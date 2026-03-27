@@ -1,0 +1,16 @@
+__pycache__
+*.py[cod]
+*$py.class
+.Python
+.env
+.venv
+venv
+env
+db.sqlite3
+.git
+.gitignore
+*.md
+.pytest_cache
+.coverage
+htmlcov
+debug_html

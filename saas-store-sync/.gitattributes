@@ -1,0 +1,2 @@
+# Ensure shell scripts use LF (prevents exec failure in Docker on Windows)
+*.sh text eol=lf

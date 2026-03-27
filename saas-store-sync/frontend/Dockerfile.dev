@@ -1,0 +1,12 @@
+# Development: runs Vite dev server (same as npm run dev locally)
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Install deps only; source is mounted at runtime
+COPY package*.json ./
+RUN npm ci
+
+# Default command; source will be mounted from host
+EXPOSE 3000
+CMD ["npm", "run", "dev"]
