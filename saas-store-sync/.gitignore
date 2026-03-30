@@ -34,3 +34,4 @@ Thumbs.db
 # Build / Docker
 *.log
 *.pid
+reports/

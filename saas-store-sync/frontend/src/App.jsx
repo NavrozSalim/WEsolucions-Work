@@ -23,6 +23,7 @@ function App() {
                         <Route element={<PrivateRoute />}>
                             <Route element={<DashboardLayout />}>
                                 <Route path="/" element={<Dashboard />} />
+                                <Route path="/dashboard" element={<Dashboard />} />
                                 <Route path="/store-settings" element={<StoreSettings />} />
                                 <Route path="/catalog" element={<Catalog />} />
                             </Route>

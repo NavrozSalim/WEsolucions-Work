@@ -1,3 +1,5 @@
+# Example: HTTPS + ACME (host or sidecar). For Docker Compose, the app mounts
+# nginx.conf as the *main* config — use backend/config/nginx.conf (events+http block).
 # Example nginx config for production. Copy to your server and adjust server_name, paths, and SSL paths.
 # Upstream for Django (Gunicorn)
 upstream backend {

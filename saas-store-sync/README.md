@@ -13,6 +13,10 @@ This repo uses **two setups**:
 
 Templates you can commit or copy: **`.env.example`** (dev), **`.env.prod.example`** (prod). Real **`.env`** / **`.env.prod`** are gitignored.
 
+**Production VPS:** audit / fix / validate scripts live in **`scripts/deploy/`** (see **`scripts/deploy/README.md`**). Nginx for Docker is **`backend/config/nginx.conf`** (full `events` + `http`); replace **`173.212.218.31`** in `server_name` if your server IP differs.
+
+**`docker-compose.prod.yml`** includes Redis AOF persistence, healthchecks (DB, Redis, backend, nginx), log rotation, resource limits, graceful `stop_grace_period`, **`init: true`** on app containers, and Celery **after** backend is healthy. **`ALLOWED_HOSTS` must include `backend`** (see `.env.prod.example`) so the backend container healthcheck (`Host: backend`) succeeds. Set **`BACKEND_IMAGE`** to use a registry image instead of local build.
+
 ---
 
 ## Quick start (development)
@@ -78,6 +82,8 @@ Ensure TLS certificates exist on the host and Nginx is configured to use them be
 |----------|----------|
 | `POSTGRES_*` | Database |
 | `POSTGRES_PORT` / `REDIS_PORT` / `BACKEND_PORT` / `FRONTEND_PORT` | Host port mappings (dev compose) |
+| `HTTP_PORT` / `HTTPS_PORT` | Nginx published ports in prod compose (default 80 / 443) |
+| `BACKEND_IMAGE` | Optional: registry image for backend + Celery in prod (skip local build) |
 | `REDIS_URL` | Host-side tooling (containers use `redis://redis:6379/0` via compose) |
 | `DEBUG` | `True` dev, `False` prod |
 | `JWT_SECRET` | Django / JWT signing |

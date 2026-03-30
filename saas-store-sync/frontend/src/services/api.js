@@ -1,4 +1,9 @@
 import axios from 'axios';
+import {
+    DEV_AUTH_BYPASS,
+    DEV_AUTH_TOKEN_KEY,
+    DEV_AUTH_TOKEN_VALUE,
+} from '../config/devAuthBypass';
 
 const api = axios.create({
     baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1',
@@ -21,6 +26,16 @@ api.interceptors.response.use(
     (response) => response,
     async (error) => {
         const originalRequest = error.config;
+        const devBypassTokenPresent =
+            DEV_AUTH_BYPASS &&
+            (localStorage.getItem(DEV_AUTH_TOKEN_KEY) === DEV_AUTH_TOKEN_VALUE ||
+                localStorage.getItem('access_token') === DEV_AUTH_TOKEN_VALUE);
+
+        if (devBypassTokenPresent) {
+            // In dev bypass mode, avoid refresh/login redirect loops on fake tokens.
+            return Promise.reject(error);
+        }
+
         if (error.response?.status === 401 && !originalRequest._retry) {
             originalRequest._retry = true;
             try {
