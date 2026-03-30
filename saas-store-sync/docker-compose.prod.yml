@@ -13,6 +13,12 @@ x-backend-image: &backend-image
     context: ./backend
     dockerfile: Dockerfile
 
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "4"
+
 services:
   db:
     image: postgres:15-alpine
@@ -44,11 +50,7 @@ services:
     restart: always
     command: redis-server --appendonly yes --appendfsync everysec
     volumes:
-      - redisdata:/datax-logging: &default-logging
-  driver: json-file
-  options:
-    max-size: "20m"
-    max-file: "4"
+      - redisdata:/data
     logging: *default-logging
     deploy:
       resources:
