@@ -1,25 +1,20 @@
 """
-eBay product scraper (Selenium headless Chrome + BeautifulSoup).
+eBay product scraper (curl_cffi optional fast path + Selenium + BeautifulSoup).
 
-eBay uses an Argon2 proof-of-work challenge that blocks all HTTP-only clients.
-This scraper uses Selenium with headless Chromium to render the JS challenge,
-then parses the resulting HTML with BeautifulSoup.
+eBay often serves an Argon2 / bot challenge to plain HTTP clients. Strategy:
+  1) Optional HTTP GET via curl_cffi (browser TLS) with regional Referer — when it
+     returns real HTML, parse without launching Chrome (set EBAY_HTTP_FIRST=0 to skip).
+  2) Selenium headless Chromium for challenge resolution and client-rendered DOM.
+
+URL normalization maps listings to www.ebay.com (USA) or www.ebay.com.au (AU).
 
 Architecture:
-  EbayParser     — stateless HTML→data extraction (price, stock, listing type)
-  EbayDriver     — manages headless Chromium via Selenium
-  EbayFetcher    — fetch with retry, block detection, Selenium lifecycle
+  EbayParser     — HTML→data extraction (Replit/aiohttp-aligned selectors + madrona JSON)
+  EbayDriver     — headless Chromium via Selenium
+  EbayFetcher    — fetch with retry, block detection, WebDriverWait (any_of locators)
 
 Public API:
-  scrape_ebay(vendor_url, region, session) -> {"price": float|None, "stock": int|None}
-
-Fixes applied (2025):
-  - PAGE_LOAD_WAIT bumped to 12s; challenge waits extended to 12s + 15s
-  - Anti-detection flags added to ChromeOptions (lang, security, randomized viewport)
-  - Debug logging added: page title + HTML length after every fetch
-  - Updated CSS selectors to match current eBay frontend (2024-2025)
-  - Added explicit WebDriverWait for price element before parsing
-  - Session sharing documented and enforced via warning log
+  scrape_ebay(vendor_url, region, session) -> {"price": float|None, "stock": int|None, ...}
 """
 import os
 import re
@@ -33,7 +28,7 @@ from typing import Optional, Tuple
 from bs4 import BeautifulSoup
 
 from .core import (
-    ScrapeResult, save_debug_html,
+    ScrapeResult,
     random_delay, backoff_delay, parse_price_text,
 )
 
@@ -42,6 +37,13 @@ logger = logging.getLogger("scrapers.ebay")
 TIMEOUT_SEC = 45        # increased from 35
 RETRY_LIMIT = 3
 PAGE_LOAD_WAIT = 12     # increased from 5 — eBay Argon2 challenge needs time
+EBAY_HTTP_TIMEOUT_SEC = 22
+
+# Strip trailing BIN / offer labels so parse_price_text sees a numeric price (Replit parity).
+PRICE_SUFFIX_PATTERN = re.compile(
+    r"(or Best Offer|Buy It Now|Best Offer|Make Offer|each|/ea).*$",
+    re.IGNORECASE,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -80,6 +82,20 @@ def _normalize_url(original_url: str, region: str) -> str:
     if region == "AU":
         return f"https://www.ebay.com.au/itm/{item_id}"
     return f"https://www.ebay.com/itm/{item_id}"
+
+
+def _strip_price_suffix(text: str) -> str:
+    if not text:
+        return ""
+    return PRICE_SUFFIX_PATTERN.sub("", text).strip()
+
+
+def _ebay_region_referer(region: str) -> str:
+    return "https://www.ebay.com.au/" if region == "AU" else "https://www.ebay.com/"
+
+
+def _ebay_http_first_enabled() -> bool:
+    return os.environ.get("EBAY_HTTP_FIRST", "1").lower() in ("1", "true", "yes")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -191,8 +207,10 @@ class EbayDriver:
 class EbayParser:
     """Extract price, stock, and listing metadata from eBay HTML."""
 
-    # Updated selectors for eBay 2024-2025 frontend
+    # Updated selectors for eBay 2024-2025 frontend (aligned with working aiohttp/Replit parser)
     PRICE_SELECTORS = [
+        # Whole price row first — strips "Buy It Now" / Best Offer suffix (Replit `.x-price-primary`)
+        ".x-price-primary",
         # Primary — current eBay frontend (2024-2025)
         "[data-testid='x-price-primary'] .ux-textspans--BOLD",
         "[data-testid='x-price-primary'] span",
@@ -243,6 +261,16 @@ class EbayParser:
 
     QUANTITY_PATTERN = re.compile(
         r'"NumberValidation","minValue":"(\d+)","maxValue":"(\d+)"'
+    )
+
+    STATUS_ENDED_PHRASES = (
+        "listing has ended",
+        "bidding has ended",
+        "out of stock",
+        "no longer available",
+        "sold out",
+        "this item is out of stock",
+        "was ended",
     )
 
     # Updated title selectors for current eBay frontend
@@ -297,6 +325,21 @@ class EbayParser:
     def detect_listing_type(cls, soup: BeautifulSoup, html: str) -> str:
         lower_html = html.lower()
 
+        err_hdr = soup.select_one("p.error-header-v2__title")
+        if err_hdr:
+            et = err_hdr.get_text(strip=True).lower()
+            if any(
+                x in et
+                for x in ("ended", "removed", "unavailable", "not available", "no longer", "sold out")
+            ):
+                return "ended"
+
+        status_el = soup.select_one(".ux-layout-section__textual-display--statusMessage span")
+        if status_el:
+            st = status_el.get_text(strip=True).lower()
+            if any(p in st for p in cls.STATUS_ENDED_PHRASES):
+                return "ended"
+
         ended_indicators = [
             "This listing has ended",
             "Bidding has ended",
@@ -325,10 +368,13 @@ class EbayParser:
                 text = elem.get_text(strip=True)
                 if not text:
                     continue
+                text = _strip_price_suffix(text)
+                if not text:
+                    continue
                 logger.debug("Price selector '%s' matched text: %r", sel, text)
                 if " to " in text.lower():
                     parts = re.split(r"\s+to\s+", text, flags=re.IGNORECASE)
-                    p = parse_price_text(parts[0])
+                    p = parse_price_text(_strip_price_suffix(parts[0]))
                     if p:
                         return p
                 p = parse_price_text(text)
@@ -360,10 +406,31 @@ class EbayParser:
 
         bid_elem = soup.select_one("#prcIsum_bidPrice, .vi-VR-cvipPrice")
         if bid_elem:
-            p = parse_price_text(bid_elem.get_text(strip=True))
+            p = parse_price_text(_strip_price_suffix(bid_elem.get_text(strip=True)))
             if p:
                 return p
 
+        return None
+
+    @staticmethod
+    def _stock_from_availability_text(text: str) -> Optional[int]:
+        if not text:
+            return None
+        text = text.lower()
+        if "sold" in text and "available" not in text:
+            return 0
+        if "ended" in text or "unavailable" in text:
+            return 0
+        m2 = re.search(r"more than (\d+) available", text)
+        if m2:
+            return int(m2.group(1))
+        m2 = re.search(r"(\d+)\s*available", text)
+        if m2:
+            return int(m2.group(1))
+        if "last one" in text or "last item" in text:
+            return 1
+        if "available" in text or "in stock" in text:
+            return 99
         return None
 
     @classmethod
@@ -374,10 +441,16 @@ class EbayParser:
             if max_qty > 0:
                 return max_qty
 
+        stock_el = soup.select_one("div.x-quantity__availability")
+        if stock_el:
+            first_span = stock_el.find("span")
+            chunk_el = first_span if first_span else stock_el
+            got = cls._stock_from_availability_text(chunk_el.get_text(strip=True))
+            if got is not None:
+                return got
+
         # Updated stock selectors for current eBay frontend
         stock_selectors = [
-            "div.x-quantity__availability",
-            "div.x-quantity__availability span",
             "div.ux-message__content",
             ".ux-labels-values--quantity .ux-labels-values__values-content",
             ".ux-labels-values--quantity",
@@ -390,23 +463,9 @@ class EbayParser:
             elem = soup.select_one(sel)
             if not elem:
                 continue
-            text = elem.get_text(strip=True).lower()
-
-            if "sold" in text and "available" not in text:
-                return 0
-            if "ended" in text or "unavailable" in text:
-                return 0
-
-            m2 = re.search(r"more than (\d+) available", text)
-            if m2:
-                return int(m2.group(1))
-            m2 = re.search(r"(\d+)\s*available", text)
-            if m2:
-                return int(m2.group(1))
-            if "last one" in text or "last item" in text:
-                return 1
-            if "available" in text or "in stock" in text:
-                return 99
+            got = cls._stock_from_availability_text(elem.get_text(strip=True))
+            if got is not None:
+                return got
 
         for script in soup.find_all("script", type="application/ld+json"):
             try:
@@ -454,6 +513,42 @@ def _is_challenge_or_blocked(content: str) -> Tuple[bool, str]:
     return False, ""
 
 
+def fetch_ebay_html_http(url: str, region: str) -> Optional[str]:
+    """
+    Optional fast path: browser-like TLS (curl_cffi) + regional Referer.
+    Datacenter IPs often get a challenge page — then returns None and Selenium runs.
+    """
+    try:
+        from curl_cffi import requests as curl_requests
+    except ImportError:
+        logger.debug("curl_cffi not installed — skipping eBay HTTP fast path")
+        return None
+    referer = _ebay_region_referer(region)
+    try:
+        resp = curl_requests.get(
+            url,
+            impersonate="chrome131",
+            timeout=EBAY_HTTP_TIMEOUT_SEC,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": referer,
+            },
+            allow_redirects=True,
+        )
+    except Exception as exc:
+        logger.debug("eBay HTTP fetch failed: %s", exc)
+        return None
+    if resp.status_code != 200:
+        return None
+    html = resp.text or ""
+    if len(html) < 9000:
+        return None
+    if _is_challenge_or_blocked(html)[0]:
+        return None
+    return html
+
+
 class EbayFetcher:
     """Fetch eBay pages using Selenium headless Chromium."""
 
@@ -474,16 +569,17 @@ class EbayFetcher:
             (By.CSS_SELECTOR, "#prcIsum"),
             (By.CSS_SELECTOR, "span[itemprop='price']"),
         ]
-        for locator in price_locators:
-            try:
-                WebDriverWait(driver, timeout).until(
-                    EC.presence_of_element_located(locator)
-                )
-                logger.debug("Price element found via locator: %s", locator)
-                return True
-            except Exception:
-                continue
-        return False
+        wait = WebDriverWait(driver, timeout)
+        try:
+            wait.until(
+                EC.any_of(*[
+                    EC.presence_of_element_located(loc) for loc in price_locators
+                ])
+            )
+            logger.debug("Price element found (any_of locators)")
+            return True
+        except Exception:
+            return False
 
     @classmethod
     def fetch(cls, url: str, session: dict) -> Tuple[Optional[str], Optional[int], str]:
@@ -504,8 +600,8 @@ class EbayFetcher:
 
             # ── DEBUG: log page title and HTML size immediately ──────────
             html = driver.page_source
-            logger.warning(
-                "PAGE TITLE: %r | HTML LENGTH: %d | URL: %s",
+            logger.info(
+                "eBay fetch title=%r html_len=%d url=%s",
                 driver.title, len(html), driver.current_url,
             )
             # ─────────────────────────────────────────────────────────────
@@ -515,8 +611,8 @@ class EbayFetcher:
                 logger.info("eBay %s detected, waiting 12s for resolution...", reason)
                 time.sleep(12)        # was 8
                 html = driver.page_source
-                logger.warning(
-                    "POST-CHALLENGE TITLE: %r | HTML LENGTH: %d",
+                logger.info(
+                    "eBay post-challenge title=%r html_len=%d",
                     driver.title, len(html),
                 )
                 is_challenge, _ = _is_challenge_or_blocked(html)
@@ -580,13 +676,24 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
     url = _normalize_url(vendor_url, region)
     random_delay(0.5, 1.5)
 
+    prefetch_html: Optional[str] = None
+    if _ebay_http_first_enabled():
+        prefetch_html = fetch_ebay_html_http(url, region)
+        if prefetch_html:
+            logger.info("eBay HTTP-first path got HTML (%d bytes), try parse before Selenium", len(prefetch_html))
+
     last_result = None
     for attempt in range(RETRY_LIMIT):
         if attempt > 0:
             backoff_delay(attempt, base=2.0, jitter=2.0)
             logger.info("eBay retry %d/%d for %s", attempt + 1, RETRY_LIMIT, url)
 
-        html, status, fetch_error = EbayFetcher.fetch(url, session)
+        if attempt == 0 and prefetch_html is not None:
+            html = prefetch_html
+            prefetch_html = None
+            fetch_error = ""
+        else:
+            html, status, fetch_error = EbayFetcher.fetch(url, session)
 
         if fetch_error:
             last_result = ScrapeResult.fail(
@@ -620,6 +727,13 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
         if "page not found" in title_text or "doesn't exist" in title_text:
             last_result = ScrapeResult.fail("http_404", "Listing not found", html, "ebay", url)
             break
+
+        err_hdr = soup.select_one("p.error-header-v2__title")
+        if err_hdr:
+            err_txt = err_hdr.get_text(strip=True)
+            if err_txt:
+                last_result = ScrapeResult.fail("ebay_page_error", err_txt, html, "ebay", url)
+                continue
 
         # Validate listing — log details to help diagnose failures
         valid_listing = EbayParser.is_valid_listing(soup, html)
