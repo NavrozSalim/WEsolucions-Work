@@ -35,3 +35,7 @@ Thumbs.db
 *.log
 *.pid
 reports/
+
+# Local dev only (never ship to production)
+backend/db.sqlite3
+backend/celerybeat-schedule

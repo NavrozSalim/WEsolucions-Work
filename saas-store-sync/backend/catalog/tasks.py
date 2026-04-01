@@ -336,14 +336,12 @@ def run_catalog_scrape(upload_id: str):
                     pm.store_stock = None
                     pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
                     pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                    pm.last_sync_time = now
                     pm.save(
                         update_fields=[
                             'store_price',
                             'store_stock',
                             'failed_sync_count',
                             'sync_status',
-                            'last_sync_time',
                         ]
                     )
                     failed += 1
@@ -359,14 +357,12 @@ def run_catalog_scrape(upload_id: str):
                 pm.store_stock = None
                 pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
                 pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                pm.last_sync_time = now
                 pm.save(
                     update_fields=[
                         'store_price',
                         'store_stock',
                         'failed_sync_count',
                         'sync_status',
-                        'last_sync_time',
                     ]
                 )
                 failed += 1
@@ -391,10 +387,10 @@ def run_catalog_scrape(upload_id: str):
 
                 pm.store_price = new_price
                 pm.store_stock = new_stock
-                pm.sync_status = 'synced'
+                pm.sync_status = 'scraped'
                 pm.failed_sync_count = 0
-                pm.last_sync_time = now
-                save_fields = ['store_price', 'store_stock', 'sync_status', 'failed_sync_count', 'last_sync_time']
+                pm.last_scrape_time = now
+                save_fields = ['store_price', 'store_stock', 'sync_status', 'failed_sync_count', 'last_scrape_time']
                 if scrape_title:
                     pm.title = scrape_title
                     save_fields.append('title')
@@ -409,14 +405,12 @@ def run_catalog_scrape(upload_id: str):
                 pm.store_stock = None
                 pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
                 pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                pm.last_sync_time = now
                 pm.save(
                     update_fields=[
                         'store_price',
                         'store_stock',
                         'failed_sync_count',
                         'sync_status',
-                        'last_sync_time',
                     ]
                 )
                 failed += 1
@@ -525,7 +519,7 @@ def catalog_update_task(self, upload_id: str):
 
     for row in rows_to_update:
         pm = row.product_mapping
-        if pm.sync_status != 'synced' or pm.store_price is None:
+        if pm.store_price is None or pm.sync_status not in ('scraped', 'synced'):
             continue
         listing_id = pm.marketplace_id
         if not listing_id:
@@ -557,6 +551,10 @@ def catalog_update_task(self, upload_id: str):
                 price=float(pm.store_price),
                 stock=pm.store_stock or 0,
             )
+            now_ok = timezone.now()
+            pm.sync_status = 'synced'
+            pm.last_sync_time = now_ok
+            pm.save(update_fields=['sync_status', 'last_sync_time'])
             ReverbUpdateLog.objects.create(
                 product_mapping=pm,
                 status=ReverbUpdateLog.Status.SUCCESS,

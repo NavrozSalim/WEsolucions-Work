@@ -3,13 +3,16 @@ Resolve which price-range margin applies to a raw vendor cost.
 
 Tiers are matched on raw vendor price (same as sync.tasks._apply_pricing).
 
-If the cost is above every tier's upper bound (e.g. only 0–20 configured but cost is 39),
-we treat it as overflow and apply the last tier — so a single "0–20" row does not leave
-higher prices on the global multiplier fallback.
+Interval rule (tiers sorted by ``from_value``):
+- **Non-final tiers:** ``from <= cost < to`` (upper bound is **exclusive**), so a
+  boundary like 15 belongs only to the tier that **starts** at 15, not the one
+  that **ends** at 15.
+- **Final tier:** ``from <= cost <= to`` (upper bound **inclusive**), so the top
+  of the band and very large costs up to MAX are covered.
 
-If several tiers match (e.g. a loose row "0 → MAX" plus narrower bands like "16–50"),
-we pick the most specific band: **largest `from_value`** among matches. That way a
-catch‑all open upper bound does not shadow the tier you actually care about.
+If the cost is strictly above the last tier's finite ``to_value``, we still
+return the last tier (overflow) so pricing does not fall through to the global
+multiplier when bands are configured but too narrow.
 """
 from __future__ import annotations
 
@@ -24,8 +27,8 @@ def resolve_margin_tier_for_raw_cost(
     raw_vendor_cost: float,
 ) -> Optional["StorePriceRangeMargin"]:
     """
-    Return the StorePriceRangeMargin whose [from, to] contains raw_vendor_cost,
-    or the last tier when cost is strictly above every tier's max (overflow).
+    Pick the tier for ``raw_vendor_cost`` using half-open intervals on every
+    tier except the last (see module docstring).
     """
     tiers = list(
         pricing_settings.range_margins.select_related("price_range").order_by(
@@ -35,31 +38,31 @@ def resolve_margin_tier_for_raw_cost(
     if not tiers:
         return None
 
-    matches = []
-    for tier in tiers:
+    cost = float(raw_vendor_cost)
+    n = len(tiers)
+
+    for i, tier in enumerate(tiers):
         from_v = float(tier.price_range.from_value)
         to_v = (
             float(tier.price_range.to_value)
             if tier.price_range.to_value is not None
             else float("inf")
         )
-        if from_v <= raw_vendor_cost <= to_v:
-            matches.append(tier)
+        is_last = i == n - 1
+        if is_last:
+            if from_v <= cost <= to_v:
+                return tier
+        else:
+            if from_v <= cost < to_v:
+                return tier
 
-    if matches:
-        return max(matches, key=lambda t: float(t.price_range.from_value))
-
-    sorted_tiers = sorted(
-        tiers,
-        key=lambda t: float(t.price_range.from_value),
-    )
-    last = sorted_tiers[-1]
+    last = tiers[-1]
     last_to = (
         float(last.price_range.to_value)
         if last.price_range.to_value is not None
         else float("inf")
     )
-    if last_to < float("inf") and raw_vendor_cost > last_to:
+    if last_to < float("inf") and cost > last_to:
         return last
 
     return None

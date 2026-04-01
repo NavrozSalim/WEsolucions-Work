@@ -39,8 +39,20 @@ import EmptyState from '../../components/design/EmptyState';
 import Badge from '../../components/design/Badge';
 import UpdateWithFileModal from '../../components/catalog/UpdateWithFileModal';
 
-const syncStatusVariant = { synced: 'success', needs_attention: 'error', pending: 'warning', failed: 'error' };
-const syncStatusLabel = { synced: 'Synced', needs_attention: 'Needs attention', pending: 'Pending', failed: 'Failed' };
+const syncStatusVariant = {
+    synced: 'success',
+    scraped: 'warning',
+    needs_attention: 'error',
+    pending: 'warning',
+    failed: 'error',
+};
+const syncStatusLabel = {
+    synced: 'Synced',
+    scraped: 'Scrape',
+    needs_attention: 'Needs attention',
+    pending: 'Pending',
+    failed: 'Failed',
+};
 const uploadStatusVariant = {
     synced: 'success', validated: 'success', pending: 'warning',
     processing: 'warning', partial: 'error', failed: 'error',
@@ -199,6 +211,17 @@ function formatLastSync(lastSync) {
     const h = Math.floor(diff / 60);
     if (h < 24) return `${h}h ago`;
     return `${Math.floor(h / 24)}d ago`;
+}
+
+function formatLastStatus(product) {
+    const st = product.sync_status || 'pending';
+    if (st === 'synced' && product.last_sync_time) {
+        return `Sync · ${formatLastSync(product.last_sync_time)}`;
+    }
+    if (product.last_scrape_time) {
+        return `Scrape · ${formatLastSync(product.last_scrape_time)}`;
+    }
+    return '—';
 }
 
 /** Fallback when API does not send Excel-aligned margin_display (legacy). */
@@ -793,6 +816,7 @@ export default function Catalog() {
                             >
                                 <option value="">All statuses</option>
                                 <option value="synced">Synced</option>
+                                <option value="scraped">Scrape</option>
                                 <option value="needs_attention">Needs attention</option>
                                 <option value="pending">Pending</option>
                             </select>
@@ -830,7 +854,7 @@ export default function Catalog() {
                                         <th className="w-[60px] whitespace-nowrap text-right">Stock</th>
                                         <th className="w-[90px] whitespace-nowrap text-center">Status</th>
                                         <th className="w-[70px] whitespace-nowrap text-right">Margin</th>
-                                        <th className="w-[90px] whitespace-nowrap">Last sync</th>
+                                        <th className="w-[100px] whitespace-nowrap">Last Status</th>
                                         <th className="w-[80px] whitespace-nowrap text-right">Actions</th>
                                     </tr>
                                 </thead>
@@ -866,7 +890,7 @@ export default function Catalog() {
                                                     </Badge>
                                                 </td>
                                                 <td className="text-right text-sm text-slate-600 dark:text-slate-400 align-middle whitespace-nowrap">{margin}</td>
-                                                <td className="text-slate-500 dark:text-slate-400 text-xs align-middle whitespace-nowrap">{formatLastSync(product.last_sync_time)}</td>
+                                                <td className="text-slate-500 dark:text-slate-400 text-xs align-middle whitespace-nowrap">{formatLastStatus(product)}</td>
                                                 <td className="text-right align-middle">
                                                     {status === 'needs_attention' ? (
                                                         <button

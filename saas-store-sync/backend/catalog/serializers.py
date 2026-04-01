@@ -39,7 +39,7 @@ class ProductMappingSerializer(serializers.ModelSerializer):
             'vendor_price',
             'margin_display',
         ]
-        read_only_fields = ('store_price', 'store_stock', 'sync_status', 'last_sync_time')
+        read_only_fields = ('store_price', 'store_stock', 'sync_status', 'last_sync_time', 'last_scrape_time')
 
     def get_sku(self, obj):
         return (

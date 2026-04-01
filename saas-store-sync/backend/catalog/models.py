@@ -35,6 +35,11 @@ class ProductMapping(models.Model):
     sync_status = models.CharField(max_length=50, default='pending', db_index=True)
     failed_sync_count = models.IntegerField(default=0)
     last_sync_time = models.DateTimeField(null=True, blank=True)
+    last_scrape_time = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='Last successful scrape that applied vendor price/stock locally.',
+    )
 
     class Meta:
         db_table = 'catalog_productmapping'

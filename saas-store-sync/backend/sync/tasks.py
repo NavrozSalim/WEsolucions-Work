@@ -142,7 +142,6 @@ def run_store_sync(self, store_id):
     try:
         for pm in mappings:
             processed += 1
-            old_price, old_stock = pm.store_price, pm.store_stock
             pricing = _get_pricing_for_vendor(store, pm.product.vendor_id)
             inventory = _get_inventory_for_vendor(store, pm.product.vendor_id)
             url = _resolve_vendor_url(pm.product, store)
@@ -158,14 +157,12 @@ def run_store_sync(self, store_id):
                 pm.store_stock = None
                 pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
                 pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                pm.last_sync_time = now
                 pm.save(
                     update_fields=[
                         'store_price',
                         'store_stock',
                         'failed_sync_count',
                         'sync_status',
-                        'last_sync_time',
                     ]
                 )
                 error_summary = str(e) if not error_summary else error_summary
@@ -176,14 +173,12 @@ def run_store_sync(self, store_id):
                 pm.store_stock = None
                 pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
                 pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                pm.last_sync_time = now
                 pm.save(
                     update_fields=[
                         'store_price',
                         'store_stock',
                         'failed_sync_count',
                         'sync_status',
-                        'last_sync_time',
                     ]
                 )
                 error_summary = 'Scraper returned no price' if not error_summary else error_summary
@@ -202,10 +197,10 @@ def run_store_sync(self, store_id):
                 )
             pm.store_price = new_price
             pm.store_stock = new_stock
-            pm.sync_status = 'synced'
+            pm.sync_status = 'scraped'
             pm.failed_sync_count = 0
-            pm.last_sync_time = now
-            _fields = ['store_price', 'store_stock', 'sync_status', 'failed_sync_count', 'last_sync_time']
+            pm.last_scrape_time = now
+            _fields = ['store_price', 'store_stock', 'sync_status', 'failed_sync_count', 'last_scrape_time']
             if scrape_title:
                 pm.title = scrape_title
                 _fields.append('title')
@@ -301,14 +296,12 @@ def run_store_update(self, store_id):
                 pm.store_stock = None
                 pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
                 pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                pm.last_sync_time = now
                 pm.save(
                     update_fields=[
                         'store_price',
                         'store_stock',
                         'failed_sync_count',
                         'sync_status',
-                        'last_sync_time',
                     ]
                 )
                 error_summary = str(e) if not error_summary else error_summary
@@ -319,14 +312,12 @@ def run_store_update(self, store_id):
                 pm.store_stock = None
                 pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
                 pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                pm.last_sync_time = now
                 pm.save(
                     update_fields=[
                         'store_price',
                         'store_stock',
                         'failed_sync_count',
                         'sync_status',
-                        'last_sync_time',
                     ]
                 )
                 error_summary = 'Scraper returned no price' if not error_summary else error_summary
@@ -334,19 +325,28 @@ def run_store_update(self, store_id):
 
             if vendor_stock is None or vendor_stock <= 0:
                 vendor_stock = 0
+
+            prev_vp = VendorPrice.objects.filter(product=pm.product).order_by('-scraped_at').first()
             new_price = _apply_pricing(vendor_price, pricing) if vendor_price is not None else None
             new_stock = _apply_inventory(vendor_stock, inventory)
 
-            if vendor_price is not None:
-                from vendor.models import VendorPrice as VP
-                VP.objects.create(product=pm.product, price=Decimal(str(vendor_price)), stock=vendor_stock or 0)
+            raw_changed = prev_vp is None or (
+                prev_vp.price != Decimal(str(vendor_price))
+                or int(prev_vp.stock or 0) != int(vendor_stock or 0)
+            )
+
+            VendorPrice.objects.create(
+                product=pm.product,
+                price=Decimal(str(vendor_price)),
+                stock=vendor_stock or 0,
+            )
 
             pm.store_price = new_price
             pm.store_stock = new_stock
-            pm.sync_status = 'synced'
+            pm.sync_status = 'scraped'
             pm.failed_sync_count = 0
-            pm.last_sync_time = now
-            _uf = ['store_price', 'store_stock', 'sync_status', 'failed_sync_count', 'last_sync_time']
+            pm.last_scrape_time = now
+            _uf = ['store_price', 'store_stock', 'sync_status', 'failed_sync_count', 'last_scrape_time']
             if scrape_title:
                 pm.title = scrape_title
                 _uf.append('title')
@@ -373,15 +373,23 @@ def run_store_update(self, store_id):
                                 pm.save(update_fields=['marketplace_id'])
                             break
 
-            if listing_id and new_price is not None:
+            continuous = bool(pricing and getattr(pricing, 'continuous_update', False))
+            should_push = bool(listing_id and new_price is not None)
+            if should_push and continuous and not raw_changed:
+                should_push = False
+
+            if should_push:
                 try:
                     adapter.update_product(listing_id, price=float(new_price), stock=new_stock or 0)
                     push_ok += 1
+                    pm.sync_status = 'synced'
+                    pm.last_sync_time = timezone.now()
+                    pm.save(update_fields=['sync_status', 'last_sync_time'])
                 except Exception as push_err:
                     logger.warning("Push failed for %s: %s", pm.marketplace_child_sku, push_err)
                     push_fail += 1
                     _record_push_error(pm.marketplace_child_sku or pm.product.vendor_sku, push_err)
-            elif new_price is not None:
+            elif new_price is not None and not listing_id:
                 push_skipped += 1
     finally:
         close_amazon_session(session)

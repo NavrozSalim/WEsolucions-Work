@@ -38,6 +38,14 @@ class Store(models.Model):
     def __str__(self):
         return self.name
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'name', 'marketplace'],
+                name='uq_store_user_name_marketplace',
+            ),
+        ]
+
 
 class StorePriceRange(models.Model):
     """Reusable price range (from_value, to_value). Use MAX value for open-ended."""
@@ -72,6 +80,10 @@ class StoreVendorPriceSettings(models.Model):
     multiplier = models.FloatField(default=1.0, help_text="Fallback when no tier matches")
     optional_fee = models.FloatField(default=0.0)
     rounding_option = models.CharField(max_length=20, choices=ROUNDING_CHOICES, default='none')
+    continuous_update = models.BooleanField(
+        default=False,
+        help_text='If True, only push listing updates to the marketplace when vendor price/stock changed since last scrape.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

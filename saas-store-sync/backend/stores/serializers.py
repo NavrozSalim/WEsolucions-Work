@@ -1,5 +1,8 @@
 from rest_framework import serializers
+from rest_framework.exceptions import ValidationError
 from decimal import Decimal
+
+from django.db import IntegrityError
 
 from stores.models import (
     Store,
@@ -18,7 +21,7 @@ class StoreVendorPriceSettingsReadSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'vendor', 'vendor_code', 'vendor_name',
             'purchase_tax_percentage', 'marketplace_fees_percentage',
-            'multiplier', 'optional_fee', 'rounding_option',
+            'multiplier', 'optional_fee', 'rounding_option', 'continuous_update',
             'range_margins',
         ]
 
@@ -127,10 +130,27 @@ class StoreSerializer(serializers.ModelSerializer):
                 validated_data['marketplace'] = mkt
             except Marketplace.DoesNotExist:
                 pass
+        sched_raw = req.get('sync_schedule')
+        if not sched_raw or not isinstance(sched_raw, dict) or not sched_raw.get('enabled', False):
+            raise ValidationError({'sync_schedule': 'Scheduled updates are required. Choose frequency and time.'})
+
         price_settings_data = req.get('vendor_price_settings', [])
         inventory_settings_data = req.get('vendor_inventory_settings', [])
         store_data = {k: v for k, v in validated_data.items() if k in ('name', 'region', 'api_token', 'marketplace', 'is_active')}
-        store = Store.objects.create(user=user, **store_data)
+        if store_data.get('name'):
+            store_data['name'] = store_data['name'].strip()
+        if mkt and Store.objects.filter(user=user, name=store_data.get('name', ''), marketplace=mkt).exists():
+            raise ValidationError({
+                'name': f'A store named "{store_data.get("name")}" already exists for this marketplace.',
+            })
+        try:
+            store = Store.objects.create(user=user, **store_data)
+        except IntegrityError as exc:
+            if 'uq_store_user_name_marketplace' in str(exc) or 'UNIQUE constraint failed' in str(exc):
+                raise ValidationError({
+                    'name': 'A store with this name and marketplace already exists.',
+                }) from None
+            raise
         self._save_vendor_price_settings(store, price_settings_data, Vendor)
         self._save_vendor_inventory_settings(store, inventory_settings_data, Vendor)
         self._save_sync_schedule(store, req.get('sync_schedule'), SyncSchedule)
@@ -151,7 +171,22 @@ class StoreSerializer(serializers.ModelSerializer):
                 instance.marketplace = mkt
             except Marketplace.DoesNotExist:
                 pass
-        instance.save()
+        if instance.name:
+            instance.name = instance.name.strip()
+        if Store.objects.filter(
+            user=instance.user, name=instance.name, marketplace=instance.marketplace,
+        ).exclude(pk=instance.pk).exists():
+            raise ValidationError({
+                'name': f'A store named "{instance.name}" already exists for this marketplace.',
+            })
+        try:
+            instance.save()
+        except IntegrityError as exc:
+            if 'uq_store_user_name_marketplace' in str(exc) or 'UNIQUE constraint failed' in str(exc):
+                raise ValidationError({
+                    'name': 'A store with this name and marketplace already exists.',
+                }) from None
+            raise
         if 'vendor_price_settings' in req:
             self._save_vendor_price_settings(instance, req['vendor_price_settings'], Vendor)
         if 'vendor_inventory_settings' in req:
@@ -168,9 +203,83 @@ class StoreSerializer(serializers.ModelSerializer):
             return as_type(str(default))
         return max(v, as_type(str(0)))
 
+    _PRICE_TIER_MAX = Decimal('999999999')
+    _PRICE_TIER_EPS = Decimal('0.000001')
+
+    def _validate_price_settings_payload(self, data):
+        """Match frontend priceRangeValidation: continuous tiers, last To = 999999999."""
+        if not isinstance(data, list):
+            return
+        _c = self._clamp_non_negative
+        max_v = self._PRICE_TIER_MAX
+        eps = self._PRICE_TIER_EPS
+
+        for item in data:
+            vendor_id = item.get('vendor_id') or item.get('vendor')
+            if not vendor_id:
+                continue
+            ranges = item.get('range_margins') or []
+            if not ranges:
+                raise ValidationError({'vendor_price_settings': 'Each vendor needs at least one price tier.'})
+
+            from_vals = []
+            to_vals = []
+
+            for ri, r in enumerate(ranges):
+                from_v = _c(r.get('from_value', 0) or 0)
+                to_raw = r.get('to_value')
+                try:
+                    if to_raw in (None, '', 'MAX') or str(to_raw).strip().upper() == 'MAX':
+                        to_dec = None
+                    else:
+                        to_dec = Decimal(str(to_raw))
+                        to_dec = max(to_dec, Decimal('0'))
+                except Exception:
+                    to_dec = None
+
+                margin = _c(r.get('margin_percentage', 0) or 0)
+
+                if from_v < 0:
+                    raise ValidationError({'vendor_price_settings': f'Price tier {ri + 1}: "From" must be non-negative.'})
+                if to_dec is not None and to_dec < 0:
+                    raise ValidationError({'vendor_price_settings': f'Price tier {ri + 1}: "To" must be non-negative.'})
+                if to_dec is not None and from_v > to_dec:
+                    raise ValidationError({'vendor_price_settings': f'Price tier {ri + 1}: "From" cannot be greater than "To".'})
+                if margin < 0:
+                    raise ValidationError({'vendor_price_settings': f'Price tier {ri + 1}: Margin must be zero or greater.'})
+
+                from_vals.append(from_v)
+                to_vals.append(to_dec)
+
+            for i in range(len(ranges) - 1):
+                if to_vals[i] is None:
+                    raise ValidationError({
+                        'vendor_price_settings': (
+                            f'Price tiers must be continuous: tier {i + 1} needs a maximum before starting tier {i + 2}.'
+                        ),
+                    })
+
+            for i in range(1, len(ranges)):
+                prev_to = to_vals[i - 1]
+                curr_from = from_vals[i]
+                if prev_to is not None and curr_from is not None and abs(curr_from - prev_to) > eps:
+                    raise ValidationError({
+                        'vendor_price_settings': (
+                            f'Price ranges must be continuous: after a tier ending at {prev_to}, '
+                            f'the next tier must start at {prev_to} (not {curr_from}).'
+                        ),
+                    })
+
+            last_to = to_vals[-1]
+            if last_to is None or abs(last_to - max_v) > eps:
+                raise ValidationError({
+                    'vendor_price_settings': f'The last price tier "To" must be {max_v}.',
+                })
+
     def _save_vendor_price_settings(self, store, data, Vendor):
         if not isinstance(data, list):
             return
+        self._validate_price_settings_payload(data)
         _c = self._clamp_non_negative
         StoreVendorPriceSettings.objects.filter(store=store).delete()
         for item in data:
@@ -188,6 +297,7 @@ class StoreSerializer(serializers.ModelSerializer):
                 multiplier=max(0.0, float(item.get('multiplier', 1) or 1)),
                 optional_fee=max(0.0, float(item.get('optional_fee', 0) or 0)),
                 rounding_option=str(item.get('rounding_option', 'none') or 'none'),
+                continuous_update=bool(item.get('continuous_update')),
             )
             for rm in item.get('range_margins', []):
                 to_val = rm.get('to_value')
@@ -220,7 +330,6 @@ class StoreSerializer(serializers.ModelSerializer):
         _c = self._clamp_non_negative
         valid_items = [i for i in data if (i.get('vendor_id') or i.get('vendor')) and (i.get('range_multipliers') or [])]
         if data and not valid_items:
-            from rest_framework.exceptions import ValidationError
             raise ValidationError({'vendor_inventory_settings': 'Add at least one vendor with inventory ranges (multiplier or fixed value).'})
         StoreVendorInventorySettings.objects.filter(store=store).delete()
         for item in data:

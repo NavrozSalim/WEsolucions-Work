@@ -7,7 +7,6 @@ import Input from '../../components/ui/Input';
 import Button from '../../components/ui/Button';
 import { Sun, Moon } from 'lucide-react';
 import { buildGoogleOAuthStartUrl } from '../../utils/googleOAuthUrl';
-import { DEV_AUTH_BYPASS } from '../../config/devAuthBypass';
 
 const ERROR_MESSAGES = {
     invalid_state: 'Google sign-in session expired. Please try again.',
@@ -45,12 +44,6 @@ const Login = () => {
                 setError(err.response?.data?.detail || 'Invalid credentials');
             }
         }
-    };
-
-    const handleDevLogin = () => {
-        localStorage.setItem('access_token', 'dev-token');
-        localStorage.setItem('refresh_token', 'dev-refresh');
-        window.location.href = '/';
     };
 
     return (
@@ -116,17 +109,6 @@ const Login = () => {
                         </svg>
                         Sign in with Google
                     </a>
-                    {DEV_AUTH_BYPASS && (
-                        <>
-                            <button
-                                type="button"
-                                onClick={handleDevLogin}
-                                className="flex items-center justify-center gap-2 w-full py-3 px-4 rounded-md border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 font-medium text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition"
-                            >
-                                Dev Login
-                            </button>
-                        </>
-                    )}
                     <p className="text-center text-sm text-slate-500 dark:text-slate-400">
                         Don&apos;t have an account?{' '}
                         <Link to="/register" className="font-medium text-accent-600 dark:text-accent-400 hover:underline">

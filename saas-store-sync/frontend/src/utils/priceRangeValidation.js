@@ -24,7 +24,8 @@ const MAX_RANGE = 999999999;
 
 /**
  * Validates tiered vendor price rows: non-negative bounds, positive margin,
- * every tier except the last has an upper bound, each tier starts at previous upper + 1,
+ * every tier except the last has an upper bound, each tier starts at previous upper bound
+ * (backend treats non-final upper bounds as exclusive so boundaries are not double-counted),
  * and the last tier must end at 999999999.
  * @param {Array<{ vendor_id?: string, range_margins?: Array<{ from_value?: unknown, to_value?: unknown, margin_type?: string, margin_percentage?: unknown }> }>} vendorPriceSettings
  * @returns {string[]} human-readable errors (deduped)
@@ -73,10 +74,9 @@ export function validateVendorPriceSettings(vendorPriceSettings) {
             const prevTo = parseTo(ranges[i - 1].to_value);
             const currFrom = parseFrom(ranges[i].from_value);
             if (prevTo === null || currFrom === null) continue;
-            const expected = prevTo + 1;
-            if (Math.abs(currFrom - expected) > 1e-6) {
+            if (Math.abs(currFrom - prevTo) > 1e-6) {
                 errs.push(
-                    `Price ranges must be continuous: after a tier ending at ${prevTo}, the next tier must start at ${expected} (not ${currFrom}).`
+                    `Price ranges must be continuous: after a tier ending at ${prevTo}, the next tier must start at ${prevTo} (not ${currFrom}). Decimals are allowed.`,
                 );
             }
         }

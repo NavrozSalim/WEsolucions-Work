@@ -60,6 +60,7 @@ function storeToForm(store) {
             purchase_tax_percentage: vp.purchase_tax_percentage ?? 0,
             marketplace_fees_percentage: vp.marketplace_fees_percentage ?? 0,
             rounding_option: vp.rounding_option || 'none',
+            continuous_update: !!vp.continuous_update,
             range_margins: (vp.range_margins || []).map((r) => ({
                 from_value: r.from_value ?? 0,
                 to_value: r.to_value ?? null,
@@ -115,13 +116,13 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
         if (!vid) {
             setForm((f) => ({
                 ...f,
-                vendor_price_settings: [...f.vendor_price_settings, { vendor_id: '', purchase_tax_percentage: 0, marketplace_fees_percentage: 0, rounding_option: 'none', range_margins: [emptyPriceRange()] }],
+                vendor_price_settings: [...f.vendor_price_settings, { vendor_id: '', purchase_tax_percentage: 0, marketplace_fees_percentage: 0, rounding_option: 'none', continuous_update: false, range_margins: [emptyPriceRange()] }],
             }));
             return;
         }
         setSelectedVendorPrice('');
         if (vid === '__all__') {
-            const toAdd = vendors.filter((v) => !usedPriceVendorIds.includes(v.id)).map((v) => ({ vendor_id: v.id, purchase_tax_percentage: 0, marketplace_fees_percentage: 0, rounding_option: 'none', range_margins: [emptyPriceRange()] }));
+            const toAdd = vendors.filter((v) => !usedPriceVendorIds.includes(v.id)).map((v) => ({ vendor_id: v.id, purchase_tax_percentage: 0, marketplace_fees_percentage: 0, rounding_option: 'none', continuous_update: false, range_margins: [emptyPriceRange()] }));
             if (toAdd.length === 0) return;
             setForm((f) => ({ ...f, vendor_price_settings: [...f.vendor_price_settings, ...toAdd] }));
             return;
@@ -129,7 +130,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
         if (usedPriceVendorIds.includes(vid)) return;
         setForm((f) => ({
             ...f,
-            vendor_price_settings: [...f.vendor_price_settings, { vendor_id: vid, purchase_tax_percentage: 0, marketplace_fees_percentage: 0, rounding_option: 'none', range_margins: [emptyPriceRange()] }],
+            vendor_price_settings: [...f.vendor_price_settings, { vendor_id: vid, purchase_tax_percentage: 0, marketplace_fees_percentage: 0, rounding_option: 'none', continuous_update: false, range_margins: [emptyPriceRange()] }],
         }));
     };
     const removeVendorPrice = (i) => setForm((f) => ({ ...f, vendor_price_settings: f.vendor_price_settings.filter((_, idx) => idx !== i) }));
@@ -148,7 +149,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
             let nextFrom = 0;
             if (last && last.to_value !== '' && last.to_value != null && String(last.to_value).trim().toUpperCase() !== 'MAX') {
                 const t = parseFloat(String(last.to_value));
-                if (Number.isFinite(t)) nextFrom = t + 1;
+                if (Number.isFinite(t)) nextFrom = t;
             }
             margins.push({ from_value: nextFrom, to_value: null, margin_type: 'percentage', margin_percentage: 25 });
             next[vendorIdx] = { ...next[vendorIdx], range_margins: margins };
@@ -242,6 +243,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                 purchase_tax_percentage: allDirect ? 0 : (parseFloat(vp.purchase_tax_percentage) || 0),
                 marketplace_fees_percentage: allDirect ? 0 : (parseFloat(vp.marketplace_fees_percentage) || 0),
                 rounding_option: vp.rounding_option || 'none',
+                continuous_update: !!vp.continuous_update,
                 range_margins: ranges.map((r) => ({
                     from_value: parseFloat(r.from_value) || 0,
                     to_value: r.to_value === '' || r.to_value === 'MAX' ? null : parseFloat(r.to_value),
@@ -533,21 +535,35 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                                 <span className="text-sm text-slate-700 dark:text-slate-300">Round final price to .99</span>
                                                 <span className="text-xs text-slate-400 dark:text-slate-500">(e.g. $56.66 → $56.99)</span>
                                             </label>
+                                            <label className="flex flex-col gap-1 cursor-pointer select-none sm:flex-row sm:items-start sm:gap-3">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={!!vp.continuous_update}
+                                                    onChange={(e) => updateVendorPrice(i, 'continuous_update', e.target.checked)}
+                                                    className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 dark:border-slate-600 text-accent-600 focus:ring-accent-500"
+                                                />
+                                                <span>
+                                                    <span className="text-sm text-slate-700 dark:text-slate-300">Continuous update</span>
+                                                    <span className="block text-xs text-slate-500 dark:text-slate-400">
+                                                        Push when vendor price/stock changes. Off = push every scheduled run after scrape.
+                                                    </span>
+                                                </span>
+                                            </label>
                                             </>
                                         );
                                     })()}
                                     <div>
                                         <div className="text-sm font-medium text-slate-700 dark:text-slate-300">Price ranges</div>
                                         <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                                            Tiers must be continuous. Last tier &quot;To&quot; must be 999999999. Use Percentage or Fixed margin per tier.
+                                            Each tier&apos;s &quot;From&quot; must match the previous &quot;To&quot;. Non-final &quot;To&quot; is exclusive (boundary applies to the next tier). Last &quot;To&quot; must be 999999999.
                                         </p>
                                     </div>
                                     <div className="space-y-3">
                                     {(vp.range_margins || []).map((r, ri) => (
                                             <div key={ri} className="rounded-lg border border-slate-200 dark:border-slate-600 bg-white/50 dark:bg-slate-900/40 p-3 space-y-3">
                                                 <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                                                    <Input label="From" type="number" min={0} step="1" value={r.from_value} onChange={(e) => { const v = e.target.value; if (v === '') { updatePriceRange(i, ri, 'from_value', ''); return; } updatePriceRange(i, ri, 'from_value', Math.max(0, parseFloat(v) || 0)); }} />
-                                                    <Input label="To" placeholder="999999999" type="number" min={0} step="1" value={r.to_value ?? ''} onChange={(e) => { const v = e.target.value; if (v === '') { updatePriceRange(i, ri, 'to_value', ''); return; } updatePriceRange(i, ri, 'to_value', Math.max(0, parseFloat(v) || 0)); }} />
+                                                    <Input label="From" type="number" min={0} step="0.01" value={r.from_value} onChange={(e) => { const v = e.target.value; if (v === '') { updatePriceRange(i, ri, 'from_value', ''); return; } updatePriceRange(i, ri, 'from_value', Math.max(0, parseFloat(v) || 0)); }} />
+                                                    <Input label="To" placeholder="999999999" type="number" min={0} step="0.01" value={r.to_value ?? ''} onChange={(e) => { const v = e.target.value; if (v === '') { updatePriceRange(i, ri, 'to_value', ''); return; } updatePriceRange(i, ri, 'to_value', Math.max(0, parseFloat(v) || 0)); }} />
                                                     <Select
                                                         label="Margin type"
                                                         value={r.margin_type || 'percentage'}
