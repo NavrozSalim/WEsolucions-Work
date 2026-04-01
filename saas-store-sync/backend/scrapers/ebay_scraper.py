@@ -187,6 +187,11 @@ class EbayParser:
         r'"buyItNowPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
         r'"convertedPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
         r'"binPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        # eBay madrona.loadudo embeds price as HTML-escaped JSON, e.g.
+        # \&quot;price\&quot;:[\&quot;34.69\&quot;]
+        r'\\&quot;price\\&quot;\s*:\s*\[\\&quot;([\d.]+)\\&quot;\]',
+        r'&quot;price&quot;\s*:\s*\[&quot;([\d.]+)&quot;\]',
+        r'"price"\s*:\s*\[\s*"([\d.]+)"\s*\]',
         r'"price"\s*:\s*"([\d.]+)"',
         r'"value"\s*:\s*"([\d.]+)"\s*,\s*"currency"',
         r'"price"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
