@@ -18,6 +18,8 @@ from .views import (
     CatalogClearView,
     CatalogSampleTemplateView,
     CatalogStoresView,
+    CatalogPushListingsView,
+    StoreCriticalZeroView,
 )
 
 router = DefaultRouter()
@@ -40,5 +42,7 @@ urlpatterns = [
     path('stores/<uuid:store_pk>/catalog/update/logs/', CatalogUpdateLogsView.as_view(), name='store-catalog-update-logs'),
     path('stores/<uuid:store_pk>/catalog/jobs/<str:job_id>/', CatalogJobStatusView.as_view(), name='store-catalog-job-status'),
     path('stores/<uuid:store_pk>/catalog/clear/', CatalogClearView.as_view(), name='catalog-clear'),
+    path('stores/<uuid:store_pk>/catalog/push-listings/', CatalogPushListingsView.as_view(), name='catalog-push-listings'),
+    path('stores/<uuid:store_pk>/catalog/critical-zero/', StoreCriticalZeroView.as_view(), name='catalog-critical-zero'),
     path('stores/<uuid:store_pk>/', include(router.urls)),
 ]

@@ -16,6 +16,7 @@ import {
     Download,
     MoreVertical,
     AlertTriangle,
+    FileDown,
 } from 'lucide-react';
 import { getMarketplaces, deleteStore } from '../../services/storeService';
 import {
@@ -30,6 +31,9 @@ import {
     deleteCatalogUpload,
     downloadCatalogUploadErrors,
     downloadCatalogUploadFile,
+    exportCatalogProducts,
+    triggerCatalogPushListings,
+    triggerCatalogCriticalZero,
 } from '../../services/catalogService';
 import Button from '../../components/ui/Button';
 import Select from '../../components/ui/Select';
@@ -125,7 +129,7 @@ function UploadActionsDropdown({ upload, storeId, syncing, scraping, syncingUplo
         });
     }
     items.push({
-        label: 'Download Catalog',
+        label: 'Download File',
         icon: <Download className="h-4 w-4 shrink-0" />,
         onClick: () => onDownload(storeId, u.id, u.original_filename),
         className: 'text-slate-700 dark:text-slate-300',
@@ -278,6 +282,11 @@ export default function Catalog() {
     const progressRef = useRef(null);
     const [currentPage, setCurrentPage] = useState(1);
     const PRODUCTS_PER_PAGE = 10;
+    const [exportScope, setExportScope] = useState('all');
+    const [exportDownloading, setExportDownloading] = useState(false);
+    const [manualPushLoading, setManualPushLoading] = useState(false);
+    const [criticalModalOpen, setCriticalModalOpen] = useState(false);
+    const [criticalLoading, setCriticalLoading] = useState(false);
 
     const selectedStoreData = storeList.find((s) => s.id === selectedStore);
 
@@ -527,6 +536,75 @@ export default function Catalog() {
         });
     };
 
+    const handleExportProducts = () => {
+        if (!selectedStore) return;
+        let syncStatus;
+        if (exportScope === 'failed') syncStatus = 'failed';
+        else if (exportScope === 'filter') {
+            if (!statusFilter) {
+                setMessage('Choose a status in the filter, or switch export scope to “All products”.');
+                return;
+            }
+            syncStatus = statusFilter;
+        }
+        setExportDownloading(true);
+        exportCatalogProducts(selectedStore, { syncStatus })
+            .then(() => setMessage('Catalog export downloaded.'))
+            .catch(() => setMessage('Export failed. Try again.'))
+            .finally(() => setExportDownloading(false));
+    };
+
+    const handleManualPushListings = () => {
+        if (!selectedStore) return;
+        setManualPushLoading(true);
+        setFlowStatus('syncing');
+        setMessage('Pushing scraped/synced listings to marketplace (no vendor scrape)…');
+        startProgress();
+        triggerCatalogPushListings(selectedStore, false)
+            .then((res) => {
+                const d = res.data || {};
+                finishProgress(true);
+                setFlowStatus('success');
+                const pushed = d.pushed ?? 0;
+                const failed = d.failed ?? 0;
+                const skipped = d.skipped_no_listing ?? 0;
+                setMessage(`Manual sync complete: ${pushed} pushed, ${failed} failed, ${skipped} skipped (no listing ID).`);
+                if (viewMode === 'products') {
+                    getProducts(selectedStore).then((r) => setProducts(r.data?.results || r.data || []));
+                }
+                getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
+            })
+            .catch((err) => {
+                finishProgress(false);
+                setFlowStatus('failed');
+                setMessage(err.response?.data?.detail || err.message || 'Manual sync failed.');
+            })
+            .finally(() => setManualPushLoading(false));
+    };
+
+    const handleCriticalZeroConfirm = () => {
+        if (!selectedStore) return;
+        setCriticalLoading(true);
+        triggerCatalogCriticalZero(selectedStore, false)
+            .then((res) => {
+                const d = res.data || {};
+                setCriticalModalOpen(false);
+                setFlowStatus('success');
+                setMessage(
+                    `Critical action finished: local stock set to 0; ${d.marketplace_push_ok ?? 0} marketplace update(s) ok. Store and schedule are deactivated.`,
+                );
+                getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
+                if (viewMode === 'products') {
+                    getProducts(selectedStore).then((r) => setProducts(r.data?.results || r.data || []));
+                }
+            })
+            .catch((err) => {
+                setFlowStatus('failed');
+                setMessage(err.response?.data?.detail || err.message || 'Critical action failed.');
+            })
+            .finally(() => setCriticalLoading(false));
+    };
+
     const handleSyncFromModal = () => {
         const latest = uploads.find((u) => ['pending', 'validated'].includes(u.status));
         if (latest) handleSync(latest.id);
@@ -715,6 +793,7 @@ export default function Catalog() {
                                         <th className="w-[100px] whitespace-nowrap">Vendor</th>
                                         <th className="w-[120px] whitespace-nowrap">Marketplace</th>
                                         <th className="w-[60px] text-right whitespace-nowrap">Items</th>
+                                        <th className="min-w-[100px] whitespace-nowrap">Reason</th>
                                         <th className="w-[90px] whitespace-nowrap">Status</th>
                                         <th className="w-[80px] text-right whitespace-nowrap">Actions</th>
                                     </tr>
@@ -735,6 +814,9 @@ export default function Catalog() {
                                                 {u.marketplace || '—'}
                                             </td>
                                             <td className="text-right text-sm tabular-nums align-middle whitespace-nowrap">{u.processed_rows ?? u.total_rows ?? '—'}</td>
+                                            <td className="text-sm text-slate-600 dark:text-slate-400 align-middle whitespace-nowrap" title={u.reason || undefined}>
+                                                {u.reason || '—'}
+                                            </td>
                                             <td className="align-middle whitespace-nowrap">
                                                 <Badge variant={uploadStatusVariant[u.status] || 'warning'}>
                                                     {uploadStatusLabel[u.status] || u.status}
@@ -789,7 +871,51 @@ export default function Catalog() {
                                     : `${filteredProducts.length} of ${products.length} products`}
                             </p>
                         </div>
-                        <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:max-w-xl sm:ml-auto sm:items-center">
+                        <div className="flex w-full flex-1 flex-col gap-2 lg:flex-row lg:flex-wrap lg:justify-end lg:items-center lg:max-w-none">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={handleManualPushListings}
+                                    disabled={manualPushLoading || scraping || !selectedStore}
+                                    title="Push current price/stock to marketplace for Synced / Scrape rows only (no new vendor fetch)"
+                                >
+                                    <RefreshCw className={`h-4 w-4 mr-1.5 ${manualPushLoading ? 'animate-spin' : ''}`} />
+                                    Manual sync
+                                </Button>
+                                <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={() => setCriticalModalOpen(true)}
+                                    disabled={criticalLoading || !selectedStore}
+                                    className="border-rose-200 text-rose-700 hover:bg-rose-50 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/40"
+                                    title="Emergency: set all listing stock to 0 and turn off store automation"
+                                >
+                                    <AlertTriangle className="h-4 w-4 mr-1.5" />
+                                    Critical action
+                                </Button>
+                                <div className="flex items-center gap-1.5">
+                                    <select
+                                        className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-2 text-xs text-slate-900 dark:text-slate-100 max-w-[10rem]"
+                                        value={exportScope}
+                                        onChange={(e) => setExportScope(e.target.value)}
+                                        title="What to include in the CSV export"
+                                    >
+                                        <option value="all">Export: all products</option>
+                                        <option value="filter">Export: current filter</option>
+                                        <option value="failed">Export: failed only</option>
+                                    </select>
+                                    <Button
+                                        variant="secondary"
+                                        size="sm"
+                                        onClick={handleExportProducts}
+                                        disabled={exportDownloading || !selectedStore}
+                                    >
+                                        <FileDown className={`h-4 w-4 mr-1.5 ${exportDownloading ? 'opacity-50' : ''}`} />
+                                        Export
+                                    </Button>
+                                </div>
+                            </div>
                             <Button
                                 variant="secondary"
                                 size="sm"
@@ -800,7 +926,7 @@ export default function Catalog() {
                                 <RefreshCw className={`h-4 w-4 mr-1.5 ${scraping ? 'animate-spin' : ''}`} />
                                 Scrape prices
                             </Button>
-                            <div className="relative flex-1 min-w-0">
+                            <div className="relative flex-1 min-w-[12rem] lg:max-w-xs">
                                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                                 <input
                                     className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 py-2 pl-9 pr-3 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-none"
@@ -819,6 +945,7 @@ export default function Catalog() {
                                 <option value="scraped">Scrape</option>
                                 <option value="needs_attention">Needs attention</option>
                                 <option value="pending">Pending</option>
+                                <option value="failed">Failed</option>
                             </select>
                         </div>
                     </div>
@@ -850,6 +977,7 @@ export default function Catalog() {
                                         <th className="whitespace-nowrap">Title</th>
                                         <th className="w-[90px] whitespace-nowrap">Vendor</th>
                                         <th className="w-[80px] whitespace-nowrap text-center">Vendor URL</th>
+                                        <th className="w-[90px] whitespace-nowrap text-right">Vendor price</th>
                                         <th className="w-[80px] whitespace-nowrap text-right">Price</th>
                                         <th className="w-[60px] whitespace-nowrap text-right">Stock</th>
                                         <th className="w-[90px] whitespace-nowrap text-center">Status</th>
@@ -881,6 +1009,9 @@ export default function Catalog() {
                                                     ) : (
                                                         '—'
                                                     )}
+                                                </td>
+                                                <td className="text-right font-mono text-sm align-middle whitespace-nowrap text-slate-600 dark:text-slate-400">
+                                                    {formatPrice(product.vendor_price)}
                                                 </td>
                                                 <td className="text-right font-mono text-sm align-middle whitespace-nowrap">{formatPrice(product.store_price)}</td>
                                                 <td className="text-right font-mono text-sm align-middle">{product.store_stock ?? '—'}</td>
@@ -1083,6 +1214,17 @@ export default function Catalog() {
                 loading={deletingUploadId === deleteUploadConfirm?.id}
                 onConfirm={() => handleDeleteUpload(deleteUploadConfirm)}
                 onCancel={() => setDeleteUploadConfirm(null)}
+            />
+            <ConfirmModal
+                open={criticalModalOpen}
+                title="Critical action"
+                message="If you click Yes, all listing inventory for this store will be set to 0 on the marketplace (where possible), local stock will be cleared, and this store will be deactivated including its scheduled sync toggle. Only use this if something went wrong and you need an immediate stop."
+                confirmLabel="Yes, zero inventory and deactivate"
+                cancelLabel="Cancel"
+                variant="danger"
+                loading={criticalLoading}
+                onConfirm={handleCriticalZeroConfirm}
+                onCancel={() => !criticalLoading && setCriticalModalOpen(false)}
             />
         </div>
     );

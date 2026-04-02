@@ -533,3 +533,173 @@ def _crontab_matches(sched, now_local):
         and _field_matches(getattr(sched, 'crontab_day_of_month', '*') or '*', now_local.day)
         and _field_matches(getattr(sched, 'crontab_month_of_year', '*') or '*', now_local.month)
     )
+
+
+def _resolve_listing_id_for_pm(adapter, pm):
+    """Resolve Reverb listing id; persist marketplace_id when found via SKU lookup."""
+    listing_id = pm.marketplace_id
+    if listing_id:
+        return listing_id
+    lookup = getattr(adapter, 'lookup_listing_by_sku', None)
+    if not lookup:
+        return None
+    for sku_candidate in filter(None, [
+        pm.marketplace_child_sku,
+        pm.marketplace_parent_sku,
+        pm.product.vendor_sku if pm.product else None,
+    ]):
+        listing_id = lookup(sku_candidate)
+        if listing_id:
+            pm.marketplace_id = listing_id
+            if not pm.marketplace_child_sku:
+                pm.marketplace_child_sku = sku_candidate
+                pm.save(update_fields=['marketplace_id', 'marketplace_child_sku'])
+            else:
+                pm.save(update_fields=['marketplace_id'])
+            break
+    return listing_id
+
+
+@shared_task
+def run_store_push_listings_only(store_id):
+    """
+    Push local store_price / store_stock to the marketplace for listings that are
+    already scraped or synced — no vendor URL scrape (excludes pending / failed / needs_attention).
+    """
+    import logging
+    from store_adapters import get_adapter
+    from store_adapters.reverb_adapter import ReverbAPIError
+    from catalog.models import ReverbUpdateLog
+
+    logger = logging.getLogger(__name__)
+    try:
+        store = Store.objects.get(id=store_id)
+    except Store.DoesNotExist:
+        return {'error': 'store_not_found', 'store_id': str(store_id)}
+
+    if store.connection_status != 'connected':
+        return {
+            'error': 'not_connected',
+            'hint': 'Validate store connection before pushing listings.',
+            'store_id': str(store_id),
+        }
+
+    adapter = get_adapter(store)
+    qs = ProductMapping.objects.filter(
+        store=store,
+        is_active=True,
+        sync_status__in=['synced', 'scraped'],
+        store_price__isnull=False,
+    ).select_related('product', 'product__vendor')
+
+    succeeded, failed, skipped = 0, 0, 0
+    for pm in qs.iterator(chunk_size=100):
+        listing_id = _resolve_listing_id_for_pm(adapter, pm)
+        if not listing_id:
+            skipped += 1
+            ReverbUpdateLog.objects.create(
+                product_mapping=pm,
+                status=ReverbUpdateLog.Status.FAILED,
+                error_message='No marketplace listing ID or resolvable SKU for push',
+            )
+            continue
+        try:
+            adapter.update_product(
+                listing_id,
+                price=float(pm.store_price),
+                stock=pm.store_stock or 0,
+            )
+            now_ok = timezone.now()
+            pm.sync_status = 'synced'
+            pm.last_sync_time = now_ok
+            pm.save(update_fields=['sync_status', 'last_sync_time'])
+            ReverbUpdateLog.objects.create(
+                product_mapping=pm,
+                status=ReverbUpdateLog.Status.SUCCESS,
+                pushed_price=pm.store_price,
+                pushed_stock=pm.store_stock,
+            )
+            succeeded += 1
+        except ReverbAPIError as e:
+            failed += 1
+            logger.warning("Manual push failed for %s: %s", pm.id, e)
+            ReverbUpdateLog.objects.create(
+                product_mapping=pm,
+                status=ReverbUpdateLog.Status.FAILED,
+                http_status=e.status_code,
+                error_message=str(e),
+            )
+        except Exception as e:
+            failed += 1
+            logger.exception("Manual push error for %s", pm.id)
+            ReverbUpdateLog.objects.create(
+                product_mapping=pm,
+                status=ReverbUpdateLog.Status.FAILED,
+                error_message=str(e)[:500],
+            )
+
+    return {
+        'store_id': str(store_id),
+        'pushed': succeeded,
+        'failed': failed,
+        'skipped_no_listing': skipped,
+    }
+
+
+@shared_task
+def run_store_critical_zero_inventory(store_id):
+    """
+    Set all active listing stock to 0 locally and on the marketplace, deactivate the store
+    and its sync schedule (emergency stop).
+    """
+    import logging
+    from store_adapters import get_adapter
+    from store_adapters.reverb_adapter import ReverbAPIError
+    from sync.models import SyncSchedule
+
+    logger = logging.getLogger(__name__)
+    try:
+        store = Store.objects.get(id=store_id)
+    except Store.DoesNotExist:
+        return {'error': 'store_not_found'}
+
+    adapter = get_adapter(store)
+    pushed, push_failed, local_zeroed = 0, 0, 0
+
+    qs = ProductMapping.objects.filter(store=store, is_active=True).select_related('product')
+    for pm in qs.iterator(chunk_size=100):
+        pm.store_stock = 0
+        pm.save(update_fields=['store_stock'])
+        local_zeroed += 1
+        if store.connection_status != 'connected':
+            continue
+        listing_id = _resolve_listing_id_for_pm(adapter, pm)
+        if not listing_id:
+            continue
+        try:
+            if pm.store_price is not None:
+                adapter.update_product(listing_id, price=float(pm.store_price), stock=0)
+            else:
+                adapter.update_product(listing_id, stock=0)
+            pushed += 1
+        except (ReverbAPIError, Exception) as e:
+            push_failed += 1
+            logger.warning("Critical zero push failed for listing %s: %s", listing_id, e)
+
+    store.is_active = False
+    store.save()
+    try:
+        sched = SyncSchedule.objects.get(store=store)
+        sched.is_active = False
+        sched.save(update_fields=['is_active'])
+    except SyncSchedule.DoesNotExist:
+        pass
+
+    return {
+        'store_id': str(store_id),
+        'store_deactivated': True,
+        'schedule_deactivated': True,
+        'listings_zeroed_local': local_zeroed,
+        'marketplace_push_ok': pushed,
+        'marketplace_push_failed': push_failed,
+    }

@@ -72,7 +72,7 @@ function storeToForm(store) {
             vendor_id: vi.vendor || vi.vendor_id,
             range_multipliers: (vi.range_multipliers || []).map((r) => ({
                 from_value: r.from_value ?? 0,
-                to_value: r.to_value ?? 999999999,
+                to_value: r.to_value !== null && r.to_value !== undefined ? r.to_value : '',
                 range_type: r.range_type ?? 'multiplier',
                 multiplier: r.multiplier ?? 0.5,
                 fixed_value: r.fixed_value ?? null,

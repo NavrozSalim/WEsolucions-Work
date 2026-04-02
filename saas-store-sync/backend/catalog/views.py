@@ -19,6 +19,27 @@ from django.db.models import Count, Q, Prefetch
 from stores.models import StoreVendorPriceSettings
 
 
+def _upload_action_reason_from_rows(rows):
+    """Summarize Add / Update / Delete mix from upload rows (prefetched)."""
+    from collections import Counter
+
+    labels = []
+    for r in rows:
+        raw = (r.action_raw or 'Add').strip().lower()
+        if 'delete' in raw:
+            labels.append('Delete')
+        elif 'update' in raw:
+            labels.append('Update')
+        else:
+            labels.append('Add')
+    if not labels:
+        return '—'
+    cnt = Counter(labels)
+    if len(cnt) == 1:
+        return list(cnt.keys())[0]
+    return ', '.join(f'{k} ({v})' for k, v in sorted(cnt.items(), key=lambda x: (-x[1], x[0])))
+
+
 class CatalogStoresView(APIView):
     """List user's stores with product count. Optional filter: marketplace_id."""
     permission_classes = [IsAuthenticated]
@@ -74,6 +95,50 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
         pm.sync_status = 'pending'
         pm.save()
         return Response({'status': 'reset', 'message': f'Ready to retry sync for {pm.product.vendor_sku}'})
+
+    @action(detail=False, methods=['get'])
+    def export(self, request, store_pk=None):
+        """Download product mappings as CSV. Optional ?sync_status=failed|synced|..."""
+        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        qs = ProductMapping.objects.filter(store=store, is_active=True).select_related(
+            'product', 'product__vendor',
+        ).prefetch_related('product__vendor_prices').order_by('product__vendor_sku')
+        st = (request.query_params.get('sync_status') or '').strip()
+        if st:
+            qs = qs.filter(sync_status=st)
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="catalog_products_{store_pk}.csv"'
+        writer = csv.writer(response)
+        writer.writerow([
+            'SKU', 'Title', 'Vendor', 'Vendor URL', 'Vendor price', 'Store price', 'Stock',
+            'Sync status', 'Marketplace ID', 'Last sync', 'Last scrape',
+        ])
+        for pm in qs:
+            sku = (
+                pm.marketplace_child_sku
+                or pm.marketplace_parent_sku
+                or (pm.product.vendor_sku if pm.product else '')
+            )
+            vp = None
+            if pm.product_id:
+                vp = pm.product.vendor_prices.order_by('-scraped_at').first()
+            vprice = ''
+            if vp and vp.price is not None:
+                vprice = str(vp.price)
+            writer.writerow([
+                sku or '',
+                (pm.title or '')[:500],
+                pm.product.vendor.name if pm.product and pm.product.vendor else '',
+                pm.product.vendor_url if pm.product else '',
+                vprice,
+                str(pm.store_price) if pm.store_price is not None else '',
+                pm.store_stock if pm.store_stock is not None else '',
+                pm.sync_status or '',
+                pm.marketplace_id or '',
+                pm.last_sync_time.isoformat() if pm.last_sync_time else '',
+                pm.last_scrape_time.isoformat() if pm.last_scrape_time else '',
+            ])
+        return response
 
     def perform_destroy(self, instance):
         sku = instance.product.vendor_sku
@@ -149,6 +214,9 @@ class CatalogUploadListView(APIView):
         uploads = (
             CatalogUpload.objects.filter(store=store)
             .select_related('user', 'store', 'store__marketplace')
+            .prefetch_related(
+                Prefetch('rows', queryset=CatalogUploadRow.objects.only('action_raw')),
+            )
             .order_by('-created_at')[:50]
         )
         data = []
@@ -178,6 +246,7 @@ class CatalogUploadListView(APIView):
                 "vendor_source": vendor_source,
                 "has_errors": has_errors,
                 "error_row_count": error_row_count,
+                "reason": _upload_action_reason_from_rows(u.rows.all()),
             })
         return Response(data)
 
@@ -572,6 +641,77 @@ class CatalogJobStatusView(APIView):
             else:
                 data["error"] = str(result.result) if result.result else "Task failed"
         return Response(data)
+
+
+class CatalogPushListingsView(APIView):
+    """Push local price/stock to marketplace for scraped/synced products only (no vendor scrape)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        if store.connection_status != 'connected':
+            return Response(
+                {'error': 'Store not connected. Validate connection first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        run_inline = request.data.get('run_inline') or request.query_params.get('inline') == '1'
+        if run_inline:
+            from sync.tasks import run_store_push_listings_only
+            result = run_store_push_listings_only(str(store.id))
+            return Response(result, status=status.HTTP_200_OK)
+        try:
+            from sync.tasks import run_store_push_listings_only
+            async_result = run_store_push_listings_only.delay(str(store.id))
+        except Exception as e:
+            detail = str(e)
+            if 'redis' in detail.lower() or 'connection' in detail.lower():
+                from sync.tasks import run_store_push_listings_only
+                result = run_store_push_listings_only(str(store.id))
+                return Response(result, status=status.HTTP_200_OK)
+            return Response({'detail': detail}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(
+            {'job_id': async_result.id, 'status': 'queued', 'message': 'Manual listing push queued.'},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class StoreCriticalZeroView(APIView):
+    """
+    Emergency: set all listing stock to 0 (local + marketplace), deactivate store and sync schedule.
+    Requires JSON body {"confirm": true}.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        if request.data.get('confirm') is not True:
+            return Response(
+                {'error': 'You must send {"confirm": true} to run this action.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        log_action(
+            request.user, 'critical_zero_inventory', 'store', str(store.id),
+            metadata={'store_name': store.name}, request=request,
+        )
+        run_inline = request.data.get('run_inline') or request.query_params.get('inline') == '1'
+        if run_inline:
+            from sync.tasks import run_store_critical_zero_inventory
+            result = run_store_critical_zero_inventory(str(store.id))
+            return Response(result, status=status.HTTP_200_OK)
+        try:
+            from sync.tasks import run_store_critical_zero_inventory
+            async_result = run_store_critical_zero_inventory.delay(str(store.id))
+        except Exception as e:
+            detail = str(e)
+            if 'redis' in detail.lower() or 'connection' in detail.lower():
+                from sync.tasks import run_store_critical_zero_inventory
+                result = run_store_critical_zero_inventory(str(store.id))
+                return Response(result, status=status.HTTP_200_OK)
+            return Response({'detail': detail}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(
+            {'job_id': async_result.id, 'status': 'queued', 'message': 'Critical zero-inventory job queued.'},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class CatalogSampleTemplateView(APIView):

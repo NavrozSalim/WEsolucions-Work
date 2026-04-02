@@ -30,7 +30,7 @@ class StoreVendorPriceSettingsReadSerializer(serializers.ModelSerializer):
             {
                 'id': str(m.id),
                 'from_value': float(m.price_range.from_value),
-                'to_value': float(m.price_range.to_value) if m.price_range.to_value else None,
+                'to_value': float(m.price_range.to_value) if m.price_range.to_value is not None else None,
                 'margin_type': getattr(m, 'margin_type', 'percentage') or 'percentage',
                 'margin_percentage': float(m.margin_percentage),
             }
@@ -56,7 +56,7 @@ class StoreVendorInventorySettingsReadSerializer(serializers.ModelSerializer):
             {
                 'id': str(r.id),
                 'from_value': float(r.from_value),
-                'to_value': float(r.to_value) if r.to_value else None,
+                'to_value': float(r.to_value) if r.to_value is not None else None,
                 'range_type': getattr(r, 'range_type', 'multiplier') or 'multiplier',
                 'multiplier': float(r.multiplier),
                 'fixed_value': r.fixed_value,
