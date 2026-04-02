@@ -8,6 +8,7 @@ from typing import Any
 from django.db import transaction
 
 from .models import CatalogUpload, CatalogUploadRow
+from .reverb_catalog import store_is_reverb
 from stores.models import Store
 from vendor.models import Vendor
 
@@ -108,9 +109,11 @@ def validate_and_create_upload(
         if indices.get(col) is None:
             return None, [f"Required column missing: {col.title()}"]
 
+    store = Store.objects.select_related('marketplace').get(pk=store.pk)
     store_name_lower = store.name.lower()
     vendors_by_name = {v.name.lower(): v for v in Vendor.objects.all()}
     vendors_by_name.update({v.code.lower(): v for v in Vendor.objects.all()})
+    is_reverb = store_is_reverb(store)
 
     with transaction.atomic():
         upload = CatalogUpload.objects.create(
@@ -159,15 +162,25 @@ def validate_and_create_upload(
                 errors.append(f"Row {row_num}: Store Name '{store_name_raw}' does not match upload store '{store.name}' (row still created)")
 
             if action_norm == 'add':
-                sku_val = (
-                    _normalize(vendor_sku_raw)
-                    or _normalize(marketplace_child_sku_raw)
-                    or _normalize(vendor_id_raw)
-                    or _normalize(marketplace_parent_sku_raw)
-                )
-                if not sku_val:
-                    errors.append(f"Row {row_num}: Vendor SKU, Marketplace Child SKU, Vendor ID, or Marketplace Parent SKU required for Add")
-                    continue
+                if is_reverb:
+                    if _normalize(marketplace_parent_sku_raw) is None:
+                        errors.append(
+                            f"Row {row_num}: Reverb stores require Marketplace Parent SKU for Add "
+                            f"(Reverb listing SKU; Is Variation, Variation ID, Child SKU, Marketplace ID, and Vendor SKU may be N/A)"
+                        )
+                        continue
+                else:
+                    sku_val = (
+                        _normalize(vendor_sku_raw)
+                        or _normalize(marketplace_child_sku_raw)
+                        or _normalize(vendor_id_raw)
+                        or _normalize(marketplace_parent_sku_raw)
+                    )
+                    if not sku_val:
+                        errors.append(
+                            f"Row {row_num}: Vendor SKU, Marketplace Child SKU, Vendor ID, or Marketplace Parent SKU required for Add"
+                        )
+                        continue
             elif action_norm == 'delete':
                 id_val = (
                     _normalize(marketplace_id_raw)

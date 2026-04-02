@@ -7,6 +7,7 @@ from stores.models import Store, StoreVendorPriceSettings, StoreVendorInventoryS
 from stores.pricing_excel import apply_excel_pricing
 from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
 from catalog.models import ProductMapping
+from catalog.reverb_catalog import listing_sku_lookup_order
 from vendor.models import VendorPrice
 from sync.models import StoreSyncRun
 from scrapers import get_price_and_stock, close_amazon_session
@@ -129,7 +130,7 @@ def _apply_inventory(vendor_stock, inventory_settings):
 def run_store_sync(self, store_id):
     """Scrape vendor URLs for a store's products, apply rules, update listings, log results."""
     try:
-        store = Store.objects.get(id=store_id)
+        store = Store.objects.select_related('marketplace').get(id=store_id)
     except Store.DoesNotExist:
         return
     now = timezone.now()
@@ -229,7 +230,7 @@ def run_store_update(self, store_id):
     logger = logging.getLogger(__name__)
 
     try:
-        store = Store.objects.get(id=store_id)
+        store = Store.objects.select_related('marketplace').get(id=store_id)
     except Store.DoesNotExist:
         return {
             'store_id': str(store_id),
@@ -358,11 +359,7 @@ def run_store_update(self, store_id):
             if not listing_id:
                 lookup = getattr(adapter, 'lookup_listing_by_sku', None)
                 if lookup:
-                    for sku_candidate in filter(None, [
-                        pm.marketplace_child_sku,
-                        pm.marketplace_parent_sku,
-                        pm.product.vendor_sku,
-                    ]):
+                    for sku_candidate in listing_sku_lookup_order(pm, store):
                         listing_id = lookup(sku_candidate)
                         if listing_id:
                             pm.marketplace_id = listing_id
@@ -535,7 +532,7 @@ def _crontab_matches(sched, now_local):
     )
 
 
-def _resolve_listing_id_for_pm(adapter, pm):
+def _resolve_listing_id_for_pm(adapter, pm, store):
     """Resolve Reverb listing id; persist marketplace_id when found via SKU lookup."""
     listing_id = pm.marketplace_id
     if listing_id:
@@ -543,11 +540,7 @@ def _resolve_listing_id_for_pm(adapter, pm):
     lookup = getattr(adapter, 'lookup_listing_by_sku', None)
     if not lookup:
         return None
-    for sku_candidate in filter(None, [
-        pm.marketplace_child_sku,
-        pm.marketplace_parent_sku,
-        pm.product.vendor_sku if pm.product else None,
-    ]):
+    for sku_candidate in listing_sku_lookup_order(pm, store):
         listing_id = lookup(sku_candidate)
         if listing_id:
             pm.marketplace_id = listing_id
@@ -573,7 +566,7 @@ def run_store_push_listings_only(store_id):
 
     logger = logging.getLogger(__name__)
     try:
-        store = Store.objects.get(id=store_id)
+        store = Store.objects.select_related('marketplace').get(id=store_id)
     except Store.DoesNotExist:
         return {'error': 'store_not_found', 'store_id': str(store_id)}
 
@@ -594,7 +587,7 @@ def run_store_push_listings_only(store_id):
 
     succeeded, failed, skipped = 0, 0, 0
     for pm in qs.iterator(chunk_size=100):
-        listing_id = _resolve_listing_id_for_pm(adapter, pm)
+        listing_id = _resolve_listing_id_for_pm(adapter, pm, store)
         if not listing_id:
             skipped += 1
             ReverbUpdateLog.objects.create(
@@ -659,7 +652,7 @@ def run_store_critical_zero_inventory(store_id):
 
     logger = logging.getLogger(__name__)
     try:
-        store = Store.objects.get(id=store_id)
+        store = Store.objects.select_related('marketplace').get(id=store_id)
     except Store.DoesNotExist:
         return {'error': 'store_not_found'}
 
@@ -673,7 +666,7 @@ def run_store_critical_zero_inventory(store_id):
         local_zeroed += 1
         if store.connection_status != 'connected':
             continue
-        listing_id = _resolve_listing_id_for_pm(adapter, pm)
+        listing_id = _resolve_listing_id_for_pm(adapter, pm, store)
         if not listing_id:
             continue
         try:

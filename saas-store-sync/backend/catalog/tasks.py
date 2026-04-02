@@ -9,6 +9,7 @@ from django.db import transaction
 logger = logging.getLogger(__name__)
 
 from .models import CatalogUpload, CatalogUploadRow, CatalogSyncLog, ProductMapping
+from .reverb_catalog import listing_sku_lookup_order, store_is_reverb
 from .services import _normalize
 from products.models import Product
 from vendor.models import Vendor
@@ -37,14 +38,20 @@ def _normalize_action(action_raw: str) -> str:
 
 
 def _find_product_mapping(row: CatalogUploadRow, store, *, active_only: bool = True) -> ProductMapping | None:
-    """Find ProductMapping by marketplace_id, marketplace_child_sku, or vendor+sku."""
+    """Find ProductMapping by marketplace_id, marketplace SKUs, or vendor+product key."""
+    reverb = store_is_reverb(store)
     mid = _normalize(row.marketplace_id_raw)
     sku = _normalize(row.marketplace_child_sku_raw)
+    mp_row = _normalize(row.marketplace_parent_sku_raw)
     qs = ProductMapping.objects.filter(store=store)
     if active_only:
         qs = qs.filter(is_active=True)
     if mid:
         pm = qs.filter(marketplace_id=mid).first()
+        if pm:
+            return pm
+    if reverb and mp_row:
+        pm = qs.filter(marketplace_parent_sku=mp_row).first()
         if pm:
             return pm
     if sku:
@@ -56,11 +63,18 @@ def _find_product_mapping(row: CatalogUploadRow, store, *, active_only: bool = T
     if not vendor:
         return None
     vid = _normalize(row.variation_id_raw) or ''
-    vsku = (
-        _normalize(row.vendor_sku_raw)
-        or _normalize(row.marketplace_child_sku_raw)
-        or _normalize(row.marketplace_parent_sku_raw)
-    )
+    if reverb:
+        vsku = (
+            _normalize(row.marketplace_parent_sku_raw)
+            or _normalize(row.vendor_sku_raw)
+            or _normalize(row.marketplace_child_sku_raw)
+        )
+    else:
+        vsku = (
+            _normalize(row.vendor_sku_raw)
+            or _normalize(row.marketplace_child_sku_raw)
+            or _normalize(row.marketplace_parent_sku_raw)
+        )
     if not vsku:
         return None
     product = Product.objects.filter(
@@ -78,14 +92,22 @@ def _find_product_mapping(row: CatalogUploadRow, store, *, active_only: bool = T
     return None
 
 
-def _get_or_create_product(vendor: Vendor, row: CatalogUploadRow) -> Product:
+def _get_or_create_product(vendor: Vendor, row: CatalogUploadRow, *, store) -> Product:
     """Get or create Product from row."""
-    vsku = (
-        _normalize(row.vendor_sku_raw)
-        or _normalize(row.marketplace_child_sku_raw)
-        or _normalize(row.vendor_id_raw)
-        or _normalize(row.marketplace_parent_sku_raw)
-    )
+    if store_is_reverb(store):
+        vsku = (
+            _normalize(row.marketplace_parent_sku_raw)
+            or _normalize(row.vendor_sku_raw)
+            or _normalize(row.marketplace_child_sku_raw)
+            or _normalize(row.vendor_id_raw)
+        )
+    else:
+        vsku = (
+            _normalize(row.vendor_sku_raw)
+            or _normalize(row.marketplace_child_sku_raw)
+            or _normalize(row.vendor_id_raw)
+            or _normalize(row.marketplace_parent_sku_raw)
+        )
     vid = _normalize(row.variation_id_raw) or ''
     url = _normalize(row.vendor_url_raw)
     product, created = Product.objects.get_or_create(
@@ -128,7 +150,7 @@ def run_catalog_sync(upload_id: str):
     Creates CatalogSyncLog per row. Call directly or via catalog_sync_task.
     """
     try:
-        upload = CatalogUpload.objects.select_related('store').get(id=upload_id)
+        upload = CatalogUpload.objects.select_related('store', 'store__marketplace').get(id=upload_id)
     except CatalogUpload.DoesNotExist:
         return {'error': 'Upload not found', 'upload_id': upload_id}
 
@@ -167,7 +189,7 @@ def run_catalog_sync(upload_id: str):
                         log_message = row.sync_error
                         errors += 1
                     elif action == 'add':
-                        product = _get_or_create_product(vendor, row)
+                        product = _get_or_create_product(vendor, row, store=store)
                         mp_sku = _normalize(row.marketplace_parent_sku_raw)
                         mc_sku = _normalize(row.marketplace_child_sku_raw)
                         mid = _normalize(row.marketplace_id_raw)
@@ -271,7 +293,7 @@ def run_catalog_scrape(upload_id: str):
     from scrapers import get_price_and_stock, close_amazon_session
 
     try:
-        upload = CatalogUpload.objects.select_related('store').get(id=upload_id)
+        upload = CatalogUpload.objects.select_related('store', 'store__marketplace').get(id=upload_id)
     except CatalogUpload.DoesNotExist:
         return {'error': 'Upload not found', 'upload_id': upload_id}
 
@@ -455,13 +477,13 @@ def catalog_scrape_task(self, upload_id: str):
 def catalog_update_task(self, upload_id: str):
     """
     Push to Reverb API: update price/inventory for active mappings, end listings for Delete rows.
-    Uses marketplace_id (listing ID) or lookup by marketplace_child_sku.
+    Uses marketplace_id (listing ID) or SKU lookup; Reverb stores try Marketplace Parent SKU first.
     """
     from .models import ReverbUpdateLog
     from store_adapters.reverb_adapter import ReverbAdapter, ReverbAPIError
 
     try:
-        upload = CatalogUpload.objects.select_related('store').get(id=upload_id)
+        upload = CatalogUpload.objects.select_related('store', 'store__marketplace').get(id=upload_id)
     except CatalogUpload.DoesNotExist:
         return {'error': 'Upload not found', 'upload_id': upload_id}
 
@@ -472,17 +494,13 @@ def catalog_update_task(self, upload_id: str):
     for row in upload.rows.filter(
         action_raw__icontains='delete',
         product_mapping__isnull=False,
-    ):
+    ).select_related('product_mapping', 'product_mapping__product'):
         pm = row.product_mapping
         if not pm or pm.is_active:
             continue
         listing_id = pm.marketplace_id
         if not listing_id:
-            for sku_candidate in filter(None, [
-                pm.marketplace_child_sku,
-                pm.marketplace_parent_sku,
-                pm.product.vendor_sku if pm.product else None,
-            ]):
+            for sku_candidate in listing_sku_lookup_order(pm, store):
                 listing_id = adapter.lookup_listing_by_sku(sku_candidate)
                 if listing_id:
                     break
@@ -514,7 +532,7 @@ def catalog_update_task(self, upload_id: str):
         product_mapping__is_active=True,
     ).exclude(
         action_raw__icontains='delete',
-    ).select_related('product_mapping')
+    ).select_related('product_mapping', 'product_mapping__product')
     succeeded, failed = 0, 0
 
     for row in rows_to_update:
@@ -523,11 +541,7 @@ def catalog_update_task(self, upload_id: str):
             continue
         listing_id = pm.marketplace_id
         if not listing_id:
-            for sku_candidate in filter(None, [
-                pm.marketplace_child_sku,
-                pm.marketplace_parent_sku,
-                pm.product.vendor_sku if pm.product else None,
-            ]):
+            for sku_candidate in listing_sku_lookup_order(pm, store):
                 listing_id = adapter.lookup_listing_by_sku(sku_candidate)
                 if listing_id:
                     pm.marketplace_id = listing_id
