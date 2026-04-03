@@ -8,7 +8,7 @@ from typing import Any
 from django.db import transaction
 
 from .models import CatalogUpload, CatalogUploadRow
-from .reverb_catalog import store_is_reverb
+from .reverb_catalog import store_is_reverb, vendor_is_ebay
 from stores.models import Store
 from vendor.models import Vendor
 
@@ -161,8 +161,25 @@ def validate_and_create_upload(
             if store_name_raw and store_name_raw.lower() != store_name_lower:
                 errors.append(f"Row {row_num}: Store Name '{store_name_raw}' does not match upload store '{store.name}' (row still created)")
 
+            vn = _normalize(vendor_name_raw)
+            vendor = vendors_by_name.get(vn.lower()) if vn else None
+            is_ebay_v = vendor_is_ebay(vendor, vendor_name_raw)
+
             if action_norm == 'add':
-                if is_reverb:
+                if is_ebay_v:
+                    if _normalize(marketplace_parent_sku_raw) is None:
+                        errors.append(
+                            f"Row {row_num}: eBay vendor rows require Marketplace Parent SKU for Add "
+                            f"(for marketplace listing / push; Child SKU, Marketplace ID, Vendor SKU may be N/A)"
+                        )
+                        continue
+                    if _normalize(vendor_url_raw) is None and _normalize(vendor_id_raw) is None:
+                        errors.append(
+                            f"Row {row_num}: eBay vendor rows require Vendor URL or Vendor ID "
+                            f"(eBay item id for https://www.ebay.com/itm/...) for Add"
+                        )
+                        continue
+                elif is_reverb:
                     if _normalize(marketplace_parent_sku_raw) is None:
                         errors.append(
                             f"Row {row_num}: Reverb stores require Marketplace Parent SKU for Add "
@@ -185,18 +202,16 @@ def validate_and_create_upload(
                 id_val = (
                     _normalize(marketplace_id_raw)
                     or _normalize(vendor_sku_raw)
+                    or _normalize(vendor_id_raw)
                     or _normalize(marketplace_child_sku_raw)
                     or _normalize(marketplace_parent_sku_raw)
                 )
                 if not id_val:
-                    errors.append(f"Row {row_num}: Delete requires Marketplace ID, Vendor SKU, Marketplace Child SKU, or Marketplace Parent SKU to find the product")
+                    errors.append(
+                        f"Row {row_num}: Delete requires Marketplace ID, Vendor SKU, Vendor ID, "
+                        f"Marketplace Child SKU, or Marketplace Parent SKU to find the product"
+                    )
                     continue
-
-            # Resolve vendor for FK (optional at upload; used in sync)
-            vendor = None
-            vn = _normalize(vendor_name_raw)
-            if vn:
-                vendor = vendors_by_name.get(vn.lower())
 
             CatalogUploadRow.objects.create(
                 catalog_upload=upload,

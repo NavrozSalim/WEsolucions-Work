@@ -9,7 +9,7 @@ from django.db import transaction
 logger = logging.getLogger(__name__)
 
 from .models import CatalogUpload, CatalogUploadRow, CatalogSyncLog, ProductMapping
-from .reverb_catalog import listing_sku_lookup_order, store_is_reverb
+from .reverb_catalog import listing_sku_lookup_order, store_is_reverb, vendor_is_ebay
 from .services import _normalize
 from products.models import Product
 from vendor.models import Vendor
@@ -39,7 +39,9 @@ def _normalize_action(action_raw: str) -> str:
 
 def _find_product_mapping(row: CatalogUploadRow, store, *, active_only: bool = True) -> ProductMapping | None:
     """Find ProductMapping by marketplace_id, marketplace SKUs, or vendor+product key."""
+    vendor_early = row.vendor or _resolve_vendor(row.vendor_name_raw)
     reverb = store_is_reverb(store)
+    ebay_v = vendor_is_ebay(vendor_early, row.vendor_name_raw)
     mid = _normalize(row.marketplace_id_raw)
     sku = _normalize(row.marketplace_child_sku_raw)
     mp_row = _normalize(row.marketplace_parent_sku_raw)
@@ -50,7 +52,7 @@ def _find_product_mapping(row: CatalogUploadRow, store, *, active_only: bool = T
         pm = qs.filter(marketplace_id=mid).first()
         if pm:
             return pm
-    if reverb and mp_row:
+    if (reverb or ebay_v) and mp_row:
         pm = qs.filter(marketplace_parent_sku=mp_row).first()
         if pm:
             return pm
@@ -58,12 +60,18 @@ def _find_product_mapping(row: CatalogUploadRow, store, *, active_only: bool = T
         pm = qs.filter(marketplace_child_sku=sku).first()
         if pm:
             return pm
-    # Fallback: by product if we have vendor + at least one identifier
-    vendor = row.vendor or _resolve_vendor(row.vendor_name_raw)
+    vendor = vendor_early
     if not vendor:
         return None
     vid = _normalize(row.variation_id_raw) or ''
-    if reverb:
+    if ebay_v:
+        vsku = (
+            _normalize(row.vendor_sku_raw)
+            or _normalize(row.vendor_id_raw)
+            or _normalize(row.marketplace_child_sku_raw)
+            or _normalize(row.marketplace_parent_sku_raw)
+        )
+    elif reverb:
         vsku = (
             _normalize(row.marketplace_parent_sku_raw)
             or _normalize(row.vendor_sku_raw)
@@ -73,6 +81,7 @@ def _find_product_mapping(row: CatalogUploadRow, store, *, active_only: bool = T
         vsku = (
             _normalize(row.vendor_sku_raw)
             or _normalize(row.marketplace_child_sku_raw)
+            or _normalize(row.vendor_id_raw)
             or _normalize(row.marketplace_parent_sku_raw)
         )
     if not vsku:
@@ -94,7 +103,14 @@ def _find_product_mapping(row: CatalogUploadRow, store, *, active_only: bool = T
 
 def _get_or_create_product(vendor: Vendor, row: CatalogUploadRow, *, store) -> Product:
     """Get or create Product from row."""
-    if store_is_reverb(store):
+    if vendor_is_ebay(vendor, row.vendor_name_raw):
+        vsku = (
+            _normalize(row.vendor_sku_raw)
+            or _normalize(row.vendor_id_raw)
+            or _normalize(row.marketplace_child_sku_raw)
+            or _normalize(row.marketplace_parent_sku_raw)
+        )
+    elif store_is_reverb(store):
         vsku = (
             _normalize(row.marketplace_parent_sku_raw)
             or _normalize(row.vendor_sku_raw)
