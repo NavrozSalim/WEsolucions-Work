@@ -71,12 +71,15 @@ def _apply_pricing(vendor_price, pricing_settings):
         elif m_type == 'fixed':
             price = cost_with_tax + margin_val
         else:
-            return apply_excel_pricing(
+            excel_dec = apply_excel_pricing(
                 cost,
                 tax_pct,
                 float(pricing_settings.marketplace_fees_percentage or 0),
                 str(pricing_settings.rounding_option or 'none'),
             )
+            if excel_dec is not None:
+                return excel_dec
+            # Denominator invalid (F+E>=100): fall through to multiplier like Amazon path
 
     if price is None:
         price = cost_with_tax * float(pricing_settings.multiplier or 1) + float(pricing_settings.optional_fee or 0)
@@ -329,6 +332,8 @@ def run_store_update(self, store_id):
 
             prev_vp = VendorPrice.objects.filter(product=pm.product).order_by('-scraped_at').first()
             new_price = _apply_pricing(vendor_price, pricing) if vendor_price is not None else None
+            if new_price is None and vendor_price is not None:
+                new_price = Decimal(str(vendor_price))
             new_stock = _apply_inventory(vendor_stock, inventory)
 
             raw_changed = prev_vp is None or (

@@ -315,6 +315,15 @@ class EbayParser:
                 t = meta["content"].strip()
                 if t and len(t) > 2:
                     return t[:500]
+        # Match Amazon-style fallback: visible H1/meta can be empty on some eBay shells
+        if soup.title and soup.title.string:
+            raw = soup.title.string.strip()
+            for suffix in (" | eBay", " | eBay.com", " on eBay"):
+                low = raw.lower()
+                if low.endswith(suffix.lower()):
+                    raw = raw[: -len(suffix)].strip()
+            if raw and len(raw) > 2:
+                return raw[:500]
         return None
 
     @classmethod
@@ -830,7 +839,11 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
 
         if listing_type == "ended":
             result = ScrapeResult.ok(price=None, stock=0, title=listing_title, listing_type="ended")
-            logger.info("eBay listing ended: %s", url)
+            logger.info(
+                "eBay listing ended for %s (title=%r)",
+                url[:80],
+                (listing_title or "")[:120],
+            )
             return result.to_legacy()
 
         price = extracted_price  # already computed above, don't call twice
@@ -845,8 +858,18 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
             )
             continue
 
-        result = ScrapeResult.ok(price=price, stock=stock, title=listing_title, listing_type=listing_type)
-        logger.info("eBay scrape OK: %s price=%.2f stock=%s", url, price, stock)
+        price_out = float(price) if price is not None else None
+        stock_out = int(stock) if stock is not None else None
+        result = ScrapeResult.ok(
+            price=price_out, stock=stock_out, title=listing_title, listing_type=listing_type
+        )
+        logger.info(
+            "eBay scrape OK for %s (price=%s stock=%s title=%r)",
+            url[:80],
+            price_out,
+            stock_out,
+            (listing_title or "")[:120],
+        )
         return result.to_legacy()
 
     # All retries exhausted

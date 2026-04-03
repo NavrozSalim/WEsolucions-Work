@@ -476,12 +476,37 @@ class CatalogScrapeTriggerView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, store_pk):
-        from catalog.tasks import catalog_scrape_task, run_catalog_scrape
+        from catalog.tasks import (
+            catalog_scrape_store_task,
+            catalog_scrape_task,
+            run_catalog_scrape,
+            run_store_wide_catalog_scrape,
+        )
         store = get_object_or_404(Store, id=store_pk, user=request.user)
         upload_id = request.data.get('upload_id')
+        scope_upload = (request.data.get('scope') or '').strip().lower() == 'upload'
+
+        run_inline = request.data.get('run_inline') or request.query_params.get('inline') == '1'
+
         if upload_id:
             upload = get_object_or_404(CatalogUpload, id=upload_id, store=store)
-        else:
+            if run_inline:
+                result = run_catalog_scrape(str(upload.id))
+                if result.get('error'):
+                    return Response(
+                        {'detail': result['error'], **result},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    )
+                return Response(result, status=status.HTTP_200_OK)
+            task = catalog_scrape_task.delay(str(upload.id))
+            return Response({
+                "job_id": task.id,
+                "upload_id": str(upload.id),
+                "scope": "upload",
+                "status": "queued",
+            }, status=status.HTTP_202_ACCEPTED)
+
+        if scope_upload:
             upload = (
                 CatalogUpload.objects.filter(
                     store=store,
@@ -490,24 +515,40 @@ class CatalogScrapeTriggerView(APIView):
                 .order_by('-created_at')
                 .first()
             )
-        if not upload:
-            return Response(
-                {"error": "No synced upload found. Run sync first."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        run_inline = request.data.get('run_inline') or request.query_params.get('inline') == '1'
+            if not upload:
+                return Response(
+                    {"error": "No synced upload found. Run sync first, or omit scope=upload for full-store scrape."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if run_inline:
+                result = run_catalog_scrape(str(upload.id))
+                if result.get('error'):
+                    return Response(
+                        {'detail': result['error'], **result},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    )
+                return Response(result, status=status.HTTP_200_OK)
+            task = catalog_scrape_task.delay(str(upload.id))
+            return Response({
+                "job_id": task.id,
+                "upload_id": str(upload.id),
+                "scope": "upload",
+                "status": "queued",
+            }, status=status.HTTP_202_ACCEPTED)
+
+        # Default: all active ProductMappings (same scrape path as scheduled store update)
         if run_inline:
-            result = run_catalog_scrape(str(upload.id))
+            result = run_store_wide_catalog_scrape(str(store.id))
             if result.get('error'):
                 return Response(
                     {'detail': result['error'], **result},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
             return Response(result, status=status.HTTP_200_OK)
-        task = catalog_scrape_task.delay(str(upload.id))
+        task = catalog_scrape_store_task.delay(str(store.id))
         return Response({
             "job_id": task.id,
-            "upload_id": str(upload.id),
+            "scope": "store",
             "status": "queued",
         }, status=status.HTTP_202_ACCEPTED)
 

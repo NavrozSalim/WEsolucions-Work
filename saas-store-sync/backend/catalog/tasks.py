@@ -410,13 +410,16 @@ def run_catalog_scrape(upload_id: str):
                 vendor_stock = 0
 
             try:
+                from decimal import Decimal
+
                 pricing = _get_pricing_for_vendor(store, product.vendor_id)
                 inventory = _get_inventory_for_vendor(store, product.vendor_id)
                 new_price = _apply_pricing(vendor_price, pricing) if vendor_price is not None else None
+                if new_price is None and vendor_price is not None:
+                    new_price = Decimal(str(vendor_price))
                 new_stock = _apply_inventory(vendor_stock, inventory)
 
                 if vendor_price is not None:
-                    from decimal import Decimal
                     VendorPrice.objects.create(
                         product=product,
                         price=Decimal(str(vendor_price)),
@@ -483,10 +486,184 @@ def run_catalog_scrape(upload_id: str):
     return out
 
 
+def run_store_wide_catalog_scrape(store_id: str) -> dict:
+    """
+    Scrape all active ProductMappings for a store (same flow as scheduled run_store_update
+    vendor pass, without marketplace push). Matches Amazon/eBay behavior for posted price,
+    inventory, and listing title on every listing — not only rows on the latest catalog upload.
+    """
+    from decimal import Decimal
+
+    from scrapers import close_amazon_session, get_price_and_stock
+    from stores.models import Store
+    from sync.tasks import (
+        _apply_inventory,
+        _apply_pricing,
+        _get_inventory_for_vendor,
+        _get_pricing_for_vendor,
+        _resolve_vendor_url,
+    )
+    from vendor.models import VendorPrice
+
+    try:
+        store = Store.objects.select_related('marketplace').get(id=store_id)
+    except Store.DoesNotExist:
+        return {'error': 'store_not_found', 'store_id': str(store_id)}
+
+    mappings = ProductMapping.objects.filter(
+        store=store, is_active=True
+    ).select_related('product', 'product__vendor')
+    session: dict = {}
+    processed = succeeded = failed = 0
+    now = timezone.now()
+    error_summary = None
+
+    import os
+
+    use_demo_fallback = os.getenv('DEMO_SCRAPE_FALLBACK', 'false').lower() in ('1', 'true', 'yes')
+
+    try:
+        for pm in mappings:
+            processed += 1
+            product = pm.product
+            if not product:
+                continue
+            pricing = _get_pricing_for_vendor(store, product.vendor_id)
+            inventory = _get_inventory_for_vendor(store, product.vendor_id)
+
+            url = _resolve_vendor_url(product, store)
+            try:
+                if not url:
+                    raise ValueError('Product has no vendor_url or resolvable SKU')
+                result = get_price_and_stock(url, store.region or '', session)
+                vendor_price = result.get('price')
+                vendor_stock = result.get('stock')
+                scrape_title = (result.get('title') or '').strip()[:500]
+            except Exception as e:
+                logger.exception(
+                    'Store scrape failed for %s (url=%s): %s',
+                    product.vendor_sku,
+                    url[:120] if url else '',
+                    e,
+                )
+                if use_demo_fallback:
+                    vendor_price = 29.99
+                    vendor_stock = 5
+                    scrape_title = ''
+                else:
+                    pm.store_price = None
+                    pm.store_stock = None
+                    pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
+                    pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
+                    pm.save(
+                        update_fields=[
+                            'store_price',
+                            'store_stock',
+                            'failed_sync_count',
+                            'sync_status',
+                        ]
+                    )
+                    failed += 1
+                    error_summary = str(e) if not error_summary else error_summary
+                    continue
+
+            if vendor_price is None and use_demo_fallback:
+                vendor_price = 29.99
+                vendor_stock = vendor_stock if vendor_stock and vendor_stock > 0 else 5
+
+            if vendor_price is None and not use_demo_fallback:
+                pm.store_price = None
+                pm.store_stock = None
+                pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
+                pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
+                pm.save(
+                    update_fields=[
+                        'store_price',
+                        'store_stock',
+                        'failed_sync_count',
+                        'sync_status',
+                    ]
+                )
+                failed += 1
+                error_summary = 'Scraper returned no price' if not error_summary else error_summary
+                continue
+
+            if vendor_stock is None or vendor_stock <= 0:
+                vendor_stock = 0
+
+            try:
+                new_price = _apply_pricing(vendor_price, pricing) if vendor_price is not None else None
+                if new_price is None and vendor_price is not None:
+                    new_price = Decimal(str(vendor_price))
+                new_stock = _apply_inventory(vendor_stock, inventory)
+
+                VendorPrice.objects.create(
+                    product=product,
+                    price=Decimal(str(vendor_price)),
+                    stock=vendor_stock or 0,
+                )
+
+                pm.store_price = new_price
+                pm.store_stock = new_stock
+                pm.sync_status = 'scraped'
+                pm.failed_sync_count = 0
+                pm.last_scrape_time = now
+                save_fields = [
+                    'store_price',
+                    'store_stock',
+                    'sync_status',
+                    'failed_sync_count',
+                    'last_scrape_time',
+                ]
+                if scrape_title:
+                    pm.title = scrape_title
+                    save_fields.append('title')
+                pm.save(update_fields=save_fields)
+                succeeded += 1
+            except Exception as apply_err:
+                logger.exception(
+                    'Pricing/inventory apply failed for SKU %s (store=%s): %s',
+                    product.vendor_sku,
+                    store.id,
+                    apply_err,
+                )
+                pm.store_price = None
+                pm.store_stock = None
+                pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
+                pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
+                pm.save(
+                    update_fields=[
+                        'store_price',
+                        'store_stock',
+                        'failed_sync_count',
+                        'sync_status',
+                    ]
+                )
+                failed += 1
+                continue
+    finally:
+        close_amazon_session(session)
+
+    return {
+        'store_id': str(store_id),
+        'scope': 'store',
+        'rows_processed': processed,
+        'rows_succeeded': succeeded,
+        'failed': failed,
+        'error_summary': error_summary,
+    }
+
+
 @shared_task(bind=True, max_retries=3)
 def catalog_scrape_task(self, upload_id: str):
     """Celery wrapper for run_catalog_scrape."""
     return run_catalog_scrape(upload_id)
+
+
+@shared_task(bind=True, max_retries=3)
+def catalog_scrape_store_task(self, store_id: str):
+    """Celery: scrape all active listings for a store (no marketplace push)."""
+    return run_store_wide_catalog_scrape(store_id)
 
 
 @shared_task(bind=True, max_retries=3)

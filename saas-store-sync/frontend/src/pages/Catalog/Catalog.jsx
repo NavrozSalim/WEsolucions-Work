@@ -921,7 +921,7 @@ export default function Catalog() {
                                 size="sm"
                                 onClick={() => handleScrape(null)}
                                 disabled={scraping || !selectedStore}
-                                title="Re-fetch vendor price/stock for products from the latest synced upload"
+                                title="Re-fetch vendor price/stock for all active listings (same logic as scheduled sync scrape)"
                             >
                                 <RefreshCw className={`h-4 w-4 mr-1.5 ${scraping ? 'animate-spin' : ''}`} />
                                 Scrape prices

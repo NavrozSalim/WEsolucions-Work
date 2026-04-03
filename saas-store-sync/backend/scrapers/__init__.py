@@ -2,7 +2,8 @@
 Scraper dispatcher.
 
 Routes vendor URLs to the correct scraper (Amazon US, Amazon AU, eBay)
-based on domain. Each scraper returns {"price": float|None, "stock": int|None}.
+based on domain. Each scraper returns {"price": float|None, "stock": int|None}
+and may include "title" (str) when extracted—same shape for Amazon US and eBay.
 
 Usage in tasks:
     from scrapers import get_price_and_stock, close_amazon_session
@@ -91,7 +92,8 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
 
     Returns
     -------
-    dict with keys "price" (float|None) and "stock" (int|None)
+    dict with keys "price" (float|None), "stock" (int|None), and optionally
+    "title" (str) when the page exposes a product title.
     """
     vendor_url = _rewrite_url_for_region(vendor_url, region)
     url_lower = (vendor_url or "").lower()
