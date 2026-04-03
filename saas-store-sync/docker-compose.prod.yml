@@ -148,6 +148,8 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      # eBay: Selenium-first on VPS; set EBAY_HTTP_FIRST=1 only on clean/residential IPs
+      - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-0}
     depends_on:
       db:
         condition: service_healthy

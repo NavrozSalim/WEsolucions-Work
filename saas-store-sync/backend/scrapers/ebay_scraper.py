@@ -34,10 +34,10 @@ from .core import (
 
 logger = logging.getLogger("scrapers.ebay")
 
-TIMEOUT_SEC = 45        # increased from 35
+TIMEOUT_SEC = 50        # VPS + bot checks can be slow
 RETRY_LIMIT = 3
-PAGE_LOAD_WAIT = 12     # increased from 5 — eBay Argon2 challenge needs time
-EBAY_HTTP_TIMEOUT_SEC = 22
+PAGE_LOAD_WAIT = 14     # eBay Argon2 / cookie wall needs headroom
+EBAY_HTTP_TIMEOUT_SEC = 25
 
 # Strip trailing BIN / offer labels so parse_price_text sees a numeric price (Replit parity).
 PRICE_SUFFIX_PATTERN = re.compile(
@@ -95,7 +95,9 @@ def _ebay_region_referer(region: str) -> str:
 
 
 def _ebay_http_first_enabled() -> bool:
-    return os.environ.get("EBAY_HTTP_FIRST", "1").lower() in ("1", "true", "yes")
+    # Default off: datacenter IPs often get HTML shells without a buy box; Selenium is more reliable.
+    # Set EBAY_HTTP_FIRST=1 for faster path on residential / clean IPs.
+    return os.environ.get("EBAY_HTTP_FIRST", "0").lower() in ("1", "true", "yes")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -225,6 +227,10 @@ class EbayParser:
         ".x-bin-price__content .ux-textspans--BOLD",
         ".x-bin-price__content span",
         ".x-bin-price span",
+        "[data-testid='x-bin-price'] span",
+        "[data-testid='x-bin-price'] .ux-textspans--BOLD",
+        "section.x-item-price span.ux-textspans--BOLD",
+        "div.ux-section-module span.ux-textspans--BOLD",
         # Auction current bid
         ".x-auction-price .ux-textspans--BOLD",
         ".x-auction-price span",
@@ -257,6 +263,9 @@ class EbayParser:
         # 2024 window.__PRELOADED_STATE__ pattern
         r'"priceValue"\s*:\s*"([\d.]+)"',
         r'"finalPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)',
+        r'"convertedAmount"\s*:\s*"([\d.]+)"',
+        r'"price"\s*:\s*\{\s*"amount"\s*:\s*"([\d.]+)"',
+        r'"transactionAmount"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)',
     ]
 
     QUANTITY_PATTERN = re.compile(
@@ -362,6 +371,17 @@ class EbayParser:
 
     @classmethod
     def extract_price(cls, soup: BeautifulSoup, html: str) -> Optional[float]:
+        for mtag in soup.find_all("meta"):
+            prop = (mtag.get("property") or "").lower()
+            if prop == "og:price:amount" and mtag.get("content"):
+                p = parse_price_text(_strip_price_suffix(str(mtag["content"])))
+                if p:
+                    return p
+            if (mtag.get("itemprop") or "").lower() == "price" and mtag.get("content"):
+                p = parse_price_text(_strip_price_suffix(str(mtag["content"])))
+                if p:
+                    return p
+
         for sel in cls.PRICE_SELECTORS:
             elem = soup.select_one(sel)
             if elem:
@@ -492,12 +512,20 @@ _CHALLENGE_INDICATORS = [
     "checking your browser",
     "challengeget",
     "splashui",
+    "enable javascript",
+    "please enable javascript",
+    "enable cookies",
+    "turn on javascript",
+    "just a moment",
+    "cf-wrapper",  # Cloudflare-style interstitial sometimes proxied
 ]
 
 _BLOCK_INDICATORS = [
     "captcha", "recaptcha", "verify you are human",
     "robot check", "security page", "access denied",
     "you have been blocked", "suspicious activity",
+    "datadome", "perimeterx", "incapsula",
+    "unusual traffic", "automated access",
 ]
 
 
@@ -511,6 +539,35 @@ def _is_challenge_or_blocked(content: str) -> Tuple[bool, str]:
         if indicator in lower:
             return True, "blocked"
     return False, ""
+
+
+def _http_prefetch_looks_like_pdp(html: str) -> bool:
+    """
+    curl_cffi often gets 200 + large HTML that is still a bot wall or shell without a buy box.
+    Require at least one strong listing/price signal before trusting HTTP-first HTML.
+    """
+    h = (html or "").lower()
+    if len(h) < 8000:
+        return False
+    signals = (
+        "x-price-primary",
+        "data-testid=\"x-price-primary\"",
+        "data-testid='x-price-primary'",
+        '"currentprice"',
+        "currentprice",
+        "buyitnowprice",
+        '"binprice"',
+        "binprice",
+        'itemprop="price"',
+        "itemprop='price'",
+        "prcisum",
+        "__ebay",
+        "madrona",  # eBay client bundles / state
+        "x-bin-price",
+        "ux-bin-price",
+        '"pricevalue"',
+    )
+    return any(s in h for s in signals)
 
 
 def fetch_ebay_html_http(url: str, region: str) -> Optional[str]:
@@ -564,10 +621,12 @@ class EbayFetcher:
 
         price_locators = [
             (By.CSS_SELECTOR, "[data-testid='x-price-primary']"),
+            (By.CSS_SELECTOR, "[data-testid='x-bin-price']"),
             (By.CSS_SELECTOR, ".x-price-primary"),
             (By.CSS_SELECTOR, ".x-bin-price"),
             (By.CSS_SELECTOR, "#prcIsum"),
             (By.CSS_SELECTOR, "span[itemprop='price']"),
+            (By.CSS_SELECTOR, "meta[itemprop='price'][content]"),
         ]
         wait = WebDriverWait(driver, timeout)
         try:
@@ -597,6 +656,12 @@ class EbayFetcher:
 
             # Wait for initial page load and Argon2 challenge to pass
             time.sleep(PAGE_LOAD_WAIT)
+            try:
+                driver.execute_script(
+                    "window.scrollTo(0, Math.min(900, document.body.scrollHeight || 900));"
+                )
+            except Exception:
+                pass
 
             # ── DEBUG: log page title and HTML size immediately ──────────
             html = driver.page_source
@@ -622,12 +687,21 @@ class EbayFetcher:
                     html = driver.page_source
 
             # If challenge passed, wait for price element to appear in DOM
-            price_found = cls._wait_for_price(driver, timeout=15)
+            price_found = cls._wait_for_price(driver, timeout=22)
+            if not price_found:
+                logger.warning(
+                    "No price element in DOM after first wait — one refresh for slow VPS/SPA loads"
+                )
+                try:
+                    driver.refresh()
+                    time.sleep(10)
+                    price_found = cls._wait_for_price(driver, timeout=18)
+                except Exception as refresh_exc:
+                    logger.debug("eBay refresh retry skipped: %s", refresh_exc)
             if not price_found:
                 logger.warning("No price element found in DOM after waiting — page may be incomplete")
-            else:
-                # Re-grab HTML after price element is confirmed present
-                html = driver.page_source
+            # Re-grab HTML (may still parse price from JSON-LD / embedded state)
+            html = driver.page_source
 
             return html, 200, ""
 
