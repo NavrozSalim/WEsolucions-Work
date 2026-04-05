@@ -15,6 +15,19 @@ for _p in [BASE_DIR.parent / '.env', BASE_DIR / '.env']:
 
 SECRET_KEY = os.getenv('JWT_SECRET', 'django-insecure-default')
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
+
+# Store-wide catalog scrape in the web worker (Gunicorn) — unsafe for production; default follows DEBUG.
+_raw_inline_scrape = os.getenv('CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE')
+if _raw_inline_scrape is None or str(_raw_inline_scrape).strip() == '':
+    CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE = DEBUG
+else:
+    CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE = str(_raw_inline_scrape).strip().lower() in (
+        '1',
+        'true',
+        'yes',
+        'on',
+    )
+
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
 # Optional: Fernet key for encrypting store API tokens (generate with cryptography.fernet.Fernet.generate_key().decode())

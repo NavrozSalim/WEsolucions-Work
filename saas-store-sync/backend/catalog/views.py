@@ -556,12 +556,7 @@ class CatalogScrapeTriggerView(APIView):
             }, status=status.HTTP_202_ACCEPTED)
 
         # Default: all active ProductMappings (same scrape path as scheduled store update)
-        allow_inline_store_wide = getattr(
-            settings,
-            "CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE",
-            settings.DEBUG,
-        )
-        if run_inline and not allow_inline_store_wide:
+        if run_inline and not settings.CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE:
             return Response(
                 {
                     "error": "Store-wide vendor scrape cannot run synchronously in the web worker.",
