@@ -169,6 +169,8 @@ CELERY_BROKER_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
+# So AsyncResult leaves PENDING while the task runs; frontend job poll can detect a live worker.
+CELERY_TASK_TRACK_STARTED = True
 # Prefork pool causes PermissionError on Windows; use solo for local dev
 if sys.platform == 'win32':
     CELERY_WORKER_POOL = 'solo'
