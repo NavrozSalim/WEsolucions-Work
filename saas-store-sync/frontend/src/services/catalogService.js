@@ -3,7 +3,28 @@ import api from './api';
 export const getCatalogStores = (marketplaceId) =>
     api.get(marketplaceId ? `/catalog/stores/?marketplace_id=${marketplaceId}` : '/catalog/stores/');
 
-export const getProducts = (storeId) => api.get(`/stores/${storeId}/products/`);
+/** Fetch all product pages (server uses pagination). */
+export const getProducts = async (storeId) => {
+    const pageSize = 200;
+    let page = 1;
+    const all = [];
+    let hasNext = true;
+    while (hasNext) {
+        const res = await api.get(`/stores/${storeId}/products/`, {
+            params: { page, page_size: pageSize },
+        });
+        const d = res.data;
+        const chunk = Array.isArray(d?.results) ? d.results : Array.isArray(d) ? d : [];
+        all.push(...chunk);
+        hasNext = Boolean(d?.next);
+        page += 1;
+        if (page > 200) break;
+    }
+    return { data: all };
+};
+
+export const getCatalogActivityLogs = (storeId) =>
+    api.get(`/stores/${storeId}/catalog/activity-logs/`);
 
 export const deleteProduct = (storeId, productId) => api.delete(`/stores/${storeId}/products/${productId}/`);
 

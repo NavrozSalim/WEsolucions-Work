@@ -313,7 +313,16 @@ def run_catalog_scrape(upload_id: str):
     except CatalogUpload.DoesNotExist:
         return {'error': 'Upload not found', 'upload_id': upload_id}
 
+    from catalog.activity_log import append_catalog_log
+
     store = upload.store
+    append_catalog_log(
+        store.id,
+        f'Vendor scrape started for upload “{upload.original_filename}” at '
+        f'{timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}.',
+        action_type='scrape_start',
+        metadata={'upload_id': str(upload_id), 'scope': 'upload'},
+    )
     run = ScrapeRun.objects.create(
         catalog_upload=upload,
         store=store,
@@ -483,6 +492,24 @@ def run_catalog_scrape(upload_id: str):
     }
     if fatal_error:
         out['error'] = str(fatal_error)
+    append_catalog_log(
+        store.id,
+        f'Vendor scrape finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
+        f'{succeeded} row(s) updated, {failed} failed, {run.rows_processed} processed.',
+        action_type='scrape_end',
+        metadata={'rows_succeeded': succeeded, 'failed': failed, 'upload_id': str(upload_id)},
+    )
+    try:
+        from sync.tasks import run_store_push_listings_only
+
+        run_store_push_listings_only.delay(str(store.id), False)
+        append_catalog_log(
+            store.id,
+            'Marketplace sync (push listings) was queued to run after this scrape.',
+            action_type='sync_queued',
+        )
+    except Exception as exc:
+        logger.warning('Could not queue post-scrape push: %s', exc)
     return out
 
 
@@ -505,10 +532,20 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
     )
     from vendor.models import VendorPrice
 
+    from catalog.activity_log import append_catalog_log
+
     try:
         store = Store.objects.select_related('marketplace').get(id=store_id)
     except Store.DoesNotExist:
         return {'error': 'store_not_found', 'store_id': str(store_id)}
+
+    append_catalog_log(
+        store.id,
+        f'Store-wide vendor scrape started at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")} '
+        f'for all active listings.',
+        action_type='scrape_start',
+        metadata={'scope': 'store'},
+    )
 
     mappings = ProductMapping.objects.filter(
         store=store, is_active=True
@@ -643,6 +680,25 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
                 continue
     finally:
         close_amazon_session(session)
+
+    append_catalog_log(
+        store.id,
+        f'Store-wide vendor scrape finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
+        f'{succeeded} listing(s) updated, {failed} failed, {processed} processed.',
+        action_type='scrape_end',
+        metadata={'rows_succeeded': succeeded, 'failed': failed, 'rows_processed': processed},
+    )
+    try:
+        from sync.tasks import run_store_push_listings_only
+
+        run_store_push_listings_only.delay(str(store.id), False)
+        append_catalog_log(
+            store.id,
+            'Marketplace sync (push listings) was queued to run after this scrape.',
+            action_type='sync_queued',
+        )
+    except Exception as exc:
+        logger.warning('Could not queue post-scrape push: %s', exc)
 
     return {
         'store_id': str(store_id),

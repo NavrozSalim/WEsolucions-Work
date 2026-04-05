@@ -17,6 +17,7 @@ import {
     MoreVertical,
     AlertTriangle,
     FileDown,
+    ScrollText,
 } from 'lucide-react';
 import { getMarketplaces, deleteStore } from '../../services/storeService';
 import {
@@ -34,6 +35,7 @@ import {
     exportCatalogProducts,
     triggerCatalogPushListings,
     triggerCatalogCriticalZero,
+    getCatalogActivityLogs,
 } from '../../services/catalogService';
 import Button from '../../components/ui/Button';
 import Select from '../../components/ui/Select';
@@ -70,6 +72,22 @@ function formatDate(iso) {
     if (!iso) return '—';
     const d = new Date(iso);
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+/** Prefer server detail for 4xx/5xx so users see useful text instead of only "status code 500". */
+function formatCatalogError(err) {
+    const status = err.response?.status;
+    const d = err.response?.data;
+    if (typeof d === 'string' && d.trim()) return d;
+    if (d?.detail != null) {
+        if (typeof d.detail === 'string') return d.detail;
+        if (Array.isArray(d.detail)) return d.detail.map((x) => x?.msg || x).filter(Boolean).join('; ') || `Request failed (${status}).`;
+        return String(d.detail);
+    }
+    if (d?.error && typeof d.error === 'string') return d.error;
+    if (d?.message && typeof d.message === 'string') return d.message;
+    if (status === 500) return 'Something went wrong on the server (500). If this persists, try a smaller page size or contact support.';
+    return err.message || `Request failed${status ? ` (${status})` : ''}.`;
 }
 
 function UploadActionsDropdown({ upload, storeId, syncing, scraping, syncingUploadId, scrapingUploadId, deletingUploadId, onSync, onScrape, onDelete, onDownload, onDownloadErrors, onError }) {
@@ -255,7 +273,7 @@ export default function Catalog() {
     const [marketplaces, setMarketplaces] = useState([]);
     const [selectedStore, setSelectedStore] = useState('');
     const [selectedMarketplace, setSelectedMarketplace] = useState('');
-    const [viewMode, setViewMode] = useState('stores'); // 'stores' | 'history' | 'products'
+    const [viewMode, setViewMode] = useState('stores'); // 'stores' | 'history' | 'products' | 'logs'
     const [uploads, setUploads] = useState([]);
     const [products, setProducts] = useState([]);
     const [search, setSearch] = useState('');
@@ -287,6 +305,8 @@ export default function Catalog() {
     const [manualPushLoading, setManualPushLoading] = useState(false);
     const [criticalModalOpen, setCriticalModalOpen] = useState(false);
     const [criticalLoading, setCriticalLoading] = useState(false);
+    const [activityLogs, setActivityLogs] = useState([]);
+    const [logsLoading, setLogsLoading] = useState(false);
 
     const selectedStoreData = storeList.find((s) => s.id === selectedStore);
 
@@ -316,10 +336,27 @@ export default function Catalog() {
     useEffect(() => {
         if (!selectedStore || viewMode !== 'products') return;
         setProductsLoading(true);
+        setMessage('');
         getProducts(selectedStore)
-            .then((res) => setProducts(res.data?.results || res.data || []))
-            .catch(() => setProducts([]))
+            .then((res) => setProducts(Array.isArray(res.data) ? res.data : []))
+            .catch((err) => {
+                setProducts([]);
+                setMessage(formatCatalogError(err));
+            })
             .finally(() => setProductsLoading(false));
+    }, [selectedStore, viewMode]);
+
+    useEffect(() => {
+        if (!selectedStore || viewMode !== 'logs') return;
+        setLogsLoading(true);
+        setMessage('');
+        getCatalogActivityLogs(selectedStore)
+            .then((res) => setActivityLogs(Array.isArray(res.data) ? res.data : []))
+            .catch((err) => {
+                setActivityLogs([]);
+                setMessage(formatCatalogError(err));
+            })
+            .finally(() => setLogsLoading(false));
     }, [selectedStore, viewMode]);
 
     const handleBackToStores = () => {
@@ -356,7 +393,7 @@ export default function Catalog() {
                 setMessage(`Store "${store.name}" deleted.`);
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
             })
-            .catch((err) => setMessage(err.response?.data?.detail || 'Failed to delete store'))
+            .catch((err) => setMessage(formatCatalogError(err) || 'Failed to delete store'))
             .finally(() => setDeletingStoreId(null));
     };
 
@@ -366,9 +403,9 @@ export default function Catalog() {
         resetProductSyncStatus(selectedStore, product.id)
             .then(() => {
                 setMessage(`Reset ${product.sku}. Ready to retry sync.`);
-                getProducts(selectedStore).then((r) => setProducts(r.data?.results || r.data || []));
+                getProducts(selectedStore).then((r) => setProducts(Array.isArray(r.data) ? r.data : []));
             })
-            .catch((err) => setMessage(err.response?.data?.detail || 'Reset failed'))
+            .catch((err) => setMessage(formatCatalogError(err) || 'Reset failed'))
             .finally(() => setResettingId(null));
     };
 
@@ -434,7 +471,7 @@ export default function Catalog() {
             .catch((err) => {
                 finishProgress(false);
                 setFlowStatus('failed');
-                setMessage(err.response?.data?.error || err.response?.data?.detail || err.message || 'Upload or sync failed');
+                setMessage(formatCatalogError(err) || 'Upload or sync failed');
             })
             .finally(() => setUploading(false));
     };
@@ -482,7 +519,7 @@ export default function Catalog() {
                     }
                     finishProgress(false);
                     setFlowStatus('failed');
-                    setMessage(err.response?.data?.error || err.response?.data?.detail || err.message || 'Sync failed.');
+                    setMessage(formatCatalogError(err));
                 });
         };
 
@@ -511,11 +548,18 @@ export default function Catalog() {
                     const proc = res?.data?.rows_processed ?? 0;
                     finishProgress(true);
                     setFlowStatus('success');
-                    setMessage(`Scrape complete: ${ok}/${proc} product(s) updated with vendor price/stock.`);
+                    setMessage(
+                        `Scrape complete: ${ok}/${proc} product(s) updated with vendor price/stock. `
+                        + 'Marketplace push runs next in the background when the worker picks it up.',
+                    );
                     getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
                     getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
                     if (viewMode === 'products') {
-                        getProducts(selectedStore).then((r) => setProducts(r.data?.results || r.data || []));
+                        getProducts(selectedStore).then((r) => setProducts(Array.isArray(r.data) ? r.data : []));
+                    }
+                    if (viewMode === 'logs') {
+                        getCatalogActivityLogs(selectedStore).then((r) =>
+                            setActivityLogs(Array.isArray(r.data) ? r.data : []));
                     }
                 })
                 .catch((err) => {
@@ -526,7 +570,7 @@ export default function Catalog() {
                     }
                     finishProgress(false);
                     setFlowStatus('failed');
-                    setMessage(err.response?.data?.error || err.response?.data?.detail || err.message || 'Scrape failed.');
+                    setMessage(formatCatalogError(err));
                 });
         };
 
@@ -568,16 +612,23 @@ export default function Catalog() {
                 const pushed = d.pushed ?? 0;
                 const failed = d.failed ?? 0;
                 const skipped = d.skipped_no_listing ?? 0;
-                setMessage(`Manual sync complete: ${pushed} pushed, ${failed} failed, ${skipped} skipped (no listing ID).`);
+                setMessage(
+                    `Manual sync complete: ${pushed} pushed, ${failed} failed, ${skipped} skipped (no listing ID). `
+                    + 'Scheduled automatic updates for this store are turned off until you enable them again in store settings.',
+                );
                 if (viewMode === 'products') {
-                    getProducts(selectedStore).then((r) => setProducts(r.data?.results || r.data || []));
+                    getProducts(selectedStore).then((r) => setProducts(Array.isArray(r.data) ? r.data : []));
                 }
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
+                if (viewMode === 'logs') {
+                    getCatalogActivityLogs(selectedStore).then((r) =>
+                        setActivityLogs(Array.isArray(r.data) ? r.data : []));
+                }
             })
             .catch((err) => {
                 finishProgress(false);
                 setFlowStatus('failed');
-                setMessage(err.response?.data?.detail || err.message || 'Manual sync failed.');
+                setMessage(formatCatalogError(err));
             })
             .finally(() => setManualPushLoading(false));
     };
@@ -595,12 +646,12 @@ export default function Catalog() {
                 );
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
                 if (viewMode === 'products') {
-                    getProducts(selectedStore).then((r) => setProducts(r.data?.results || r.data || []));
+                    getProducts(selectedStore).then((r) => setProducts(Array.isArray(r.data) ? r.data : []));
                 }
             })
             .catch((err) => {
                 setFlowStatus('failed');
-                setMessage(err.response?.data?.detail || err.message || 'Critical action failed.');
+                setMessage(formatCatalogError(err) || 'Critical action failed.');
             })
             .finally(() => setCriticalLoading(false));
     };
@@ -621,7 +672,7 @@ export default function Catalog() {
                 getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
             })
-            .catch((err) => setMessage(err.response?.data?.detail || err.message || 'Failed to delete upload'))
+            .catch((err) => setMessage(formatCatalogError(err) || 'Failed to delete upload'))
             .finally(() => setDeletingUploadId(null));
     };
 
@@ -708,6 +759,9 @@ export default function Catalog() {
                                         {selectedStoreData.marketplace_name || '—'}
                                         {selectedStoreData.product_count != null &&
                                             ` · ${selectedStoreData.product_count} product${selectedStoreData.product_count !== 1 ? 's' : ''}`}
+                                        {selectedStoreData.schedule_active === false && (
+                                            <span className="text-amber-600 dark:text-amber-400"> · Schedule off</span>
+                                        )}
                                     </p>
                                 </div>
                             </div>
@@ -735,6 +789,17 @@ export default function Catalog() {
                                     }`}
                                 >
                                     Products
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setViewMode('logs')}
+                                    className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                                        viewMode === 'logs'
+                                            ? 'bg-accent-500 text-white shadow-sm'
+                                            : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
+                                    }`}
+                                >
+                                    Logs
                                 </button>
                             </div>
                             <Button
@@ -1098,6 +1163,56 @@ export default function Catalog() {
                 </div>
             )}
 
+            {selectedStore && viewMode === 'logs' && (
+                <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden">
+                    <div className="border-b border-slate-200 dark:border-slate-700 px-4 py-3 flex items-start gap-3">
+                        <ScrollText className="h-5 w-5 text-accent-600 dark:text-accent-400 shrink-0 mt-0.5" />
+                        <div>
+                            <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Activity log</h2>
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                                Scrape and marketplace sync messages from the last 24 hours. Older entries are removed automatically.
+                            </p>
+                        </div>
+                    </div>
+                    <div className="max-h-[min(70vh,32rem)] overflow-y-auto">
+                        {logsLoading ? (
+                            <div className="flex justify-center py-16">
+                                <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-200 dark:border-slate-700 border-t-accent-500" />
+                            </div>
+                        ) : activityLogs.length === 0 ? (
+                            <EmptyState
+                                icon={ScrollText}
+                                title="No activity yet"
+                                description="Run Scrape prices, Manual sync, or scheduled updates — events will appear here."
+                            />
+                        ) : (
+                            <ul className="divide-y divide-slate-100 dark:divide-slate-700/80">
+                                {activityLogs.map((log) => (
+                                    <li key={log.id} className="px-4 py-3 hover:bg-slate-50/80 dark:hover:bg-slate-800/40">
+                                        <div className="flex flex-wrap items-baseline justify-between gap-2">
+                                            <span className="text-xs font-mono text-slate-500 dark:text-slate-400">
+                                                {formatDate(log.created_at)}
+                                            </span>
+                                            <span className="text-[10px] uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                                                {log.action_type?.replace(/_/g, ' ') || 'event'}
+                                            </span>
+                                        </div>
+                                        <p className="mt-1 text-sm text-slate-800 dark:text-slate-200 leading-snug">
+                                            {log.message}
+                                        </p>
+                                        {log.user_email ? (
+                                            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                                User: {log.user_email}
+                                            </p>
+                                        ) : null}
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                    </div>
+                </div>
+            )}
+
             {/* Store list & marketplace filter — only on All stores; switching stores uses the toolbar All stores button */}
             {!selectedStore && (
             <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-5">
@@ -1158,6 +1273,9 @@ export default function Catalog() {
                                         <p className="text-xs text-slate-500 dark:text-slate-400">
                                             {s.product_count} product{s.product_count !== 1 ? 's' : ''}
                                             {s.marketplace_name && ` · ${s.marketplace_name}`}
+                                            {s.schedule_active === false && (
+                                                <span className="text-amber-600 dark:text-amber-400"> · Schedule off</span>
+                                            )}
                                         </p>
                                     </div>
                                 </button>

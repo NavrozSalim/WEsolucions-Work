@@ -7,9 +7,11 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 
-from catalog.models import ProductMapping, CatalogUpload, CatalogUploadRow, CatalogSyncLog, ReverbUpdateLog
-from catalog.serializers import ProductMappingSerializer
+from catalog.models import ProductMapping, CatalogUpload, CatalogUploadRow, CatalogSyncLog, ReverbUpdateLog, CatalogActivityLog
+from catalog.serializers import ProductMappingSerializer, CatalogActivityLogSerializer
+from catalog.pagination import CatalogProductPagination
 from catalog.services import validate_and_create_upload
 from products.models import Product
 from stores.models import Store
@@ -45,28 +47,37 @@ class CatalogStoresView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from sync.models import SyncSchedule
+
         stores = Store.objects.filter(user=request.user).annotate(
             product_count=Count('products', filter=Q(products__is_active=True)),
         ).order_by('name')
         marketplace_id = request.query_params.get('marketplace_id')
         if marketplace_id:
             stores = stores.filter(marketplace_id=marketplace_id)
-        data = [
-            {
+        store_ids = [s.id for s in stores]
+        sched_map = {
+            str(s.store_id): s
+            for s in SyncSchedule.objects.filter(store_id__in=store_ids)
+        }
+        data = []
+        for s in stores:
+            sch = sched_map.get(str(s.id))
+            data.append({
                 'id': str(s.id),
                 'name': s.name,
                 'marketplace_id': str(s.marketplace_id) if s.marketplace_id else None,
                 'marketplace_name': s.marketplace.name if s.marketplace else None,
                 'product_count': s.product_count,
-            }
-            for s in stores
-        ]
+                'schedule_active': sch.is_active if sch else None,
+            })
         return Response(data)
 
 
 class ProductMappingViewSet(viewsets.ModelViewSet):
     serializer_class = ProductMappingSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = CatalogProductPagination
 
     def get_queryset(self):
         store_id = self.kwargs.get('store_pk')
@@ -476,6 +487,7 @@ class CatalogScrapeTriggerView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, store_pk):
+        from catalog.activity_log import append_catalog_log
         from catalog.tasks import (
             catalog_scrape_store_task,
             catalog_scrape_task,
@@ -483,6 +495,12 @@ class CatalogScrapeTriggerView(APIView):
             run_store_wide_catalog_scrape,
         )
         store = get_object_or_404(Store, id=store_pk, user=request.user)
+        append_catalog_log(
+            store.id,
+            'You requested a vendor scrape from the catalog page.',
+            action_type='user_action',
+            user_id=request.user.id,
+        )
         upload_id = request.data.get('upload_id')
         scope_upload = (request.data.get('scope') or '').strip().lower() == 'upload'
 
@@ -684,12 +702,38 @@ class CatalogJobStatusView(APIView):
         return Response(data)
 
 
+class CatalogActivityLogListView(APIView):
+    """Last 24 hours of catalog timeline for a store (scrape, sync, resets)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        from datetime import timedelta
+
+        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        since = timezone.now() - timedelta(days=1)
+        qs = (
+            CatalogActivityLog.objects.filter(store=store, created_at__gte=since)
+            .select_related('user')
+            .order_by('-created_at')[:500]
+        )
+        return Response(CatalogActivityLogSerializer(qs, many=True).data)
+
+
 class CatalogPushListingsView(APIView):
     """Push local price/stock to marketplace for scraped/synced products only (no vendor scrape)."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, store_pk):
+        from catalog.activity_log import append_catalog_log
+
         store = get_object_or_404(Store, id=store_pk, user=request.user)
+        append_catalog_log(
+            store.id,
+            'You started Manual sync (push listings to the marketplace).',
+            action_type='user_action',
+            user_id=request.user.id,
+        )
         if store.connection_status != 'connected':
             return Response(
                 {'error': 'Store not connected. Validate connection first.'},
@@ -698,16 +742,16 @@ class CatalogPushListingsView(APIView):
         run_inline = request.data.get('run_inline') or request.query_params.get('inline') == '1'
         if run_inline:
             from sync.tasks import run_store_push_listings_only
-            result = run_store_push_listings_only(str(store.id))
+            result = run_store_push_listings_only(str(store.id), disable_schedule=True)
             return Response(result, status=status.HTTP_200_OK)
         try:
             from sync.tasks import run_store_push_listings_only
-            async_result = run_store_push_listings_only.delay(str(store.id))
+            async_result = run_store_push_listings_only.delay(str(store.id), True)
         except Exception as e:
             detail = str(e)
             if 'redis' in detail.lower() or 'connection' in detail.lower():
                 from sync.tasks import run_store_push_listings_only
-                result = run_store_push_listings_only(str(store.id))
+                result = run_store_push_listings_only(str(store.id), disable_schedule=True)
                 return Response(result, status=status.HTTP_200_OK)
             return Response({'detail': detail}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(

@@ -32,6 +32,12 @@ class Store(models.Model):
     )
     last_validated_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True, help_text='Whether store is active for syncing')
+    catalog_pending_reset_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text='When reached, active catalog listings sync_status reset to pending (24h after marketplace sync).',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

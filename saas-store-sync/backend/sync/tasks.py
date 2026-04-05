@@ -223,6 +223,34 @@ def run_store_sync(self, store_id):
     return {'store_id': str(store_id), 'at': str(now)}
 
 
+def _set_catalog_sync_reset_timer(store_id):
+    """Start 24h window after marketplace push; then listings return to Pending."""
+    from datetime import timedelta
+
+    when = timezone.now() + timedelta(days=1)
+    Store.objects.filter(id=store_id).update(catalog_pending_reset_at=when)
+
+
+def _reset_expired_catalog_pending_statuses():
+    """Clear pending-reset timer and set active mappings to sync_status=pending when due."""
+    from catalog.activity_log import append_catalog_log
+
+    now = timezone.now()
+    qs = Store.objects.filter(
+        catalog_pending_reset_at__isnull=False,
+        catalog_pending_reset_at__lte=now,
+    )
+    for store in qs:
+        n = ProductMapping.objects.filter(store=store, is_active=True).update(sync_status='pending')
+        Store.objects.filter(id=store.id).update(catalog_pending_reset_at=None)
+        append_catalog_log(
+            store.id,
+            f'The 24-hour window after your last marketplace sync ended. '
+            f'{n} active listing(s) were set back to Pending.',
+            action_type='catalog_reset',
+        )
+
+
 @shared_task(bind=True, max_retries=3)
 def run_store_update(self, store_id):
     """
@@ -442,6 +470,23 @@ def run_store_update(self, store_id):
     except SyncSchedule.DoesNotExist:
         pass
 
+    if push_ok > 0:
+        _set_catalog_sync_reset_timer(store_id)
+        from catalog.activity_log import append_catalog_log
+
+        append_catalog_log(
+            store.id,
+            f'Scheduled update finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
+            f'{updated} listing(s) scraped, {push_ok} pushed to marketplace.',
+            action_type='scheduled_sync_end',
+            metadata={
+                'scraped': updated,
+                'pushed': push_ok,
+                'push_failed': push_fail,
+                'push_skipped': push_skipped,
+            },
+        )
+
     return {
         'store_id': str(store_id),
         'at': now.isoformat(),
@@ -472,6 +517,8 @@ def check_scheduled_updates():
     from sync.models import SyncSchedule
 
     now_utc = timezone.now()
+
+    _reset_expired_catalog_pending_statuses()
 
     for sched in SyncSchedule.objects.filter(is_active=True).select_related('store'):
         if not sched.store.is_active or sched.store.connection_status != 'connected':
@@ -559,15 +606,19 @@ def _resolve_listing_id_for_pm(adapter, pm, store):
 
 
 @shared_task
-def run_store_push_listings_only(store_id):
+def run_store_push_listings_only(store_id, disable_schedule=False):
     """
     Push local store_price / store_stock to the marketplace for listings that are
     already scraped or synced — no vendor URL scrape (excludes pending / failed / needs_attention).
+
+    disable_schedule: if True (manual sync from Catalog), turn off SyncSchedule.is_active for this store.
     """
     import logging
     from store_adapters import get_adapter
     from store_adapters.reverb_adapter import ReverbAPIError
     from catalog.models import ReverbUpdateLog
+    from catalog.activity_log import append_catalog_log
+    from sync.models import SyncSchedule
 
     logger = logging.getLogger(__name__)
     try:
@@ -581,6 +632,20 @@ def run_store_push_listings_only(store_id):
             'hint': 'Validate store connection before pushing listings.',
             'store_id': str(store_id),
         }
+
+    append_catalog_log(
+        store.id,
+        'Marketplace sync started — pushing local prices and stock to your marketplace.',
+        action_type='sync_start',
+    )
+    if disable_schedule:
+        SyncSchedule.objects.filter(store=store).update(is_active=False)
+        append_catalog_log(
+            store.id,
+            'Scheduled automatic updates were turned off because you used Manual sync. '
+            'You can turn them back on in store settings.',
+            action_type='schedule_paused',
+        )
 
     adapter = get_adapter(store)
     qs = ProductMapping.objects.filter(
@@ -635,6 +700,16 @@ def run_store_push_listings_only(store_id):
                 status=ReverbUpdateLog.Status.FAILED,
                 error_message=str(e)[:500],
             )
+
+    if succeeded > 0:
+        _set_catalog_sync_reset_timer(store_id)
+    append_catalog_log(
+        store.id,
+        f'Marketplace sync finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
+        f'{succeeded} listing(s) updated, {failed} failed, {skipped} skipped (no marketplace listing ID).',
+        action_type='sync_end',
+        metadata={'pushed': succeeded, 'failed': failed, 'skipped_no_listing': skipped},
+    )
 
     return {
         'store_id': str(store_id),

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from catalog.models import ProductMapping
+from catalog.models import ProductMapping, CatalogActivityLog
 from stores.models import StoreVendorPriceSettings
 from stores.pricing_excel import excel_margin_tier_percent
 from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
@@ -21,11 +21,24 @@ def _pricing_settings_for_product(store, vendor_id):
         return StoreVendorPriceSettings.objects.filter(store=store).first()
 
 
+class CatalogActivityLogSerializer(serializers.ModelSerializer):
+    user_email = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = CatalogActivityLog
+        fields = ('id', 'action_type', 'message', 'metadata', 'created_at', 'user_email')
+
+    def get_user_email(self, obj):
+        if obj.user_id and obj.user:
+            return getattr(obj.user, 'email', None) or str(obj.user_id)
+        return None
+
+
 class ProductMappingSerializer(serializers.ModelSerializer):
     sku = serializers.SerializerMethodField(read_only=True)
     vendor_sku = serializers.CharField(source='product.vendor_sku', read_only=True)
-    vendor_url = serializers.URLField(source='product.vendor_url', read_only=True)
-    vendor_name = serializers.CharField(source='product.vendor.name', read_only=True)
+    vendor_url = serializers.SerializerMethodField(read_only=True)
+    vendor_name = serializers.SerializerMethodField(read_only=True)
     vendor_price = serializers.SerializerMethodField(read_only=True)
     margin_display = serializers.SerializerMethodField(read_only=True)
 
@@ -40,6 +53,23 @@ class ProductMappingSerializer(serializers.ModelSerializer):
             'margin_display',
         ]
         read_only_fields = ('store_price', 'store_stock', 'sync_status', 'last_sync_time', 'last_scrape_time')
+
+    def get_vendor_url(self, obj):
+        try:
+            if not obj.product:
+                return None
+            u = obj.product.vendor_url
+            return u if u else None
+        except Exception:
+            return None
+
+    def get_vendor_name(self, obj):
+        try:
+            if not obj.product or not obj.product.vendor:
+                return None
+            return obj.product.vendor.name or obj.product.vendor.code
+        except Exception:
+            return None
 
     def get_sku(self, obj):
         return (

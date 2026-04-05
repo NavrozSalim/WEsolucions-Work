@@ -98,6 +98,36 @@ class CatalogUpload(models.Model):
         return f"{self.original_filename} ({self.status})"
 
 
+class CatalogActivityLog(models.Model):
+    """User-facing catalog timeline (scrape, sync, actions). List API returns last 24 hours."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        related_name='catalog_activity_logs',
+        db_index=True,
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='catalog_activity_logs',
+    )
+    action_type = models.CharField(max_length=64, db_index=True)
+    message = models.TextField()
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'catalog_catalogactivitylog'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.action_type} @ {self.created_at}"
+
+
 class CatalogUploadRow(models.Model):
     """Single row from catalog upload. Raw values preserved; resolved FKs after sync."""
     class SyncStatus(models.TextChoices):
