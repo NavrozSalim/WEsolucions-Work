@@ -5,6 +5,7 @@ from rest_framework.decorators import action
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
+from django.conf import settings
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -555,6 +556,22 @@ class CatalogScrapeTriggerView(APIView):
             }, status=status.HTTP_202_ACCEPTED)
 
         # Default: all active ProductMappings (same scrape path as scheduled store update)
+        allow_inline_store_wide = getattr(
+            settings,
+            "CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE",
+            settings.DEBUG,
+        )
+        if run_inline and not allow_inline_store_wide:
+            return Response(
+                {
+                    "error": "Store-wide vendor scrape cannot run synchronously in the web worker.",
+                    "detail": (
+                        "Use the background queue (Celery). For local debugging only, set DEBUG=True "
+                        "or CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE=1."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if run_inline:
             result = run_store_wide_catalog_scrape(str(store.id))
             if result.get('error'):

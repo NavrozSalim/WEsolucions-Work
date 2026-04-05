@@ -113,7 +113,7 @@ function pollCeleryJob(storeId, jobId, { intervalMs = 2000, maxWaitMs = 600000, 
     });
 }
 
-function runWithCeleryFallback(url, body, storeId) {
+function runWithCeleryFallback(url, body, storeId, { forbidInlineFallback = false } = {}) {
     return api.post(url, body, { timeout: 600000 })
         .then((res) => {
             if (res.data?.job_id) {
@@ -122,11 +122,27 @@ function runWithCeleryFallback(url, body, storeId) {
             return res;
         })
         .catch((err) => {
-            const shouldFallback = !body.run_inline && (
+            const transient =
                 err.code === 'NO_WORKER' ||
                 !err.response ||
-                err.response?.status >= 500
-            );
+                err.response?.status >= 500;
+            if (!body.run_inline && forbidInlineFallback && transient) {
+                const msg =
+                    err.code === 'NO_WORKER'
+                        ? 'Background worker is not running. Store-wide vendor scrape must run in Celery. Start the worker and try again.'
+                        : (err.response?.data?.detail ||
+                              err.response?.data?.error ||
+                              err.message ||
+                              'Request failed.');
+                const wrapped = new Error(msg);
+                wrapped.response = err.response;
+                wrapped.code = err.code;
+                throw wrapped;
+            }
+            const shouldFallback =
+                !body.run_inline &&
+                !forbidInlineFallback &&
+                transient;
             if (shouldFallback) {
                 return api.post(url, { ...body, run_inline: true }, { timeout: 600000 });
             }
@@ -144,11 +160,14 @@ export const triggerCatalogSync = (storeId, runInline = false, uploadId = null, 
     return runWithCeleryFallback(`/stores/${storeId}/catalog/sync/`, body, storeId);
 };
 
-/** Scrape vendor URLs for price/stock, apply rules. Tries async (Celery) first, falls back to inline. */
+/** Scrape vendor URLs for price/stock, apply rules. Async (Celery) for store-wide; upload-scoped may fall back to inline. */
 export const triggerCatalogScrape = (storeId, runInline = false, uploadId = null) => {
     const body = { run_inline: runInline };
     if (uploadId) body.upload_id = uploadId;
-    return runWithCeleryFallback(`/stores/${storeId}/catalog/scrape/`, body, storeId);
+    const storeWide = !uploadId;
+    return runWithCeleryFallback(`/stores/${storeId}/catalog/scrape/`, body, storeId, {
+        forbidInlineFallback: storeWide,
+    });
 };
 
 export const downloadSampleTemplate = () =>

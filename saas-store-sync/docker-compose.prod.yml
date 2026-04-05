@@ -84,6 +84,7 @@ services:
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
+      - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
     depends_on:
       db:
         condition: service_healthy
