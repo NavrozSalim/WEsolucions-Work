@@ -307,8 +307,21 @@ export default function Catalog() {
     const [criticalLoading, setCriticalLoading] = useState(false);
     const [activityLogs, setActivityLogs] = useState([]);
     const [logsLoading, setLogsLoading] = useState(false);
+    const [liveRefreshUntil, setLiveRefreshUntil] = useState(0);
 
     const selectedStoreData = storeList.find((s) => s.id === selectedStore);
+
+    const refreshLiveData = useCallback(() => {
+        if (!selectedStore) return;
+        getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
+        getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
+        if (viewMode === 'products') {
+            getProducts(selectedStore).then((r) => setProducts(Array.isArray(r.data) ? r.data : []));
+        } else if (viewMode === 'logs') {
+            getCatalogActivityLogs(selectedStore).then((r) =>
+                setActivityLogs(Array.isArray(r.data) ? r.data : []));
+        }
+    }, [selectedStore, selectedMarketplace, viewMode]);
 
     useEffect(() => {
         getMarketplaces()
@@ -358,6 +371,32 @@ export default function Catalog() {
             })
             .finally(() => setLogsLoading(false));
     }, [selectedStore, viewMode]);
+
+    useEffect(() => {
+        if (flowStatus === 'success') {
+            // Keep UI fresh briefly after success because downstream tasks continue in background.
+            setLiveRefreshUntil(Date.now() + 30000);
+        }
+    }, [flowStatus]);
+
+    useEffect(() => {
+        if (!selectedStore) return undefined;
+        const activeFlow = flowStatus === 'syncing' || flowStatus === 'scraping';
+        const inGraceWindow = liveRefreshUntil > Date.now();
+        if (!activeFlow && !inGraceWindow) return undefined;
+
+        refreshLiveData();
+        const intervalId = setInterval(refreshLiveData, 5000);
+        let timeoutId = null;
+        if (!activeFlow && inGraceWindow) {
+            timeoutId = setTimeout(() => clearInterval(intervalId), Math.max(0, liveRefreshUntil - Date.now()));
+        }
+
+        return () => {
+            clearInterval(intervalId);
+            if (timeoutId) clearTimeout(timeoutId);
+        };
+    }, [selectedStore, flowStatus, liveRefreshUntil, refreshLiveData]);
 
     const handleBackToStores = () => {
         setSelectedStore('');
