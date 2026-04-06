@@ -94,6 +94,29 @@ def _ebay_region_referer(region: str) -> str:
     return "https://www.ebay.com.au/" if region == "AU" else "https://www.ebay.com/"
 
 
+def _to_ebay_ca_url(url: str) -> str:
+    """
+    Replit-parity fallback: normalize to ebay.ca item URL.
+    Sometimes .ca returns a parseable PDP where .com/.com.au serves a challenge shell.
+    """
+    parsed = urlparse(url or "")
+    path = (parsed.path or "").strip("/")
+    item_id = None
+    if "/itm/" in (url or ""):
+        parts = path.split("/")
+        for p in reversed(parts):
+            if p.isdigit() and len(p) >= 8:
+                item_id = p
+                break
+    if not item_id:
+        m = re.search(r"(\d{10,})", url or "")
+        if m:
+            item_id = m.group(1)
+    if not item_id:
+        return url
+    return f"https://www.ebay.ca/itm/{item_id}"
+
+
 def _ebay_http_first_enabled() -> bool:
     # Default off: datacenter IPs often get HTML shells without a buy box; Selenium is more reliable.
     # Set EBAY_HTTP_FIRST=1 for faster path on residential / clean IPs.
@@ -589,30 +612,67 @@ def fetch_ebay_html_http(url: str, region: str) -> Optional[str]:
     except ImportError:
         logger.debug("curl_cffi not installed — skipping eBay HTTP fast path")
         return None
-    referer = _ebay_region_referer(region)
-    try:
-        resp = curl_requests.get(
-            url,
-            impersonate="chrome131",
-            timeout=EBAY_HTTP_TIMEOUT_SEC,
-            headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Referer": referer,
-            },
-            allow_redirects=True,
-        )
-    except Exception as exc:
-        logger.debug("eBay HTTP fetch failed: %s", exc)
-        return None
-    if resp.status_code != 200:
-        return None
-    html = resp.text or ""
-    if len(html) < 9000:
-        return None
-    if _is_challenge_or_blocked(html)[0]:
-        return None
-    return html
+    # Try canonical URL first, then a Replit-style ebay.ca fallback.
+    candidates = [url]
+    ca_url = _to_ebay_ca_url(url)
+    if ca_url and ca_url != url:
+        candidates.append(ca_url)
+
+    referers = [_ebay_region_referer(region), "https://www.ebay.ca/"]
+
+    for candidate in candidates:
+        for referer in referers:
+            try:
+                resp = curl_requests.get(
+                    candidate,
+                    impersonate="chrome131",
+                    timeout=EBAY_HTTP_TIMEOUT_SEC,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0"
+                        ),
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Referer": referer,
+                        "Cache-Control": "max-age=0",
+                        "Pragma": "no-cache",
+                    },
+                    allow_redirects=True,
+                )
+            except Exception as exc:
+                logger.debug("eBay HTTP fetch failed (%s): %s", candidate, exc)
+                continue
+
+            if resp.status_code != 200:
+                continue
+
+            html = resp.text or ""
+            if len(html) < 9000:
+                continue
+            if _is_challenge_or_blocked(html)[0]:
+                continue
+            if not _http_prefetch_looks_like_pdp(html):
+                continue
+
+            # Ensure we can parse at least title or price before skipping Selenium.
+            try:
+                soup = BeautifulSoup(html, "lxml")
+            except Exception:
+                soup = BeautifulSoup(html, "html.parser")
+            parsed_price = EbayParser.extract_price(soup, html)
+            parsed_title = EbayParser.extract_title(soup)
+            if parsed_price is None and not parsed_title:
+                continue
+
+            logger.info(
+                "eBay HTTP-first accepted candidate=%s referer=%s bytes=%d",
+                candidate, referer, len(html),
+            )
+            return html
+
+    return None
 
 
 class EbayFetcher:
