@@ -35,7 +35,7 @@ from .core import (
 logger = logging.getLogger("scrapers.ebay")
 
 TIMEOUT_SEC = 50        # VPS + bot checks can be slow
-RETRY_LIMIT = 3
+RETRY_LIMIT = 4         # Alternate .com / .ca + backoff
 PAGE_LOAD_WAIT = 14     # eBay Argon2 / cookie wall needs headroom
 EBAY_HTTP_TIMEOUT_SEC = 25
 
@@ -573,6 +573,25 @@ def _is_challenge_or_blocked(content: str) -> Tuple[bool, str]:
     return False, ""
 
 
+def _ebay_interstitial_blocks_scrape(html: str) -> Tuple[bool, str]:
+    """
+    Treat as blocked only if HTML looks like a wall/interstitial, not a real PDP.
+    Legitimate listings can contain substrings like 'enable javascript' in bundled scripts.
+    """
+    if _http_prefetch_looks_like_pdp(html):
+        return False, ""
+    return _is_challenge_or_blocked(html)
+
+
+def _ebay_home_origin_for_item_url(item_url: str) -> str:
+    u = (item_url or "").lower()
+    if "ebay.ca" in u:
+        return "https://www.ebay.ca/"
+    if "ebay.com.au" in u:
+        return "https://www.ebay.com.au/"
+    return "https://www.ebay.com/"
+
+
 def _http_prefetch_looks_like_pdp(html: str) -> bool:
     """
     curl_cffi often gets 200 + large HTML that is still a bot wall or shell without a buy box.
@@ -651,7 +670,7 @@ def fetch_ebay_html_http(url: str, region: str) -> Optional[str]:
             html = resp.text or ""
             if len(html) < 9000:
                 continue
-            if _is_challenge_or_blocked(html)[0]:
+            if _ebay_interstitial_blocks_scrape(html)[0]:
                 continue
             if not _http_prefetch_looks_like_pdp(html):
                 continue
@@ -721,6 +740,14 @@ class EbayFetcher:
             return None, None, f"selenium_init: {exc}"
 
         try:
+            # Warm session on same eBay site (cookies / anti-bot) before item PDP.
+            home = _ebay_home_origin_for_item_url(url)
+            try:
+                driver.get(home)
+                time.sleep(1.0 + random.uniform(0, 1.0))
+            except Exception:
+                pass
+
             driver.get(url)
 
             # Wait for initial page load and Argon2 challenge to pass
@@ -740,7 +767,7 @@ class EbayFetcher:
             )
             # ─────────────────────────────────────────────────────────────
 
-            is_challenge, reason = _is_challenge_or_blocked(html)
+            is_challenge, reason = _ebay_interstitial_blocks_scrape(html)
             if is_challenge:
                 logger.info("eBay %s detected, waiting 12s for resolution...", reason)
                 time.sleep(12)        # was 8
@@ -749,7 +776,7 @@ class EbayFetcher:
                     "eBay post-challenge title=%r html_len=%d",
                     driver.title, len(html),
                 )
-                is_challenge, _ = _is_challenge_or_blocked(html)
+                is_challenge, _ = _ebay_interstitial_blocks_scrape(html)
                 if is_challenge:
                     logger.info("Still challenged, waiting 15s more...")
                     time.sleep(15)    # was 10
@@ -817,6 +844,7 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
         session = {}
 
     url = _normalize_url(vendor_url, region)
+    ca_url = _to_ebay_ca_url(url)
     random_delay(0.5, 1.5)
 
     prefetch_html: Optional[str] = None
@@ -826,17 +854,36 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
             logger.info("eBay HTTP-first path got HTML (%d bytes), try parse before Selenium", len(prefetch_html))
 
     last_result = None
+    prev_selenium_url: Optional[str] = None
+
     for attempt in range(RETRY_LIMIT):
         if attempt > 0:
             backoff_delay(attempt, base=2.0, jitter=2.0)
             logger.info("eBay retry %d/%d for %s", attempt + 1, RETRY_LIMIT, url)
+
+        # Alternate regional host (.com / .com.au vs .ca) — datacenter IPs often get one or the other.
+        if ca_url != url:
+            selenium_item_url = ca_url if (attempt % 2 == 1) else url
+        else:
+            selenium_item_url = url
 
         if attempt == 0 and prefetch_html is not None:
             html = prefetch_html
             prefetch_html = None
             fetch_error = ""
         else:
-            html, status, fetch_error = EbayFetcher.fetch(url, session)
+            if (
+                prev_selenium_url is not None
+                and selenium_item_url != prev_selenium_url
+            ):
+                EbayDriver.close(session)
+                logger.info(
+                    "eBay Selenium host switch: %s -> %s",
+                    prev_selenium_url[:80],
+                    selenium_item_url[:80],
+                )
+            html, status, fetch_error = EbayFetcher.fetch(selenium_item_url, session)
+            prev_selenium_url = selenium_item_url
 
         if fetch_error:
             last_result = ScrapeResult.fail(
@@ -848,8 +895,8 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
             last_result = ScrapeResult.fail("empty_response", "Empty response body", "", "ebay", url)
             continue
 
-        # Challenge / block detection
-        is_blocked, block_reason = _is_challenge_or_blocked(html)
+        # Challenge / block detection (ignore false positives when PDP signals exist)
+        is_blocked, block_reason = _ebay_interstitial_blocks_scrape(html)
         if is_blocked:
             last_result = ScrapeResult.fail(
                 f"blocked_{block_reason}",
