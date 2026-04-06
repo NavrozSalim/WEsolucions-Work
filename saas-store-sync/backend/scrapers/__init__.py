@@ -130,8 +130,8 @@ def close_amazon_session(session):
     close_us(session)
     close_legacy(session)
     try:
-        from .ebay_scraper import EbayDriver
-        EbayDriver.close(session)
+        from .ebay_scraper import close_ebay_session
+        close_ebay_session(session)
     except ImportError:
         pass
 
