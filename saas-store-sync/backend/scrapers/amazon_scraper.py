@@ -122,7 +122,7 @@ class AmazonLegacyHTTP:
 
         try:
             soup = BeautifulSoup(html, "lxml")
-    except Exception:
+        except Exception:
             soup = BeautifulSoup(html, "html.parser")
 
         price = AmazonParser.extract_price(soup, html)
@@ -243,7 +243,7 @@ def _selenium_scrape_page(url: str, driver) -> ScrapeResult:
             try:
                 WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
                 break
-    except Exception:
+            except Exception:
                 continue
         time.sleep(1.5)
 
