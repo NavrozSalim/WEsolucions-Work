@@ -15,6 +15,11 @@ app.conf.beat_schedule = {
         'task': 'sync.tasks.check_scheduled_updates',
         'schedule': crontab(minute='*'),
     },
+    # Populate daily dashboard trend data from ProductMapping snapshots.
+    'aggregate-daily-analytics-metrics': {
+        'task': 'analytics.tasks.aggregate_daily_metrics',
+        'schedule': crontab(minute=10, hour=0),
+    },
 }
 
 

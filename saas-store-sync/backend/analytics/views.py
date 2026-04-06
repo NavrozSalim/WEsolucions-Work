@@ -101,12 +101,26 @@ class AnalyticsChartView(APIView):
             out_of_stock_count=Sum('out_of_stock_count'),
         ).order_by('date')
 
-        orders = [{'date': str(m['date']), 'count': m['orders_count']} for m in daily]
-        revenue = [{'date': str(m['date']), 'value': float(m['revenue'] or 0)} for m in daily]
-        out_of_stock = [{'date': str(m['date']), 'count': m['out_of_stock_count']} for m in daily]
+        # Backward-compatible fallback: show current snapshot when history has not been aggregated yet.
+        if not daily.exists():
+            current_out_of_stock = ProductMapping.objects.filter(
+                store_id__in=store_ids
+            ).filter(Q(store_stock=0) | Q(store_stock__isnull=True)).count()
+            daily_metrics = [{
+                'date': end_date,
+                'orders_count': 0,
+                'revenue': 0,
+                'out_of_stock_count': current_out_of_stock,
+            }]
+        else:
+            daily_metrics = list(daily)
+
+        orders = [{'date': str(m['date']), 'count': m['orders_count']} for m in daily_metrics]
+        revenue = [{'date': str(m['date']), 'value': float(m['revenue'] or 0)} for m in daily_metrics]
+        out_of_stock = [{'date': str(m['date']), 'count': m['out_of_stock_count']} for m in daily_metrics]
 
         return Response({
-            'daily_metrics': list(daily),
+            'daily_metrics': daily_metrics,
             'orders': orders,
             'revenue': revenue,
             'out_of_stock': out_of_stock,
