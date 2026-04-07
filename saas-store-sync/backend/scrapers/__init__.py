@@ -25,6 +25,8 @@ _scrape_amazon_us = None
 _close_amazon_us = None
 _scrape_amazon_legacy = None
 _close_amazon_legacy = None
+_scrape_heb = None
+_close_heb = None
 
 
 def _get_amazon_us_scraper():
@@ -53,6 +55,20 @@ def _get_amazon_legacy_scraper():
             _scrape_amazon_legacy = _placeholder_scrape
             _close_amazon_legacy = lambda s: None
     return _scrape_amazon_legacy, _close_amazon_legacy
+
+
+def _get_heb_scraper():
+    global _scrape_heb, _close_heb
+    if _scrape_heb is None:
+        try:
+            from .heb_scraper import scrape_heb, close_heb_session
+            _scrape_heb = scrape_heb
+            _close_heb = close_heb_session
+        except ImportError as exc:
+            logger.warning("HEB scraper unavailable: %s", exc)
+            _scrape_heb = _placeholder_scrape
+            _close_heb = lambda s: None
+    return _scrape_heb, _close_heb
 
 
 def _rewrite_url_for_region(vendor_url: str, region: str) -> str:
@@ -112,6 +128,11 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
         logger.debug("Routing to eBay scraper: %s", vendor_url[:80])
         return scrape_ebay(vendor_url, region, session)
 
+    if "heb.com" in url_lower:
+        scrape_fn, _ = _get_heb_scraper()
+        logger.debug("Routing to HEB scraper: %s", vendor_url[:80])
+        return scrape_fn(vendor_url, region, session)
+
     logger.warning("No scraper registered for URL: %s", vendor_url[:80])
     return _placeholder_scrape(vendor_url, region)
 
@@ -134,6 +155,8 @@ def close_amazon_session(session):
         close_ebay_session(session)
     except ImportError:
         pass
+    _, close_heb = _get_heb_scraper()
+    close_heb(session)
 
 
 __all__ = ["get_price_and_stock", "close_amazon_session"]
