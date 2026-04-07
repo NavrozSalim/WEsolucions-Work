@@ -232,7 +232,7 @@ def _set_catalog_sync_reset_timer(store_id):
 
 
 def _reset_expired_catalog_pending_statuses():
-    """Clear pending-reset timer and set active mappings to sync_status=pending when due."""
+    """Clear pending-reset timer and set only synced active mappings back to pending when due."""
     from catalog.activity_log import append_catalog_log
 
     now = timezone.now()
@@ -241,7 +241,11 @@ def _reset_expired_catalog_pending_statuses():
         catalog_pending_reset_at__lte=now,
     )
     for store in qs:
-        n = ProductMapping.objects.filter(store=store, is_active=True).update(sync_status='pending')
+        n = ProductMapping.objects.filter(
+            store=store,
+            is_active=True,
+            sync_status='synced',
+        ).update(sync_status='pending')
         Store.objects.filter(id=store.id).update(catalog_pending_reset_at=None)
         append_catalog_log(
             store.id,

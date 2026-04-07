@@ -499,17 +499,8 @@ def run_catalog_scrape(upload_id: str):
         action_type='scrape_end',
         metadata={'rows_succeeded': succeeded, 'failed': failed, 'upload_id': str(upload_id)},
     )
-    try:
-        from sync.tasks import run_store_push_listings_only
-
-        run_store_push_listings_only.delay(str(store.id), False)
-        append_catalog_log(
-            store.id,
-            'Marketplace sync (push listings) was queued to run after this scrape.',
-            action_type='sync_queued',
-        )
-    except Exception as exc:
-        logger.warning('Could not queue post-scrape push: %s', exc)
+    # Intentionally do not auto-push after scrape.
+    # "synced" should only come from explicit Manual sync or scheduled sync runs.
     return out
 
 
@@ -688,18 +679,6 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
         action_type='scrape_end',
         metadata={'rows_succeeded': succeeded, 'failed': failed, 'rows_processed': processed},
     )
-    try:
-        from sync.tasks import run_store_push_listings_only
-
-        run_store_push_listings_only.delay(str(store.id), False)
-        append_catalog_log(
-            store.id,
-            'Marketplace sync (push listings) was queued to run after this scrape.',
-            action_type='sync_queued',
-        )
-    except Exception as exc:
-        logger.warning('Could not queue post-scrape push: %s', exc)
-
     return {
         'store_id': str(store_id),
         'scope': 'store',
