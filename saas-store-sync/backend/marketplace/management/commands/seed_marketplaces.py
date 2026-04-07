@@ -19,6 +19,7 @@ VENDORS = [
     ('vevor', 'Vevor'),
     ('aliexpress', 'AliExpress'),
     ('ebay', 'eBay'),
+    ('heb', 'HEB'),
 ]
 
 
