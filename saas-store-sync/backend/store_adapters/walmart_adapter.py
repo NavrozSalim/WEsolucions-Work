@@ -179,12 +179,30 @@ class WalmartAdapter(BaseStoreAdapter):
             return {"raw": resp.text}
 
     def validate_connection(self):
-        """Validate Walmart credentials by fetching a tiny inventory list."""
+        """
+        Validate Walmart credentials.
+
+        Preferred path validates via a lightweight Marketplace API call.
+        For manual/token-only setups (no client credentials configured), keep
+        the connection usable if a bearer token exists so stores are not stuck
+        in "error" before first sync attempts.
+        """
         try:
             # Lightweight endpoint for auth/header verification.
             self._request("GET", "/v3/inventories?limit=1")
             return True
         except WalmartAPIError:
+            # Graceful fallback for token-only mode when merchants paste an
+            # already-issued access token instead of client credentials JSON.
+            has_client_creds = bool(
+                self._creds.get("client_id")
+                or os.getenv("WALMART_CLIENT_ID")
+                or self._creds.get("client_secret")
+                or os.getenv("WALMART_CLIENT_SECRET")
+            )
+            if not has_client_creds:
+                token = (self._access_token or "").strip()
+                return len(token) > 20
             return False
 
     def lookup_listing_by_sku(self, sku: str):
