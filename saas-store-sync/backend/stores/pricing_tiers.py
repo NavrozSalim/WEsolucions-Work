@@ -13,6 +13,10 @@ Interval rule (tiers sorted by ``from_value``):
 If the cost is strictly above the last tier's finite ``to_value``, we still
 return the last tier (overflow) so pricing does not fall through to the global
 multiplier when bands are configured but too narrow.
+
+If the cost is **below** the first tier's ``from_value`` (e.g. unit cost 0.97 when the
+first band starts at 5), we return the **first** tier so low vendor prices
+still get tiered margins instead of falling through to the store multiplier.
 """
 from __future__ import annotations
 
@@ -64,5 +68,10 @@ def resolve_margin_tier_for_raw_cost(
     )
     if last_to < float("inf") and cost > last_to:
         return last
+
+    first = tiers[0]
+    first_from = float(first.price_range.from_value)
+    if cost < first_from:
+        return first
 
     return None

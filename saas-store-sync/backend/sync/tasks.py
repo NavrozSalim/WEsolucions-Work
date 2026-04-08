@@ -60,6 +60,7 @@ def _apply_pricing(
     cost_with_tax = vendor_price * (1 + purchase_tax_percentage/100).
     Per tier: margin_type fixed → list = cost_with_tax + margin_value.
     margin_type percentage → Excel: D = cost_with_tax, F = tier(D), G = D*100/(100-F-E), then rounding.
+    Walmart + percentage tier: same revenue math as Walmart fixed, but profit = (cost×pack_qty) after tax × (tier%/100).
     No tier: cost_with_tax * multiplier + optional_fee, then rounding.
     """
     if vendor_price is None or pricing_settings is None:
@@ -82,6 +83,22 @@ def _apply_pricing(
     tax_pct = _safe_float(getattr(pricing_settings, 'purchase_tax_percentage', 0), 0.0)
     cost_with_tax = cost * (1 + tax_pct / 100)
 
+    def _walmart_post_price(profit_dollars: float) -> float:
+        """PostPrice = final_selling - shipping, with marketplace fee in denominator."""
+        pq = _safe_float(pack_qty, 1.0)
+        pf = _safe_float(prep_fees, 0.0)
+        sf = _safe_float(shipping_fees, 0.0)
+        fee_pct = _safe_float(getattr(pricing_settings, 'marketplace_fees_percentage', 0), 0.0)
+        if pq <= 0:
+            pq = 1.0
+        vendor_total = cost * pq
+        vendor_total_with_tax = vendor_total * (1 + tax_pct / 100)
+        denom = 1 - (fee_pct / 100)
+        if denom <= 0:
+            return vendor_total_with_tax + profit_dollars
+        final_selling = (vendor_total_with_tax + profit_dollars + pf + sf) / denom
+        return final_selling - sf
+
     price = None
     tier = resolve_margin_tier_for_raw_cost(pricing_settings, cost)
     if tier is not None:
@@ -91,23 +108,17 @@ def _apply_pricing(
             price = cost * margin_val
         elif m_type == 'fixed':
             if is_walmart:
-                pq = _safe_float(pack_qty, 1.0)
-                pf = _safe_float(prep_fees, 0.0)
-                sf = _safe_float(shipping_fees, 0.0)
-                if pq <= 0:
-                    pq = 1.0
-                vendor_total = cost * pq
-                vendor_total_with_tax = vendor_total * (1 + tax_pct / 100)
-                fee_pct = _safe_float(getattr(pricing_settings, 'marketplace_fees_percentage', 0), 0.0)
-                denom = 1 - (fee_pct / 100)
-                if denom <= 0:
-                    price = vendor_total_with_tax + margin_val
-                else:
-                    final_selling = (vendor_total_with_tax + margin_val + pf + sf) / denom
-                    # Walmart post price: final selling price minus shipping component.
-                    price = final_selling - sf
+                price = _walmart_post_price(margin_val)
             else:
                 price = cost_with_tax + margin_val
+        elif is_walmart and m_type == 'percentage':
+            pq = _safe_float(pack_qty, 1.0)
+            if pq <= 0:
+                pq = 1.0
+            vendor_total = cost * pq
+            vendor_total_with_tax = vendor_total * (1 + tax_pct / 100)
+            profit_dollars = vendor_total_with_tax * (margin_val / 100)
+            price = _walmart_post_price(profit_dollars)
         else:
             excel_dec = apply_excel_pricing(
                 cost,
