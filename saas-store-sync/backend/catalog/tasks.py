@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 from .models import CatalogUpload, CatalogUploadRow, CatalogSyncLog, ProductMapping
 from .reverb_catalog import listing_sku_lookup_order, store_is_reverb, vendor_is_ebay
 from .services import _normalize
+from .vendor_price_fallback import get_last_known_vendor_price_stock, resolve_vendor_price_for_listing
 from products.models import Product
 from vendor.models import Vendor
 
@@ -365,6 +366,7 @@ def run_catalog_scrape(upload_id: str):
             if not url:
                 continue
 
+            price_from_fallback = False
             run.rows_processed += 1
             if run.rows_processed % 10 == 0:
                 run.rows_succeeded = succeeded
@@ -396,25 +398,48 @@ def run_catalog_scrape(upload_id: str):
                     vendor_price = 29.99
                     vendor_stock = 5
                 else:
-                    pm.store_price = None
-                    pm.store_stock = None
-                    pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-                    pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                    pm.save(
-                        update_fields=[
-                            'store_price',
-                            'store_stock',
-                            'failed_sync_count',
-                            'sync_status',
-                        ]
-                    )
-                    failed += 1
-                    continue
+                    p_cached, s_cached = get_last_known_vendor_price_stock(product)
+                    if p_cached is not None:
+                        vendor_price = p_cached
+                        vendor_stock = s_cached
+                        price_from_fallback = True
+                        scrape_title = ''
+                        logger.warning(
+                            "Scrape error for %s; using last known vendor price %.2f from DB",
+                            product.vendor_sku,
+                            p_cached,
+                        )
+                    else:
+                        pm.store_price = None
+                        pm.store_stock = None
+                        pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
+                        pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
+                        pm.save(
+                            update_fields=[
+                                'store_price',
+                                'store_stock',
+                                'failed_sync_count',
+                                'sync_status',
+                            ]
+                        )
+                        failed += 1
+                        continue
 
             # Demo fallback: when scraper returns None (Selenium not set up, Amazon blocks, etc.)
             if vendor_price is None and use_demo_fallback:
                 vendor_price = 29.99
                 vendor_stock = vendor_stock if vendor_stock and vendor_stock > 0 else 5
+
+            vendor_price, vendor_stock, from_db = resolve_vendor_price_for_listing(
+                product, vendor_price, vendor_stock
+            )
+            price_from_fallback = price_from_fallback or from_db
+            if from_db:
+                logger.warning(
+                    "No live vendor price for %s; using cached price %.2f from DB for listing math",
+                    product.vendor_sku,
+                    vendor_price,
+                )
 
             if vendor_price is None and not use_demo_fallback:
                 pm.store_price = None
@@ -455,7 +480,7 @@ def run_catalog_scrape(upload_id: str):
                     new_price = Decimal(str(vendor_price))
                 new_stock = _apply_inventory(vendor_stock, inventory)
 
-                if vendor_price is not None:
+                if vendor_price is not None and not price_from_fallback:
                     VendorPrice.objects.create(
                         product=product,
                         price=Decimal(str(vendor_price)),
@@ -584,6 +609,7 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
             product = pm.product
             if not product:
                 continue
+            price_from_fallback = False
             pricing = _get_pricing_for_vendor(store, product.vendor_id)
             inventory = _get_inventory_for_vendor(store, product.vendor_id)
 
@@ -607,25 +633,48 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
                     vendor_stock = 5
                     scrape_title = ''
                 else:
-                    pm.store_price = None
-                    pm.store_stock = None
-                    pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-                    pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                    pm.save(
-                        update_fields=[
-                            'store_price',
-                            'store_stock',
-                            'failed_sync_count',
-                            'sync_status',
-                        ]
-                    )
-                    failed += 1
-                    error_summary = str(e) if not error_summary else error_summary
-                    continue
+                    p_cached, s_cached = get_last_known_vendor_price_stock(product)
+                    if p_cached is not None:
+                        vendor_price = p_cached
+                        vendor_stock = s_cached
+                        price_from_fallback = True
+                        scrape_title = ''
+                        logger.warning(
+                            'Store scrape exception for %s; using last known vendor price %.2f from DB',
+                            product.vendor_sku,
+                            p_cached,
+                        )
+                    else:
+                        pm.store_price = None
+                        pm.store_stock = None
+                        pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
+                        pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
+                        pm.save(
+                            update_fields=[
+                                'store_price',
+                                'store_stock',
+                                'failed_sync_count',
+                                'sync_status',
+                            ]
+                        )
+                        failed += 1
+                        error_summary = str(e) if not error_summary else error_summary
+                        continue
 
             if vendor_price is None and use_demo_fallback:
                 vendor_price = 29.99
                 vendor_stock = vendor_stock if vendor_stock and vendor_stock > 0 else 5
+
+            vendor_price, vendor_stock, from_db = resolve_vendor_price_for_listing(
+                product, vendor_price, vendor_stock
+            )
+            price_from_fallback = price_from_fallback or from_db
+            if from_db:
+                logger.warning(
+                    'No live vendor price for %s; using cached price %.2f from DB for listing math',
+                    product.vendor_sku,
+                    vendor_price,
+                )
 
             if vendor_price is None and not use_demo_fallback:
                 pm.store_price = None
@@ -663,11 +712,12 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
                     new_price = Decimal(str(vendor_price))
                 new_stock = _apply_inventory(vendor_stock, inventory)
 
-                VendorPrice.objects.create(
-                    product=product,
-                    price=Decimal(str(vendor_price)),
-                    stock=vendor_stock or 0,
-                )
+                if not price_from_fallback:
+                    VendorPrice.objects.create(
+                        product=product,
+                        price=Decimal(str(vendor_price)),
+                        stock=vendor_stock or 0,
+                    )
 
                 pm.store_price = new_price
                 pm.store_stock = new_stock

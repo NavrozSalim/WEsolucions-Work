@@ -374,8 +374,9 @@ export default function Catalog() {
 
     useEffect(() => {
         if (flowStatus === 'success') {
-            // Keep UI fresh briefly after success because downstream tasks continue in background.
-            setLiveRefreshUntil(Date.now() + 30000);
+            // Keep UI fresh after success: Celery can finish a few seconds after the API returns,
+            // and store-wide scrapes may update many rows.
+            setLiveRefreshUntil(Date.now() + 120000);
         }
     }, [flowStatus]);
 

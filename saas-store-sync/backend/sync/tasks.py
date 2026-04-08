@@ -1,7 +1,10 @@
 from celery import shared_task
 from django.utils import timezone
 from decimal import Decimal
+import logging
 import math
+
+logger = logging.getLogger(__name__)
 
 from stores.models import Store, StoreVendorPriceSettings, StoreVendorInventorySettings
 from stores.pricing_excel import apply_excel_pricing
@@ -11,6 +14,7 @@ from catalog.reverb_catalog import listing_sku_lookup_order
 from vendor.models import VendorPrice
 from sync.models import StoreSyncRun
 from scrapers import get_price_and_stock, close_amazon_session
+from catalog.vendor_price_fallback import get_last_known_vendor_price_stock, resolve_vendor_price_for_listing
 
 
 def _resolve_vendor_url(product, store):
@@ -201,6 +205,7 @@ def run_store_sync(self, store_id):
     try:
         for pm in mappings:
             processed += 1
+            price_from_fallback = False
             pricing = _get_pricing_for_vendor(store, pm.product.vendor_id)
             inventory = _get_inventory_for_vendor(store, pm.product.vendor_id)
             url = _resolve_vendor_url(pm.product, store)
@@ -212,20 +217,44 @@ def run_store_sync(self, store_id):
                 vendor_stock = result.get('stock')
                 scrape_title = (result.get('title') or '').strip()[:500]
             except Exception as e:
-                pm.store_price = None
-                pm.store_stock = None
-                pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-                pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                pm.save(
-                    update_fields=[
-                        'store_price',
-                        'store_stock',
-                        'failed_sync_count',
-                        'sync_status',
-                    ]
+                p_cached, s_cached = get_last_known_vendor_price_stock(pm.product)
+                if p_cached is not None:
+                    vendor_price = p_cached
+                    vendor_stock = s_cached
+                    price_from_fallback = True
+                    scrape_title = ''
+                    logger.warning(
+                        "Store sync scrape error for %s; using last known vendor price %.2f from DB (%s)",
+                        pm.product.vendor_sku,
+                        p_cached,
+                        e,
+                    )
+                else:
+                    pm.store_price = None
+                    pm.store_stock = None
+                    pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
+                    pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
+                    pm.save(
+                        update_fields=[
+                            'store_price',
+                            'store_stock',
+                            'failed_sync_count',
+                            'sync_status',
+                        ]
+                    )
+                    error_summary = str(e) if not error_summary else error_summary
+                    continue
+
+            vendor_price, vendor_stock, from_db = resolve_vendor_price_for_listing(
+                pm.product, vendor_price, vendor_stock
+            )
+            price_from_fallback = price_from_fallback or from_db
+            if from_db:
+                logger.warning(
+                    "No live vendor price for %s; using cached price %.2f from DB (store sync)",
+                    pm.product.vendor_sku,
+                    vendor_price,
                 )
-                error_summary = str(e) if not error_summary else error_summary
-                continue
 
             if vendor_price is None:
                 pm.store_price = None
@@ -258,7 +287,7 @@ def run_store_sync(self, store_id):
             )
             new_stock = _apply_inventory(vendor_stock, inventory)
 
-            if vendor_price is not None:
+            if vendor_price is not None and not price_from_fallback:
                 VendorPrice.objects.create(
                     product=pm.product,
                     price=Decimal(str(vendor_price)),
@@ -380,6 +409,7 @@ def run_store_update(self, store_id):
     try:
         for pm in mappings:
             processed += 1
+            price_from_fallback = False
             pricing = _get_pricing_for_vendor(store, pm.product.vendor_id)
             inventory = _get_inventory_for_vendor(store, pm.product.vendor_id)
 
@@ -393,20 +423,44 @@ def run_store_update(self, store_id):
                 vendor_stock = result.get('stock')
                 scrape_title = (result.get('title') or '').strip()[:500]
             except Exception as e:
-                pm.store_price = None
-                pm.store_stock = None
-                pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-                pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                pm.save(
-                    update_fields=[
-                        'store_price',
-                        'store_stock',
-                        'failed_sync_count',
-                        'sync_status',
-                    ]
+                p_cached, s_cached = get_last_known_vendor_price_stock(pm.product)
+                if p_cached is not None:
+                    vendor_price = p_cached
+                    vendor_stock = s_cached
+                    price_from_fallback = True
+                    scrape_title = ''
+                    logger.warning(
+                        "Scheduled update scrape error for %s; using last known vendor price %.2f from DB (%s)",
+                        pm.product.vendor_sku,
+                        p_cached,
+                        e,
+                    )
+                else:
+                    pm.store_price = None
+                    pm.store_stock = None
+                    pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
+                    pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
+                    pm.save(
+                        update_fields=[
+                            'store_price',
+                            'store_stock',
+                            'failed_sync_count',
+                            'sync_status',
+                        ]
+                    )
+                    error_summary = str(e) if not error_summary else error_summary
+                    continue
+
+            vendor_price, vendor_stock, from_db = resolve_vendor_price_for_listing(
+                pm.product, vendor_price, vendor_stock
+            )
+            price_from_fallback = price_from_fallback or from_db
+            if from_db:
+                logger.warning(
+                    "No live vendor price for %s; using cached price %.2f from DB (scheduled update)",
+                    pm.product.vendor_sku,
+                    vendor_price,
                 )
-                error_summary = str(e) if not error_summary else error_summary
-                continue
 
             if vendor_price is None:
                 pm.store_price = None
@@ -448,11 +502,12 @@ def run_store_update(self, store_id):
                 or int(prev_vp.stock or 0) != int(vendor_stock or 0)
             )
 
-            VendorPrice.objects.create(
-                product=pm.product,
-                price=Decimal(str(vendor_price)),
-                stock=vendor_stock or 0,
-            )
+            if not price_from_fallback:
+                VendorPrice.objects.create(
+                    product=pm.product,
+                    price=Decimal(str(vendor_price)),
+                    stock=vendor_stock or 0,
+                )
 
             pm.store_price = new_price
             pm.store_stock = new_stock
