@@ -65,27 +65,40 @@ def _apply_pricing(
     if vendor_price is None or pricing_settings is None:
         return Decimal(str(vendor_price)) if vendor_price is not None else None
 
-    cost = float(vendor_price)
-    tax_pct = float(pricing_settings.purchase_tax_percentage or 0)
+    def _safe_float(val, default=0.0):
+        try:
+            if val is None:
+                return float(default)
+            if isinstance(val, str):
+                v = val.strip()
+                if v == '':
+                    return float(default)
+                return float(v)
+            return float(val)
+        except Exception:
+            return float(default)
+
+    cost = _safe_float(vendor_price, 0.0)
+    tax_pct = _safe_float(getattr(pricing_settings, 'purchase_tax_percentage', 0), 0.0)
     cost_with_tax = cost * (1 + tax_pct / 100)
 
     price = None
     tier = resolve_margin_tier_for_raw_cost(pricing_settings, cost)
     if tier is not None:
-        margin_val = float(tier.margin_percentage or 0)
+        margin_val = _safe_float(getattr(tier, 'margin_percentage', 0), 0.0)
         m_type = getattr(tier, 'margin_type', 'percentage') or 'percentage'
         if m_type == 'direct':
             price = cost * margin_val
         elif m_type == 'fixed':
             if is_walmart:
-                pq = float(pack_qty) if pack_qty is not None else 1.0
-                pf = float(prep_fees) if prep_fees is not None else 0.0
-                sf = float(shipping_fees) if shipping_fees is not None else 0.0
+                pq = _safe_float(pack_qty, 1.0)
+                pf = _safe_float(prep_fees, 0.0)
+                sf = _safe_float(shipping_fees, 0.0)
                 if pq <= 0:
                     pq = 1.0
                 vendor_total = cost * pq
                 vendor_total_with_tax = vendor_total * (1 + tax_pct / 100)
-                fee_pct = float(pricing_settings.marketplace_fees_percentage or 0)
+                fee_pct = _safe_float(getattr(pricing_settings, 'marketplace_fees_percentage', 0), 0.0)
                 denom = 1 - (fee_pct / 100)
                 if denom <= 0:
                     price = vendor_total_with_tax + margin_val
@@ -99,7 +112,7 @@ def _apply_pricing(
             excel_dec = apply_excel_pricing(
                 cost,
                 tax_pct,
-                float(pricing_settings.marketplace_fees_percentage or 0),
+                _safe_float(getattr(pricing_settings, 'marketplace_fees_percentage', 0), 0.0),
                 str(pricing_settings.rounding_option or 'none'),
             )
             if excel_dec is not None:
@@ -107,7 +120,7 @@ def _apply_pricing(
             # Denominator invalid (F+E>=100): fall through to multiplier like Amazon path
 
     if price is None:
-        price = cost_with_tax * float(pricing_settings.multiplier or 1) + float(pricing_settings.optional_fee or 0)
+        price = cost_with_tax * _safe_float(getattr(pricing_settings, 'multiplier', 1), 1.0) + _safe_float(getattr(pricing_settings, 'optional_fee', 0), 0.0)
 
     opt = pricing_settings.rounding_option
     if opt == 'nearest_99':
