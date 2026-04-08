@@ -5,6 +5,7 @@ import logging
 from celery import shared_task
 from django.utils import timezone
 from django.db import transaction
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,16 @@ def _normalize_action(action_raw: str) -> str:
     if a in ('add', 'update', 'delete'):
         return a
     return 'add'
+
+
+def _to_decimal_or_none(raw_val):
+    val = _normalize(raw_val)
+    if val is None:
+        return None
+    try:
+        return Decimal(str(val))
+    except Exception:
+        return None
 
 
 def _find_product_mapping(row: CatalogUploadRow, store, *, active_only: bool = True) -> ProductMapping | None:
@@ -150,6 +161,9 @@ def _update_product_mapping(pm: ProductMapping, row: CatalogUploadRow) -> None:
         updates['marketplace_parent_sku'] = mp_sku
     if mid is not None:
         updates['marketplace_id'] = mid
+    updates['pack_qty'] = _to_decimal_or_none(row.pack_qty_raw)
+    updates['prep_fees'] = _to_decimal_or_none(row.prep_fees_raw)
+    updates['shipping_fees'] = _to_decimal_or_none(row.shipping_fees_raw)
     url = _normalize(row.vendor_url_raw)
     if url and pm.product:
         pm.product.vendor_url = url
@@ -216,6 +230,9 @@ def run_catalog_sync(upload_id: str):
                                 'marketplace_child_sku': mc_sku,
                                 'marketplace_parent_sku': mp_sku,
                                 'marketplace_id': mid,
+                                'pack_qty': _to_decimal_or_none(row.pack_qty_raw),
+                                'prep_fees': _to_decimal_or_none(row.prep_fees_raw),
+                                'shipping_fees': _to_decimal_or_none(row.shipping_fees_raw),
                                 'is_active': True,
                             },
                         )
@@ -303,7 +320,7 @@ def run_catalog_scrape(upload_id: str):
     Call directly or via catalog_scrape_task.
     """
     from sync.models import ScrapeRun
-    from sync.tasks import _get_pricing_for_vendor, _apply_pricing, _apply_inventory
+    from sync.tasks import _get_pricing_for_vendor, _apply_pricing, _apply_inventory, _is_walmart_store
     from sync.tasks import _get_inventory_for_vendor, _resolve_vendor_url
     from vendor.models import VendorPrice
     from scrapers import get_price_and_stock, close_amazon_session
@@ -423,7 +440,17 @@ def run_catalog_scrape(upload_id: str):
 
                 pricing = _get_pricing_for_vendor(store, product.vendor_id)
                 inventory = _get_inventory_for_vendor(store, product.vendor_id)
-                new_price = _apply_pricing(vendor_price, pricing) if vendor_price is not None else None
+                new_price = (
+                    _apply_pricing(
+                        vendor_price,
+                        pricing,
+                        is_walmart=_is_walmart_store(store),
+                        pack_qty=getattr(pm, 'pack_qty', None),
+                        prep_fees=getattr(pm, 'prep_fees', None),
+                        shipping_fees=getattr(pm, 'shipping_fees', None),
+                    )
+                    if vendor_price is not None else None
+                )
                 if new_price is None and vendor_price is not None:
                     new_price = Decimal(str(vendor_price))
                 new_stock = _apply_inventory(vendor_stock, inventory)
@@ -519,6 +546,7 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
         _apply_pricing,
         _get_inventory_for_vendor,
         _get_pricing_for_vendor,
+        _is_walmart_store,
         _resolve_vendor_url,
     )
     from vendor.models import VendorPrice
@@ -620,7 +648,17 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
                 vendor_stock = 0
 
             try:
-                new_price = _apply_pricing(vendor_price, pricing) if vendor_price is not None else None
+                new_price = (
+                    _apply_pricing(
+                        vendor_price,
+                        pricing,
+                        is_walmart=_is_walmart_store(store),
+                        pack_qty=getattr(pm, 'pack_qty', None),
+                        prep_fees=getattr(pm, 'prep_fees', None),
+                        shipping_fees=getattr(pm, 'shipping_fees', None),
+                    )
+                    if vendor_price is not None else None
+                )
                 if new_price is None and vendor_price is not None:
                     new_price = Decimal(str(vendor_price))
                 new_stock = _apply_inventory(vendor_stock, inventory)

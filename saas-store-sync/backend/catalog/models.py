@@ -31,6 +31,9 @@ class ProductMapping(models.Model):
 
     store_price = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
     store_stock = models.IntegerField(null=True, blank=True)
+    pack_qty = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    prep_fees = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    shipping_fees = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
 
     sync_status = models.CharField(max_length=50, default='pending', db_index=True)
     failed_sync_count = models.IntegerField(default=0)
@@ -160,6 +163,9 @@ class CatalogUploadRow(models.Model):
     vendor_sku_raw = models.CharField(max_length=255, default='', blank=True)
     vendor_url_raw = models.CharField(max_length=1000, default='', blank=True)
     action_raw = models.CharField(max_length=20, default='Add')
+    pack_qty_raw = models.CharField(max_length=255, default='', blank=True)
+    prep_fees_raw = models.CharField(max_length=255, default='', blank=True)
+    shipping_fees_raw = models.CharField(max_length=255, default='', blank=True)
 
     # Resolved after validation
     vendor = models.ForeignKey(

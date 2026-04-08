@@ -251,6 +251,9 @@ def validate_and_create_upload(
                 vendor_sku_raw=vendor_sku_raw,
                 vendor_url_raw=vendor_url_raw,
                 action_raw=action_raw or 'Add',
+                pack_qty_raw=pack_qty_raw,
+                prep_fees_raw=prep_fees_raw,
+                shipping_fees_raw=shipping_fees_raw,
                 vendor=vendor,
                 store=store,
             )

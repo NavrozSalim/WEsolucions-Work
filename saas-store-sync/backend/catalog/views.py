@@ -299,7 +299,7 @@ class CatalogUploadErrorFileView(APIView):
             'Vendor Name', 'Vendor ID', 'Is Variation', 'Variation ID',
             'Marketplace Name', 'Store Name', 'Marketplace Parent SKU',
             'Marketplace Child SKU', 'Marketplace ID', 'Vendor SKU',
-            'Vendor URL', 'Action', 'Error Logs',
+            'Vendor URL', 'Action', 'Pack QTY', 'Prep Fees', 'Shipping Fees', 'Error Logs',
         ])
         for r in failed_rows:
             writer.writerow([
@@ -315,11 +315,14 @@ class CatalogUploadErrorFileView(APIView):
                 r.vendor_sku_raw or '',
                 r.vendor_url_raw or '',
                 r.action_raw or 'Add',
+                r.pack_qty_raw or '',
+                r.prep_fees_raw or '',
+                r.shipping_fees_raw or '',
                 (r.sync_error or '').replace('\n', ' '),
             ])
         if not failed_rows.exists() and upload.error_summary:
             writer.writerow([
-                '', '', '', '', '', '', '', '', '', '', '', '',
+                '', '', '', '', '', '', '', '', '', '', '', '', '', '', '',
                 upload.error_summary.replace('\n', ' '),
             ])
         return response
@@ -376,7 +379,8 @@ class CatalogUploadDetailView(APIView):
             'Vendor Name', 'Vendor ID', 'Is Variation', 'Variation ID',
             'Marketplace Name', 'Store Name', 'Marketplace Parent SKU',
             'Marketplace Child SKU', 'Marketplace ID', 'Vendor SKU',
-            'Vendor URL', 'Action', 'Posted Price', 'Posted Inventory',
+            'Vendor URL', 'Action', 'Pack QTY', 'Prep Fees', 'Shipping Fees',
+            'Posted Price', 'Posted Inventory',
         ])
         for r in rows:
             pm = r.product_mapping
@@ -398,6 +402,9 @@ class CatalogUploadDetailView(APIView):
                 r.vendor_sku_raw or '',
                 r.vendor_url_raw or '',
                 r.action_raw or 'Add',
+                r.pack_qty_raw or '',
+                r.prep_fees_raw or '',
+                r.shipping_fees_raw or '',
                 posted_price,
                 posted_inventory,
             ])

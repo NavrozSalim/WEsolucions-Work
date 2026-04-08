@@ -47,7 +47,15 @@ def _get_inventory_for_vendor(store, vendor_id):
         return StoreVendorInventorySettings.objects.filter(store=store).first()
 
 
-def _apply_pricing(vendor_price, pricing_settings):
+def _apply_pricing(
+    vendor_price,
+    pricing_settings,
+    *,
+    is_walmart=False,
+    pack_qty=None,
+    prep_fees=None,
+    shipping_fees=None,
+):
     """
     cost_with_tax = vendor_price * (1 + purchase_tax_percentage/100).
     Per tier: margin_type fixed → list = cost_with_tax + margin_value.
@@ -69,7 +77,24 @@ def _apply_pricing(vendor_price, pricing_settings):
         if m_type == 'direct':
             price = cost * margin_val
         elif m_type == 'fixed':
-            price = cost_with_tax + margin_val
+            if is_walmart:
+                pq = float(pack_qty) if pack_qty is not None else 1.0
+                pf = float(prep_fees) if prep_fees is not None else 0.0
+                sf = float(shipping_fees) if shipping_fees is not None else 0.0
+                if pq <= 0:
+                    pq = 1.0
+                vendor_total = cost * pq
+                vendor_total_with_tax = vendor_total * (1 + tax_pct / 100)
+                fee_pct = float(pricing_settings.marketplace_fees_percentage or 0)
+                denom = 1 - (fee_pct / 100)
+                if denom <= 0:
+                    price = vendor_total_with_tax + margin_val
+                else:
+                    final_selling = (vendor_total_with_tax + margin_val + pf + sf) / denom
+                    # Walmart post price: final selling price minus shipping component.
+                    price = final_selling - sf
+            else:
+                price = cost_with_tax + margin_val
         else:
             excel_dec = apply_excel_pricing(
                 cost,
@@ -94,6 +119,12 @@ def _apply_pricing(vendor_price, pricing_settings):
     elif opt == 'floor':
         price = math.floor(price)
     return Decimal(str(round(price, 2)))
+
+
+def _is_walmart_store(store):
+    code = (getattr(store.marketplace, 'code', '') or '').strip().lower()
+    name = (getattr(store.marketplace, 'name', '') or '').strip().lower()
+    return code == 'walmart' or name == 'walmart'
 
 
 def _apply_inventory(vendor_stock, inventory_settings):
@@ -190,7 +221,17 @@ def run_store_sync(self, store_id):
 
             if vendor_stock is None or vendor_stock <= 0:
                 vendor_stock = 0
-            new_price = _apply_pricing(vendor_price, pricing) if vendor_price is not None else None
+            new_price = (
+                _apply_pricing(
+                    vendor_price,
+                    pricing,
+                    is_walmart=_is_walmart_store(store),
+                    pack_qty=getattr(pm, 'pack_qty', None),
+                    prep_fees=getattr(pm, 'prep_fees', None),
+                    shipping_fees=getattr(pm, 'shipping_fees', None),
+                )
+                if vendor_price is not None else None
+            )
             new_stock = _apply_inventory(vendor_stock, inventory)
 
             if vendor_price is not None:
@@ -363,7 +404,17 @@ def run_store_update(self, store_id):
                 vendor_stock = 0
 
             prev_vp = VendorPrice.objects.filter(product=pm.product).order_by('-scraped_at').first()
-            new_price = _apply_pricing(vendor_price, pricing) if vendor_price is not None else None
+            new_price = (
+                _apply_pricing(
+                    vendor_price,
+                    pricing,
+                    is_walmart=_is_walmart_store(store),
+                    pack_qty=getattr(pm, 'pack_qty', None),
+                    prep_fees=getattr(pm, 'prep_fees', None),
+                    shipping_fees=getattr(pm, 'shipping_fees', None),
+                )
+                if vendor_price is not None else None
+            )
             if new_price is None and vendor_price is not None:
                 new_price = Decimal(str(vendor_price))
             new_stock = _apply_inventory(vendor_stock, inventory)
