@@ -8,6 +8,7 @@ Goals:
 - Return the same shape used by the app: {"price": float|None, "stock": int|None, "title": str|None}
 """
 import logging
+import json
 import re
 from typing import Optional
 
@@ -29,10 +30,14 @@ class HebParser:
         "meta[property='og:title']",
     )
     PRICE_SELECTORS = (
+        "meta[itemprop='price']",
+        "meta[property='product:price:amount']",
+        "[itemprop='price']",
+        "[data-qe-id*='price']",
         "[data-testid*='price']",
+        "[aria-label*='price' i]",
         "span[class*='price']",
         ".price",
-        "meta[property='product:price:amount']",
     )
     STOCK_HINTS_IN = ("in stock", "available", "add to cart")
     STOCK_HINTS_OUT = ("out of stock", "unavailable", "sold out")
@@ -62,8 +67,23 @@ class HebParser:
         p = parse_price_text(txt)
         if p is not None:
             return p
+        # Try JSON-LD product schema blocks
+        for script in soup.select("script[type='application/ld+json']"):
+            raw = (script.string or script.get_text() or "").strip()
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            p = cls._extract_price_from_json(data)
+            if p is not None:
+                return p
         # Fallback regex across HTML/inline json
         for pat in (
+            r'"finalPrice"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
+            r'"salePrice"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
+            r'"value"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
             r'"price"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
             r'"amount"\s*:\s*"?(\d+(?:\.\d{2})?)',
             r'\$(\d+(?:\.\d{2})?)',
@@ -71,6 +91,33 @@ class HebParser:
             m = re.search(pat, html or "", re.IGNORECASE)
             if m:
                 p = parse_price_text(m.group(1))
+                if p is not None:
+                    return p
+        return None
+
+    @classmethod
+    def _extract_price_from_json(cls, data) -> Optional[float]:
+        if isinstance(data, list):
+            for it in data:
+                p = cls._extract_price_from_json(it)
+                if p is not None:
+                    return p
+            return None
+        if not isinstance(data, dict):
+            return None
+        for key in ("price", "value", "salePrice", "finalPrice", "amount"):
+            if key in data:
+                p = parse_price_text(str(data.get(key)))
+                if p is not None:
+                    return p
+        offers = data.get("offers")
+        if offers is not None:
+            p = cls._extract_price_from_json(offers)
+            if p is not None:
+                return p
+        for v in data.values():
+            if isinstance(v, (dict, list)):
+                p = cls._extract_price_from_json(v)
                 if p is not None:
                     return p
         return None
@@ -122,16 +169,28 @@ def _fetch_html(driver, url: str) -> str:
     from selenium.webdriver.support import expected_conditions as EC
 
     driver.get(url)
+    # Some HEB pages lazy-render pricing after interaction.
     try:
-        WebDriverWait(driver, 4).until(
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.35);")
+    except Exception:
+        pass
+    try:
+        WebDriverWait(driver, 7).until(
             lambda d: d.execute_script("return document.readyState") == "complete"
         )
     except Exception:
         pass
-    # Wait for at least one likely product signal (short wait to stay fast)
-    for sel in ("h1", "[data-testid*='price']", "span[class*='price']"):
+    # Wait for at least one likely product signal (price-specific first).
+    for sel in (
+        "[data-qe-id*='price']",
+        "meta[itemprop='price']",
+        "[itemprop='price']",
+        "[data-testid*='price']",
+        "span[class*='price']",
+        "h1",
+    ):
         try:
-            WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+            WebDriverWait(driver, 4).until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
             break
         except Exception:
             continue
