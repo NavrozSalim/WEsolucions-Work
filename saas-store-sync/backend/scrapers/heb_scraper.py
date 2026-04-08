@@ -63,6 +63,7 @@ class HebParser:
 
     @classmethod
     def extract_price(cls, soup: BeautifulSoup, html: str) -> Optional[float]:
+        html = html or ""
         txt = cls._select_text(soup, cls.PRICE_SELECTORS)
         p = parse_price_text(txt)
         if p is not None:
@@ -80,19 +81,38 @@ class HebParser:
             if p is not None:
                 return p
         # Fallback regex across HTML/inline json
+        normalized_html = html.replace("\\u0024", "$").replace("&dollar;", "$")
+
         for pat in (
             r'"finalPrice"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
             r'"salePrice"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
+            r'"regularPrice"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
+            r'"listPrice"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
+            r'"unitPrice"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
+            r'"priceValue"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
             r'"value"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
             r'"price"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
             r'"amount"\s*:\s*"?(\d+(?:\.\d{2})?)',
-            r'\$(\d+(?:\.\d{2})?)',
+            r'\$(\d{1,4}(?:\.\d{1,3})?)',
         ):
-            m = re.search(pat, html or "", re.IGNORECASE)
+            m = re.search(pat, normalized_html, re.IGNORECASE)
             if m:
                 p = parse_price_text(m.group(1))
                 if p is not None:
                     return p
+
+        # Some payloads only expose cents-based fields.
+        for cents_pat in (
+            r'"priceInCents"\s*:\s*(\d{1,6})',
+            r'"finalPriceInCents"\s*:\s*(\d{1,6})',
+            r'"salePriceInCents"\s*:\s*(\d{1,6})',
+        ):
+            m = re.search(cents_pat, normalized_html, re.IGNORECASE)
+            if m:
+                try:
+                    return round(float(m.group(1)) / 100.0, 2)
+                except Exception:
+                    continue
         return None
 
     @classmethod
