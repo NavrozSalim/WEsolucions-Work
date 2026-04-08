@@ -80,6 +80,7 @@ export default function UpdateWithFileModal({
     };
 
     if (!open) return null;
+    const isWalmart = (storeMarketplace || '').trim().toLowerCase() === 'walmart';
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -134,6 +135,11 @@ export default function UpdateWithFileModal({
                                 <Download className="h-4 w-4" />
                                 Download CSV template
                             </button>
+                        )}
+                        {isWalmart && (
+                            <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+                                Walmart uploads require: Pack QTY, Prep Fees, and Shipping Fees.
+                            </p>
                         )}
                     </div>
 

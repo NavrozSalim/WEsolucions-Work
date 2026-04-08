@@ -170,8 +170,11 @@ export const triggerCatalogScrape = (storeId, runInline = false, uploadId = null
     });
 };
 
-export const downloadSampleTemplate = () =>
-    api.get('/catalog/sample-template/', { responseType: 'blob' }).then((res) => {
+export const downloadSampleTemplate = (storeId = null) => {
+    const path = storeId
+        ? `/catalog/sample-template/?store_id=${encodeURIComponent(storeId)}`
+        : '/catalog/sample-template/';
+    return api.get(path, { responseType: 'blob' }).then((res) => {
         const url = window.URL.createObjectURL(new Blob([res.data]));
         const link = document.createElement('a');
         link.href = url;
@@ -181,6 +184,7 @@ export const downloadSampleTemplate = () =>
         link.remove();
         window.URL.revokeObjectURL(url);
     });
+};
 
 /** Export active product mappings as CSV. Optional sync_status filter (e.g. failed). */
 export const exportCatalogProducts = (storeId, { syncStatus } = {}) => {

@@ -1344,7 +1344,7 @@ export default function Catalog() {
                 storeName={selectedStoreData?.name}
                 storeMarketplace={selectedStoreData?.marketplace_name}
                 storeId={selectedStore}
-                downloadSample={() => downloadSampleTemplate().catch(() => setMessage('Failed to download template'))}
+                downloadSample={() => downloadSampleTemplate(selectedStore).catch(() => setMessage('Failed to download template'))}
                 loading={uploading}
                 file={modalFile}
                 setFile={setModalFile}

@@ -19,6 +19,7 @@ EXPECTED_COLUMNS = [
     'marketplace name', 'store name', 'marketplace parent sku',
     'marketplace child sku', 'marketplace id', 'vendor sku',
     'vendor url', 'action',
+    'pack qty', 'prep fees', 'shipping fees',
 ]
 
 
@@ -114,6 +115,15 @@ def validate_and_create_upload(
     vendors_by_name = {v.name.lower(): v for v in Vendor.objects.all()}
     vendors_by_name.update({v.code.lower(): v for v in Vendor.objects.all()})
     is_reverb = store_is_reverb(store)
+    marketplace_code = (getattr(store.marketplace, 'code', '') or '').strip().lower()
+    marketplace_name = (getattr(store.marketplace, 'name', '') or '').strip().lower()
+    is_walmart = marketplace_code == 'walmart' or marketplace_name == 'walmart'
+
+    if is_walmart:
+        walmart_required_cols = ['pack qty', 'prep fees', 'shipping fees']
+        for col in walmart_required_cols:
+            if indices.get(col) is None:
+                return None, [f"Walmart uploads require column: {col.title()}"]
 
     with transaction.atomic():
         upload = CatalogUpload.objects.create(
@@ -145,6 +155,9 @@ def validate_and_create_upload(
             vendor_sku_raw = _val(row, 'vendor sku')
             vendor_url_raw = _val(row, 'vendor url')
             action_raw = (_val(row, 'action') or 'Add').strip()
+            pack_qty_raw = _val(row, 'pack qty')
+            prep_fees_raw = _val(row, 'prep fees')
+            shipping_fees_raw = _val(row, 'shipping fees')
 
             # Validation
             action_norm = action_raw.lower() if action_raw else 'add'
@@ -198,6 +211,16 @@ def validate_and_create_upload(
                             f"Row {row_num}: Vendor SKU, Marketplace Child SKU, Vendor ID, or Marketplace Parent SKU required for Add"
                         )
                         continue
+            if is_walmart and action_norm in ('add', 'update'):
+                if _normalize(pack_qty_raw) is None:
+                    errors.append(f"Row {row_num}: Walmart requires Pack QTY for {action_norm.title()}")
+                    continue
+                if _normalize(prep_fees_raw) is None:
+                    errors.append(f"Row {row_num}: Walmart requires Prep Fees for {action_norm.title()}")
+                    continue
+                if _normalize(shipping_fees_raw) is None:
+                    errors.append(f"Row {row_num}: Walmart requires Shipping Fees for {action_norm.title()}")
+                    continue
             elif action_norm == 'delete':
                 id_val = (
                     _normalize(marketplace_id_raw)

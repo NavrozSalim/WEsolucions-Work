@@ -816,28 +816,62 @@ class CatalogSampleTemplateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        store_id = request.query_params.get('store_id')
+        is_walmart = False
+        if store_id:
+            store = get_object_or_404(Store, id=store_id, user=request.user)
+            code = (getattr(store.marketplace, 'code', '') or '').strip().lower()
+            name = (getattr(store.marketplace, 'name', '') or '').strip().lower()
+            is_walmart = code == 'walmart' or name == 'walmart'
+
         response = HttpResponse(content_type='text/csv')
-        response['Content-Disposition'] = 'attachment; filename="catalog_upload_template.csv"'
+        response['Content-Disposition'] = (
+            'attachment; filename="catalog_upload_template_walmart.csv"'
+            if is_walmart else
+            'attachment; filename="catalog_upload_template.csv"'
+        )
         writer = csv.writer(response)
         headers = [
             'Vendor Name', 'Vendor ID', 'Is Variation', 'Variation ID',
             'Marketplace Name', 'Store Name', 'Marketplace Parent SKU', 'Marketplace Child SKU',
             'Marketplace ID', 'Vendor SKU', 'Vendor URL', 'Action',
         ]
+        if is_walmart:
+            headers.extend(['Pack QTY', 'Prep Fees', 'Shipping Fees'])
         writer.writerow(headers)
-        writer.writerow([
-            'Amazon', '', 'Yes', '192339|Green',
-            'Reverb', 'GG', 'COST4', 'COST4',
-            'A41000001', 'COST4', 'https://example.com/product/123', 'Add',
-        ])
-        writer.writerow([
-            'Amazon', '', 'No', '',
-            'Reverb', 'GG', 'COST6', 'COST6',
-            'A41000002', 'COST6', '', 'Add',
-        ])
-        writer.writerow([
-            'Amazon', '', 'Yes', '',
-            'Reverb', 'GG', 'COST8-Pink', 'COST8-Grey',
-            'A41000003', 'COST8-Grey', '', 'Delete',
-        ])
+        if is_walmart:
+            writer.writerow([
+                'Amazon', '', 'No', '',
+                'Walmart', 'AHJ', 'COST4', 'COST4',
+                '', 'COST4', 'https://example.com/product/123', 'Add',
+                '1', '2.50', '5.00',
+            ])
+            writer.writerow([
+                'Amazon', '', 'No', '',
+                'Walmart', 'AHJ', 'COST6', 'COST6',
+                'WM-12345', 'COST6', '', 'Update',
+                '2', '1.00', '3.75',
+            ])
+            writer.writerow([
+                'Amazon', '', 'No', '',
+                'Walmart', 'AHJ', 'COST8', 'COST8',
+                'WM-67890', 'COST8', '', 'Delete',
+                '', '', '',
+            ])
+        else:
+            writer.writerow([
+                'Amazon', '', 'Yes', '192339|Green',
+                'Reverb', 'GG', 'COST4', 'COST4',
+                'A41000001', 'COST4', 'https://example.com/product/123', 'Add',
+            ])
+            writer.writerow([
+                'Amazon', '', 'No', '',
+                'Reverb', 'GG', 'COST6', 'COST6',
+                'A41000002', 'COST6', '', 'Add',
+            ])
+            writer.writerow([
+                'Amazon', '', 'Yes', '',
+                'Reverb', 'GG', 'COST8-Pink', 'COST8-Grey',
+                'A41000003', 'COST8-Grey', '', 'Delete',
+            ])
         return response
