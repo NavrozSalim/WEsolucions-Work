@@ -93,11 +93,16 @@ class HebParser:
             r'"value"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
             r'"price"\s*:\s*"?\$?(\d+(?:\.\d{2})?)',
             r'"amount"\s*:\s*"?(\d+(?:\.\d{2})?)',
+            r'"[A-Za-z_]*price[A-Za-z_]*"\s*:\s*"?\$?(\d{1,4}(?:\.\d{1,3})?)',
+            r'"integer"\s*:\s*(\d{1,4})\s*,\s*"fractional"\s*:\s*"(\d{1,3})"',
             r'\$(\d{1,4}(?:\.\d{1,3})?)',
         ):
             m = re.search(pat, normalized_html, re.IGNORECASE)
             if m:
-                p = parse_price_text(m.group(1))
+                if len(m.groups()) == 2:
+                    p = parse_price_text(f"{m.group(1)}.{m.group(2)}")
+                else:
+                    p = parse_price_text(m.group(1))
                 if p is not None:
                     return p
 
@@ -113,6 +118,18 @@ class HebParser:
                     return round(float(m.group(1)) / 100.0, 2)
                 except Exception:
                     continue
+
+        # Last resort: visible "each"/"ea" price patterns in text.
+        text = soup.get_text(" ", strip=True) or ""
+        for pat in (
+            r'(\d{1,4}(?:\.\d{1,3})?)\s*(?:/|per)?\s*(?:ea|each)\b',
+            r'(?:now|price|our price)\s*\$?\s*(\d{1,4}(?:\.\d{1,3})?)',
+        ):
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                p = parse_price_text(m.group(1))
+                if p is not None:
+                    return p
         return None
 
     @classmethod
@@ -217,6 +234,24 @@ def _fetch_html(driver, url: str) -> str:
     return driver.page_source or ""
 
 
+def _fetch_runtime_json(driver) -> str:
+    """Fetch runtime app data that may not exist in static HTML."""
+    payloads = []
+    scripts = (
+        "return window.__NEXT_DATA__ || null;",
+        "return window.__APOLLO_STATE__ || null;",
+        "return window.__INITIAL_STATE__ || null;",
+    )
+    for script in scripts:
+        try:
+            obj = driver.execute_script(script)
+            if obj:
+                payloads.append(json.dumps(obj, ensure_ascii=False))
+        except Exception:
+            continue
+    return "\n".join(payloads)
+
+
 def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
     if session is None:
         session = {}
@@ -233,6 +268,9 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
             if attempt:
                 random_delay(0.5, 1.2)
             html = _fetch_html(driver, vendor_url)
+            runtime_json = _fetch_runtime_json(driver)
+            if runtime_json:
+                html = f"{html}\n<!--runtime-json-->\n{runtime_json}"
             blocked, reason = detect_block(html)
             if blocked:
                 last = ScrapeResult.fail(f"blocked_{reason}", f"Blocked: {reason}", html, "heb", vendor_url)
