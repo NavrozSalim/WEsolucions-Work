@@ -45,6 +45,110 @@ _NEXTDATA_TITLE_PATHS = [
 ]
 
 
+def _next_data_from_soup(soup: BeautifulSoup) -> dict:
+    """Parse embedded Next.js payload when window.__NEXT_DATA__ was not available yet."""
+    for sel in ("script#__NEXT_DATA__", "script[id='__NEXT_DATA__']"):
+        el = soup.select_one(sel)
+        if not el:
+            continue
+        raw = (el.string or el.get_text() or "").strip()
+        if not raw:
+            continue
+        try:
+            return json.loads(raw)
+        except Exception:
+            continue
+    return {}
+
+
+def _merge_next_data(primary: Optional[dict], soup: BeautifulSoup) -> dict:
+    """Prefer driver-injected __NEXT_DATA__, fall back to HTML script tag."""
+    if primary and isinstance(primary, dict) and primary.get("props"):
+        return primary
+    from_html = _next_data_from_soup(soup)
+    if from_html:
+        return from_html
+    return primary if isinstance(primary, dict) else {}
+
+
+def _deep_extract_price_from_obj(obj, depth: int = 0, max_depth: int = 28) -> Optional[float]:
+    """
+    Walk JSON trees for HEB PDP shapes that change between releases.
+    Prefer cent-based integers, then nested price.value, then numeric/string prices.
+    """
+    if depth > max_depth or obj is None:
+        return None
+
+    if isinstance(obj, dict):
+        for cents_key in (
+            "priceInCents",
+            "finalPriceInCents",
+            "salePriceInCents",
+            "listPriceInCents",
+            "nowPriceInCents",
+            "itemPriceInCents",
+        ):
+            if cents_key in obj:
+                v = obj[cents_key]
+                if isinstance(v, (int, float)) and 1 <= v < 10_000_000:
+                    return round(float(v) / 100.0, 2)
+        for key in ("price", "finalPrice", "salePrice", "listPrice", "lowPrice", "displayPrice", "nowPrice"):
+            if key not in obj:
+                continue
+            v = obj[key]
+            if isinstance(v, dict):
+                for subk in ("value", "amount", "display", "formatted"):
+                    if subk in v:
+                        p = parse_price_text(str(v[subk]))
+                        if p is not None:
+                            return p
+                p = _deep_extract_price_from_obj(v, depth + 1, max_depth)
+                if p is not None:
+                    return p
+            elif isinstance(v, (int, float, str)):
+                p = parse_price_text(str(v))
+                if p is not None:
+                    return p
+        for v in obj.values():
+            p = _deep_extract_price_from_obj(v, depth + 1, max_depth)
+            if p is not None:
+                return p
+
+    elif isinstance(obj, list):
+        for item in obj:
+            p = _deep_extract_price_from_obj(item, depth + 1, max_depth)
+            if p is not None:
+                return p
+
+    return None
+
+
+def _deep_extract_title_from_obj(obj, depth: int = 0, max_depth: int = 22) -> Optional[str]:
+    if depth > max_depth or obj is None:
+        return None
+    if isinstance(obj, dict):
+        for key in ("name", "title", "productName", "displayName"):
+            if key in obj and isinstance(obj[key], str):
+                t = obj[key].strip()
+                if len(t) > 3 and len(t) < 600:
+                    return t[:500]
+        desc = obj.get("description")
+        if isinstance(desc, str):
+            t = desc.strip()
+            if 10 < len(t) < 200:
+                return t[:500]
+        for v in obj.values():
+            t = _deep_extract_title_from_obj(v, depth + 1, max_depth)
+            if t:
+                return t
+    elif isinstance(obj, list):
+        for item in obj:
+            t = _deep_extract_title_from_obj(item, depth + 1, max_depth)
+            if t:
+                return t
+    return None
+
+
 class HebParser:
     TITLE_SELECTORS = (
         "h1[data-testid*='title']",
@@ -59,11 +163,14 @@ class HebParser:
         "[data-qe-id*='price']",
         "[data-testid='product-price']",
         "[data-testid*='price']",
+        "[data-component*='price' i]",
+        "[data-component*='Price']",
         "meta[itemprop='price']",
         "meta[property='product:price:amount']",
         "[itemprop='price']",
         "[aria-label*='price' i]",
         "span[class*='price' i]",
+        "p[class*='price' i]",
         ".price",
     )
     STOCK_HINTS_IN = ("in stock", "available", "add to cart", "add to bag")
@@ -93,6 +200,13 @@ class HebParser:
                         return val[:500]
                 except (KeyError, TypeError):
                     continue
+            props = next_data.get("props") if isinstance(next_data, dict) else None
+            if isinstance(props, dict):
+                page_props = props.get("pageProps")
+                if isinstance(page_props, dict):
+                    t_deep = _deep_extract_title_from_obj(page_props, max_depth=14)
+                    if t_deep:
+                        return t_deep[:500]
         t = cls._select_text(soup, cls.TITLE_SELECTORS)
         return t[:500] if t else None
 
@@ -110,6 +224,10 @@ class HebParser:
                             return p
                 except (KeyError, TypeError):
                     continue
+            p_deep = _deep_extract_price_from_obj(next_data)
+            if p_deep is not None:
+                logger.debug("Price from __NEXT_DATA__ deep walk: %s", p_deep)
+                return p_deep
 
         # 2. CSS selectors
         txt = cls._select_text(soup, cls.PRICE_SELECTORS)
@@ -138,6 +256,9 @@ class HebParser:
             r'"priceInCents"\s*:\s*(\d{1,6})',
             r'"finalPriceInCents"\s*:\s*(\d{1,6})',
             r'"salePriceInCents"\s*:\s*(\d{1,6})',
+            r'"listPriceInCents"\s*:\s*(\d{1,6})',
+            r'"nowPriceInCents"\s*:\s*(\d{1,6})',
+            r'"itemPriceInCents"\s*:\s*(\d{1,6})',
         ):
             m = re.search(cents_pat, normalized_html, re.IGNORECASE)
             if m:
@@ -151,6 +272,8 @@ class HebParser:
             r'"salePrice"\s*:\s*"?\$?(\d+(?:\.\d{1,3})?)',
             r'"regularPrice"\s*:\s*"?\$?(\d+(?:\.\d{1,3})?)',
             r'"listPrice"\s*:\s*"?\$?(\d+(?:\.\d{1,3})?)',
+            r'"displayPrice"\s*:\s*"?\$?(\d+(?:\.\d{1,3})?)',
+            r'"nowPrice"\s*:\s*"?\$?(\d+(?:\.\d{1,3})?)',
             r'"unitPrice"\s*:\s*"?\$?(\d+(?:\.\d{1,3})?)',
             r'"priceValue"\s*:\s*"?\$?(\d+(?:\.\d{1,3})?)',
             r'"integer"\s*:\s*(\d{1,4})\s*,\s*"fractional"\s*:\s*"(\d{1,3})"',
@@ -277,6 +400,7 @@ def _fetch_html(driver, url: str) -> str:
 
     waited = False
     for sel in (
+        "script#__NEXT_DATA__",
         "[data-qe-id*='price']",
         "[data-testid*='price']",
         "meta[itemprop='price']",
@@ -295,6 +419,8 @@ def _fetch_html(driver, url: str) -> str:
 
     if waited:
         time.sleep(0.8)
+    else:
+        time.sleep(1.2)
 
     return driver.page_source or ""
 
@@ -326,8 +452,12 @@ def _is_block(html: str) -> tuple[bool, str]:
     if blocked:
         return True, reason
     lower = html.lower()
-    if "select your store" in lower and "add to cart" not in lower:
-        return True, "store_gate"
+    if "select your store" in lower:
+        if not any(
+            x in lower
+            for x in ("add to cart", "add to bag", "add to trolley", "add to list")
+        ):
+            return True, "store_gate"
     return False, ""
 
 
@@ -364,8 +494,9 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
                 continue
 
             soup = BeautifulSoup(html, "lxml")
-            title = HebParser.extract_title(soup, next_data)
-            price = HebParser.extract_price(soup, html, next_data)
+            merged_nd = _merge_next_data(next_data, soup)
+            title = HebParser.extract_title(soup, merged_nd)
+            price = HebParser.extract_price(soup, html, merged_nd)
             stock = HebParser.extract_stock(soup, html)
 
             if price is None:
