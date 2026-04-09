@@ -3,6 +3,7 @@ from django.utils import timezone
 from decimal import Decimal
 import logging
 import math
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,16 @@ def _resolve_vendor_url(product, store):
         if region == 'AU':
             return f"https://www.ebay.com.au/itm/{sku}"
         return f"https://www.ebay.com/itm/{sku}"
+    if vcode == 'heb' or vcode.startswith('heb_'):
+        if sku.isdigit() and len(sku) >= 5:
+            return f"https://www.heb.com/product-detail/{sku}"
+        nums = re.findall(r'\d{5,8}', sku)
+        for n in nums:
+            if len(n) == 6:
+                return f"https://www.heb.com/product-detail/{n}"
+        if nums:
+            return f"https://www.heb.com/product-detail/{nums[0]}"
+        return None
     return None
 
 

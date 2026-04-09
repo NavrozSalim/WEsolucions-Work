@@ -47,6 +47,9 @@ class ScrapeResult:
         out = {"price": self.price, "stock": self.stock}
         if self.title:
             out["title"] = self.title
+        if not self.success and self.error_code:
+            out["error_code"] = self.error_code
+            out["error_message"] = (self.error_message or "")[:500]
         return out
 
     @classmethod

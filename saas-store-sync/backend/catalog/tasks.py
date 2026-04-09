@@ -384,6 +384,7 @@ def run_catalog_scrape(upload_id: str):
                 url[:120],
             )
 
+            result = {}
             try:
                 result = get_price_and_stock(url, store.region or '', session)
                 vendor_price = result.get('price')
@@ -442,6 +443,13 @@ def run_catalog_scrape(upload_id: str):
                 )
 
             if vendor_price is None and not use_demo_fallback:
+                logger.warning(
+                    "Catalog scrape no price sku=%s url=%s code=%s msg=%s",
+                    product.vendor_sku,
+                    url[:160],
+                    result.get("error_code") if isinstance(result, dict) else None,
+                    (result.get("error_message") or "")[:300] if isinstance(result, dict) else "",
+                )
                 pm.store_price = None
                 pm.store_stock = None
                 pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
@@ -614,6 +622,7 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
             inventory = _get_inventory_for_vendor(store, product.vendor_id)
 
             url = _resolve_vendor_url(product, store)
+            result = {}
             try:
                 if not url:
                     raise ValueError('Product has no vendor_url or resolvable SKU')
@@ -677,6 +686,13 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
                 )
 
             if vendor_price is None and not use_demo_fallback:
+                logger.warning(
+                    "Store-wide scrape no price sku=%s url=%s code=%s msg=%s",
+                    product.vendor_sku,
+                    (url or "")[:160],
+                    result.get("error_code") if isinstance(result, dict) else None,
+                    (result.get("error_message") or "")[:300] if isinstance(result, dict) else "",
+                )
                 pm.store_price = None
                 pm.store_stock = None
                 pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
@@ -690,7 +706,10 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
                     ]
                 )
                 failed += 1
-                error_summary = 'Scraper returned no price' if not error_summary else error_summary
+                err_hint = (
+                    result.get("error_code") if isinstance(result, dict) else None
+                ) or "no_price"
+                error_summary = err_hint if not error_summary else error_summary
                 continue
 
             if vendor_stock is None or vendor_stock <= 0:
