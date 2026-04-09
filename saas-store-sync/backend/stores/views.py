@@ -13,7 +13,11 @@ class StoreViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Store.objects.filter(user=self.request.user)
+        user = self.request.user
+        # Admin users need cross-account visibility in Store Settings.
+        if getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
+            return Store.objects.all()
+        return Store.objects.filter(user=user)
 
     def create(self, request, *args, **kwargs):
         """Override to catch errors and return JSON instead of 500."""
