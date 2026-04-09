@@ -42,7 +42,15 @@ _NEXTDATA_PRICE_PATHS = [
 
 _NEXTDATA_TITLE_PATHS = [
     lambda d: d["props"]["pageProps"]["pdpData"]["product"]["name"],
+    lambda d: d["props"]["pageProps"]["pdpData"]["product"]["title"],
     lambda d: d["props"]["pageProps"]["productData"]["name"],
+    lambda d: d["props"]["pageProps"]["productData"]["title"],
+    lambda d: d["props"]["pageProps"]["seo"]["title"],
+    lambda d: d["props"]["pageProps"]["seoTitle"],
+]
+
+# Brand-only strings are a poor product title; use only if nothing else matched.
+_NEXTDATA_TITLE_BRAND_FALLBACK = [
     lambda d: d["props"]["pageProps"]["pdpData"]["product"]["brand"]["name"],
 ]
 
@@ -151,13 +159,69 @@ def _deep_extract_title_from_obj(obj, depth: int = 0, max_depth: int = 22) -> Op
     return None
 
 
+def _normalize_document_title(raw: str) -> Optional[str]:
+    """Use <title> when JSON/DOM miss (strip site suffix like \" | HEB\")."""
+    t = (raw or "").strip()
+    if len(t) < 4:
+        return None
+    low = t.lower()
+    if low in ("heb", "heb.com", "error", "access denied", "page not found"):
+        return None
+    # First segment before pipe or em/en dash (common PDP pattern)
+    base = re.split(r"\s*[|\u2013\u2014]\s*", t, maxsplit=1)[0].strip()
+    if len(base) < 4:
+        return None
+    blo = base.lower()
+    if blo in ("heb", "shop", "products"):
+        return None
+    return base[:500]
+
+
+def _title_from_json_ld(soup: BeautifulSoup) -> Optional[str]:
+    for script in soup.select("script[type='application/ld+json']"):
+        raw = (script.string or script.get_text() or "").strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+
+        def walk(node):
+            if isinstance(node, dict):
+                typ = node.get("@type")
+                types = typ if isinstance(typ, list) else ([typ] if typ else [])
+                if "Product" in types:
+                    for key in ("name", "title"):
+                        v = node.get(key)
+                        if isinstance(v, str) and len(v.strip()) > 3:
+                            return v.strip()[:500]
+                for v in node.values():
+                    got = walk(v)
+                    if got:
+                        return got
+            elif isinstance(node, list):
+                for it in node:
+                    got = walk(it)
+                    if got:
+                        return got
+            return None
+
+        found = walk(data)
+        if found:
+            return found
+    return None
+
+
 class HebParser:
     TITLE_SELECTORS = (
         "h1[data-testid*='title']",
         "h1.product-title",
         "[data-testid='product-title']",
         "[data-qe-id='product-name']",
+        "[data-qe-id*='product-name']",
         "h1",
+        "meta[name='twitter:title']",
         "meta[property='og:title']",
     )
     PRICE_SELECTORS = (
@@ -175,8 +239,24 @@ class HebParser:
         "p[class*='price' i]",
         ".price",
     )
-    STOCK_HINTS_IN = ("in stock", "available", "add to cart", "add to bag")
-    STOCK_HINTS_OUT = ("out of stock", "unavailable", "sold out", "not available")
+    # Strong purchase signals (substring match is OK).
+    STOCK_HINTS_IN = (
+        "add to cart",
+        "add to bag",
+        "add to list",
+        "in stock",
+        "available for pickup",
+        "available for delivery",
+    )
+    # Avoid bare "unavailable" / "not available" — they appear in nav/SEO copy.
+    STOCK_HINTS_OUT_STRONG = (
+        "out of stock",
+        "sold out",
+        "currently out of stock",
+        "unavailable for purchase",
+        "not available for delivery",
+        "not available for pickup",
+    )
 
     @classmethod
     def _select_text(cls, soup: BeautifulSoup, selectors) -> str:
@@ -193,13 +273,20 @@ class HebParser:
         return ""
 
     @classmethod
-    def extract_title(cls, soup: BeautifulSoup, next_data: dict = None) -> Optional[str]:
+    def extract_title(
+        cls,
+        soup: BeautifulSoup,
+        next_data: dict = None,
+        page_title: Optional[str] = None,
+    ) -> Optional[str]:
         if next_data:
             for path_fn in _NEXTDATA_TITLE_PATHS:
                 try:
                     val = path_fn(next_data)
                     if val and isinstance(val, str):
-                        return val[:500]
+                        t = val.strip()
+                        if len(t) > 3:
+                            return t[:500]
                 except (KeyError, TypeError):
                     continue
             props = next_data.get("props") if isinstance(next_data, dict) else None
@@ -210,7 +297,26 @@ class HebParser:
                     if t_deep:
                         return t_deep[:500]
         t = cls._select_text(soup, cls.TITLE_SELECTORS)
-        return t[:500] if t else None
+        if t and len(t.strip()) > 3:
+            return t[:500]
+        ld = _title_from_json_ld(soup)
+        if ld:
+            return ld
+        if page_title:
+            doc = _normalize_document_title(page_title)
+            if doc:
+                return doc
+        if next_data:
+            for path_fn in _NEXTDATA_TITLE_BRAND_FALLBACK:
+                try:
+                    val = path_fn(next_data)
+                    if val and isinstance(val, str):
+                        t = val.strip()
+                        if len(t) > 3:
+                            return t[:500]
+                except (KeyError, TypeError):
+                    continue
+        return None
 
     @classmethod
     def extract_price(cls, soup: BeautifulSoup, html: str, next_data: dict = None) -> Optional[float]:
@@ -339,9 +445,13 @@ class HebParser:
         text = (soup.get_text(" ", strip=True) or "").lower()
         if not text:
             text = (html or "").lower()
-        if any(k in text for k in cls.STOCK_HINTS_OUT):
+        has_in = any(k in text for k in cls.STOCK_HINTS_IN)
+        has_out = any(k in text for k in cls.STOCK_HINTS_OUT_STRONG)
+        if has_in and not has_out:
+            return 3
+        if has_out and not has_in:
             return 0
-        if any(k in text for k in cls.STOCK_HINTS_IN):
+        if has_in and has_out:
             return 3
         return 3
 
@@ -507,6 +617,12 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
                 last = ScrapeResult.fail("fetch_error", str(exc), "", "heb", vendor_url)
                 continue
 
+            page_title = ""
+            try:
+                page_title = (driver.title or "").strip()
+            except Exception:
+                pass
+
             runtime_json, next_data = _fetch_runtime_json(driver)
             if runtime_json:
                 html = f"{html}\n<!--runtime-json-->\n{runtime_json}"
@@ -519,7 +635,7 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
 
             soup = BeautifulSoup(html, "lxml")
             merged_nd = _merge_next_data(next_data, soup)
-            title = HebParser.extract_title(soup, merged_nd)
+            title = HebParser.extract_title(soup, merged_nd, page_title=page_title)
             price = HebParser.extract_price(soup, html, merged_nd)
             stock = HebParser.extract_stock(soup, html)
 

@@ -18,6 +18,43 @@ from scrapers import get_price_and_stock, close_amazon_session
 from catalog.vendor_price_fallback import get_last_known_vendor_price_stock, resolve_vendor_price_for_listing
 
 
+def _heb_product_id_from_sku(sku: str):
+    """
+    Pick the HEB PDP numeric id from a composite SKU (e.g. AHJH-150275-0311-PK3).
+
+    Prefer 7-digit ids (common on HEB), then 6 / 8 / 5. When multiple segments qualify,
+    prefer the left-most hyphen segment (vendor id slot) over later numeric runs.
+    """
+    sku = (sku or "").strip().replace("_", "-")
+    if not sku:
+        return None
+    if sku.isdigit():
+        ln = len(sku)
+        if 5 <= ln <= 12:
+            return sku
+        return None
+
+    candidates = []
+    for idx, part in enumerate(re.split(r"[-/]+", sku)):
+        if part.isdigit() and 5 <= len(part) <= 8:
+            candidates.append((idx, part))
+
+    if not candidates:
+        pos = 0
+        for m in re.finditer(r"\d{5,8}", sku):
+            candidates.append((1000 + pos, m.group(0)))
+            pos += 1
+
+    if not candidates:
+        return None
+
+    def tier(length: int) -> int:
+        return {7: 4, 6: 3, 8: 2, 5: 1}.get(length, 0)
+
+    candidates.sort(key=lambda it: (-tier(len(it[1])), it[0]))
+    return candidates[0][1]
+
+
 def _resolve_vendor_url(product, store):
     """Build a scrapable URL for a product, falling back to SKU-based construction."""
     if product.vendor_url:
@@ -36,14 +73,9 @@ def _resolve_vendor_url(product, store):
             return f"https://www.ebay.com.au/itm/{sku}"
         return f"https://www.ebay.com/itm/{sku}"
     if vcode == 'heb' or vcode.startswith('heb_'):
-        if sku.isdigit() and len(sku) >= 5:
-            return f"https://www.heb.com/product-detail/{sku}"
-        nums = re.findall(r'\d{5,8}', sku)
-        for n in nums:
-            if len(n) == 6:
-                return f"https://www.heb.com/product-detail/{n}"
-        if nums:
-            return f"https://www.heb.com/product-detail/{nums[0]}"
+        pid = _heb_product_id_from_sku(sku)
+        if pid:
+            return f"https://www.heb.com/product-detail/{pid}"
         return None
     return None
 
