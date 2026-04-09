@@ -14,7 +14,7 @@ curl_cffi>=0.7
 # Scrapers — Amazon uses Selenium, eBay uses curl_cffi (browser TLS) + BS4
 # Optional: pip install pillow && pip install amazoncaptcha --no-deps
 selenium>=4.15
-undetected-chromedriver>=3.5
+selenium-stealth>=1.0.6
 webdriver-manager>=4.0
 beautifulsoup4>=4.12
 lxml>=5.0

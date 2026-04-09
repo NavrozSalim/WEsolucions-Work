@@ -9,7 +9,9 @@ Goals:
 """
 import logging
 import json
+import os
 import re
+import sys
 import time
 from typing import Optional
 
@@ -347,24 +349,46 @@ class HebParser:
 class HebDriver:
     @staticmethod
     def create():
-        import os
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium_stealth import stealth
 
-        import undetected_chromedriver as uc
-
-        opts = uc.ChromeOptions()
+        opts = Options()
         opts.add_argument("--headless=new")
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--window-size=1366,900")
         opts.add_argument("--disable-notifications")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+        opts.add_experimental_option("useAutomationExtension", False)
         opts.add_argument(f"--user-agent={_USER_AGENT}")
 
         chrome_bin = os.environ.get("CHROME_BIN")
         if chrome_bin:
-            driver = uc.Chrome(options=opts, use_subprocess=True, browser_executable_path=chrome_bin)
-        else:
-            driver = uc.Chrome(options=opts, use_subprocess=True)
+            opts.binary_location = chrome_bin
+
+        driver = webdriver.Chrome(options=opts)
         driver.set_page_load_timeout(PAGE_TIMEOUT)
+
+        if sys.platform.startswith("win"):
+            plat = "Win32"
+            webgl_vendor = "Intel Inc."
+            renderer = "Intel Iris OpenGL Engine"
+        else:
+            plat = "Linux x86_64"
+            webgl_vendor = "Google Inc. (Google)"
+            renderer = "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)))"
+
+        stealth(
+            driver,
+            languages=["en-US", "en"],
+            vendor="Google Inc.",
+            platform=plat,
+            webgl_vendor=webgl_vendor,
+            renderer=renderer,
+            fix_hairline=True,
+        )
         return driver
 
     @staticmethod
