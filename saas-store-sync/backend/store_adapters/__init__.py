@@ -7,6 +7,7 @@ from .base import BaseStoreAdapter
 from .reverb_adapter import ReverbAdapter
 from .etsy_adapter import EtsyAdapter
 from .walmart_adapter import WalmartAdapter
+from .sears_adapter import SearsAdapter
 
 _REGISTRY = {
     'Reverb': ReverbAdapter,
@@ -14,7 +15,7 @@ _REGISTRY = {
     'Walmart': WalmartAdapter,
     'Kogan': ReverbAdapter,   # placeholder until KoganAdapter exists
     'MyDeal': ReverbAdapter,
-    'Sears': ReverbAdapter,
+    'Sears': SearsAdapter,
 }
 
 

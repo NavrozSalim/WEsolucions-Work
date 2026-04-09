@@ -499,7 +499,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                         />
                                     </div>
                                     <div className="sm:col-span-2">
-                                        <Input label="API Key" type="password" placeholder="Enter marketplace API key" value={form.api_token} onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))} required />
+                                        <Input label="API Key / Credentials JSON" type="password" placeholder="Enter marketplace API key or JSON credentials" value={form.api_token} onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))} required />
                                     </div>
                                     <Select
                                         label="Region"
@@ -515,7 +515,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                         options={[{ value: 'USA', label: 'USA' }, { value: 'AU', label: 'Australia' }]}
                                     />
                                 </div>
-                                <p className="text-xs text-slate-500 dark:text-slate-400">API key will be encrypted and stored securely.</p>
+                                <p className="text-xs text-slate-500 dark:text-slate-400">Credentials are encrypted at rest. For marketplaces like Walmart/Sears, paste JSON credentials.</p>
 
                                 {/* Schedule section */}
                                 <div className="mt-6 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-5 space-y-4">

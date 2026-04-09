@@ -405,8 +405,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                     <Input label="Store Name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} required />
                                 </div>
                                 <div className="sm:col-span-2">
-                                    <Input label="API Token" type="password" placeholder="Leave blank to keep current token" value={form.api_token} onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))} />
-                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Leave empty to keep the existing token unchanged.</p>
+                                    <Input label="API Token / Credentials JSON" type="password" placeholder="Leave blank to keep current token" value={form.api_token} onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))} />
+                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Leave empty to keep the existing token unchanged. Sears/Walmart can use JSON credentials.</p>
                                 </div>
                             </div>
 

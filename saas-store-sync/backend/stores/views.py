@@ -47,6 +47,7 @@ class StoreViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         store = serializer.save()
+        self._auto_validate_store_connection(store)
         try:
             log_action(self.request.user, 'store_created', 'store', store.id, {'name': store.name}, self.request)
         except Exception:
@@ -54,12 +55,37 @@ class StoreViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         token_updated = 'api_token' in serializer.validated_data
+        marketplace_updated = 'marketplace' in serializer.validated_data
         store = serializer.save()
+        if token_updated or marketplace_updated:
+            self._auto_validate_store_connection(store)
         if token_updated:
             try:
                 log_action(self.request.user, 'store_token_updated', 'store', store.id, {'name': store.name}, self.request)
             except Exception:
                 pass
+
+    @staticmethod
+    def _auto_validate_store_connection(store):
+        """
+        Best-effort connection validation after create/token update so users do not
+        need a separate manual "Connect" click for supported marketplaces.
+        """
+        from django.utils import timezone as tz
+        from store_adapters import get_adapter
+
+        try:
+            adapter = get_adapter(store)
+            valid = getattr(
+                adapter,
+                'validate_connection',
+                lambda: bool(store.api_token and len(str(store.api_token or '')) > 10),
+            )()
+            store.connection_status = 'connected' if valid else 'error'
+        except Exception:
+            store.connection_status = 'error'
+        store.last_validated_at = tz.now()
+        store.save(update_fields=['connection_status', 'last_validated_at'])
 
     def perform_destroy(self, instance):
         from django.db import transaction
