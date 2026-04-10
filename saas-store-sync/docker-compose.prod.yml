@@ -86,6 +86,13 @@ services:
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
       - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
       - CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE=${CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE:-}
+      # HEB Selenium scraper (optional; set in .env.prod)
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_HOST=${PROXY_HOST:-}
+      - PROXY_PORT=${PROXY_PORT:-}
+      - PROXY_USER=${PROXY_USER:-}
+      - PROXY_PASS=${PROXY_PASS:-}
+      - PROXY_SCHEME=${PROXY_SCHEME:-http}
     depends_on:
       db:
         condition: service_healthy
@@ -152,6 +159,13 @@ services:
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       # eBay: Selenium-first on VPS; set EBAY_HTTP_FIRST=1 only on clean/residential IPs
       - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-0}
+      # HEB Selenium scraper (optional; set in .env.prod)
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_HOST=${PROXY_HOST:-}
+      - PROXY_PORT=${PROXY_PORT:-}
+      - PROXY_USER=${PROXY_USER:-}
+      - PROXY_PASS=${PROXY_PASS:-}
+      - PROXY_SCHEME=${PROXY_SCHEME:-http}
     depends_on:
       db:
         condition: service_healthy

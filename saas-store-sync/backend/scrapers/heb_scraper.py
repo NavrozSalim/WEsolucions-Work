@@ -11,9 +11,13 @@ import logging
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
+import zipfile
 from typing import Optional
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
@@ -211,6 +215,117 @@ def _title_from_json_ld(soup: BeautifulSoup) -> Optional[str]:
         if found:
             return found
     return None
+
+
+def _js_string(value: str) -> str:
+    return json.dumps(value)
+
+
+def _parse_proxy_config():
+    """
+    Supports either:
+    - PROXY_URL=http://user:pass@host:port
+    or
+    - PROXY_HOST / PROXY_PORT / PROXY_USER / PROXY_PASS / PROXY_SCHEME
+    """
+    proxy_url = os.environ.get("PROXY_URL", "").strip()
+    if proxy_url:
+        parsed = urlparse(proxy_url)
+        if not parsed.hostname or not parsed.port:
+            raise ValueError("Invalid PROXY_URL. Expected format: http://user:pass@host:port")
+        return {
+            "scheme": parsed.scheme or "http",
+            "host": parsed.hostname,
+            "port": int(parsed.port),
+            "username": parsed.username or "",
+            "password": parsed.password or "",
+        }
+
+    host = os.environ.get("PROXY_HOST", "").strip()
+    port = os.environ.get("PROXY_PORT", "").strip()
+    username = os.environ.get("PROXY_USER", "").strip()
+    password = os.environ.get("PROXY_PASS", "").strip()
+    scheme = os.environ.get("PROXY_SCHEME", "http").strip() or "http"
+
+    if not host or not port:
+        return None
+
+    return {
+        "scheme": scheme,
+        "host": host,
+        "port": int(port),
+        "username": username,
+        "password": password,
+    }
+
+
+def _create_proxy_extension(proxy_conf: dict) -> str:
+    """
+    Creates a temporary Chrome extension zip that:
+    - sets the proxy
+    - injects auth credentials when Chrome asks for them
+    """
+    manifest = {
+        "version": "1.0.0",
+        "manifest_version": 3,
+        "name": "Chrome Proxy Auth Extension",
+        "permissions": [
+            "proxy",
+            "storage",
+            "tabs",
+            "webRequest",
+            "webRequestAuthProvider",
+        ],
+        "host_permissions": ["<all_urls>"],
+        "background": {
+            "service_worker": "background.js"
+        },
+        "minimum_chrome_version": "110",
+    }
+
+    background_js = f"""
+const config = {{
+  mode: "fixed_servers",
+  rules: {{
+    singleProxy: {{
+      scheme: {_js_string(proxy_conf["scheme"])},
+      host: {_js_string(proxy_conf["host"])},
+      port: {int(proxy_conf["port"])}
+    }},
+    bypassList: ["localhost", "127.0.0.1"]
+  }}
+}};
+
+chrome.runtime.onInstalled.addListener(() => {{
+  chrome.proxy.settings.set({{ value: config, scope: "regular" }}, () => {{}});
+}});
+
+chrome.runtime.onStartup.addListener(() => {{
+  chrome.proxy.settings.set({{ value: config, scope: "regular" }}, () => {{}});
+}});
+
+chrome.webRequest.onAuthRequired.addListener(
+  (details, callback) => {{
+    callback({{
+      authCredentials: {{
+        username: {_js_string(proxy_conf["username"])},
+        password: {_js_string(proxy_conf["password"])}
+      }}
+    }});
+  }},
+  {{ urls: ["<all_urls>"] }},
+  ["asyncBlocking"]
+);
+""".strip()
+
+    temp_dir = tempfile.mkdtemp(prefix="chrome_proxy_ext_")
+    ext_path = os.path.join(temp_dir, "proxy_auth_extension.zip")
+
+    with zipfile.ZipFile(ext_path, "w", zipfile.ZIP_DEFLATED) as zp:
+        zp.writestr("manifest.json", json.dumps(manifest, indent=2))
+        zp.writestr("background.js", background_js)
+
+    return ext_path
 
 
 class HebParser:
@@ -478,8 +593,37 @@ class HebDriver:
         if chrome_bin:
             opts.binary_location = chrome_bin
 
+        proxy_ext_path = None
+        try:
+            proxy_conf = _parse_proxy_config()
+        except ValueError as exc:
+            logger.error("HEB proxy config: %s", exc)
+            raise
+
+        if proxy_conf:
+            logger.info(
+                "Using proxy %s://%s:%s",
+                proxy_conf["scheme"],
+                proxy_conf["host"],
+                proxy_conf["port"],
+            )
+            if proxy_conf["username"] and proxy_conf["password"]:
+                proxy_ext_path = _create_proxy_extension(proxy_conf)
+                opts.add_extension(proxy_ext_path)
+            else:
+                opts.add_argument(
+                    f'--proxy-server={proxy_conf["scheme"]}://{proxy_conf["host"]}:{proxy_conf["port"]}'
+                )
+
         driver = webdriver.Chrome(options=opts)
         driver.set_page_load_timeout(PAGE_TIMEOUT)
+
+        if proxy_ext_path:
+            try:
+                driver._heb_proxy_ext_path = proxy_ext_path
+                driver._heb_proxy_ext_dir = os.path.dirname(proxy_ext_path)
+            except Exception:
+                pass
 
         if sys.platform.startswith("win"):
             plat = "Win32"
@@ -505,10 +649,16 @@ class HebDriver:
     def quit_safe(driver):
         if not driver:
             return
+        ext_dir = getattr(driver, "_heb_proxy_ext_dir", None)
         try:
             driver.quit()
         except Exception:
             pass
+        if ext_dir and os.path.isdir(ext_dir):
+            try:
+                shutil.rmtree(ext_dir, ignore_errors=True)
+            except Exception:
+                pass
 
 
 def _fetch_html(driver, url: str) -> str:
