@@ -28,8 +28,8 @@ logger = logging.getLogger("scrapers.heb")
 RETRY_LIMIT = 3
 PAGE_TIMEOUT = 25
 PRICE_WAIT_TIMEOUT = 10
-# Wait for __NEXT_DATA__ PDP after Incapsula / hydration (avoids premature no_price).
 PDP_READY_TIMEOUT = 24
+DEBUG_DUMP_DIR = os.environ.get("HEB_DEBUG_DIR", "/tmp/heb_debug")
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -55,7 +55,6 @@ _NEXTDATA_TITLE_PATHS = [
     lambda d: d["props"]["pageProps"]["seoTitle"],
 ]
 
-# Brand-only strings are a poor product title; use only if nothing else matched.
 _NEXTDATA_TITLE_BRAND_FALLBACK = [
     lambda d: d["props"]["pageProps"]["pdpData"]["product"]["brand"]["name"],
 ]
@@ -88,10 +87,6 @@ def _merge_next_data(primary: Optional[dict], soup: BeautifulSoup) -> dict:
 
 
 def _deep_extract_price_from_obj(obj, depth: int = 0, max_depth: int = 28) -> Optional[float]:
-    """
-    Walk JSON trees for HEB PDP shapes that change between releases.
-    Prefer cent-based integers, then nested price.value, then numeric/string prices.
-    """
     if depth > max_depth or obj is None:
         return None
 
@@ -108,6 +103,7 @@ def _deep_extract_price_from_obj(obj, depth: int = 0, max_depth: int = 28) -> Op
                 v = obj[cents_key]
                 if isinstance(v, (int, float)) and 1 <= v < 10_000_000:
                     return round(float(v) / 100.0, 2)
+
         for key in ("price", "finalPrice", "salePrice", "listPrice", "lowPrice", "displayPrice", "nowPrice"):
             if key not in obj:
                 continue
@@ -125,6 +121,7 @@ def _deep_extract_price_from_obj(obj, depth: int = 0, max_depth: int = 28) -> Op
                 p = parse_price_text(str(v))
                 if p is not None:
                     return p
+
         for v in obj.values():
             p = _deep_extract_price_from_obj(v, depth + 1, max_depth)
             if p is not None:
@@ -146,7 +143,7 @@ def _deep_extract_title_from_obj(obj, depth: int = 0, max_depth: int = 22) -> Op
         for key in ("name", "title", "productName", "displayName"):
             if key in obj and isinstance(obj[key], str):
                 t = obj[key].strip()
-                if len(t) > 3 and len(t) < 600:
+                if 3 < len(t) < 600:
                     return t[:500]
         desc = obj.get("description")
         if isinstance(desc, str):
@@ -166,14 +163,13 @@ def _deep_extract_title_from_obj(obj, depth: int = 0, max_depth: int = 22) -> Op
 
 
 def _normalize_document_title(raw: str) -> Optional[str]:
-    """Use <title> when JSON/DOM miss (strip site suffix like \" | HEB\")."""
     t = (raw or "").strip()
     if len(t) < 4:
         return None
     low = t.lower()
     if low in ("heb", "heb.com", "error", "access denied", "page not found"):
         return None
-    # First segment before pipe or em/en dash (common PDP pattern)
+
     base = re.split(r"\s*[|\u2013\u2014]\s*", t, maxsplit=1)[0].strip()
     if len(base) < 4:
         return None
@@ -224,12 +220,6 @@ def _js_string(value: str) -> str:
 
 
 def _parse_proxy_config():
-    """
-    Supports either:
-    - PROXY_URL=http://user:pass@host:port
-    or
-    - PROXY_HOST / PROXY_PORT / PROXY_USER / PROXY_PASS / PROXY_SCHEME
-    """
     proxy_url = os.environ.get("PROXY_URL", "").strip()
     if proxy_url:
         parsed = urlparse(proxy_url)
@@ -262,11 +252,6 @@ def _parse_proxy_config():
 
 
 def _create_proxy_extension(proxy_conf: dict) -> str:
-    """
-    Creates a temporary Chrome extension zip that:
-    - sets the proxy
-    - injects auth credentials when Chrome asks for them
-    """
     manifest = {
         "version": "1.0.0",
         "manifest_version": 3,
@@ -298,13 +283,12 @@ const config = {{
   }}
 }};
 
-chrome.runtime.onInstalled.addListener(() => {{
+function applyProxy() {{
   chrome.proxy.settings.set({{ value: config, scope: "regular" }}, () => {{}});
-}});
+}}
 
-chrome.runtime.onStartup.addListener(() => {{
-  chrome.proxy.settings.set({{ value: config, scope: "regular" }}, () => {{}});
-}});
+chrome.runtime.onInstalled.addListener(applyProxy);
+chrome.runtime.onStartup.addListener(applyProxy);
 
 chrome.webRequest.onAuthRequired.addListener(
   (details, callback) => {{
@@ -328,6 +312,42 @@ chrome.webRequest.onAuthRequired.addListener(
         zp.writestr("background.js", background_js)
 
     return ext_path
+
+
+def _safe_quit_and_recreate_driver(driver, session: dict):
+    try:
+        HebDriver.quit_safe(driver)
+    except Exception:
+        pass
+    new_driver = HebDriver.create()
+    session["heb_driver"] = new_driver
+    return new_driver
+
+
+def _dump_debug_files(vendor_url: str, current_url: str, page_title: str, title, next_data, html: str, attempt: int):
+    try:
+        os.makedirs(DEBUG_DUMP_DIR, exist_ok=True)
+        ts = int(time.time() * 1000)
+        base = os.path.join(DEBUG_DUMP_DIR, f"heb_fail_{ts}_attempt{attempt}")
+
+        with open(f"{base}.html", "w", encoding="utf-8") as f:
+            f.write(html or "")
+
+        meta = {
+            "vendor_url": vendor_url,
+            "current_url": current_url,
+            "page_title": page_title,
+            "title_extracted": title,
+            "has_next_data": bool(next_data),
+            "next_data_keys": list(next_data.keys()) if isinstance(next_data, dict) else [],
+            "html_len": len(html or ""),
+        }
+        with open(f"{base}.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+
+        logger.warning("HEB debug dumped: %s(.html/.json)", base)
+    except Exception as exc:
+        logger.warning("HEB debug dump failed: %s", exc)
 
 
 class HebParser:
@@ -356,7 +376,6 @@ class HebParser:
         "p[class*='price' i]",
         ".price",
     )
-    # Strong purchase signals (substring match is OK).
     STOCK_HINTS_IN = (
         "add to cart",
         "add to bag",
@@ -365,7 +384,6 @@ class HebParser:
         "available for pickup",
         "available for delivery",
     )
-    # Avoid bare "unavailable" / "not available" — they appear in nav/SEO copy.
     STOCK_HINTS_OUT_STRONG = (
         "out of stock",
         "sold out",
@@ -413,16 +431,20 @@ class HebParser:
                     t_deep = _deep_extract_title_from_obj(page_props, max_depth=14)
                     if t_deep:
                         return t_deep[:500]
+
         t = cls._select_text(soup, cls.TITLE_SELECTORS)
         if t and len(t.strip()) > 3:
             return t[:500]
+
         ld = _title_from_json_ld(soup)
         if ld:
             return ld
+
         if page_title:
             doc = _normalize_document_title(page_title)
             if doc:
                 return doc
+
         if next_data:
             for path_fn in _NEXTDATA_TITLE_BRAND_FALLBACK:
                 try:
@@ -437,7 +459,6 @@ class HebParser:
 
     @classmethod
     def extract_price(cls, soup: BeautifulSoup, html: str, next_data: dict = None) -> Optional[float]:
-        # 1. Next.js structured data (most reliable for HEB)
         if next_data:
             for path_fn in _NEXTDATA_PRICE_PATHS:
                 try:
@@ -449,18 +470,17 @@ class HebParser:
                             return p
                 except (KeyError, TypeError):
                     continue
+
             p_deep = _deep_extract_price_from_obj(next_data)
             if p_deep is not None:
                 logger.debug("Price from __NEXT_DATA__ deep walk: %s", p_deep)
                 return p_deep
 
-        # 2. CSS selectors
         txt = cls._select_text(soup, cls.PRICE_SELECTORS)
         p = parse_price_text(txt)
         if p is not None:
             return p
 
-        # 3. JSON-LD product schema
         for script in soup.select("script[type='application/ld+json']"):
             raw = (script.string or script.get_text() or "").strip()
             if not raw:
@@ -473,7 +493,6 @@ class HebParser:
             if p is not None:
                 return p
 
-        # 4. Regex across full HTML
         html = html or ""
         normalized_html = html.replace("\\u0024", "$").replace("&dollar;", "$")
 
@@ -515,7 +534,6 @@ class HebParser:
                 if p is not None:
                     return p
 
-        # 5. Visible text patterns
         text = soup.get_text(" ", strip=True) or ""
         for pat in (
             r'(\d{1,4}(?:\.\d{1,3})?)\s*(?:/|per)?\s*(?:ea|each)\b',
@@ -558,7 +576,6 @@ class HebParser:
 
     @classmethod
     def extract_stock(cls, soup: BeautifulSoup, html: str) -> int:
-        """Always returns an int — never None."""
         text = (soup.get_text(" ", strip=True) or "").lower()
         if not text:
             text = (html or "").lower()
@@ -622,7 +639,6 @@ class HebDriver:
 
         if proxy_ext_path:
             try:
-                driver._heb_proxy_ext_path = proxy_ext_path
                 driver._heb_proxy_ext_dir = os.path.dirname(proxy_ext_path)
             except Exception:
                 pass
@@ -664,7 +680,6 @@ class HebDriver:
 
 
 def _heb_next_data_has_product(driver) -> bool:
-    """True when window.__NEXT_DATA__ contains a PDP product payload (not Incapsula shell)."""
     try:
         return bool(
             driver.execute_script(
@@ -770,51 +785,83 @@ def _is_block(html: str) -> tuple[bool, str]:
     blocked, reason = detect_block(html)
     if blocked:
         return True, reason
+
     lower = html.lower()
-    # Imperva / Incapsula hard block or interstitial (not the normal _Incapsula_Resource script on real PDPs).
+
     for needle in (
         "incapsula incident id",
         "pardon our interruption",
         "request unsuccessful",
         "errors.edgesuite.net",
-        "access denied — if you think there has been a mistake",
+        "access denied",
+        "service unavailable",
+        "temporarily unavailable",
     ):
         if needle in lower:
             return True, "waf_challenge"
+
     if "select your store" in lower:
         if not any(
             x in lower
             for x in ("add to cart", "add to bag", "add to trolley", "add to list")
         ):
             return True, "store_gate"
+
+    if (
+        "__next_data__" in lower
+        and "product-detail" in lower
+        and not any(x in lower for x in (
+            "add to cart",
+            "add to bag",
+            "available for pickup",
+            "available for delivery",
+            'itemprop="price"',
+            "product:price:amount",
+            "priceincents",
+            '"price":',
+            '"lowprice":',
+        ))
+    ):
+        return True, "soft_empty_pdp"
+
     return False, ""
 
 
 def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
     if session is None:
         session = {}
+
     driver = session.get("heb_driver")
     created = False
+
     if driver is None:
         driver = HebDriver.create()
         session["heb_driver"] = driver
         created = True
 
     last = None
+
     try:
         for attempt in range(RETRY_LIMIT):
             if attempt:
                 random_delay(1.0, 2.5)
+
             try:
                 html = _fetch_html(driver, vendor_url)
             except Exception as exc:
                 logger.warning("HEB fetch error attempt %d: %s", attempt, exc)
                 last = ScrapeResult.fail("fetch_error", str(exc), "", "heb", vendor_url)
+                driver = _safe_quit_and_recreate_driver(driver, session)
                 continue
 
             page_title = ""
+            current_url = vendor_url
             try:
                 page_title = (driver.title or "").strip()
+            except Exception:
+                pass
+            try:
+                current_url = driver.current_url or vendor_url
             except Exception:
                 pass
 
@@ -824,8 +871,16 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
 
             blocked, reason = _is_block(html)
             if blocked:
-                logger.warning("HEB blocked (%s) attempt %d", reason, attempt)
-                last = ScrapeResult.fail(f"blocked_{reason}", f"Blocked: {reason}", html, "heb", vendor_url)
+                logger.warning("HEB blocked (%s) attempt %d url=%s", reason, attempt, current_url)
+                _dump_debug_files(vendor_url, current_url, page_title, None, next_data, html, attempt)
+                last = ScrapeResult.fail(
+                    f"blocked_{reason}",
+                    f"Blocked: {reason}",
+                    html,
+                    "heb",
+                    vendor_url,
+                )
+                driver = _safe_quit_and_recreate_driver(driver, session)
                 continue
 
             soup = BeautifulSoup(html, "lxml")
@@ -836,10 +891,18 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
 
             if price is None:
                 logger.warning(
-                    "HEB price not found attempt %d — title=%s url=%s",
-                    attempt, title, vendor_url,
+                    "HEB price not found attempt %d — title=%s page_title=%s current_url=%s url=%s next_data_present=%s html_len=%s",
+                    attempt,
+                    title,
+                    page_title,
+                    current_url,
+                    vendor_url,
+                    bool(next_data),
+                    len(html or ""),
                 )
+                _dump_debug_files(vendor_url, current_url, page_title, title, next_data, html, attempt)
                 last = ScrapeResult.fail("no_price", "Price not found on HEB page", html, "heb", vendor_url)
+                driver = _safe_quit_and_recreate_driver(driver, session)
                 continue
 
             logger.info("HEB ok price=%.2f stock=%d title=%s", price, stock, title)
@@ -848,6 +911,7 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
     except Exception as exc:
         logger.exception("HEB scrape exception: %s", exc)
         last = ScrapeResult.fail("exception", str(exc), "", "heb", vendor_url)
+
     finally:
         if created and session.get("heb_driver") is not driver:
             HebDriver.quit_safe(driver)
