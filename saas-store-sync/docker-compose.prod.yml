@@ -88,6 +88,8 @@ services:
       - CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE=${CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE:-}
       # HEB Selenium scraper (optional; set in .env.prod)
       - PROXY_URL=${PROXY_URL:-}
+      - PROXY_URLS=${PROXY_URLS:-}
+      - PROXY_ENDPOINTS=${PROXY_ENDPOINTS:-}
       - PROXY_HOST=${PROXY_HOST:-}
       - PROXY_PORT=${PROXY_PORT:-}
       - PROXY_USER=${PROXY_USER:-}
@@ -161,6 +163,8 @@ services:
       - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-0}
       # HEB Selenium scraper (optional; set in .env.prod)
       - PROXY_URL=${PROXY_URL:-}
+      - PROXY_URLS=${PROXY_URLS:-}
+      - PROXY_ENDPOINTS=${PROXY_ENDPOINTS:-}
       - PROXY_HOST=${PROXY_HOST:-}
       - PROXY_PORT=${PROXY_PORT:-}
       - PROXY_USER=${PROXY_USER:-}

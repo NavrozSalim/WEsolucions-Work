@@ -14,6 +14,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from typing import Optional
@@ -224,36 +225,136 @@ def _js_string(value: str) -> str:
     return json.dumps(value)
 
 
-def _parse_proxy_config():
-    proxy_url = os.environ.get("PROXY_URL", "").strip()
+def _split_proxy_env_list(raw: str) -> list[str]:
+    """Split comma/newline/semicolon-separated proxy entries from env."""
+    if not raw or not str(raw).strip():
+        return []
+    parts: list[str] = []
+    for line in raw.replace(";", "\n").split("\n"):
+        for chunk in line.split(","):
+            c = chunk.strip()
+            if c:
+                parts.append(c)
+    return parts
+
+
+def _parse_proxy_configs() -> list[dict]:
+    """
+    Build ordered proxy pool. Precedence:
+    1) PROXY_URLS — multiple full URLs (http://user:pass@host:port), comma or newline separated
+    2) PROXY_ENDPOINTS — host:port,host:port,... with shared PROXY_USER / PROXY_PASS / PROXY_SCHEME
+    3) PROXY_URL — single URL
+    4) PROXY_HOST + PROXY_PORT (+ optional PROXY_USER, PROXY_PASS, PROXY_SCHEME)
+    """
+    urls_raw = (os.environ.get("PROXY_URLS") or "").strip()
+    if urls_raw:
+        out: list[dict] = []
+        for item in _split_proxy_env_list(urls_raw):
+            parsed = urlparse(item)
+            if not parsed.hostname or not parsed.port:
+                raise ValueError(
+                    "Invalid PROXY_URLS entry. Each value must look like "
+                    "http://user:pass@host:port — got %r" % (item,)
+                )
+            out.append(
+                {
+                    "scheme": (parsed.scheme or "http").strip() or "http",
+                    "host": parsed.hostname,
+                    "port": int(parsed.port),
+                    "username": (parsed.username or "").strip(),
+                    "password": (parsed.password or "").strip(),
+                }
+            )
+        return out
+
+    eps_raw = (os.environ.get("PROXY_ENDPOINTS") or "").strip()
+    if eps_raw:
+        username = (os.environ.get("PROXY_USER") or "").strip()
+        password = (os.environ.get("PROXY_PASS") or "").strip()
+        scheme = (os.environ.get("PROXY_SCHEME") or "http").strip() or "http"
+        if not username or not password:
+            raise ValueError("PROXY_ENDPOINTS requires PROXY_USER and PROXY_PASS")
+        out_eps: list[dict] = []
+        for item in _split_proxy_env_list(eps_raw):
+            if ":" not in item:
+                raise ValueError(
+                    "Invalid PROXY_ENDPOINTS entry %r — expected host:port" % (item,)
+                )
+            host, _, port_s = item.rpartition(":")
+            host = host.strip()
+            port_s = port_s.strip()
+            if not host or not port_s.isdigit():
+                raise ValueError(
+                    "Invalid PROXY_ENDPOINTS entry %r — expected host:port" % (item,)
+                )
+            out_eps.append(
+                {
+                    "scheme": scheme,
+                    "host": host,
+                    "port": int(port_s),
+                    "username": username,
+                    "password": password,
+                }
+            )
+        return out_eps
+
+    proxy_url = (os.environ.get("PROXY_URL") or "").strip()
     if proxy_url:
         parsed = urlparse(proxy_url)
         if not parsed.hostname or not parsed.port:
             raise ValueError("Invalid PROXY_URL. Expected format: http://user:pass@host:port")
-        return {
-            "scheme": parsed.scheme or "http",
-            "host": parsed.hostname,
-            "port": int(parsed.port),
-            "username": parsed.username or "",
-            "password": parsed.password or "",
-        }
+        return [
+            {
+                "scheme": parsed.scheme or "http",
+                "host": parsed.hostname,
+                "port": int(parsed.port),
+                "username": parsed.username or "",
+                "password": parsed.password or "",
+            }
+        ]
 
-    host = os.environ.get("PROXY_HOST", "").strip()
-    port = os.environ.get("PROXY_PORT", "").strip()
-    username = os.environ.get("PROXY_USER", "").strip()
-    password = os.environ.get("PROXY_PASS", "").strip()
-    scheme = os.environ.get("PROXY_SCHEME", "http").strip() or "http"
+    host = (os.environ.get("PROXY_HOST") or "").strip()
+    port = (os.environ.get("PROXY_PORT") or "").strip()
+    username = (os.environ.get("PROXY_USER") or "").strip()
+    password = (os.environ.get("PROXY_PASS") or "").strip()
+    scheme = (os.environ.get("PROXY_SCHEME") or "http").strip() or "http"
 
     if not host or not port:
-        return None
+        return []
 
-    return {
-        "scheme": scheme,
-        "host": host,
-        "port": int(port),
-        "username": username,
-        "password": password,
-    }
+    return [
+        {
+            "scheme": scheme,
+            "host": host,
+            "port": int(port),
+            "username": username,
+            "password": password,
+        }
+    ]
+
+
+_proxy_pool_cache: Optional[list] = None
+_proxy_rr_lock = threading.Lock()
+_proxy_rr_index = 0
+
+
+def _proxy_pool() -> list:
+    global _proxy_pool_cache
+    if _proxy_pool_cache is None:
+        _proxy_pool_cache = _parse_proxy_configs()
+    return _proxy_pool_cache
+
+
+def _next_proxy_conf() -> Optional[dict]:
+    """Round-robin across the pool (each new Chrome session gets the next endpoint)."""
+    pool = _proxy_pool()
+    if not pool:
+        return None
+    global _proxy_rr_index
+    with _proxy_rr_lock:
+        conf = pool[_proxy_rr_index % len(pool)]
+        _proxy_rr_index += 1
+    return conf
 
 
 def _create_proxy_extension(proxy_conf: dict) -> str:
@@ -632,7 +733,7 @@ class HebParser:
 
 class HebDriver:
     @staticmethod
-    def create():
+    def create(proxy_conf: Optional[dict] = None):
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
         from selenium_stealth import stealth
@@ -654,18 +755,29 @@ class HebDriver:
 
         proxy_ext_path = None
         try:
-            proxy_conf = _parse_proxy_config()
+            if proxy_conf is None:
+                proxy_conf = _next_proxy_conf()
         except ValueError as exc:
             logger.error("HEB proxy config: %s", exc)
             raise
 
         if proxy_conf:
-            logger.info(
-                "Using proxy %s://%s:%s",
-                proxy_conf["scheme"],
-                proxy_conf["host"],
-                proxy_conf["port"],
-            )
+            pool = _proxy_pool()
+            if len(pool) > 1:
+                logger.info(
+                    "Using proxy %s://%s:%s (pool size %d)",
+                    proxy_conf["scheme"],
+                    proxy_conf["host"],
+                    proxy_conf["port"],
+                    len(pool),
+                )
+            else:
+                logger.info(
+                    "Using proxy %s://%s:%s",
+                    proxy_conf["scheme"],
+                    proxy_conf["host"],
+                    proxy_conf["port"],
+                )
             if proxy_conf["username"] and proxy_conf["password"]:
                 proxy_ext_path = _create_proxy_extension(proxy_conf)
                 opts.add_extension(proxy_ext_path)
