@@ -31,6 +31,11 @@ PRICE_WAIT_TIMEOUT = 10
 PDP_READY_TIMEOUT = 24
 DEBUG_DUMP_DIR = os.environ.get("HEB_DEBUG_DIR", "/tmp/heb_debug")
 
+# Junk/interstitial responses (~650 B) vs real PDPs; avoid 3× no_price retries on those.
+TINY_PDP_HTML_MAX_LEN = 2000
+# 0-based: at most attempts 0 and 1 (one retry) for tiny invalid PDPs.
+INVALID_PDP_LAST_ATTEMPT_INDEX = 1
+
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -324,16 +329,51 @@ def _safe_quit_and_recreate_driver(driver, session: dict):
     return new_driver
 
 
-def _dump_debug_files(vendor_url: str, current_url: str, page_title: str, title, next_data, html: str, attempt: int):
+def _is_tiny_invalid_pdp(
+    next_data: Optional[dict],
+    merged_nd: dict,
+    page_title: str,
+    title: Optional[str],
+    base_html_len: int,
+) -> bool:
+    """
+    Empty/interstitial/junk: tiny raw HTML, no document title, no product title,
+    and no __NEXT_DATA__ props from runtime or from HTML.
+    """
+    if base_html_len >= TINY_PDP_HTML_MAX_LEN:
+        return False
+    if (page_title or "").strip():
+        return False
+    if title is not None:
+        return False
+    run_props = isinstance(next_data, dict) and bool(next_data.get("props"))
+    mer_props = isinstance(merged_nd, dict) and bool(merged_nd.get("props"))
+    if run_props or mer_props:
+        return False
+    return True
+
+
+def _dump_debug_files(
+    vendor_url: str,
+    current_url: str,
+    page_title: str,
+    title,
+    next_data,
+    html: str,
+    attempt: int,
+    failure_label: str = "fail",
+):
     try:
         os.makedirs(DEBUG_DUMP_DIR, exist_ok=True)
         ts = int(time.time() * 1000)
-        base = os.path.join(DEBUG_DUMP_DIR, f"heb_fail_{ts}_attempt{attempt}")
+        safe_label = re.sub(r"[^\w\-]+", "_", failure_label)[:48]
+        base = os.path.join(DEBUG_DUMP_DIR, f"heb_{safe_label}_{ts}_attempt{attempt}")
 
         with open(f"{base}.html", "w", encoding="utf-8") as f:
             f.write(html or "")
 
         meta = {
+            "failure_label": failure_label,
             "vendor_url": vendor_url,
             "current_url": current_url,
             "page_title": page_title,
@@ -866,13 +906,16 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
                 pass
 
             runtime_json, next_data = _fetch_runtime_json(driver)
+            base_html_len = len(html or "")
             if runtime_json:
                 html = f"{html}\n<!--runtime-json-->\n{runtime_json}"
 
             blocked, reason = _is_block(html)
             if blocked:
                 logger.warning("HEB blocked (%s) attempt %d url=%s", reason, attempt, current_url)
-                _dump_debug_files(vendor_url, current_url, page_title, None, next_data, html, attempt)
+                _dump_debug_files(
+                    vendor_url, current_url, page_title, None, next_data, html, attempt, f"blocked_{reason}",
+                )
                 last = ScrapeResult.fail(
                     f"blocked_{reason}",
                     f"Blocked: {reason}",
@@ -886,6 +929,36 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
             soup = BeautifulSoup(html, "lxml")
             merged_nd = _merge_next_data(next_data, soup)
             title = HebParser.extract_title(soup, merged_nd, page_title=page_title)
+
+            if _is_tiny_invalid_pdp(next_data, merged_nd, page_title, title, base_html_len):
+                logger.warning(
+                    "HEB invalid_or_blocked_pdp (tiny/non-product) attempt=%d base_html_len=%d url=%s",
+                    attempt,
+                    base_html_len,
+                    vendor_url,
+                )
+                _dump_debug_files(
+                    vendor_url,
+                    current_url,
+                    page_title,
+                    title,
+                    next_data,
+                    html,
+                    attempt,
+                    "invalid_or_blocked_pdp",
+                )
+                last = ScrapeResult.fail(
+                    "invalid_or_blocked_pdp",
+                    "HEB empty or non-product page (tiny HTML, no PDP payload)",
+                    html,
+                    "heb",
+                    vendor_url,
+                )
+                driver = _safe_quit_and_recreate_driver(driver, session)
+                if attempt >= INVALID_PDP_LAST_ATTEMPT_INDEX:
+                    break
+                continue
+
             price = HebParser.extract_price(soup, html, merged_nd)
             stock = HebParser.extract_stock(soup, html)
 
@@ -900,7 +973,9 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
                     bool(next_data),
                     len(html or ""),
                 )
-                _dump_debug_files(vendor_url, current_url, page_title, title, next_data, html, attempt)
+                _dump_debug_files(
+                    vendor_url, current_url, page_title, title, next_data, html, attempt, "no_price",
+                )
                 last = ScrapeResult.fail("no_price", "Price not found on HEB page", html, "heb", vendor_url)
                 driver = _safe_quit_and_recreate_driver(driver, session)
                 continue
