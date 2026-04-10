@@ -28,6 +28,8 @@ logger = logging.getLogger("scrapers.heb")
 RETRY_LIMIT = 3
 PAGE_TIMEOUT = 25
 PRICE_WAIT_TIMEOUT = 10
+# Wait for __NEXT_DATA__ PDP after Incapsula / hydration (avoids premature no_price).
+PDP_READY_TIMEOUT = 24
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -661,6 +663,28 @@ class HebDriver:
                 pass
 
 
+def _heb_next_data_has_product(driver) -> bool:
+    """True when window.__NEXT_DATA__ contains a PDP product payload (not Incapsula shell)."""
+    try:
+        return bool(
+            driver.execute_script(
+                """
+                try {
+                  var d = window.__NEXT_DATA__;
+                  if (!d || typeof d !== 'object' || !d.props || !d.props.pageProps) return false;
+                  var pp = d.props.pageProps;
+                  if (pp.pdpData && pp.pdpData.product) return true;
+                  if (pp.productData) return true;
+                  if (pp.initialData && pp.initialData.product) return true;
+                  return false;
+                } catch (e) { return false; }
+                """
+            )
+        )
+    except Exception:
+        return False
+
+
 def _fetch_html(driver, url: str) -> str:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
@@ -670,7 +694,7 @@ def _fetch_html(driver, url: str) -> str:
 
     try:
         driver.execute_script("window.scrollTo(0, 400);")
-        time.sleep(0.3)
+        time.sleep(0.35)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.35);")
     except Exception:
         pass
@@ -682,29 +706,40 @@ def _fetch_html(driver, url: str) -> str:
     except Exception:
         pass
 
-    waited = False
-    for sel in (
-        "script#__NEXT_DATA__",
-        "[data-qe-id*='price']",
-        "[data-testid*='price']",
-        "meta[itemprop='price']",
-        "[itemprop='price']",
-        "span[class*='price' i]",
-        "h1",
-    ):
-        try:
-            WebDriverWait(driver, PRICE_WAIT_TIMEOUT).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, sel))
-            )
-            waited = True
-            break
-        except Exception:
-            continue
+    waited_pdp = False
+    try:
+        WebDriverWait(driver, PDP_READY_TIMEOUT).until(lambda d: _heb_next_data_has_product(d))
+        waited_pdp = True
+        logger.debug("HEB __NEXT_DATA__ PDP ready")
+    except Exception:
+        pass
 
-    if waited:
-        time.sleep(0.8)
+    waited = waited_pdp
+    if not waited:
+        for sel in (
+            "script#__NEXT_DATA__",
+            "[data-qe-id*='price']",
+            "[data-testid*='price']",
+            "meta[itemprop='price']",
+            "[itemprop='price']",
+            "span[class*='price' i]",
+            "h1",
+        ):
+            try:
+                WebDriverWait(driver, min(PRICE_WAIT_TIMEOUT, 7)).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, sel))
+                )
+                waited = True
+                break
+            except Exception:
+                continue
+
+    if waited_pdp:
+        time.sleep(0.45)
+    elif waited:
+        time.sleep(0.65)
     else:
-        time.sleep(1.2)
+        time.sleep(1.0)
 
     return driver.page_source or ""
 
@@ -736,6 +771,16 @@ def _is_block(html: str) -> tuple[bool, str]:
     if blocked:
         return True, reason
     lower = html.lower()
+    # Imperva / Incapsula hard block or interstitial (not the normal _Incapsula_Resource script on real PDPs).
+    for needle in (
+        "incapsula incident id",
+        "pardon our interruption",
+        "request unsuccessful",
+        "errors.edgesuite.net",
+        "access denied — if you think there has been a mistake",
+    ):
+        if needle in lower:
+            return True, "waf_challenge"
     if "select your store" in lower:
         if not any(
             x in lower
