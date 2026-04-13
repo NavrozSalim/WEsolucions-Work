@@ -13,8 +13,31 @@ for _p in [BASE_DIR.parent / '.env', BASE_DIR / '.env']:
     if _p.exists():
         load_dotenv(str(_p))
 
-SECRET_KEY = os.getenv('JWT_SECRET', 'django-insecure-default')
-DEBUG = os.getenv('DEBUG', 'False') == 'True'
+def _env_bool(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _env_list(name: str, default: str = "") -> list[str]:
+    raw = os.getenv(name, default)
+    return [item.strip() for item in raw.split(',') if item.strip()]
+
+
+def _require_env(name: str) -> str:
+    value = os.getenv(name, '').strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+DEBUG = _env_bool('DEBUG', False)
+
+if DEBUG:
+    SECRET_KEY = os.getenv('JWT_SECRET', 'dev-only-change-me')
+else:
+    SECRET_KEY = _require_env('JWT_SECRET')
 
 # Store-wide catalog scrape in the web worker (Gunicorn) — unsafe for production; default follows DEBUG.
 _raw_inline_scrape = os.getenv('CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE')
@@ -28,15 +51,22 @@ else:
         'on',
     )
 
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+if DEBUG:
+    ALLOWED_HOSTS = _env_list('ALLOWED_HOSTS', 'localhost,127.0.0.1,backend')
+else:
+    ALLOWED_HOSTS = _env_list('ALLOWED_HOSTS')
+    if not ALLOWED_HOSTS:
+        raise RuntimeError("Missing required environment variable: ALLOWED_HOSTS")
 
-# Optional: Fernet key for encrypting store API tokens (generate with cryptography.fernet.Fernet.generate_key().decode())
-ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY', '')
+# Required in production. Dev fallback is generated in core.fields only when DEBUG=True.
+ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY', '').strip()
+if not DEBUG and not ENCRYPTION_KEY:
+    raise RuntimeError("Missing required environment variable: ENCRYPTION_KEY")
 
 # Google OAuth
-GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
-GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '').strip()
+GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '').strip()
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000').strip()
 # Optional: force redirect URI to match Google Console exactly (e.g. http://localhost:8000/api/v1/auth/google/callback/)
 GOOGLE_REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', '')
 
@@ -159,11 +189,31 @@ SIMPLE_JWT = {
     'SIGNING_KEY': SECRET_KEY,
 }
 
-CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001').split(',')
+CORS_ALLOWED_ORIGINS = _env_list(
+    'CORS_ALLOWED_ORIGINS',
+    'http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001',
+)
 
-# Session cookies: Lax allows OAuth redirect from Google back to our callback
+# Security
 SESSION_COOKIE_SAMESITE = 'Lax'
-SESSION_COOKIE_SECURE = False  # True only when using HTTPS
+SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_HTTPONLY = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
+SECURE_REFERRER_POLICY = 'same-origin'
+
+if DEBUG:
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
+    SECURE_SSL_REDIRECT = False
+else:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_SSL_REDIRECT = _env_bool('SECURE_SSL_REDIRECT', True)
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '31536000'))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', True)
+    SECURE_HSTS_PRELOAD = _env_bool('SECURE_HSTS_PRELOAD', True)
 
 CELERY_BROKER_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('REDIS_URL', 'redis://localhost:6379/0')

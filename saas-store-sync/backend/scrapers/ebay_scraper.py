@@ -24,7 +24,14 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from .core import random_delay, backoff_delay, parse_price_text
+from .core import (
+    random_delay,
+    backoff_delay,
+    parse_price_text,
+    classify_failure,
+    should_retry_failure,
+    save_debug_html,
+)
 
 logger = logging.getLogger("scrapers.ebay")
 
@@ -846,6 +853,17 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
                 parts.append(f"http_{status2}")
             last_error = next((p for p in parts if p), "unknown_error")
 
+            if last_error and last_error.startswith("http_"):
+                try:
+                    status_val = int(last_error.split("_", 1)[1])
+                except Exception:
+                    status_val = None
+                if status_val is not None:
+                    last_error = classify_failure(status_val, browser_html or html2 or html or "")
+
+            if not should_retry_failure(last_error):
+                break
+
             if len(candidate_urls) > 1:
                 try:
                     current_browser_url = session.get("ebay_last_browser_url", "") if session else ""
@@ -856,8 +874,8 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
 
     logger.warning("eBay scrape failed for %s, last_error=%s", url, last_error)
 
-    if last_browser_html and session is not None:
-        session["ebay_last_failed_html"] = last_browser_html[:250000]
+    if last_browser_html:
+        save_debug_html(last_browser_html, "ebay", url, last_error or "unknown")
 
     return {"price": None, "stock": None, "title": None}
 

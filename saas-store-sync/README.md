@@ -113,6 +113,135 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f backend
 
 ---
 
+## Known flaws (current repo)
+
+- Large debug/snapshot artifacts are tracked in git, which makes the repo heavy and slower to clone/review:
+  - `backend/scrapers/debug_html/` (many HTML dumps from blocked/404 pages)
+  - `root@173.212.218.31/` (server snapshot-like folder)
+- Secret handling has risky fallbacks in code:
+  - `JWT_SECRET` falls back to `django-insecure-default` in `backend/core/settings.py`
+  - Encryption helper falls back to a SECRET_KEY-derived key in `backend/core/fields.py` when `ENCRYPTION_KEY` is invalid/missing
+- Security defaults are development-friendly and easy to misconfigure in production (for example `SESSION_COOKIE_SECURE = False` in settings; safe only behind HTTPS-aware setup).
+- Automated test coverage appears minimal relative to project size (very few concrete `test_*` implementations), increasing regression risk when changing sync/scraper flows.
+- Scraper reliability is inherently fragile (CAPTCHA/challenge/404 pages are already present in debug captures), so production sync quality can degrade without strong monitoring and retries.
+
+## Diagnostics playbook
+
+Run this top-to-bottom when the project is "not working".
+
+### 1) Quick environment sanity
+
+```powershell
+# From project root
+Test-Path .env
+docker --version
+docker compose version
+```
+
+If `.env` is missing: copy from `.env.example` first.
+
+### 2) Start and verify containers (development)
+
+```powershell
+docker compose up -d --build
+docker compose ps
+```
+
+Expected healthy services: `db`, `redis`, `backend`, `celery_worker`, `celery_beat`, `frontend`.
+
+### 3) Health endpoints and API reachability
+
+```powershell
+curl http://localhost:8000/health/
+curl http://localhost:8000/ready/
+curl http://localhost:8000/api/v1/
+```
+
+If these fail, inspect backend logs immediately.
+
+### 4) Logs triage (most useful first)
+
+```powershell
+docker compose logs --tail=200 backend
+docker compose logs --tail=200 celery_worker
+docker compose logs --tail=200 celery_beat
+docker compose logs --tail=100 db
+docker compose logs --tail=100 redis
+docker compose logs --tail=100 frontend
+```
+
+Look for: migration errors, DB connection failures, Redis refused, import/module errors, OAuth redirect mismatch, scraper timeouts/challenges.
+
+### 5) Django checks and migrations
+
+```powershell
+docker compose exec backend python manage.py check
+docker compose exec backend python manage.py showmigrations
+docker compose exec backend python manage.py migrate --noinput
+```
+
+### 6) Celery worker diagnostics
+
+```powershell
+docker compose exec celery_worker celery -A core inspect ping
+docker compose exec celery_worker celery -A core report
+```
+
+If ping fails, verify `REDIS_URL` and worker startup logs.
+
+### 7) Frontend wiring checks
+
+```powershell
+docker compose exec frontend printenv VITE_API_URL
+```
+
+Confirm it points to `http://localhost:8000/api/v1` in dev.
+
+### 8) Port conflict checks (Windows host)
+
+```powershell
+netstat -ano | findstr :8000
+netstat -ano | findstr :3001
+netstat -ano | findstr :5433
+netstat -ano | findstr :6379
+```
+
+If ports are busy, adjust `.env` host ports or stop conflicting processes.
+
+### 9) Resource / disk pressure checks
+
+```powershell
+docker system df
+```
+
+Large local artifacts can also hurt performance. In this repo, `backend/scrapers/debug_html/` and `root@173.212.218.31/` are prime cleanup candidates.
+
+### 10) Production-specific checks
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod ps
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs --tail=200 backend
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs --tail=200 nginx
+curl -H "Host: backend" http://127.0.0.1:8000/health/
+```
+
+Also verify:
+- `.env.prod` has strong non-default `JWT_SECRET` and valid `ENCRYPTION_KEY`
+- `ALLOWED_HOSTS` includes domain + `backend` (container healthcheck requirement)
+- `CORS_ALLOWED_ORIGINS` and `FRONTEND_URL` match real domain
+- Nginx `server_name` and TLS cert paths are correct
+
+### 11) Optional "reset and rebuild" (development only)
+
+```powershell
+docker compose down
+docker compose up -d --build
+```
+
+Use this when stale containers/images are suspected. Avoid deleting DB volumes unless you intentionally want to reset data.
+
+---
+
 ## Project layout (short)
 
 ```

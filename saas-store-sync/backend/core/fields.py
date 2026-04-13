@@ -1,35 +1,37 @@
 """
 Encrypted storage for sensitive values (e.g. store API tokens).
-Requires: cryptography, ENCRYPTION_KEY in settings (32-byte base64 Fernet key).
+Production requires ENCRYPTION_KEY; debug can auto-generate an in-memory key.
 """
-import base64
 import logging
 from django.conf import settings
 from django.db import models
 
 logger = logging.getLogger(__name__)
 
+_DEV_FERNET = None
+
 
 def _get_fernet():
     from cryptography.fernet import Fernet
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+    global _DEV_FERNET
     key = getattr(settings, 'ENCRYPTION_KEY', None) or ''
     if isinstance(key, str):
         key = key.strip()
     if key:
+        key_b = key.encode() if isinstance(key, str) else key
         try:
-            key_b = key.encode() if isinstance(key, str) else key
             return Fernet(key_b)
-        except Exception as e:
-            logger.warning("ENCRYPTION_KEY invalid (%s); using SECRET_KEY-derived key", e)
+        except Exception as exc:
+            raise RuntimeError("Invalid ENCRYPTION_KEY: expected valid Fernet key") from exc
 
-    # Fallback: derive 32-byte key from SECRET_KEY
-    secret = (getattr(settings, 'SECRET_KEY', None) or 'insecure').encode()
-    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=b'wesolutions', iterations=480000)
-    derived = base64.urlsafe_b64encode(kdf.derive(secret))
-    return Fernet(derived)
+    if getattr(settings, 'DEBUG', False):
+        if _DEV_FERNET is None:
+            _DEV_FERNET = Fernet(Fernet.generate_key())
+            logger.warning("ENCRYPTION_KEY is missing in DEBUG mode; using ephemeral in-memory key")
+        return _DEV_FERNET
+
+    raise RuntimeError("ENCRYPTION_KEY is required when DEBUG=False")
 
 
 class EncryptedTextField(models.TextField):
@@ -38,21 +40,27 @@ class EncryptedTextField(models.TextField):
     Set ENCRYPTION_KEY in env (Fernet.generate_key().decode()).
     """
 
-    def get_db_prep_value(self, value, connection, prepared=False):
-        value = super().get_db_prep_value(value, connection, prepared)
-        if value:
-            try:
-                return _get_fernet().encrypt(value.encode()).decode()
-            except Exception as e:
-                logger.exception("Encryption failed: %s", e)
-                raise
-        return value
+    def get_prep_value(self, value):
+        value = super().get_prep_value(value)
+        if value in (None, ''):
+            return value
+        return _get_fernet().encrypt(str(value).encode()).decode()
 
     def from_db_value(self, value, expression, connection):
-        if value is None:
+        if value in (None, ''):
             return value
-        try:
-            return _get_fernet().decrypt(value.encode()).decode()
-        except Exception as e:
-            logger.warning("Decryption failed (value may be plaintext): %s", e)
+        return _get_fernet().decrypt(value.encode()).decode()
+
+    def to_python(self, value):
+        if value in (None, ''):
             return value
+        if isinstance(value, str) and value.startswith('gAAAA'):
+            try:
+                return _get_fernet().decrypt(value.encode()).decode()
+            except Exception:
+                return value
+        return value
+
+    def get_db_prep_value(self, value, connection, prepared=False):
+        value = super().get_db_prep_value(value, connection, prepared)
+        return value

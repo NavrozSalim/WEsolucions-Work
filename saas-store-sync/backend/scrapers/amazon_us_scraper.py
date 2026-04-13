@@ -27,7 +27,7 @@ from bs4 import BeautifulSoup
 
 from .core import (
     ScrapeResult, detect_block, is_amazon_captcha_page, is_amazon_dog_page,
-    save_debug_html, random_delay, backoff_delay, parse_price_text,
+    random_delay, backoff_delay, parse_price_text, classify_failure, should_retry_failure,
     get_random_headers, USER_AGENTS, logger as _parent_logger,
 )
 from .amazonus_rules import AmazonUSBusinessRules
@@ -282,8 +282,13 @@ class AmazonHTTP:
 
         html = resp.text
         if resp.status_code != 200:
+            failure_code = classify_failure(resp.status_code, html, parse_failed=False)
             return ScrapeResult.fail(
-                f"http_{resp.status_code}", f"HTTP {resp.status_code}", html, "amazon_us", url
+                f"http_{resp.status_code}" if failure_code == "unknown" else failure_code,
+                f"HTTP {resp.status_code}",
+                html,
+                "amazon_us",
+                url,
             )
 
         blocked, reason = detect_block(html)
@@ -324,9 +329,11 @@ class AmazonHTTP:
                 return result
             last_result = result
 
-            if result.error_code in ("http_404", "not_product_page"):
+            if result.error_code in ("http_404", "not_found", "not_product_page"):
                 break
-            if result.error_code.startswith("blocked"):
+            if not should_retry_failure(result.error_code):
+                break
+            if result.error_code.startswith("blocked") or result.error_code in {"blocked", "captcha"}:
                 s = cls._get_session(session_dict)
                 s.headers.update(get_random_headers("https://www.amazon.com/"))
 

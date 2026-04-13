@@ -9,12 +9,14 @@ import re
 import time
 import random
 import logging
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("scrapers")
+MAX_DEBUG_HTML_BYTES = int(os.getenv("SCRAPER_DEBUG_HTML_MAX_BYTES", "200000"))
 
 # ---------------------------------------------------------------------------
 # Structured scrape result
@@ -166,6 +168,44 @@ def detect_block(html: str) -> tuple:
     return False, ""
 
 
+def classify_failure(status_code: Optional[int], html: str, parse_failed: bool = False) -> str:
+    if status_code == 404:
+        return "not_found"
+    if status_code in (401, 403):
+        return "blocked"
+    if status_code and status_code >= 500:
+        return "upstream_error"
+    blocked, reason = detect_block(html or "")
+    if blocked:
+        if reason == "captcha":
+            return "captcha"
+        if reason in {"blocked", "truncated"}:
+            return "blocked"
+        return "response_invalid"
+    if parse_failed:
+        return "parse_error"
+    return "unknown"
+
+
+def should_retry_failure(code: str) -> bool:
+    retryable = {
+        "timeout",
+        "connection_error",
+        "request_error",
+        "challenge",
+        "captcha",
+        "blocked",
+        "upstream_error",
+        "response_invalid",
+        "http_429",
+        "http_500",
+        "http_502",
+        "http_503",
+        "http_504",
+    }
+    return code in retryable or code.startswith("blocked_")
+
+
 def is_amazon_captcha_page(html: str) -> bool:
     """Specific Amazon CAPTCHA check."""
     if not html:
@@ -189,21 +229,38 @@ DEBUG_HTML_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug
 
 
 def save_debug_html(html: str, vendor: str, url: str, error_code: str = "") -> bool:
-    """Save raw HTML to debug_html/ for post-mortem analysis. Returns True on success."""
+    """Save bounded HTML + structured metadata for post-mortem analysis."""
     try:
         os.makedirs(DEBUG_HTML_DIR, exist_ok=True)
-        _cleanup_old_debug_files(max_files=200)
+        _cleanup_old_debug_files(max_files=100)
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         slug = re.sub(r"[^\w]", "_", (url or "unknown").split("/")[-1][:40])
         filename = f"{vendor}_{error_code}_{ts}_{slug}.html"
         filepath = os.path.join(DEBUG_HTML_DIR, filename)
+        metadata_path = filepath.replace(".html", ".json")
+        html_bounded = (html or "")[:MAX_DEBUG_HTML_BYTES]
+        truncated = len(html or "") > len(html_bounded)
 
         with open(filepath, "w", encoding="utf-8", errors="replace") as f:
             f.write(f"<!-- URL: {url} -->\n")
             f.write(f"<!-- Error: {error_code} -->\n")
             f.write(f"<!-- Time: {datetime.now().isoformat()} -->\n\n")
-            f.write(html or "")
+            f.write(html_bounded)
+
+        with open(metadata_path, "w", encoding="utf-8") as meta:
+            json.dump(
+                {
+                    "vendor": vendor,
+                    "url": url,
+                    "error_code": error_code,
+                    "captured_at": datetime.now().isoformat(),
+                    "stored_bytes": len(html_bounded.encode("utf-8", errors="replace")),
+                    "truncated": truncated,
+                },
+                meta,
+                indent=2,
+            )
 
         logger.debug("Debug HTML saved: %s", filepath)
         return True

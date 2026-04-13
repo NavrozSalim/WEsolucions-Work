@@ -1,8 +1,14 @@
-# Environment
+# Secrets and env
 .env
-.env.local
-.env.*.local
-.env.prod
+.env.*
+!.env.example
+!.env.prod.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
 
 # Python
 __pycache__/
@@ -10,32 +16,53 @@ __pycache__/
 *$py.class
 *.so
 .Python
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 venv/
 .venv/
 env/
 
-# Node
+# Django local state
+backend/db.sqlite3
+backend/celerybeat-schedule
+backend/media/
+backend/static/
+
+# Node and frontend build
 node_modules/
+frontend/node_modules/
 frontend/dist/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
 
-# IDE
+# Build and tooling output
+*.log
+*.pid
+reports/
+tmp/
+.cache/
+
+# Debug scraper dumps and artifacts
+backend/scrapers/debug_html/
+backend/scrapers/**/*.har
+backend/scrapers/**/*.trace
+
+# Server snapshots and local archives
+root@*/
+*.tar
+*.tar.gz
+*.zip
+
+# IDE / OS
 .idea/
 .vscode/
 *.swp
 *.swo
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Build / Docker
-*.log
-*.pid
-reports/
-
-# Local dev only (never ship to production)
-backend/db.sqlite3
-backend/celerybeat-schedule
