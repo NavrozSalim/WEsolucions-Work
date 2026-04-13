@@ -45,6 +45,7 @@ import PageHeader from '../../components/design/PageHeader';
 import EmptyState from '../../components/design/EmptyState';
 import Badge from '../../components/design/Badge';
 import UpdateWithFileModal from '../../components/catalog/UpdateWithFileModal';
+import { useSidebarActivity } from '../../context/SidebarActivityContext';
 
 const syncStatusVariant = {
     synced: 'success',
@@ -314,7 +315,16 @@ export default function Catalog() {
     const [logsLoading, setLogsLoading] = useState(false);
     const [liveRefreshUntil, setLiveRefreshUntil] = useState(0);
 
+    const { setSidebarActivity, clearSidebarActivity, clearCatalogActivities } = useSidebarActivity();
+
     const selectedStoreData = storeList.find((s) => s.id === selectedStore);
+
+    useEffect(
+        () => () => {
+            clearCatalogActivities();
+        },
+        [clearCatalogActivities],
+    );
 
     const refreshLiveData = useCallback(() => {
         if (!selectedStore) return;
@@ -397,6 +407,91 @@ export default function Catalog() {
             })
             .finally(() => setLogsLoading(false));
     }, [selectedStore, viewMode]);
+
+    useEffect(() => {
+        if (loading && !selectedStore) {
+            setSidebarActivity('catalog-stores', {
+                title: 'Loading stores',
+                description: 'Fetching your stores so you can open the catalog.',
+            });
+        } else {
+            clearSidebarActivity('catalog-stores');
+        }
+    }, [loading, selectedStore, setSidebarActivity, clearSidebarActivity]);
+
+    useEffect(() => {
+        if (uploadsLoading && selectedStore && viewMode === 'history') {
+            setSidebarActivity('catalog-uploads', {
+                title: 'Upload history',
+                description: 'Loading past file uploads for this store from the server.',
+            });
+        } else {
+            clearSidebarActivity('catalog-uploads');
+        }
+    }, [uploadsLoading, selectedStore, viewMode, setSidebarActivity, clearSidebarActivity]);
+
+    useEffect(() => {
+        if (productsLoading && selectedStore && viewMode === 'products') {
+            setSidebarActivity('catalog-products', {
+                title: 'Product listings',
+                description:
+                    'Downloading all products (paginated). Large stores can take a minute while the API returns each page.',
+            });
+        } else {
+            clearSidebarActivity('catalog-products');
+        }
+    }, [productsLoading, selectedStore, viewMode, setSidebarActivity, clearSidebarActivity]);
+
+    useEffect(() => {
+        if (logsLoading && selectedStore && viewMode === 'logs') {
+            setSidebarActivity('catalog-logs', {
+                title: 'Activity logs',
+                description: 'Loading recent catalog and sync activity for this store.',
+            });
+        } else {
+            clearSidebarActivity('catalog-logs');
+        }
+    }, [logsLoading, selectedStore, viewMode, setSidebarActivity, clearSidebarActivity]);
+
+    useEffect(() => {
+        if (exportDownloading) {
+            setSidebarActivity('catalog-export', {
+                title: 'Export',
+                description: 'Building your CSV file. The download will start when ready.',
+            });
+        } else {
+            clearSidebarActivity('catalog-export');
+        }
+    }, [exportDownloading, setSidebarActivity, clearSidebarActivity]);
+
+    useEffect(() => {
+        if (criticalLoading) {
+            setSidebarActivity('catalog-critical', {
+                title: 'Critical action',
+                description: 'Updating stock and marketplace. Please wait.',
+            });
+        } else {
+            clearSidebarActivity('catalog-critical');
+        }
+    }, [criticalLoading, setSidebarActivity, clearSidebarActivity]);
+
+    useEffect(() => {
+        if (flowStatus === 'syncing' || flowStatus === 'scraping') {
+            const title =
+                flowStatus === 'scraping' ? 'Scraping vendor data' : 'Sync & marketplace';
+            setSidebarActivity('catalog-flow', {
+                title,
+                description:
+                    message ||
+                    (flowStatus === 'scraping'
+                        ? 'Re-fetching vendor price and stock from your URLs.'
+                        : 'Talking to the marketplace and background workers.'),
+                progress: progress > 0 ? progress : null,
+            });
+        } else {
+            clearSidebarActivity('catalog-flow');
+        }
+    }, [flowStatus, message, progress, setSidebarActivity, clearSidebarActivity]);
 
     useEffect(() => {
         if (flowStatus === 'success') {
@@ -766,35 +861,19 @@ export default function Catalog() {
                 description="Pick a store, upload a file, and sync listings to your marketplace. Use All stores to choose a different store."
             />
 
-            {(flowStatus || message) && (
+            {(flowStatus || message) && flowStatus !== 'syncing' && flowStatus !== 'scraping' && (
                 <div
                     className={`rounded-lg overflow-hidden text-sm ${
                         flowStatus === 'failed'
                             ? 'bg-rose-50 dark:bg-rose-900/20 text-rose-700 dark:text-rose-300'
                             : flowStatus === 'success'
                                 ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300'
-                                : flowStatus === 'syncing' || flowStatus === 'scraping'
-                                    ? 'bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300'
-                                    : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                                : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
                     }`}
                 >
                     <div className="flex items-center gap-3 px-4 py-3">
-                        {(flowStatus === 'syncing' || flowStatus === 'scraping') && (
-                            <RefreshCw className="h-4 w-4 animate-spin flex-shrink-0" />
-                        )}
                         <span className="flex-1 min-w-0">{message}</span>
-                        {(flowStatus === 'syncing' || flowStatus === 'scraping') && progress > 0 && (
-                            <span className="flex-shrink-0 tabular-nums font-semibold text-sm">{progress}%</span>
-                        )}
                     </div>
-                    {(flowStatus === 'syncing' || flowStatus === 'scraping') && progress > 0 && (
-                        <div className="h-1 w-full bg-amber-200/50 dark:bg-amber-800/30">
-                            <div
-                                className="h-full bg-amber-500 dark:bg-amber-400 transition-all duration-300 ease-out"
-                                style={{ width: `${progress}%` }}
-                            />
-                        </div>
-                    )}
                 </div>
             )}
 

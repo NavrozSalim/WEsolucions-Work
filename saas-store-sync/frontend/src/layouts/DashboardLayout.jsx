@@ -16,6 +16,8 @@ import {
     Moon,
 } from 'lucide-react';
 import { WesolutionsLogo } from '../components/brand';
+import { SidebarActivityProvider, useSidebarActivity } from '../context/SidebarActivityContext';
+import SidebarActivityPanel from '../components/layout/SidebarActivityPanel';
 
 const navItems = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -23,10 +25,11 @@ const navItems = [
     { path: '/catalog', label: 'Catalog', icon: Package },
 ];
 
-export default function DashboardLayout() {
+function DashboardLayoutInner() {
     const { user, logout } = useContext(AuthContext);
     const { dark, toggleTheme } = useContext(ThemeContext);
     const location = useLocation();
+    const { activities } = useSidebarActivity();
 
     // Mobile: drawer open/closed. Desktop: sidebar always visible, but can collapse.
     const [mobileOpen, setMobileOpen] = useState(false);
@@ -130,34 +133,37 @@ export default function DashboardLayout() {
                     </button>
                 </div>
 
-                <nav className="flex-1 overflow-x-hidden overflow-y-auto px-3 py-4 space-y-0.5">
-                    {navItems.map(({ path, label, icon: Icon }) => {
-                        const isActive =
-                            location.pathname === path ||
-                            (path !== '/' && location.pathname.startsWith(path));
-                        return (
-                            <Link
-                                key={path}
-                                to={path}
-                                title={desktopCollapsed ? label : undefined}
-                                className={`flex items-center gap-3 rounded-md text-sm font-medium transition-colors ${
-                                    desktopCollapsed ? 'lg:justify-center lg:px-0' : 'px-3 py-2'
-                                } py-2 ${
-                                    isActive
-                                        ? dark
-                                            ? 'bg-slate-800 text-slate-100'
-                                            : 'bg-slate-100 text-slate-900'
-                                        : dark
-                                          ? 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
-                                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
-                                }`}
-                                onClick={closeMobileSidebar}
-                            >
-                                <Icon className="h-5 w-5 shrink-0 opacity-80" />
-                                {!desktopCollapsed && <span>{label}</span>}
-                            </Link>
-                        );
-                    })}
+                <nav className="flex min-h-0 flex-1 flex-col overflow-hidden px-3 py-4">
+                    <div className="shrink-0 space-y-0.5 overflow-x-hidden overflow-y-auto">
+                        {navItems.map(({ path, label, icon: Icon }) => {
+                            const isActive =
+                                location.pathname === path ||
+                                (path !== '/' && location.pathname.startsWith(path));
+                            return (
+                                <Link
+                                    key={path}
+                                    to={path}
+                                    title={desktopCollapsed ? label : undefined}
+                                    className={`flex items-center gap-3 rounded-md text-sm font-medium transition-colors ${
+                                        desktopCollapsed ? 'lg:justify-center lg:px-0' : 'px-3 py-2'
+                                    } py-2 ${
+                                        isActive
+                                            ? dark
+                                                ? 'bg-slate-800 text-slate-100'
+                                                : 'bg-slate-100 text-slate-900'
+                                            : dark
+                                              ? 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
+                                              : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                                    }`}
+                                    onClick={closeMobileSidebar}
+                                >
+                                    <Icon className="h-5 w-5 shrink-0 opacity-80" />
+                                    {!desktopCollapsed && <span>{label}</span>}
+                                </Link>
+                            );
+                        })}
+                    </div>
+                    <SidebarActivityPanel activities={activities} desktopCollapsed={desktopCollapsed} />
                 </nav>
 
                 <div
@@ -296,5 +302,13 @@ export default function DashboardLayout() {
                 </main>
             </div>
         </div>
+    );
+}
+
+export default function DashboardLayout() {
+    return (
+        <SidebarActivityProvider>
+            <DashboardLayoutInner />
+        </SidebarActivityProvider>
     );
 }
