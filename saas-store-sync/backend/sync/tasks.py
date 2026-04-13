@@ -257,7 +257,7 @@ def run_store_sync(self, store_id):
                     raise ValueError("Product has no vendor_url or resolvable SKU")
                 result = get_price_and_stock(url, store.region, session)
                 vendor_price = result.get('price')
-                vendor_stock = result.get('stock')
+                vendor_stock = result.get('inventory')
                 scrape_title = (result.get('title') or '').strip()[:500]
             except Exception as e:
                 p_cached, s_cached = get_last_known_vendor_price_stock(pm.product)
@@ -463,7 +463,7 @@ def run_store_update(self, store_id):
                     raise ValueError("Product has no vendor_url or resolvable SKU")
                 result = get_price_and_stock(url, store.region, session)
                 vendor_price = result.get('price')
-                vendor_stock = result.get('stock')
+                vendor_stock = result.get('inventory')
                 scrape_title = (result.get('title') or '').strip()[:500]
             except Exception as e:
                 p_cached, s_cached = get_last_known_vendor_price_stock(pm.product)

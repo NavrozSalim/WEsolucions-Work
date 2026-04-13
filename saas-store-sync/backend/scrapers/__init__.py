@@ -118,20 +118,20 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
         if "amazon.com.au" in url_lower:
             scrape_fn, _ = _get_amazon_legacy_scraper()
             logger.debug("Routing to Amazon AU scraper: %s", vendor_url[:80])
-            return scrape_fn(vendor_url, region, session)
+            return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
         scrape_fn, _ = _get_amazon_us_scraper()
         logger.debug("Routing to Amazon US scraper: %s", vendor_url[:80])
-        return scrape_fn(vendor_url, region, session)
+        return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
 
     if "ebay." in url_lower:
         from .ebay_scraper import scrape_ebay
         logger.debug("Routing to eBay scraper: %s", vendor_url[:80])
-        return scrape_ebay(vendor_url, region, session)
+        return _normalize_scrape_payload(scrape_ebay(vendor_url, region, session))
 
     if "heb.com" in url_lower:
         scrape_fn, _ = _get_heb_scraper()
         logger.debug("Routing to HEB scraper: %s", vendor_url[:80])
-        return scrape_fn(vendor_url, region, session)
+        return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
 
     logger.warning("No scraper registered for URL: %s", vendor_url[:80])
     return _placeholder_scrape(vendor_url, region)
@@ -139,7 +139,25 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
 
 def _placeholder_scrape(vendor_url: str, region: str, session: dict = None) -> dict:
     """Fallback for unsupported vendor domains."""
-    return {"price": None, "stock": None, "title": None}
+    return {"price": None, "inventory": None, "title": None}
+
+
+def _normalize_scrape_payload(result: dict | None) -> dict:
+    """
+    Enforce a minimal, consistent scraper payload across vendors:
+    - price
+    - inventory
+    - title
+    """
+    result = result or {}
+    inventory = result.get("inventory")
+    if inventory is None:
+        inventory = result.get("stock")
+    return {
+        "price": result.get("price"),
+        "inventory": inventory,
+        "title": result.get("title"),
+    }
 
 
 def close_amazon_session(session):
