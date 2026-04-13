@@ -34,8 +34,11 @@ export const resetProductSyncStatus = (storeId, productId) =>
 export const clearCatalog = (storeId) => api.delete(`/stores/${storeId}/catalog/clear/`);
 
 /** List upload history for a store */
-export const getCatalogUploads = (storeId) =>
-    api.get(`/stores/${storeId}/catalog/uploads/`);
+export const getCatalogUploads = (storeId, config = {}) =>
+    api.get(`/stores/${storeId}/catalog/uploads/`, {
+        timeout: 90_000,
+        ...config,
+    });
 
 /** Get upload detail with rows */
 export const getCatalogUploadDetail = (storeId, uploadId) =>

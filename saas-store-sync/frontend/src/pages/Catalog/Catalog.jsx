@@ -88,6 +88,7 @@ function formatCatalogError(err) {
     if (d?.error && typeof d.error === 'string') return d.error;
     if (d?.message && typeof d.message === 'string') return d.message;
     if (status === 500) return 'Something went wrong on the server (500). If this persists, try a smaller page size or contact support.';
+    if (err.code === 'ECONNABORTED') return 'Request timed out. Check your connection and try again.';
     return err.message || `Request failed${status ? ` (${status})` : ''}.`;
 }
 
@@ -281,6 +282,9 @@ export default function Catalog() {
     const [statusFilter, setStatusFilter] = useState('');
     const [loading, setLoading] = useState(true);
     const [uploadsLoading, setUploadsLoading] = useState(false);
+    const [uploadsError, setUploadsError] = useState('');
+    const [uploadsReloadNonce, setUploadsReloadNonce] = useState(0);
+    const uploadsFetchGenRef = useRef(0);
     const [productsLoading, setProductsLoading] = useState(false);
     const [uploading, setUploading] = useState(false);
     const [syncing, setSyncing] = useState(false);
@@ -315,7 +319,9 @@ export default function Catalog() {
     const refreshLiveData = useCallback(() => {
         if (!selectedStore) return;
         getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
-        getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
+        getCatalogUploads(selectedStore)
+            .then((r) => setUploads(Array.isArray(r.data) ? r.data : []))
+            .catch(() => {});
         if (viewMode === 'products') {
             getProducts(selectedStore).then((r) => setProducts(Array.isArray(r.data) ? r.data : []));
         } else if (viewMode === 'logs') {
@@ -323,6 +329,27 @@ export default function Catalog() {
                 setActivityLogs(Array.isArray(r.data) ? r.data : []));
         }
     }, [selectedStore, selectedMarketplace, viewMode]);
+
+    const fetchUploadHistory = useCallback((storeId, signal) => {
+        const id = ++uploadsFetchGenRef.current;
+        setUploadsLoading(true);
+        setUploadsError('');
+        getCatalogUploads(storeId, { signal })
+            .then((res) => {
+                if (id !== uploadsFetchGenRef.current) return;
+                setUploads(Array.isArray(res.data) ? res.data : []);
+            })
+            .catch((err) => {
+                if (err.code === 'ERR_CANCELED' || err.name === 'CanceledError' || err.name === 'AbortError') return;
+                if (id !== uploadsFetchGenRef.current) return;
+                setUploads([]);
+                setUploadsError(formatCatalogError(err) || 'Could not load upload history.');
+            })
+            .finally(() => {
+                if (id !== uploadsFetchGenRef.current) return;
+                setUploadsLoading(false);
+            });
+    }, []);
 
     useEffect(() => {
         getMarketplaces()
@@ -339,13 +366,11 @@ export default function Catalog() {
     }, [selectedMarketplace]);
 
     useEffect(() => {
-        if (!selectedStore || viewMode !== 'history') return;
-        setUploadsLoading(true);
-        getCatalogUploads(selectedStore)
-            .then((res) => setUploads(Array.isArray(res.data) ? res.data : []))
-            .catch(() => setUploads([]))
-            .finally(() => setUploadsLoading(false));
-    }, [selectedStore, viewMode]);
+        if (!selectedStore || viewMode !== 'history') return undefined;
+        const ac = new AbortController();
+        fetchUploadHistory(selectedStore, ac.signal);
+        return () => ac.abort();
+    }, [selectedStore, viewMode, uploadsReloadNonce, fetchUploadHistory]);
 
     useEffect(() => {
         if (!selectedStore || viewMode !== 'products') return;
@@ -410,12 +435,9 @@ export default function Catalog() {
     const handleBackToHistory = () => {
         setViewMode('history');
         setFlowStatus('');
-        setUploadsLoading(true);
-        getCatalogUploads(selectedStore)
-            .then((res) => setUploads(Array.isArray(res.data) ? res.data : []))
-            .catch(() => setUploads([]))
-            .finally(() => setUploadsLoading(false));
     };
+
+    const retryUploadHistory = () => setUploadsReloadNonce((n) => n + 1);
 
     const handleViewProducts = () => {
         setViewMode('products');
@@ -867,11 +889,59 @@ export default function Catalog() {
 
                     <div className="overflow-x-auto">
                         {uploadsLoading ? (
-                            <div className="flex justify-center py-16">
-                                <div className="flex flex-col items-center gap-3">
-                                    <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-200 dark:border-slate-700 border-t-accent-500" />
-                                    <p className="text-sm text-slate-500 dark:text-slate-400">Loading uploads…</p>
+                            <div className="px-4 py-6">
+                                <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                                    <div>
+                                        <p className="text-sm font-medium text-slate-800 dark:text-slate-200">
+                                            Loading upload history
+                                        </p>
+                                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                                            Requesting the list from the server (up to 90s for slow connections).
+                                        </p>
+                                    </div>
+                                    <div className="flex items-center gap-1.5" aria-hidden>
+                                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent-500/80 animate-pulse" />
+                                        <span
+                                            className="inline-block h-1.5 w-1.5 rounded-full bg-accent-500/60 animate-pulse"
+                                            style={{ animationDelay: '0.2s' }}
+                                        />
+                                        <span
+                                            className="inline-block h-1.5 w-1.5 rounded-full bg-accent-500/40 animate-pulse"
+                                            style={{ animationDelay: '0.4s' }}
+                                        />
+                                    </div>
                                 </div>
+                                <table className="table-base w-full">
+                                    <thead>
+                                        <tr>
+                                            <th className="whitespace-nowrap">Date</th>
+                                            <th className="whitespace-nowrap">User</th>
+                                            <th className="w-[100px] whitespace-nowrap">Vendor</th>
+                                            <th className="w-[120px] whitespace-nowrap">Marketplace</th>
+                                            <th className="w-[60px] text-right whitespace-nowrap">Items</th>
+                                            <th className="min-w-[100px] whitespace-nowrap">Reason</th>
+                                            <th className="w-[90px] whitespace-nowrap">Status</th>
+                                            <th className="w-[80px] text-right whitespace-nowrap">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {[0, 1, 2, 3, 4].map((i) => (
+                                            <tr key={i}>
+                                                <td colSpan={8} className="py-2.5">
+                                                    <div className="h-3.5 w-full max-w-full rounded bg-slate-200/80 dark:bg-slate-700/80 animate-pulse" />
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        ) : uploadsError ? (
+                            <div className="flex flex-col items-center justify-center gap-4 px-4 py-14 text-center">
+                                <p className="text-sm text-rose-600 dark:text-rose-400 max-w-md">{uploadsError}</p>
+                                <Button variant="secondary" size="sm" type="button" onClick={retryUploadHistory}>
+                                    <RefreshCw className="h-4 w-4 mr-1.5" />
+                                    Try again
+                                </Button>
                             </div>
                         ) : uploads.length === 0 ? (
                             <EmptyState
