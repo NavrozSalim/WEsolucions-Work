@@ -53,6 +53,21 @@ def store_marketplace_kind(store: Store) -> str:
     return 'other'
 
 
+def template_kind_from_store_adapter(store: Store) -> str:
+    """
+    Listing marketplace for CSV templates, aligned with store_adapters (same as sync/push).
+    Works when Marketplace.code is lowercase or name variants differ from FK parsing.
+    """
+    from store_adapters import get_adapter
+
+    cls_name = type(get_adapter(store)).__name__
+    return {
+        'ReverbAdapter': 'reverb',
+        'WalmartAdapter': 'walmart',
+        'SearsAdapter': 'sears',
+    }.get(cls_name, 'other')
+
+
 def _norm_header_cell(h: Any) -> str:
     return (str(h) or '').strip().lower().replace('_', ' ')
 

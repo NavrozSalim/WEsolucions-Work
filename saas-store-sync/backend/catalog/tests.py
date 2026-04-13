@@ -7,6 +7,8 @@ from catalog.marketplace_templates import (
     col_index,
     validate_marketplace_headers,
 )
+from store_adapters import _resolve_adapter_class
+from store_adapters.walmart_adapter import WalmartAdapter
 from scrapers.core import parse_price_text, classify_failure
 
 
@@ -29,6 +31,13 @@ class ScraperParsingTests(SimpleTestCase):
         html = "<html><body>Please verify you are human captcha</body></html>"
         self.assertEqual(classify_failure(200, html, parse_failed=False), "captcha")
         self.assertEqual(classify_failure(200, "<html>ok</html>", parse_failed=True), "parse_error")
+
+
+class AdapterRegistryTests(SimpleTestCase):
+    def test_resolve_adapter_class_is_case_insensitive(self):
+        self.assertIs(_resolve_adapter_class('walmart'), WalmartAdapter)
+        self.assertIs(_resolve_adapter_class('Walmart'), WalmartAdapter)
+        self.assertIs(_resolve_adapter_class('WALMART'), WalmartAdapter)
 
 
 class MarketplaceTemplateTests(SimpleTestCase):

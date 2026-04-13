@@ -187,8 +187,9 @@ export const downloadSampleTemplate = (storeId = null, marketplaceKind = '') => 
     if (storeId) params.set('store_id', storeId);
     const kind = String(marketplaceKind || '').trim().toLowerCase();
     if (['reverb', 'walmart', 'sears'].includes(kind)) params.set('marketplace', kind);
+    params.set('_cb', String(Date.now()));
     const qs = params.toString();
-    const path = qs ? `/catalog/sample-template/?${qs}` : '/catalog/sample-template/';
+    const path = `/catalog/sample-template/?${qs}`;
     return api.get(path, { responseType: 'blob' }).then((res) => {
         let filename = 'catalog_upload_template.csv';
         const cd = res.headers?.['content-disposition'] || res.headers?.['Content-Disposition'];

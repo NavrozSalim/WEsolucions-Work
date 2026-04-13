@@ -19,6 +19,7 @@ from catalog.marketplace_templates import (
     sample_template_filename_for_kind,
     sample_template_rows_for_kind,
     store_marketplace_kind,
+    template_kind_from_store_adapter,
     upload_row_to_cells,
 )
 from products.models import Product
@@ -806,7 +807,9 @@ class CatalogSampleTemplateView(APIView):
         if kind_param in ('reverb', 'walmart', 'sears'):
             kind = kind_param
         elif store:
-            kind = store_marketplace_kind(store)
+            kind = template_kind_from_store_adapter(store)
+            if kind == 'other':
+                kind = store_marketplace_kind(store)
         elif kind_param:
             kind = 'other'
         else:
