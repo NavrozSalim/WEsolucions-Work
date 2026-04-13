@@ -27,7 +27,7 @@ from bs4 import BeautifulSoup
 
 from .core import (
     ScrapeResult, detect_block, is_amazon_captcha_page, is_amazon_dog_page,
-    random_delay, backoff_delay, parse_price_text, classify_failure, should_retry_failure,
+    save_debug_html, random_delay, backoff_delay, parse_price_text, classify_failure, should_retry_failure,
     get_random_headers, USER_AGENTS, logger as _parent_logger,
 )
 from .amazonus_rules import AmazonUSBusinessRules
