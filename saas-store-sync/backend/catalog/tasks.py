@@ -322,7 +322,7 @@ def run_catalog_scrape(upload_id: str):
     """
     from sync.models import ScrapeRun
     from sync.tasks import _get_pricing_for_vendor, _apply_pricing, _apply_inventory, _is_walmart_store
-    from sync.tasks import _get_inventory_for_vendor, _resolve_vendor_url
+    from sync.tasks import _get_inventory_for_vendor, resolve_vendor_scrape_url, _inventory_from_scrape_result
     from vendor.models import VendorPrice
     from scrapers import get_price_and_stock, close_amazon_session
 
@@ -362,15 +362,27 @@ def run_catalog_scrape(upload_id: str):
             product = pm.product
             if not product:
                 continue
-            url = _normalize(row.vendor_url_raw) or _resolve_vendor_url(product, store)
-            if not url:
-                continue
 
-            price_from_fallback = False
             run.rows_processed += 1
             if run.rows_processed % 10 == 0:
                 run.rows_succeeded = succeeded
                 run.save(update_fields=['rows_processed', 'rows_succeeded'])
+
+            url = resolve_vendor_scrape_url(product, store, row)
+            if not url:
+                logger.warning(
+                    'Catalog scrape row %s: no Vendor URL / Vendor ID resolvable for product %s '
+                    '(listing marketplace does not affect vendor scraper).',
+                    row.row_number,
+                    product.vendor_sku,
+                )
+                pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
+                pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
+                pm.save(update_fields=['failed_sync_count', 'sync_status'])
+                failed += 1
+                continue
+
+            price_from_fallback = False
 
             import os
             use_demo_fallback = os.getenv('DEMO_SCRAPE_FALLBACK', 'false').lower() in ('1', 'true', 'yes')
@@ -388,7 +400,8 @@ def run_catalog_scrape(upload_id: str):
             try:
                 result = get_price_and_stock(url, store.region or '', session)
                 vendor_price = result.get('price')
-                vendor_stock = result.get('stock', 0) or 0
+                inv = _inventory_from_scrape_result(result)
+                vendor_stock = 0 if inv is None or inv < 0 else inv
                 if isinstance(result, dict):
                     scrape_title = (result.get('title') or '').strip()[:500]
             except Exception as scrape_err:
@@ -580,7 +593,8 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
         _get_inventory_for_vendor,
         _get_pricing_for_vendor,
         _is_walmart_store,
-        _resolve_vendor_url,
+        resolve_vendor_scrape_url,
+        _inventory_from_scrape_result,
     )
     from vendor.models import VendorPrice
 
@@ -621,14 +635,14 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
             pricing = _get_pricing_for_vendor(store, product.vendor_id)
             inventory = _get_inventory_for_vendor(store, product.vendor_id)
 
-            url = _resolve_vendor_url(product, store)
+            url = resolve_vendor_scrape_url(product, store, None)
             result = {}
             try:
                 if not url:
                     raise ValueError('Product has no vendor_url or resolvable SKU')
                 result = get_price_and_stock(url, store.region or '', session)
                 vendor_price = result.get('price')
-                vendor_stock = result.get('stock')
+                vendor_stock = _inventory_from_scrape_result(result)
                 scrape_title = (result.get('title') or '').strip()[:500]
             except Exception as e:
                 logger.exception(

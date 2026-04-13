@@ -1,5 +1,10 @@
 import { createContext, useState, useEffect } from 'react';
-import { getCurrentUser, login as authLogin, logout as authLogout } from '../services/authService';
+import {
+    getCurrentUser,
+    getUserProfile,
+    login as authLogin,
+    logout as authLogout,
+} from '../services/authService';
 
 export const AuthContext = createContext(null);
 
@@ -8,18 +13,48 @@ export const AuthProvider = ({ children }) => {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        const currentUser = getCurrentUser();
-        setUser(currentUser);
-        setLoading(false);
+        const bootstrapAuth = async () => {
+            const currentUser = getCurrentUser();
+            if (!currentUser) {
+                setUser(null);
+                setLoading(false);
+                return;
+            }
+
+            try {
+                const profile = await getUserProfile();
+                setUser(profile);
+            } catch {
+                authLogout();
+                setUser(null);
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        bootstrapAuth();
     }, []);
 
     const login = async (email, password) => {
         await authLogin(email, password);
-        setUser(getCurrentUser());
+        try {
+            const profile = await getUserProfile();
+            setUser(profile);
+        } catch {
+            setUser(getCurrentUser());
+        }
     };
 
-    const setUserFromTokens = () => {
-        setUser(getCurrentUser());
+    const setUserFromTokens = async () => {
+        setLoading(true);
+        try {
+            const profile = await getUserProfile();
+            setUser(profile);
+        } catch {
+            setUser(getCurrentUser());
+        } finally {
+            setLoading(false);
+        }
     };
 
     const logout = () => {

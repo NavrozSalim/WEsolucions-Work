@@ -40,3 +40,8 @@ export const getCurrentUser = () => {
         return null;
     }
 };
+
+export const getUserProfile = async () => {
+    const response = await api.get('/auth/profile/');
+    return response.data;
+};

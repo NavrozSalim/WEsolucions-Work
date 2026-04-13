@@ -8,19 +8,13 @@ from typing import Any
 from django.db import transaction
 
 from .models import CatalogUpload, CatalogUploadRow
+from .marketplace_templates import INTERNAL_FIELDS, build_field_indices, validate_marketplace_headers
 from .reverb_catalog import store_is_reverb, vendor_is_ebay
 from stores.models import Store
 from vendor.models import Vendor
 
-
-# Column names in expected order (case-insensitive match)
-EXPECTED_COLUMNS = [
-    'vendor name', 'vendor id', 'is variation', 'variation id',
-    'marketplace name', 'store name', 'marketplace parent sku',
-    'marketplace child sku', 'marketplace id', 'vendor sku',
-    'vendor url', 'action',
-    'pack qty', 'prep fees', 'shipping fees',
-]
+# Backward-compatible alias (canonical list lives in marketplace_templates)
+EXPECTED_COLUMNS = INTERNAL_FIELDS
 
 
 def _parse_xlsx(file_obj) -> list[list[Any]]:
@@ -50,16 +44,6 @@ def parse_upload_file(file_obj, filename: str) -> list[list[Any]]:
     if name.endswith('.xlsx') or name.endswith('.xls'):
         return _parse_xlsx(file_obj)
     raise ValueError("File must be CSV or XLSX")
-
-
-def _col_index(header: list, col_name: str) -> int | None:
-    """Find column index by header name (case-insensitive)."""
-    col_lower = col_name.lower().replace('_', ' ')
-    for i, h in enumerate(header):
-        h_clean = (str(h) or '').strip().lower().replace('_', ' ')
-        if h_clean == col_lower or col_lower in h_clean or h_clean in col_lower:
-            return i
-    return None
 
 
 def _store_raw(val: Any) -> str:
@@ -103,14 +87,13 @@ def validate_and_create_upload(
         return None, ["File is empty"]
 
     header = rows[0]
-    indices = {col: _col_index(header, col) for col in EXPECTED_COLUMNS}
-
-    required = ['vendor name', 'store name', 'action']
-    for col in required:
-        if indices.get(col) is None:
-            return None, [f"Required column missing: {col.title()}"]
 
     store = Store.objects.select_related('marketplace').get(pk=store.pk)
+    indices = build_field_indices(header, store)
+    header_err = validate_marketplace_headers(indices, store)
+    if header_err:
+        return None, [header_err]
+
     store_name_lower = store.name.lower()
     vendors_by_name = {v.name.lower(): v for v in Vendor.objects.all()}
     vendors_by_name.update({v.code.lower(): v for v in Vendor.objects.all()})
@@ -118,12 +101,6 @@ def validate_and_create_upload(
     marketplace_code = (getattr(store.marketplace, 'code', '') or '').strip().lower()
     marketplace_name = (getattr(store.marketplace, 'name', '') or '').strip().lower()
     is_walmart = marketplace_code == 'walmart' or marketplace_name == 'walmart'
-
-    if is_walmart:
-        walmart_required_cols = ['pack qty', 'prep fees', 'shipping fees']
-        for col in walmart_required_cols:
-            if indices.get(col) is None:
-                return None, [f"Walmart uploads require column: {col.title()}"]
 
     with transaction.atomic():
         upload = CatalogUpload.objects.create(
@@ -195,8 +172,8 @@ def validate_and_create_upload(
                 elif is_reverb:
                     if _normalize(marketplace_parent_sku_raw) is None:
                         errors.append(
-                            f"Row {row_num}: Reverb stores require Marketplace Parent SKU for Add "
-                            f"(Reverb listing SKU; Is Variation, Variation ID, Child SKU, Marketplace ID, and Vendor SKU may be N/A)"
+                            f"Row {row_num}: Reverb stores require SKU (or Marketplace Parent SKU) for Add "
+                            f"(Reverb listing SKU; other marketplace columns may be N/A)"
                         )
                         continue
                 else:

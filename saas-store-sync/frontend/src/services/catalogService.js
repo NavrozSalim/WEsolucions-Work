@@ -175,10 +175,16 @@ export const downloadSampleTemplate = (storeId = null) => {
         ? `/catalog/sample-template/?store_id=${encodeURIComponent(storeId)}`
         : '/catalog/sample-template/';
     return api.get(path, { responseType: 'blob' }).then((res) => {
+        let filename = 'catalog_upload_template.csv';
+        const cd = res.headers?.['content-disposition'] || res.headers?.['Content-Disposition'];
+        if (cd && cd.includes('filename=')) {
+            const m = cd.match(/filename="?([^";\n]+)"?/i);
+            if (m) filename = m[1].trim();
+        }
         const url = window.URL.createObjectURL(new Blob([res.data]));
         const link = document.createElement('a');
         link.href = url;
-        link.setAttribute('download', 'catalog_upload_template.csv');
+        link.setAttribute('download', filename);
         document.body.appendChild(link);
         link.click();
         link.remove();

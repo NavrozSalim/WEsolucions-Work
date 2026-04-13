@@ -80,6 +80,74 @@ def _resolve_vendor_url(product, store):
     return None
 
 
+def _vendor_url_from_vendor_id(vendor, vendor_id: str, region: str) -> str | None:
+    """Build a product page URL from the catalog Vendor ID (ASIN, eBay item id, HEB PDP id)."""
+    vcode = (vendor.code or '').lower() if vendor else ''
+    vid = (vendor_id or '').strip()
+    if not vid:
+        return None
+    r = (region or 'USA').upper()
+    if vcode in ('amazon', 'amazonusa', 'amazonau', 'amazon_us', 'amazon_au'):
+        if r == 'AU':
+            return f'https://www.amazon.com.au/dp/{vid}'
+        return f'https://www.amazon.com/dp/{vid}'
+    if vcode in ('ebay', 'ebayau', 'ebay_au', 'ebay_us'):
+        if r == 'AU':
+            return f'https://www.ebay.com.au/itm/{vid}'
+        return f'https://www.ebay.com/itm/{vid}'
+    if vcode == 'heb' or vcode.startswith('heb_'):
+        if vid.isdigit() and 5 <= len(vid) <= 12:
+            return f'https://www.heb.com/product-detail/{vid}'
+    return None
+
+
+def resolve_vendor_scrape_url(product, store, catalog_row=None):
+    """
+    URL used for vendor price/stock scraping.
+
+    Always follows the **source vendor** from the catalog / Product (Vendor Name, Vendor URL,
+    Vendor ID), not the store's listing marketplace (Reverb, Walmart, Sears). The scraper
+    is chosen later from the URL domain (Amazon / eBay / HEB, etc.).
+    """
+    from catalog.services import _normalize
+
+    if catalog_row is not None:
+        u = _normalize(getattr(catalog_row, 'vendor_url_raw', None))
+        if u:
+            return u
+        vid = _normalize(getattr(catalog_row, 'vendor_id_raw', None))
+        if vid and product and product.vendor:
+            built = _vendor_url_from_vendor_id(product.vendor, vid, store.region or 'USA')
+            if built:
+                return built
+
+    if product and product.vendor_url:
+        u = str(product.vendor_url).strip()
+        if u:
+            return u
+
+    return _resolve_vendor_url(product, store)
+
+
+def _inventory_from_scrape_result(result: dict | None) -> int | None:
+    """Normalize scraper output: prefer ``inventory`` (canonical), fall back to ``stock``."""
+    if not isinstance(result, dict):
+        return None
+    inv = result.get('inventory')
+    if inv is not None:
+        try:
+            return int(inv)
+        except (TypeError, ValueError):
+            return None
+    st = result.get('stock')
+    if st is not None:
+        try:
+            return int(st)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _get_pricing_for_vendor(store, vendor_id):
     try:
         return StoreVendorPriceSettings.objects.get(store=store, vendor_id=vendor_id)
@@ -251,13 +319,13 @@ def run_store_sync(self, store_id):
             price_from_fallback = False
             pricing = _get_pricing_for_vendor(store, pm.product.vendor_id)
             inventory = _get_inventory_for_vendor(store, pm.product.vendor_id)
-            url = _resolve_vendor_url(pm.product, store)
+            url = resolve_vendor_scrape_url(pm.product, store, None)
             try:
                 if not url:
                     raise ValueError("Product has no vendor_url or resolvable SKU")
                 result = get_price_and_stock(url, store.region, session)
                 vendor_price = result.get('price')
-                vendor_stock = result.get('inventory')
+                vendor_stock = _inventory_from_scrape_result(result)
                 scrape_title = (result.get('title') or '').strip()[:500]
             except Exception as e:
                 p_cached, s_cached = get_last_known_vendor_price_stock(pm.product)
@@ -457,13 +525,13 @@ def run_store_update(self, store_id):
             inventory = _get_inventory_for_vendor(store, pm.product.vendor_id)
 
             # --- Scrape ---
-            url = _resolve_vendor_url(pm.product, store)
+            url = resolve_vendor_scrape_url(pm.product, store, None)
             try:
                 if not url:
                     raise ValueError("Product has no vendor_url or resolvable SKU")
                 result = get_price_and_stock(url, store.region, session)
                 vendor_price = result.get('price')
-                vendor_stock = result.get('inventory')
+                vendor_stock = _inventory_from_scrape_result(result)
                 scrape_title = (result.get('title') or '').strip()[:500]
             except Exception as e:
                 p_cached, s_cached = get_last_known_vendor_price_stock(pm.product)

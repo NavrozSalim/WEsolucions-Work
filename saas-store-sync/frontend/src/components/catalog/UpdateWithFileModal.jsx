@@ -80,7 +80,23 @@ export default function UpdateWithFileModal({
     };
 
     if (!open) return null;
-    const isWalmart = (storeMarketplace || '').trim().toLowerCase() === 'walmart';
+    const mk = (storeMarketplace || '').trim().toLowerCase();
+    const isWalmart = mk === 'walmart';
+    const isReverb = mk === 'reverb';
+    const isSears = mk === 'sears';
+
+    const templateHint = (() => {
+        if (isWalmart) {
+            return 'Walmart template: Vendor Name, Vendor ID, Marketplace Name, Store Name, SKU, Vendor URL, Action, Pack QTY, Prep Fees, Shipping Fees.';
+        }
+        if (isSears) {
+            return 'Sears template: all SKU/variant columns (Parent/Child/Marketplace ID/Vendor SKU), Vendor URL, and Action — no Walmart fee columns.';
+        }
+        if (isReverb) {
+            return 'Reverb template: Vendor Name, Vendor ID, Marketplace Name, Store Name, SKU, Vendor URL, Action.';
+        }
+        return 'Pick a store to download the matching template, or use the generic template (all columns).';
+    })();
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -121,8 +137,17 @@ export default function UpdateWithFileModal({
                             value={template}
                             onChange={(e) => setTemplate(e.target.value)}
                             options={[
-                                { value: 'standard', label: 'Standard catalog template' },
-                                { value: 'download', label: 'Download sample' },
+                                {
+                                    value: 'standard',
+                                    label: isWalmart
+                                        ? 'Walmart catalog template'
+                                        : isSears
+                                          ? 'Sears catalog template'
+                                          : isReverb
+                                            ? 'Reverb catalog template'
+                                            : 'Catalog template (matches store marketplace)',
+                                },
+                                { value: 'download', label: 'Download sample CSV' },
                             ]}
                             className="w-full"
                         />
@@ -136,11 +161,7 @@ export default function UpdateWithFileModal({
                                 Download CSV template
                             </button>
                         )}
-                        {isWalmart && (
-                            <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
-                                Walmart uploads require: Pack QTY, Prep Fees, and Shipping Fees.
-                            </p>
-                        )}
+                        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">{templateHint}</p>
                     </div>
 
                     <div>

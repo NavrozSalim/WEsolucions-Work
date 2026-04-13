@@ -14,6 +14,14 @@ from catalog.models import ProductMapping, CatalogUpload, CatalogUploadRow, Cata
 from catalog.serializers import ProductMappingSerializer, CatalogActivityLogSerializer
 from catalog.pagination import CatalogProductPagination
 from catalog.services import validate_and_create_upload
+from catalog.marketplace_templates import (
+    export_headers_for_store,
+    sample_template_filename,
+    sample_template_rows,
+    sample_template_filename_for_kind,
+    sample_template_rows_for_kind,
+    upload_row_to_cells,
+)
 from products.models import Product
 from stores.models import Store
 from rest_framework.permissions import IsAuthenticated
@@ -295,36 +303,13 @@ class CatalogUploadErrorFileView(APIView):
         safe_name = (upload.original_filename or 'upload').rsplit('.', 1)[0]
         response['Content-Disposition'] = f'attachment; filename="{safe_name}_errors.csv"'
         writer = csv.writer(response)
-        writer.writerow([
-            'Vendor Name', 'Vendor ID', 'Is Variation', 'Variation ID',
-            'Marketplace Name', 'Store Name', 'Marketplace Parent SKU',
-            'Marketplace Child SKU', 'Marketplace ID', 'Vendor SKU',
-            'Vendor URL', 'Action', 'Pack QTY', 'Prep Fees', 'Shipping Fees', 'Error Logs',
-        ])
+        hdr = export_headers_for_store(store)
+        writer.writerow([*hdr, 'Error Logs'])
         for r in failed_rows:
-            writer.writerow([
-                r.vendor_name_raw or '',
-                r.vendor_id_raw or '',
-                r.is_variation_raw or '',
-                r.variation_id_raw or '',
-                r.marketplace_name_raw or '',
-                r.store_name_raw or '',
-                r.marketplace_parent_sku_raw or '',
-                r.marketplace_child_sku_raw or '',
-                r.marketplace_id_raw or '',
-                r.vendor_sku_raw or '',
-                r.vendor_url_raw or '',
-                r.action_raw or 'Add',
-                r.pack_qty_raw or '',
-                r.prep_fees_raw or '',
-                r.shipping_fees_raw or '',
-                (r.sync_error or '').replace('\n', ' '),
-            ])
+            cells = upload_row_to_cells(r, store)
+            writer.writerow([*cells, (r.sync_error or '').replace('\n', ' ')])
         if not failed_rows.exists() and upload.error_summary:
-            writer.writerow([
-                '', '', '', '', '', '', '', '', '', '', '', '', '', '', '',
-                upload.error_summary.replace('\n', ' '),
-            ])
+            writer.writerow([''] * len(hdr) + [upload.error_summary.replace('\n', ' ')])
         return response
 
 
@@ -370,18 +355,14 @@ class CatalogUploadDetailView(APIView):
 
     @staticmethod
     def _download_csv(upload):
+        store = upload.store
         rows = upload.rows.select_related('product_mapping').order_by('row_number')
         response = HttpResponse(content_type='text/csv')
         safe_name = (upload.original_filename or 'catalog').rsplit('.', 1)[0]
         response['Content-Disposition'] = f'attachment; filename="{safe_name}.csv"'
         writer = csv.writer(response)
-        writer.writerow([
-            'Vendor Name', 'Vendor ID', 'Is Variation', 'Variation ID',
-            'Marketplace Name', 'Store Name', 'Marketplace Parent SKU',
-            'Marketplace Child SKU', 'Marketplace ID', 'Vendor SKU',
-            'Vendor URL', 'Action', 'Pack QTY', 'Prep Fees', 'Shipping Fees',
-            'Posted Price', 'Posted Inventory',
-        ])
+        hdr = export_headers_for_store(store, include_posted=True)
+        writer.writerow(hdr)
         for r in rows:
             pm = r.product_mapping
             posted_price = ''
@@ -389,25 +370,14 @@ class CatalogUploadDetailView(APIView):
             if pm:
                 posted_price = str(pm.store_price) if pm.store_price is not None else ''
                 posted_inventory = str(pm.store_stock) if pm.store_stock is not None else ''
-            writer.writerow([
-                r.vendor_name_raw or '',
-                r.vendor_id_raw or '',
-                r.is_variation_raw or '',
-                r.variation_id_raw or '',
-                r.marketplace_name_raw or '',
-                r.store_name_raw or '',
-                r.marketplace_parent_sku_raw or '',
-                r.marketplace_child_sku_raw or '',
-                r.marketplace_id_raw or '',
-                r.vendor_sku_raw or '',
-                r.vendor_url_raw or '',
-                r.action_raw or 'Add',
-                r.pack_qty_raw or '',
-                r.prep_fees_raw or '',
-                r.shipping_fees_raw or '',
-                posted_price,
-                posted_inventory,
-            ])
+            cells = upload_row_to_cells(
+                r,
+                store,
+                include_posted=True,
+                posted_price=posted_price,
+                posted_inventory=posted_inventory,
+            )
+            writer.writerow(cells)
         return response
 
 
@@ -819,66 +789,26 @@ class StoreCriticalZeroView(APIView):
 
 
 class CatalogSampleTemplateView(APIView):
-    """Download sample CSV template for catalog bulk upload (new format)."""
+    """Download sample CSV template for catalog bulk upload (marketplace-specific columns)."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         store_id = request.query_params.get('store_id')
-        is_walmart = False
+        store = None
         if store_id:
             store = get_object_or_404(Store, id=store_id, user=request.user)
-            code = (getattr(store.marketplace, 'code', '') or '').strip().lower()
-            name = (getattr(store.marketplace, 'name', '') or '').strip().lower()
-            is_walmart = code == 'walmart' or name == 'walmart'
 
         response = HttpResponse(content_type='text/csv')
-        response['Content-Disposition'] = (
-            'attachment; filename="catalog_upload_template_walmart.csv"'
-            if is_walmart else
-            'attachment; filename="catalog_upload_template.csv"'
-        )
-        writer = csv.writer(response)
-        headers = [
-            'Vendor Name', 'Vendor ID', 'Is Variation', 'Variation ID',
-            'Marketplace Name', 'Store Name', 'Marketplace Parent SKU', 'Marketplace Child SKU',
-            'Marketplace ID', 'Vendor SKU', 'Vendor URL', 'Action',
-        ]
-        if is_walmart:
-            headers.extend(['Pack QTY', 'Prep Fees', 'Shipping Fees'])
-        writer.writerow(headers)
-        if is_walmart:
-            writer.writerow([
-                'Amazon', '', 'No', '',
-                'Walmart', 'AHJ', 'COST4', 'COST4',
-                '', 'COST4', 'https://example.com/product/123', 'Add',
-                '1', '2.50', '5.00',
-            ])
-            writer.writerow([
-                'Amazon', '', 'No', '',
-                'Walmart', 'AHJ', 'COST6', 'COST6',
-                'WM-12345', 'COST6', '', 'Update',
-                '2', '1.00', '3.75',
-            ])
-            writer.writerow([
-                'Amazon', '', 'No', '',
-                'Walmart', 'AHJ', 'COST8', 'COST8',
-                'WM-67890', 'COST8', '', 'Delete',
-                '', '', '',
-            ])
+        if store:
+            fname = sample_template_filename(store)
+            headers, sample_rows = sample_template_rows(store)
         else:
-            writer.writerow([
-                'Amazon', '', 'Yes', '192339|Green',
-                'Reverb', 'GG', 'COST4', 'COST4',
-                'A41000001', 'COST4', 'https://example.com/product/123', 'Add',
-            ])
-            writer.writerow([
-                'Amazon', '', 'No', '',
-                'Reverb', 'GG', 'COST6', 'COST6',
-                'A41000002', 'COST6', '', 'Add',
-            ])
-            writer.writerow([
-                'Amazon', '', 'Yes', '',
-                'Reverb', 'GG', 'COST8-Pink', 'COST8-Grey',
-                'A41000003', 'COST8-Grey', '', 'Delete',
-            ])
+            fname = sample_template_filename_for_kind('other')
+            headers, sample_rows = sample_template_rows_for_kind('other')
+
+        response['Content-Disposition'] = f'attachment; filename="{fname}"'
+        writer = csv.writer(response)
+        writer.writerow(headers)
+        for row in sample_rows:
+            writer.writerow(row)
         return response

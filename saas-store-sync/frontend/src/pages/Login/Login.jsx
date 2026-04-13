@@ -2,7 +2,7 @@ import { useState, useContext, useEffect } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { AuthContext } from '../../context/AuthContext';
 import { ThemeContext } from '../../context/ThemeContext';
-import { WesolutionsLogo } from '../../components/brand';
+import { WesolutionsLogo, WesolutionsLoading } from '../../components/brand';
 import Input from '../../components/ui/Input';
 import Button from '../../components/ui/Button';
 import { Sun, Moon } from 'lucide-react';
@@ -21,7 +21,7 @@ const Login = () => {
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
     const [searchParams] = useSearchParams();
-    const { login } = useContext(AuthContext);
+    const { login, user, loading } = useContext(AuthContext);
     const navigate = useNavigate();
 
     useEffect(() => {
@@ -30,6 +30,12 @@ const Login = () => {
             setError(ERROR_MESSAGES[errorParam] || `Sign-in error: ${errorParam}`);
         }
     }, [searchParams]);
+
+    useEffect(() => {
+        if (!loading && user) {
+            navigate('/', { replace: true });
+        }
+    }, [loading, user, navigate]);
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -45,6 +51,10 @@ const Login = () => {
             }
         }
     };
+
+    if (loading) {
+        return <WesolutionsLoading />;
+    }
 
     return (
         <div className="min-h-screen flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8 bg-slate-50 dark:bg-slate-950">

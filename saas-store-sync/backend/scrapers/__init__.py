@@ -97,6 +97,9 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
     """
     Main entry point: resolve vendor URL → scraper → return price + stock.
 
+    Routing uses the **URL host/path only** (Amazon, eBay, HEB, …). It does not depend on
+    which marketplace the listing is sold on (Reverb, Walmart, Sears, etc.).
+
     Parameters
     ----------
     vendor_url : str
