@@ -170,10 +170,25 @@ export const triggerCatalogScrape = (storeId, runInline = false, uploadId = null
     });
 };
 
-export const downloadSampleTemplate = (storeId = null) => {
-    const path = storeId
-        ? `/catalog/sample-template/?store_id=${encodeURIComponent(storeId)}`
-        : '/catalog/sample-template/';
+/** Map store row from /catalog/stores/ to reverb | walmart | sears for sample CSV columns. */
+export const resolveMarketplaceTemplateKind = (store) => {
+    if (!store) return '';
+    const c = String(store.marketplace_code || '').trim().toLowerCase();
+    if (['reverb', 'walmart', 'sears'].includes(c)) return c;
+    const n = String(store.marketplace_name || '').trim().toLowerCase();
+    if (n.includes('walmart')) return 'walmart';
+    if (n.includes('sears')) return 'sears';
+    if (n.includes('reverb')) return 'reverb';
+    return '';
+};
+
+export const downloadSampleTemplate = (storeId = null, marketplaceKind = '') => {
+    const params = new URLSearchParams();
+    if (storeId) params.set('store_id', storeId);
+    const kind = String(marketplaceKind || '').trim().toLowerCase();
+    if (['reverb', 'walmart', 'sears'].includes(kind)) params.set('marketplace', kind);
+    const qs = params.toString();
+    const path = qs ? `/catalog/sample-template/?${qs}` : '/catalog/sample-template/';
     return api.get(path, { responseType: 'blob' }).then((res) => {
         let filename = 'catalog_upload_template.csv';
         const cd = res.headers?.['content-disposition'] || res.headers?.['Content-Disposition'];

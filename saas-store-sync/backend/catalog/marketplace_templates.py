@@ -32,14 +32,24 @@ INTERNAL_FIELDS = [
 
 def store_marketplace_kind(store: Store) -> str:
     m = getattr(store, 'marketplace', None)
+    if m is None and getattr(store, 'marketplace_id', None):
+        from marketplace.models import Marketplace
+
+        m = Marketplace.objects.filter(pk=store.marketplace_id).only('code', 'name').first()
+
     code = (getattr(m, 'code', '') or '').strip().lower()
     name = (getattr(m, 'name', '') or '').strip().lower()
-    if code == 'reverb' or name == 'reverb':
-        return 'reverb'
-    if code == 'walmart' or name == 'walmart':
+
+    if code in ('reverb', 'walmart', 'sears'):
+        return code
+    if 'walmart' in name:
         return 'walmart'
-    if code == 'sears' or name == 'sears':
+    if 'sears' in name:
         return 'sears'
+    if 'reverb' in name:
+        return 'reverb'
+    if name in ('reverb', 'walmart', 'sears'):
+        return name
     return 'other'
 
 

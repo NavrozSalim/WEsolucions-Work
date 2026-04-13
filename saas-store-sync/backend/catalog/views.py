@@ -16,10 +16,9 @@ from catalog.pagination import CatalogProductPagination
 from catalog.services import validate_and_create_upload
 from catalog.marketplace_templates import (
     export_headers_for_store,
-    sample_template_filename,
-    sample_template_rows,
     sample_template_filename_for_kind,
     sample_template_rows_for_kind,
+    store_marketplace_kind,
     upload_row_to_cells,
 )
 from products.models import Product
@@ -58,7 +57,7 @@ class CatalogStoresView(APIView):
     def get(self, request):
         from sync.models import SyncSchedule
 
-        stores = Store.objects.filter(user=request.user).annotate(
+        stores = Store.objects.filter(user=request.user).select_related('marketplace').annotate(
             product_count=Count('products', filter=Q(products__is_active=True)),
         ).order_by('name')
         marketplace_id = request.query_params.get('marketplace_id')
@@ -77,6 +76,7 @@ class CatalogStoresView(APIView):
                 'name': s.name,
                 'marketplace_id': str(s.marketplace_id) if s.marketplace_id else None,
                 'marketplace_name': s.marketplace.name if s.marketplace else None,
+                'marketplace_code': (s.marketplace.code or '').strip() if s.marketplace else None,
                 'product_count': s.product_count,
                 'schedule_active': sch.is_active if sch else None,
             })
@@ -794,17 +794,27 @@ class CatalogSampleTemplateView(APIView):
 
     def get(self, request):
         store_id = request.query_params.get('store_id')
+        kind_param = (request.query_params.get('marketplace') or '').strip().lower()
         store = None
         if store_id:
-            store = get_object_or_404(Store, id=store_id, user=request.user)
+            store = get_object_or_404(
+                Store.objects.select_related('marketplace'),
+                id=store_id,
+                user=request.user,
+            )
+
+        if kind_param in ('reverb', 'walmart', 'sears'):
+            kind = kind_param
+        elif store:
+            kind = store_marketplace_kind(store)
+        elif kind_param:
+            kind = 'other'
+        else:
+            kind = 'other'
 
         response = HttpResponse(content_type='text/csv')
-        if store:
-            fname = sample_template_filename(store)
-            headers, sample_rows = sample_template_rows(store)
-        else:
-            fname = sample_template_filename_for_kind('other')
-            headers, sample_rows = sample_template_rows_for_kind('other')
+        fname = sample_template_filename_for_kind(kind)
+        headers, sample_rows = sample_template_rows_for_kind(kind)
 
         response['Content-Disposition'] = f'attachment; filename="{fname}"'
         writer = csv.writer(response)
