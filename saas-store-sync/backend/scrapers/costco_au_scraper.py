@@ -1,32 +1,53 @@
 """
-Costco AU product scraper (HTTP + BeautifulSoup).
+Costco AU product scraper (Playwright + Chromium).
 
 Public API:
   scrape_costco_au(vendor_url, region, session=None) -> {"price": float|None, "stock": int|None, "title": str|None}
   close_costco_au_session(session)
+
+Notes:
+- Keeps the same public API as your current scraper.
+- Uses Playwright browser instead of requests for Costco AU.
+- Rotates proxies from COSTCO_AU_PROXY_URLS / COSTCO_AU_PROXY_URL / PROXY_URLS / PROXY_URL / PROXY_ENDPOINTS.
+- Returns legacy ScrapeResult payload like your current pipeline expects.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 from typing import Optional
 from urllib.parse import urlparse
 
-import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import (
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
+)
 
 from .core import ScrapeResult, detect_block, parse_price_text, random_delay
 
 logger = logging.getLogger("scrapers.costco_au")
 
 RETRY_LIMIT = 2
-FETCH_TIMEOUT = 30
+PAGE_TIMEOUT_MS = 45000
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+]
+
+CHROMIUM_CANDIDATES = [
+    os.environ.get("PLAYWRIGHT_CHROMIUM_PATH", "").strip(),
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    shutil.which("chromium"),
+    shutil.which("chromium-browser"),
 ]
 
 
@@ -43,14 +64,6 @@ def _split_proxy_env_list(raw: str) -> list[str]:
 
 
 def _proxy_pool() -> list[str]:
-    """
-    Proxy precedence (Costco-specific first):
-    1) COSTCO_AU_PROXY_URLS
-    2) COSTCO_AU_PROXY_URL
-    3) PROXY_URLS
-    4) PROXY_URL
-    5) PROXY_ENDPOINTS + PROXY_USER + PROXY_PASS + PROXY_SCHEME
-    """
     raw = (os.environ.get("COSTCO_AU_PROXY_URLS") or "").strip()
     if raw:
         return _split_proxy_env_list(raw)
@@ -99,23 +112,31 @@ def _normalize_proxy_url(proxy_url: str) -> Optional[str]:
         return None
 
 
-def _get_session(session_dict: dict | None) -> requests.Session:
-    key = "costco_au_http_session"
-    if session_dict is not None and key in session_dict:
-        return session_dict[key]
+def _playwright_proxy_from_url(proxy_url: str) -> Optional[dict]:
+    normalized = _normalize_proxy_url(proxy_url)
+    if not normalized:
+        return None
 
-    s = requests.Session()
-    s.headers.update(
-        {
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-AU,en-US;q=0.7,en;q=0.3",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-        }
-    )
-    if session_dict is not None:
-        session_dict[key] = s
-    return s
+    parsed = urlparse(normalized)
+    if not parsed.hostname or not parsed.port:
+        return None
+
+    server = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    proxy: dict = {"server": server}
+
+    if parsed.username:
+        proxy["username"] = parsed.username
+    if parsed.password:
+        proxy["password"] = parsed.password
+
+    return proxy
+
+
+def _chromium_executable_path() -> Optional[str]:
+    for path in CHROMIUM_CANDIDATES:
+        if path and os.path.exists(path):
+            return path
+    return None
 
 
 def _extract_title(soup: BeautifulSoup) -> Optional[str]:
@@ -192,7 +213,7 @@ def _extract_price(soup: BeautifulSoup, html: str) -> Optional[float]:
 
 def _extract_stock(soup: BeautifulSoup, html: str) -> int:
     """
-    Requested business rule:
+    Business rule:
     - If Add to Cart is available -> 3
     - Otherwise -> 0
     """
@@ -224,6 +245,7 @@ def _is_blocked(html: str) -> tuple[bool, str]:
     blocked, reason = detect_block(html)
     if blocked:
         return True, reason
+
     lower = (html or "").lower()
     for needle in (
         "access denied",
@@ -231,14 +253,125 @@ def _is_blocked(html: str) -> tuple[bool, str]:
         "request unsuccessful",
         "captcha",
         "verify you are human",
+        "are you a robot",
+        "cf-challenge",
     ):
         if needle in lower:
             return True, "waf_challenge"
     return False, ""
 
 
+def _page_ready(page) -> None:
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+    except Exception:
+        pass
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=8000)
+    except Exception:
+        pass
+
+    try:
+        page.wait_for_timeout(2500)
+    except Exception:
+        pass
+
+
+def _fetch_html_with_browser(vendor_url: str, proxy_url: Optional[str], attempt: int) -> tuple[Optional[str], Optional[str]]:
+    user_data_dir = tempfile.mkdtemp(prefix="costco_au_pw_")
+    pw = None
+    browser = None
+    context = None
+    page = None
+
+    try:
+        pw = sync_playwright().start()
+        chromium = pw.chromium
+
+        launch_kwargs = {
+            "headless": True,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
+        }
+
+        executable_path = _chromium_executable_path()
+        if executable_path:
+            launch_kwargs["executable_path"] = executable_path
+
+        proxy = _playwright_proxy_from_url(proxy_url) if proxy_url else None
+        if proxy:
+            launch_kwargs["proxy"] = proxy
+
+        browser = chromium.launch(**launch_kwargs)
+
+        context = browser.new_context(
+            user_agent=USER_AGENTS[attempt % len(USER_AGENTS)],
+            locale="en-AU",
+            timezone_id="Australia/Sydney",
+            viewport={"width": 1366, "height": 900},
+            extra_http_headers={
+                "Accept-Language": "en-AU,en-US;q=0.9,en;q=0.8",
+            },
+            ignore_https_errors=True,
+        )
+
+        page = context.new_page()
+        page.set_default_navigation_timeout(PAGE_TIMEOUT_MS)
+        page.set_default_timeout(PAGE_TIMEOUT_MS)
+
+        page.goto(vendor_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+        _page_ready(page)
+
+        html = page.content()
+        final_url = page.url
+
+        if html and "captcha" not in html.lower():
+            try:
+                if page.locator("button, a").count() > 0:
+                    page.mouse.move(200, 250)
+                    page.wait_for_timeout(400)
+            except Exception:
+                pass
+
+            try:
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.35)")
+                page.wait_for_timeout(700)
+                html = page.content()
+            except Exception:
+                pass
+
+        return html, final_url
+
+    finally:
+        try:
+            if page:
+                page.close()
+        except Exception:
+            pass
+        try:
+            if context:
+                context.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+        try:
+            if pw:
+                pw.stop()
+        except Exception:
+            pass
+        shutil.rmtree(user_data_dir, ignore_errors=True)
+
+
 def scrape_costco_au(vendor_url: str, region: str, session: dict = None) -> dict:
-    s = _get_session(session)
     last = None
     proxies_pool = _proxy_pool()
     if proxies_pool:
@@ -246,44 +379,23 @@ def scrape_costco_au(vendor_url: str, region: str, session: dict = None) -> dict
 
     for attempt in range(RETRY_LIMIT + 1):
         if attempt:
-            random_delay(1.0, 2.2)
+            random_delay(2.0, 4.5)
 
-        headers = {
-            "User-Agent": USER_AGENTS[attempt % len(USER_AGENTS)],
-            "Referer": "https://www.costco.com.au/",
-        }
-        req_kwargs = {
-            "timeout": FETCH_TIMEOUT,
-            "headers": headers,
-            "allow_redirects": True,
-        }
+        proxy_url = None
         if proxies_pool:
-            proxy_raw = proxies_pool[attempt % len(proxies_pool)]
-            proxy_url = _normalize_proxy_url(proxy_raw)
-            if proxy_url:
-                req_kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
-                logger.debug("Costco AU attempt %d using proxy=%s", attempt, proxy_url.rsplit("@", 1)[-1])
+            proxy_url = _normalize_proxy_url(proxies_pool[attempt % len(proxies_pool)])
 
         try:
-            resp = s.get(vendor_url, **req_kwargs)
-        except requests.Timeout:
-            last = ScrapeResult.fail("timeout", "Costco AU HTTP timeout", "", "costco_au", vendor_url)
+            html, final_url = _fetch_html_with_browser(vendor_url, proxy_url, attempt)
+        except PlaywrightTimeoutError:
+            last = ScrapeResult.fail("timeout", "Costco AU browser timeout", "", "costco_au", vendor_url)
             continue
-        except requests.RequestException as exc:
-            last = ScrapeResult.fail("request_error", str(exc), "", "costco_au", vendor_url)
-            continue
-
-        html = resp.text or ""
-        if resp.status_code != 200:
-            last = ScrapeResult.fail(
-                f"http_{resp.status_code}",
-                f"Costco AU HTTP {resp.status_code}",
-                html,
-                "costco_au",
-                vendor_url,
-            )
+        except Exception as exc:
+            logger.warning("Costco AU browser error attempt %d url=%s err=%s", attempt, vendor_url, exc)
+            last = ScrapeResult.fail("browser_error", str(exc), "", "costco_au", vendor_url)
             continue
 
+        html = html or ""
         blocked, reason = _is_blocked(html)
         if blocked:
             logger.warning("Costco AU blocked (%s) attempt %d url=%s", reason, attempt, vendor_url)
@@ -296,7 +408,7 @@ def scrape_costco_au(vendor_url: str, region: str, session: dict = None) -> dict
         stock = _extract_stock(soup, html)
 
         if price is None:
-            last = ScrapeResult.fail("no_price", "Price not found on Costco AU page", html, "costco_au", vendor_url)
+            last = ScrapeResult.fail("no_price", "Price not found on Costco AU page", html, "costco_au", final_url or vendor_url)
             continue
 
         return ScrapeResult.ok(price=price, stock=stock, title=title).to_legacy()
@@ -307,12 +419,6 @@ def scrape_costco_au(vendor_url: str, region: str, session: dict = None) -> dict
 
 
 def close_costco_au_session(session):
-    if session is None:
-        return
-    s = session.pop("costco_au_http_session", None)
-    try:
-        if s:
-            s.close()
-    except Exception:
-        pass
+    # No persistent session kept for browser mode.
+    return
 

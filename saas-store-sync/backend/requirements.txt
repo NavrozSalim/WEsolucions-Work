@@ -18,3 +18,4 @@ selenium-stealth>=1.0.6
 webdriver-manager>=4.0
 beautifulsoup4>=4.12
 lxml>=5.0
+playwright>=1.46
