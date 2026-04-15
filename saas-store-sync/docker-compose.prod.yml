@@ -180,6 +180,7 @@ services:
       - PROXY_PASS=${PROXY_PASS:-}
       - PROXY_SCHEME=${PROXY_SCHEME:-http}
       - COSTCO_AU_MIN_REQUEST_GAP_SEC=${COSTCO_AU_MIN_REQUEST_GAP_SEC:-8}
+      - COSTCO_AU_LOCK_WAIT_SEC=${COSTCO_AU_LOCK_WAIT_SEC:-40}
     depends_on:
       db:
         condition: service_healthy

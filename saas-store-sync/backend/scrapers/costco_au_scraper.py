@@ -51,6 +51,7 @@ import re
 import shutil
 import tempfile
 import time
+import uuid
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -59,6 +60,7 @@ from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
     sync_playwright,
 )
+import redis
 
 from .core import ScrapeResult, detect_block, parse_price_text, random_delay
 
@@ -69,6 +71,9 @@ PAGE_TIMEOUT_MS = 55_000
 RETRY_BACKOFF_SEC = (4.0, 9.0)
 DEFAULT_MIN_REQUEST_GAP_SEC = 8.0
 _LAST_COSTCO_REQUEST_AT = 0.0
+COSTCO_LOCK_KEY = "scrapers:costco_au:global_lock"
+COSTCO_LOCK_TTL_SEC = 120
+COSTCO_LOCK_WAIT_SEC = 40
 
 # ---------------------------------------------------------------------------
 # camoufox availability check
@@ -230,6 +235,69 @@ def _respect_min_request_gap() -> None:
     if elapsed < gap:
         time.sleep(gap - elapsed)
     _LAST_COSTCO_REQUEST_AT = time.monotonic()
+
+
+def _redis_client() -> Optional[redis.Redis]:
+    redis_url = (os.environ.get("REDIS_URL") or "").strip()
+    if not redis_url:
+        return None
+    try:
+        return redis.Redis.from_url(redis_url, decode_responses=True, socket_timeout=5)
+    except Exception:
+        return None
+
+
+def _costco_lock_wait_sec() -> int:
+    raw = (os.environ.get("COSTCO_AU_LOCK_WAIT_SEC") or "").strip()
+    if not raw:
+        return COSTCO_LOCK_WAIT_SEC
+    try:
+        return max(1, int(float(raw)))
+    except Exception:
+        return COSTCO_LOCK_WAIT_SEC
+
+
+def _acquire_costco_lock() -> tuple[Optional[redis.Redis], Optional[str], bool]:
+    """
+    Cross-worker lock so only one Costco scrape runs at once.
+    Returns (client, token, acquired).
+    """
+    client = _redis_client()
+    if not client:
+        return None, None, True
+
+    token = uuid.uuid4().hex
+    deadline = time.monotonic() + _costco_lock_wait_sec()
+    while time.monotonic() < deadline:
+        try:
+            ok = client.set(COSTCO_LOCK_KEY, token, nx=True, ex=COSTCO_LOCK_TTL_SEC)
+            if ok:
+                return client, token, True
+        except Exception:
+            # If Redis has transient issues, fail open to avoid full scraper outage.
+            return None, None, True
+        time.sleep(0.35)
+    return client, token, False
+
+
+def _release_costco_lock(client: Optional[redis.Redis], token: Optional[str]) -> None:
+    if not client or not token:
+        return
+    try:
+        client.eval(
+            """
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("del", KEYS[1])
+            else
+                return 0
+            end
+            """,
+            1,
+            COSTCO_LOCK_KEY,
+            token,
+        )
+    except Exception:
+        pass
 
 
 def _proxy_pool() -> list[str]:
@@ -650,6 +718,17 @@ def _fetch_html(
 # ---------------------------------------------------------------------------
 
 def scrape_costco_au(vendor_url: str, region: str, session: dict = None) -> dict:
+    lock_client, lock_token, lock_ok = _acquire_costco_lock()
+    if not lock_ok:
+        logger.warning("Costco AU lock wait timeout; skipping scrape url=%s", vendor_url)
+        return ScrapeResult.fail(
+            "busy",
+            "Costco AU scraper busy; try again shortly",
+            "",
+            "costco_au",
+            vendor_url,
+        ).to_legacy()
+
     _respect_min_request_gap()
     last = None
     proxies_pool = _proxy_pool()
@@ -666,65 +745,68 @@ def scrape_costco_au(vendor_url: str, region: str, session: dict = None) -> dict
             "Costco AU: no proxies configured — direct IP will be blocked by Cloudflare Bot Management"
         )
 
-    for attempt in range(RETRY_LIMIT + 1):
-        if attempt:
-            random_delay(*RETRY_BACKOFF_SEC)
+    try:
+        for attempt in range(RETRY_LIMIT + 1):
+            if attempt:
+                random_delay(*RETRY_BACKOFF_SEC)
 
-        proxy_url = _pick_proxy(proxies_pool, attempt, blocked_proxies)
+            proxy_url = _pick_proxy(proxies_pool, attempt, blocked_proxies)
 
-        try:
-            html, final_url = _fetch_html(vendor_url, proxy_url, attempt)
-        except PlaywrightTimeoutError:
-            if proxy_url:
-                blocked_proxies.add(proxy_url)
-            logger.warning("Costco AU timeout attempt=%d url=%s proxy=%s", attempt, vendor_url, proxy_url or "none")
-            last = ScrapeResult.fail("timeout", "Costco AU browser timeout", "", "costco_au", vendor_url)
-            continue
-        except Exception as exc:
-            err = str(exc)
-            is_tunnel = any(k in err.upper() for k in ("ERR_TUNNEL_CONNECTION_FAILED", "TUNNEL", "ECONNREFUSED", "ECONNRESET"))
-            if is_tunnel and proxy_url:
-                blocked_proxies.add(proxy_url)
-                logger.warning("Costco AU proxy dead, rotating immediately. attempt=%d proxy=%s", attempt, proxy_url)
-                last = ScrapeResult.fail("proxy_tunnel_error", err, "", "costco_au", vendor_url)
-                continue  # skip sleep — proxy is dead, rotate immediately
-            logger.warning("Costco AU browser error attempt=%d url=%s err=%s", attempt, vendor_url, exc)
-            last = ScrapeResult.fail("browser_error", err, "", "costco_au", vendor_url)
-            continue
+            try:
+                html, final_url = _fetch_html(vendor_url, proxy_url, attempt)
+            except PlaywrightTimeoutError:
+                if proxy_url:
+                    blocked_proxies.add(proxy_url)
+                logger.warning("Costco AU timeout attempt=%d url=%s proxy=%s", attempt, vendor_url, proxy_url or "none")
+                last = ScrapeResult.fail("timeout", "Costco AU browser timeout", "", "costco_au", vendor_url)
+                continue
+            except Exception as exc:
+                err = str(exc)
+                is_tunnel = any(k in err.upper() for k in ("ERR_TUNNEL_CONNECTION_FAILED", "TUNNEL", "ECONNREFUSED", "ECONNRESET"))
+                if is_tunnel and proxy_url:
+                    blocked_proxies.add(proxy_url)
+                    logger.warning("Costco AU proxy dead, rotating immediately. attempt=%d proxy=%s", attempt, proxy_url)
+                    last = ScrapeResult.fail("proxy_tunnel_error", err, "", "costco_au", vendor_url)
+                    continue  # skip sleep — proxy is dead, rotate immediately
+                logger.warning("Costco AU browser error attempt=%d url=%s err=%s", attempt, vendor_url, exc)
+                last = ScrapeResult.fail("browser_error", err, "", "costco_au", vendor_url)
+                continue
 
-        html = html or ""
-        blocked, reason = _is_blocked(html)
-        if blocked:
-            if proxy_url:
-                blocked_proxies.add(proxy_url)
-            logger.warning(
-                "Costco AU blocked reason=%s attempt=%d url=%s final=%s engine=%s proxy=%s",
-                reason, attempt, vendor_url, final_url or "",
-                "camoufox" if _CAMOUFOX_AVAILABLE else "chromium",
-                "yes" if proxy_url else "no",
-            )
-            last = ScrapeResult.fail(
-                f"blocked_{reason}", f"Blocked: {reason}", html, "costco_au", final_url or vendor_url
-            )
-            continue
+            html = html or ""
+            blocked, reason = _is_blocked(html)
+            if blocked:
+                if proxy_url:
+                    blocked_proxies.add(proxy_url)
+                logger.warning(
+                    "Costco AU blocked reason=%s attempt=%d url=%s final=%s engine=%s proxy=%s",
+                    reason, attempt, vendor_url, final_url or "",
+                    "camoufox" if _CAMOUFOX_AVAILABLE else "chromium",
+                    "yes" if proxy_url else "no",
+                )
+                last = ScrapeResult.fail(
+                    f"blocked_{reason}", f"Blocked: {reason}", html, "costco_au", final_url or vendor_url
+                )
+                continue
 
-        soup = BeautifulSoup(html, "lxml")
-        title = _extract_title(soup)
-        price = _extract_price(soup, html)
-        stock = _extract_stock(soup)
+            soup = BeautifulSoup(html, "lxml")
+            title = _extract_title(soup)
+            price = _extract_price(soup, html)
+            stock = _extract_stock(soup)
 
-        if price is None:
-            logger.debug("Costco AU no_price attempt=%d url=%s", attempt, vendor_url)
-            last = ScrapeResult.fail(
-                "no_price", "Price not found on Costco AU page", html, "costco_au", final_url or vendor_url
-            )
-            continue
+            if price is None:
+                logger.debug("Costco AU no_price attempt=%d url=%s", attempt, vendor_url)
+                last = ScrapeResult.fail(
+                    "no_price", "Price not found on Costco AU page", html, "costco_au", final_url or vendor_url
+                )
+                continue
 
-        return ScrapeResult.ok(price=price, stock=stock, title=title).to_legacy()
+            return ScrapeResult.ok(price=price, stock=stock, title=title).to_legacy()
 
-    return (
-        last or ScrapeResult.fail("max_retries", "Costco AU retries exhausted", "", "costco_au", vendor_url)
-    ).to_legacy()
+        return (
+            last or ScrapeResult.fail("max_retries", "Costco AU retries exhausted", "", "costco_au", vendor_url)
+        ).to_legacy()
+    finally:
+        _release_costco_lock(lock_client, lock_token)
 
 
 def close_costco_au_session(session) -> None:
