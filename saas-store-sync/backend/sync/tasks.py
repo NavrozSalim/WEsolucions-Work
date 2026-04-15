@@ -55,6 +55,29 @@ def _heb_product_id_from_sku(sku: str):
     return candidates[0][1]
 
 
+def _costco_product_id_from_value(value: str):
+    """
+    Extract Costco AU numeric product id from mixed values like:
+    - 173734
+    - TFCO-173734-New
+    """
+    raw = (value or "").strip().replace("_", "-")
+    if not raw:
+        return None
+    if raw.isdigit() and 5 <= len(raw) <= 12:
+        return raw
+
+    parts = [p for p in re.split(r"[-/]+", raw) if p]
+    for p in parts:
+        if p.isdigit() and 5 <= len(p) <= 12:
+            return p
+
+    m = re.search(r"\d{5,12}", raw)
+    if m:
+        return m.group(0)
+    return None
+
+
 def _resolve_vendor_url(product, store):
     """Build a scrapable URL for a product, falling back to SKU-based construction."""
     if product.vendor_url:
@@ -78,7 +101,10 @@ def _resolve_vendor_url(product, store):
             return f"https://www.heb.com/product-detail/{pid}"
         return None
     if vcode in ('costcoau', 'costco_au', 'costco-au'):
-        return f"https://www.costco.com.au/p/{sku}"
+        pid = _costco_product_id_from_value(sku)
+        if pid:
+            return f"https://www.costco.com.au/p/{pid}"
+        return None
     return None
 
 
@@ -101,7 +127,10 @@ def _vendor_url_from_vendor_id(vendor, vendor_id: str, region: str) -> str | Non
         if vid.isdigit() and 5 <= len(vid) <= 12:
             return f'https://www.heb.com/product-detail/{vid}'
     if vcode in ('costcoau', 'costco_au', 'costco-au'):
-        return f'https://www.costco.com.au/p/{vid}'
+        pid = _costco_product_id_from_value(vid)
+        if pid:
+            return f'https://www.costco.com.au/p/{pid}'
+        return None
     return None
 
 
@@ -115,20 +144,35 @@ def resolve_vendor_scrape_url(product, store, catalog_row=None):
     """
     from catalog.services import _normalize
 
+    vendor = getattr(product, "vendor", None) if product else None
+    vcode = (getattr(vendor, "code", "") or "").strip().lower()
+    is_costco_au = vcode in ('costcoau', 'costco_au', 'costco-au')
+
     if catalog_row is not None:
+        if is_costco_au:
+            vid = _normalize(getattr(catalog_row, 'vendor_id_raw', None))
+            built = _vendor_url_from_vendor_id(vendor, vid or '', store.region or 'USA')
+            if built:
+                return built
         u = _normalize(getattr(catalog_row, 'vendor_url_raw', None))
         if u:
             return u
         vid = _normalize(getattr(catalog_row, 'vendor_id_raw', None))
-        if vid and product and product.vendor:
-            built = _vendor_url_from_vendor_id(product.vendor, vid, store.region or 'USA')
+        if vid and vendor:
+            built = _vendor_url_from_vendor_id(vendor, vid, store.region or 'USA')
             if built:
                 return built
 
-    if product and product.vendor_url:
+    if product and product.vendor_url and not is_costco_au:
         u = str(product.vendor_url).strip()
         if u:
             return u
+    if product and product.vendor_url and is_costco_au:
+        # Canonicalize legacy Costco URLs like /p/TFCO-173734-New -> /p/173734
+        u = str(product.vendor_url).strip()
+        pid = _costco_product_id_from_value(u.rsplit("/", 1)[-1])
+        if pid:
+            return f'https://www.costco.com.au/p/{pid}'
 
     return _resolve_vendor_url(product, store)
 
