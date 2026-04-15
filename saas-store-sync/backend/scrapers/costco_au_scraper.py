@@ -8,8 +8,10 @@ Public API:
 
 import json
 import logging
+import os
 import re
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -26,6 +28,75 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
 ]
+
+
+def _split_proxy_env_list(raw: str) -> list[str]:
+    if not raw or not raw.strip():
+        return []
+    out: list[str] = []
+    for line in raw.replace(";", "\n").split("\n"):
+        for chunk in line.split(","):
+            c = chunk.strip()
+            if c:
+                out.append(c)
+    return out
+
+
+def _proxy_pool() -> list[str]:
+    """
+    Proxy precedence (Costco-specific first):
+    1) COSTCO_AU_PROXY_URLS
+    2) COSTCO_AU_PROXY_URL
+    3) PROXY_URLS
+    4) PROXY_URL
+    5) PROXY_ENDPOINTS + PROXY_USER + PROXY_PASS + PROXY_SCHEME
+    """
+    raw = (os.environ.get("COSTCO_AU_PROXY_URLS") or "").strip()
+    if raw:
+        return _split_proxy_env_list(raw)
+
+    one = (os.environ.get("COSTCO_AU_PROXY_URL") or "").strip()
+    if one:
+        return [one]
+
+    raw_global = (os.environ.get("PROXY_URLS") or "").strip()
+    if raw_global:
+        return _split_proxy_env_list(raw_global)
+
+    one_global = (os.environ.get("PROXY_URL") or "").strip()
+    if one_global:
+        return [one_global]
+
+    endpoints = (os.environ.get("PROXY_ENDPOINTS") or "").strip()
+    user = (os.environ.get("PROXY_USER") or "").strip()
+    password = (os.environ.get("PROXY_PASS") or "").strip()
+    scheme = (os.environ.get("PROXY_SCHEME") or "http").strip() or "http"
+    if endpoints and user and password:
+        built: list[str] = []
+        for ep in _split_proxy_env_list(endpoints):
+            host, _, port_s = ep.rpartition(":")
+            host = host.strip()
+            port_s = port_s.strip()
+            if host and port_s.isdigit():
+                built.append(f"{scheme}://{user}:{password}@{host}:{port_s}")
+        return built
+
+    return []
+
+
+def _normalize_proxy_url(proxy_url: str) -> Optional[str]:
+    p = (proxy_url or "").strip()
+    if not p:
+        return None
+    if "://" not in p:
+        p = f"http://{p}"
+    try:
+        parsed = urlparse(p)
+        if not parsed.hostname or not parsed.port:
+            return None
+        return p
+    except Exception:
+        return None
 
 
 def _get_session(session_dict: dict | None) -> requests.Session:
@@ -169,14 +240,32 @@ def _is_blocked(html: str) -> tuple[bool, str]:
 def scrape_costco_au(vendor_url: str, region: str, session: dict = None) -> dict:
     s = _get_session(session)
     last = None
+    proxies_pool = _proxy_pool()
+    if proxies_pool:
+        logger.info("Costco AU proxy pool configured (size=%d)", len(proxies_pool))
 
     for attempt in range(RETRY_LIMIT + 1):
         if attempt:
             random_delay(1.0, 2.2)
 
-        headers = {"User-Agent": USER_AGENTS[attempt % len(USER_AGENTS)]}
+        headers = {
+            "User-Agent": USER_AGENTS[attempt % len(USER_AGENTS)],
+            "Referer": "https://www.costco.com.au/",
+        }
+        req_kwargs = {
+            "timeout": FETCH_TIMEOUT,
+            "headers": headers,
+            "allow_redirects": True,
+        }
+        if proxies_pool:
+            proxy_raw = proxies_pool[attempt % len(proxies_pool)]
+            proxy_url = _normalize_proxy_url(proxy_raw)
+            if proxy_url:
+                req_kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
+                logger.debug("Costco AU attempt %d using proxy=%s", attempt, proxy_url.rsplit("@", 1)[-1])
+
         try:
-            resp = s.get(vendor_url, timeout=FETCH_TIMEOUT, headers=headers, allow_redirects=True)
+            resp = s.get(vendor_url, **req_kwargs)
         except requests.Timeout:
             last = ScrapeResult.fail("timeout", "Costco AU HTTP timeout", "", "costco_au", vendor_url)
             continue
