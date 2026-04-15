@@ -27,6 +27,8 @@ _scrape_amazon_legacy = None
 _close_amazon_legacy = None
 _scrape_heb = None
 _close_heb = None
+_scrape_costco_au = None
+_close_costco_au = None
 
 
 def _get_amazon_us_scraper():
@@ -69,6 +71,20 @@ def _get_heb_scraper():
             _scrape_heb = _placeholder_scrape
             _close_heb = lambda s: None
     return _scrape_heb, _close_heb
+
+
+def _get_costco_au_scraper():
+    global _scrape_costco_au, _close_costco_au
+    if _scrape_costco_au is None:
+        try:
+            from .costco_au_scraper import scrape_costco_au, close_costco_au_session
+            _scrape_costco_au = scrape_costco_au
+            _close_costco_au = close_costco_au_session
+        except ImportError as exc:
+            logger.warning("Costco AU scraper unavailable: %s", exc)
+            _scrape_costco_au = _placeholder_scrape
+            _close_costco_au = lambda s: None
+    return _scrape_costco_au, _close_costco_au
 
 
 def _rewrite_url_for_region(vendor_url: str, region: str) -> str:
@@ -136,6 +152,11 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
         logger.debug("Routing to HEB scraper: %s", vendor_url[:80])
         return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
 
+    if "costco.com.au" in url_lower:
+        scrape_fn, _ = _get_costco_au_scraper()
+        logger.debug("Routing to Costco AU scraper: %s", vendor_url[:80])
+        return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
+
     logger.warning("No scraper registered for URL: %s", vendor_url[:80])
     return _placeholder_scrape(vendor_url, region)
 
@@ -178,6 +199,8 @@ def close_amazon_session(session):
         pass
     _, close_heb = _get_heb_scraper()
     close_heb(session)
+    _, close_costco_au = _get_costco_au_scraper()
+    close_costco_au(session)
 
 
 __all__ = ["get_price_and_stock", "close_amazon_session"]

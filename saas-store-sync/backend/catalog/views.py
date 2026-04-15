@@ -131,7 +131,7 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
         response['Content-Disposition'] = f'attachment; filename="catalog_products_{store_pk}.csv"'
         writer = csv.writer(response)
         writer.writerow([
-            'SKU', 'Title', 'Vendor', 'Vendor URL', 'Vendor price', 'Store price', 'Stock',
+            'SKU', 'Title', 'Vendor', 'Vendor URL', 'Vendor price', 'Vendor inventory', 'Store price', 'Store stock',
             'Sync status', 'Marketplace ID', 'Last sync', 'Last scrape',
         ])
         for pm in qs:
@@ -144,14 +144,18 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
             if pm.product_id:
                 vp = pm.product.vendor_prices.order_by('-scraped_at').first()
             vprice = ''
+            vinventory = ''
             if vp and vp.price is not None:
                 vprice = str(vp.price)
+            if vp and vp.stock is not None:
+                vinventory = str(vp.stock)
             writer.writerow([
                 sku or '',
                 (pm.title or '')[:500],
                 pm.product.vendor.name if pm.product and pm.product.vendor else '',
                 pm.product.vendor_url if pm.product else '',
                 vprice,
+                vinventory,
                 str(pm.store_price) if pm.store_price is not None else '',
                 pm.store_stock if pm.store_stock is not None else '',
                 pm.sync_status or '',

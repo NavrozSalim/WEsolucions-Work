@@ -7,7 +7,7 @@ from .models import Vendor
 
 
 class VendorViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Vendor.objects.all()
+    queryset = Vendor.objects.exclude(code__iexact='aliexpress')
     permission_classes = [IsAuthenticated]
 
     def list(self, request, *args, **kwargs):
