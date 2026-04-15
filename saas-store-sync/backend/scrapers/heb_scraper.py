@@ -8,6 +8,7 @@ Goals:
 - Return the same shape used by the app: {"price": float|None, "stock": int|None, "title": str|None}
 """
 import logging
+import importlib
 import json
 import os
 import re
@@ -31,6 +32,10 @@ PAGE_TIMEOUT = 25
 PRICE_WAIT_TIMEOUT = 10
 PDP_READY_TIMEOUT = 24
 DEBUG_DUMP_DIR = os.environ.get("HEB_DEBUG_DIR", "/tmp/heb_debug")
+HEB_HOME = os.environ.get("HEB_HOME_URL", "https://www.heb.com/")
+COOKIES_FILE = os.environ.get("HEB_COOKIES_FILE", "cookies.json")
+HEB_HEADLESS = os.environ.get("HEB_HEADLESS", "1").strip().lower() not in ("0", "false", "no")
+HEB_USE_UNDETECTED = os.environ.get("HEB_USE_UNDETECTED", "1").strip().lower() not in ("0", "false", "no")
 
 # Junk/interstitial responses (~650 B) vs real PDPs; avoid 3× no_price retries on those.
 TINY_PDP_HTML_MAX_LEN = 2000
@@ -420,6 +425,67 @@ chrome.webRequest.onAuthRequired.addListener(
     return ext_path
 
 
+def _load_cookies(driver, cookies_file: str = COOKIES_FILE):
+    """
+    Load persisted cookies for heb.com to reduce store-gate/challenge frequency.
+    Safe no-op when file is absent or invalid.
+    """
+    if not cookies_file or not os.path.exists(cookies_file):
+        return
+    try:
+        with open(cookies_file, "r", encoding="utf-8") as f:
+            cookies = json.load(f)
+        added = 0
+        skipped_expired = 0
+        skipped_non_heb = 0
+        skipped_noise = 0
+        now_ts = int(time.time())
+        # Keep high-signal cookies only; ignore telemetry/noise cookies.
+        ignore_prefixes = (
+            "_ga",
+            "_gcl_",
+            "AMP_",
+            "AMP_MKTG_",
+            "Optanon",
+        )
+        for cookie in cookies if isinstance(cookies, list) else []:
+            try:
+                allowed = {
+                    "name", "value", "domain", "path",
+                    "expiry", "secure", "httpOnly", "sameSite"
+                }
+                c = {k: v for k, v in cookie.items() if k in allowed}
+                dom = str(c.get("domain", "")).lower()
+                if dom and "heb.com" not in dom:
+                    skipped_non_heb += 1
+                    continue
+
+                exp = c.get("expiry")
+                if isinstance(exp, (int, float)) and int(exp) <= now_ts:
+                    skipped_expired += 1
+                    continue
+
+                name = str(c.get("name", ""))
+                low_name = name.lower()
+                if low_name.startswith(tuple(p.lower() for p in ignore_prefixes)):
+                    skipped_noise += 1
+                    continue
+                driver.add_cookie(c)
+                added += 1
+            except Exception:
+                continue
+        logger.info(
+            "HEB cookies: loaded=%d skipped_expired=%d skipped_non_heb=%d skipped_noise=%d file=%s",
+            added,
+            skipped_expired,
+            skipped_non_heb,
+            skipped_noise,
+            cookies_file,
+        )
+    except Exception as exc:
+        logger.warning("HEB cookie load failed (%s): %s", cookies_file, exc)
+
+
 def _safe_quit_and_recreate_driver(driver, session: dict):
     try:
         HebDriver.quit_safe(driver)
@@ -736,10 +802,18 @@ class HebDriver:
     def create(proxy_conf: Optional[dict] = None):
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
-        from selenium_stealth import stealth
 
-        opts = Options()
-        opts.add_argument("--headless=new")
+        uc_module = None
+        if HEB_USE_UNDETECTED:
+            try:
+                uc_module = importlib.import_module("undetected_chromedriver")
+            except Exception:
+                uc_module = None
+
+        use_uc = bool(HEB_USE_UNDETECTED and uc_module is not None)
+        opts = uc_module.ChromeOptions() if use_uc else Options()
+        if HEB_HEADLESS:
+            opts.add_argument("--headless=new")
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--window-size=1366,900")
@@ -786,7 +860,11 @@ class HebDriver:
                     f'--proxy-server={proxy_conf["scheme"]}://{proxy_conf["host"]}:{proxy_conf["port"]}'
                 )
 
-        driver = webdriver.Chrome(options=opts)
+        if use_uc:
+            logger.info("HEB using undetected_chromedriver")
+            driver = uc_module.Chrome(options=opts, use_subprocess=True)
+        else:
+            driver = webdriver.Chrome(options=opts)
         driver.set_page_load_timeout(PAGE_TIMEOUT)
 
         if proxy_ext_path:
@@ -804,15 +882,29 @@ class HebDriver:
             webgl_vendor = "Google Inc. (Google)"
             renderer = "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)))"
 
-        stealth(
-            driver,
-            languages=["en-US", "en"],
-            vendor="Google Inc.",
-            platform=plat,
-            webgl_vendor=webgl_vendor,
-            renderer=renderer,
-            fix_hairline=True,
-        )
+        try:
+            stealth = importlib.import_module("selenium_stealth").stealth
+            stealth(
+                driver,
+                languages=["en-US", "en"],
+                vendor="Google Inc.",
+                platform=plat,
+                webgl_vendor=webgl_vendor,
+                renderer=renderer,
+                fix_hairline=True,
+            )
+        except Exception:
+            pass
+
+        # Optional warm-up + cookie injection. Helps bypass store selector/challenges.
+        try:
+            driver.get(HEB_HOME)
+            time.sleep(0.8)
+            _load_cookies(driver)
+            driver.get(HEB_HOME)
+            time.sleep(0.6)
+        except Exception:
+            pass
         return driver
 
     @staticmethod
