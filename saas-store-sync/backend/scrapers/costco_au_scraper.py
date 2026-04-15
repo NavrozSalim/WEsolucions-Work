@@ -211,30 +211,28 @@ def _extract_price(soup: BeautifulSoup, html: str) -> Optional[float]:
     return None
 
 
-def _extract_stock(soup: BeautifulSoup, html: str) -> int:
+def _extract_stock(soup: BeautifulSoup) -> int:
     """
-    Business rule:
-    - If Add to Cart is available -> 3
-    - Otherwise -> 0
+    Costco AU does not expose a numeric quantity. Stock is 3 when an enabled
+    Add to cart control is found, otherwise 0.
     """
-    text = ((soup.get_text(" ", strip=True) or "") + " " + (html or "")).lower()
-    if any(x in text for x in ("out of stock", "sold out", "unavailable")):
-        return 0
-
     for sel in (
         "button[data-testid*='add' i]",
+        "a[data-testid*='add' i]",
+        "[role='button'][data-testid*='add' i]",
         "button.add-to-cart",
+        "a.add-to-cart",
         "button.btn-block",
         "button.notranslate",
         "button",
     ):
-        for btn in soup.select(sel):
-            btn_text = (btn.get_text(" ", strip=True) or "").lower()
+        for el in soup.select(sel):
+            btn_text = (el.get_text(" ", strip=True) or "").lower()
             if "add to cart" not in btn_text:
                 continue
-            disabled = btn.has_attr("disabled")
-            aria_disabled = (btn.get("aria-disabled") or "").lower() == "true"
-            cls = " ".join(btn.get("class") or []).lower()
+            disabled = el.has_attr("disabled")
+            aria_disabled = (el.get("aria-disabled") or "").lower() == "true"
+            cls = " ".join(el.get("class") or []).lower()
             class_disabled = "disabled" in cls
             if not (disabled or aria_disabled or class_disabled):
                 return 3
@@ -405,7 +403,7 @@ def scrape_costco_au(vendor_url: str, region: str, session: dict = None) -> dict
         soup = BeautifulSoup(html, "lxml")
         title = _extract_title(soup)
         price = _extract_price(soup, html)
-        stock = _extract_stock(soup, html)
+        stock = _extract_stock(soup)
 
         if price is None:
             last = ScrapeResult.fail("no_price", "Price not found on Costco AU page", html, "costco_au", final_url or vendor_url)
