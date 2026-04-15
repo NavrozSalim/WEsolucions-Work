@@ -35,6 +35,7 @@ logger = logging.getLogger("scrapers.costco_au")
 
 RETRY_LIMIT = 2
 PAGE_TIMEOUT_MS = 45000
+RETRY_BACKOFF_SEC = (2.0, 4.5)
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
@@ -95,6 +96,20 @@ def _proxy_pool() -> list[str]:
         return built
 
     return []
+
+
+def _pick_proxy(proxies_pool: list[str], attempt: int, blocked_proxies: set[str]) -> Optional[str]:
+    if not proxies_pool:
+        return None
+    size = len(proxies_pool)
+    for i in range(size):
+        candidate = _normalize_proxy_url(proxies_pool[(attempt + i) % size])
+        if not candidate:
+            continue
+        if candidate in blocked_proxies and size > 1:
+            continue
+        return candidate
+    return _normalize_proxy_url(proxies_pool[attempt % size])
 
 
 def _normalize_proxy_url(proxy_url: str) -> Optional[str]:
@@ -242,6 +257,12 @@ def _extract_stock(soup: BeautifulSoup) -> int:
 def _is_blocked(html: str) -> tuple[bool, str]:
     blocked, reason = detect_block(html)
     if blocked:
+        # Normalize vague reasons to stable labels used by monitoring.
+        if reason in ("blocked", "waf_challenge"):
+            low = (html or "").lower()
+            if "captcha" in low or "verify you are human" in low or "are you a robot" in low:
+                return True, "captcha"
+            return True, "blocked"
         return True, reason
 
     lower = (html or "").lower()
@@ -253,9 +274,12 @@ def _is_blocked(html: str) -> tuple[bool, str]:
         "verify you are human",
         "are you a robot",
         "cf-challenge",
+        "challenge-platform",
+        "distil_r_captcha",
+        "perimeterx",
     ):
         if needle in lower:
-            return True, "waf_challenge"
+            return True, "captcha" if "captcha" in needle else "blocked"
     return False, ""
 
 
@@ -272,6 +296,20 @@ def _page_ready(page) -> None:
 
     try:
         page.wait_for_timeout(2500)
+    except Exception:
+        pass
+
+
+def _apply_stealth_overrides(context) -> None:
+    try:
+        context.add_init_script(
+            """
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+            Object.defineProperty(navigator, 'language', { get: () => 'en-AU' });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-AU', 'en-US', 'en'] });
+            """
+        )
     except Exception:
         pass
 
@@ -314,15 +352,21 @@ def _fetch_html_with_browser(vendor_url: str, proxy_url: Optional[str], attempt:
             viewport={"width": 1366, "height": 900},
             extra_http_headers={
                 "Accept-Language": "en-AU,en-US;q=0.9,en;q=0.8",
+                "Upgrade-Insecure-Requests": "1",
             },
             ignore_https_errors=True,
         )
+        _apply_stealth_overrides(context)
 
         page = context.new_page()
         page.set_default_navigation_timeout(PAGE_TIMEOUT_MS)
         page.set_default_timeout(PAGE_TIMEOUT_MS)
 
-        page.goto(vendor_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+        try:
+            page.goto(vendor_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            # Retry once with a lighter wait condition before bubbling up.
+            page.goto(vendor_url, wait_until="commit", timeout=15000)
         _page_ready(page)
 
         html = page.content()
@@ -372,20 +416,21 @@ def _fetch_html_with_browser(vendor_url: str, proxy_url: Optional[str], attempt:
 def scrape_costco_au(vendor_url: str, region: str, session: dict = None) -> dict:
     last = None
     proxies_pool = _proxy_pool()
+    blocked_proxies: set[str] = set()
     if proxies_pool:
         logger.info("Costco AU proxy pool configured (size=%d)", len(proxies_pool))
 
     for attempt in range(RETRY_LIMIT + 1):
         if attempt:
-            random_delay(2.0, 4.5)
+            random_delay(*RETRY_BACKOFF_SEC)
 
-        proxy_url = None
-        if proxies_pool:
-            proxy_url = _normalize_proxy_url(proxies_pool[attempt % len(proxies_pool)])
+        proxy_url = _pick_proxy(proxies_pool, attempt, blocked_proxies)
 
         try:
             html, final_url = _fetch_html_with_browser(vendor_url, proxy_url, attempt)
         except PlaywrightTimeoutError:
+            if proxy_url:
+                blocked_proxies.add(proxy_url)
             last = ScrapeResult.fail("timeout", "Costco AU browser timeout", "", "costco_au", vendor_url)
             continue
         except Exception as exc:
@@ -396,8 +441,17 @@ def scrape_costco_au(vendor_url: str, region: str, session: dict = None) -> dict
         html = html or ""
         blocked, reason = _is_blocked(html)
         if blocked:
-            logger.warning("Costco AU blocked (%s) attempt %d url=%s", reason, attempt, vendor_url)
-            last = ScrapeResult.fail(f"blocked_{reason}", f"Blocked: {reason}", html, "costco_au", vendor_url)
+            if proxy_url:
+                blocked_proxies.add(proxy_url)
+            logger.warning(
+                "Costco AU blocked (%s) attempt %d url=%s final=%s proxy=%s",
+                reason,
+                attempt,
+                vendor_url,
+                final_url or "",
+                "yes" if proxy_url else "no",
+            )
+            last = ScrapeResult.fail(f"blocked_{reason}", f"Blocked: {reason}", html, "costco_au", final_url or vendor_url)
             continue
 
         soup = BeautifulSoup(html, "lxml")
