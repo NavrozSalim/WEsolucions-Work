@@ -75,8 +75,16 @@ def _find_product_mapping(row: CatalogUploadRow, store, *, active_only: bool = T
     vendor = vendor_early
     if not vendor:
         return None
+    vendor_code = (vendor.code or "").strip().lower()
     vid = _normalize(row.variation_id_raw) or ''
-    if ebay_v:
+    if vendor_code in ("costcoau", "costco_au", "costco-au"):
+        vsku = (
+            _normalize(row.vendor_id_raw)
+            or _normalize(row.vendor_sku_raw)
+            or _normalize(row.marketplace_child_sku_raw)
+            or _normalize(row.marketplace_parent_sku_raw)
+        )
+    elif ebay_v:
         vsku = (
             _normalize(row.vendor_sku_raw)
             or _normalize(row.vendor_id_raw)
@@ -115,7 +123,15 @@ def _find_product_mapping(row: CatalogUploadRow, store, *, active_only: bool = T
 
 def _get_or_create_product(vendor: Vendor, row: CatalogUploadRow, *, store) -> Product:
     """Get or create Product from row."""
-    if vendor_is_ebay(vendor, row.vendor_name_raw):
+    vendor_code = (vendor.code or "").strip().lower()
+    if vendor_code in ("costcoau", "costco_au", "costco-au"):
+        vsku = (
+            _normalize(row.vendor_id_raw)
+            or _normalize(row.vendor_sku_raw)
+            or _normalize(row.marketplace_child_sku_raw)
+            or _normalize(row.marketplace_parent_sku_raw)
+        )
+    elif vendor_is_ebay(vendor, row.vendor_name_raw):
         vsku = (
             _normalize(row.vendor_sku_raw)
             or _normalize(row.vendor_id_raw)

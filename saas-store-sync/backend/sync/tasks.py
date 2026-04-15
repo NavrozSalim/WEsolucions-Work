@@ -77,6 +77,8 @@ def _resolve_vendor_url(product, store):
         if pid:
             return f"https://www.heb.com/product-detail/{pid}"
         return None
+    if vcode in ('costcoau', 'costco_au', 'costco-au'):
+        return f"https://www.costco.com.au/p/{sku}"
     return None
 
 
@@ -98,6 +100,8 @@ def _vendor_url_from_vendor_id(vendor, vendor_id: str, region: str) -> str | Non
     if vcode == 'heb' or vcode.startswith('heb_'):
         if vid.isdigit() and 5 <= len(vid) <= 12:
             return f'https://www.heb.com/product-detail/{vid}'
+    if vcode in ('costcoau', 'costco_au', 'costco-au'):
+        return f'https://www.costco.com.au/p/{vid}'
     return None
 
 
