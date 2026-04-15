@@ -67,6 +67,8 @@ logger = logging.getLogger("scrapers.costco_au")
 RETRY_LIMIT = 3
 PAGE_TIMEOUT_MS = 55_000
 RETRY_BACKOFF_SEC = (4.0, 9.0)
+DEFAULT_MIN_REQUEST_GAP_SEC = 8.0
+_LAST_COSTCO_REQUEST_AT = 0.0
 
 # ---------------------------------------------------------------------------
 # camoufox availability check
@@ -205,6 +207,29 @@ def _split_proxy_env_list(raw: str) -> list[str]:
             if c:
                 out.append(c)
     return out
+
+
+def _min_request_gap_sec() -> float:
+    raw = (os.environ.get("COSTCO_AU_MIN_REQUEST_GAP_SEC") or "").strip()
+    if not raw:
+        return DEFAULT_MIN_REQUEST_GAP_SEC
+    try:
+        return max(0.0, float(raw))
+    except Exception:
+        return DEFAULT_MIN_REQUEST_GAP_SEC
+
+
+def _respect_min_request_gap() -> None:
+    global _LAST_COSTCO_REQUEST_AT
+    gap = _min_request_gap_sec()
+    if gap <= 0:
+        _LAST_COSTCO_REQUEST_AT = time.monotonic()
+        return
+    now = time.monotonic()
+    elapsed = now - _LAST_COSTCO_REQUEST_AT if _LAST_COSTCO_REQUEST_AT else gap
+    if elapsed < gap:
+        time.sleep(gap - elapsed)
+    _LAST_COSTCO_REQUEST_AT = time.monotonic()
 
 
 def _proxy_pool() -> list[str]:
@@ -625,6 +650,7 @@ def _fetch_html(
 # ---------------------------------------------------------------------------
 
 def scrape_costco_au(vendor_url: str, region: str, session: dict = None) -> dict:
+    _respect_min_request_gap()
     last = None
     proxies_pool = _proxy_pool()
     blocked_proxies: set[str] = set()
