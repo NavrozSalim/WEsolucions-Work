@@ -87,6 +87,8 @@ class StoreSerializer(serializers.ModelSerializer):
         model = Store
         fields = [
             'id', 'name', 'region', 'api_token', 'marketplace', 'marketplace_id', 'marketplace_name',
+            'kogan_service_account_json', 'kogan_sheet_id', 'kogan_tab_name',
+            'kogan_sku_column', 'kogan_stock_column', 'kogan_price_column', 'kogan_rrp_column', 'kogan_first_price_column',
             'connection_status', 'last_validated_at',
             'is_active', 'created_at', 'updated_at',
             'vendor_price_settings', 'vendor_inventory_settings',
@@ -94,6 +96,7 @@ class StoreSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {
             'api_token': {'write_only': True},
+            'kogan_service_account_json': {'write_only': True},
             'marketplace': {'allow_null': True},
             'connection_status': {'read_only': True},
             'last_validated_at': {'read_only': True},
@@ -130,13 +133,46 @@ class StoreSerializer(serializers.ModelSerializer):
                 validated_data['marketplace'] = mkt
             except Marketplace.DoesNotExist:
                 pass
+        is_kogan = bool(mkt and (str(mkt.code or '').strip().lower() == 'kogan' or str(mkt.name or '').strip().lower() == 'kogan'))
+        if is_kogan:
+            # Kogan uses Google Sheets service account JSON + spreadsheet details, not Store.api_token.
+            if not (req.get('kogan_sheet_id') or '').strip():
+                raise ValidationError({'kogan_sheet_id': 'Spreadsheet ID is required for Kogan.'})
+            if not (req.get('kogan_tab_name') or '').strip():
+                raise ValidationError({'kogan_tab_name': 'Tab name is required for Kogan.'})
+            # Accept either explicit kogan JSON field or legacy api_token containing JSON.
+            has_json = bool((req.get('kogan_service_account_json') or '').strip() or (validated_data.get('kogan_service_account_json') or '').strip())
+            if not has_json and not (req.get('api_token') or '').strip():
+                raise ValidationError({'kogan_service_account_json': 'Upload service account JSON for Kogan (or paste it into API token).'})
+        else:
+            if not (req.get('api_token') or '').strip():
+                raise ValidationError({'api_token': 'API key is required.'})
         sched_raw = req.get('sync_schedule')
         if not sched_raw or not isinstance(sched_raw, dict) or not sched_raw.get('enabled', False):
             raise ValidationError({'sync_schedule': 'Scheduled updates are required. Choose frequency and time.'})
 
         price_settings_data = req.get('vendor_price_settings', [])
         inventory_settings_data = req.get('vendor_inventory_settings', [])
-        store_data = {k: v for k, v in validated_data.items() if k in ('name', 'region', 'api_token', 'marketplace', 'is_active')}
+        store_data = {
+            k: v
+            for k, v in validated_data.items()
+            if k in (
+                'name',
+                'region',
+                'api_token',
+                'marketplace',
+                'is_active',
+                # Kogan
+                'kogan_service_account_json',
+                'kogan_sheet_id',
+                'kogan_tab_name',
+                'kogan_sku_column',
+                'kogan_stock_column',
+                'kogan_price_column',
+                'kogan_rrp_column',
+                'kogan_first_price_column',
+            )
+        }
         if store_data.get('name'):
             store_data['name'] = store_data['name'].strip()
         if mkt and Store.objects.filter(user=user, name=store_data.get('name', ''), marketplace=mkt).exists():
@@ -162,7 +198,22 @@ class StoreSerializer(serializers.ModelSerializer):
         from sync.models import SyncSchedule
         req = self.context['request'].data
         for attr, value in validated_data.items():
-            if attr in ('name', 'region', 'api_token', 'marketplace', 'is_active'):
+            if attr in (
+                'name',
+                'region',
+                'api_token',
+                'marketplace',
+                'is_active',
+                # Kogan
+                'kogan_service_account_json',
+                'kogan_sheet_id',
+                'kogan_tab_name',
+                'kogan_sku_column',
+                'kogan_stock_column',
+                'kogan_price_column',
+                'kogan_rrp_column',
+                'kogan_first_price_column',
+            ):
                 setattr(instance, attr, value)
         marketplace_id = req.get('marketplace_id') or req.get('marketplace')
         if marketplace_id is not None:
@@ -171,6 +222,13 @@ class StoreSerializer(serializers.ModelSerializer):
                 instance.marketplace = mkt
             except Marketplace.DoesNotExist:
                 pass
+        mkt_now = instance.marketplace
+        is_kogan = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'kogan' or str(mkt_now.name or '').strip().lower() == 'kogan'))
+        if is_kogan:
+            if 'kogan_sheet_id' in req and not (req.get('kogan_sheet_id') or '').strip():
+                raise ValidationError({'kogan_sheet_id': 'Spreadsheet ID is required for Kogan.'})
+            if 'kogan_tab_name' in req and not (req.get('kogan_tab_name') or '').strip():
+                raise ValidationError({'kogan_tab_name': 'Tab name is required for Kogan.'})
         if instance.name:
             instance.name = instance.name.strip()
         if Store.objects.filter(

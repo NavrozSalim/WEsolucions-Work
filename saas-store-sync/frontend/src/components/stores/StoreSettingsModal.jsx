@@ -55,6 +55,10 @@ function storeToForm(store) {
     return {
         name: store.name || '',
         api_token: '',
+        kogan_auth_method: 'json',
+        kogan_sheet_id: store.kogan_sheet_id || '',
+        kogan_tab_name: store.kogan_tab_name || '',
+        kogan_service_account_json: '',
         vendor_price_settings: (store.vendor_price_settings || []).map((vp) => ({
             vendor_id: vp.vendor || vp.vendor_id,
             purchase_tax_percentage: vp.purchase_tax_percentage ?? 0,
@@ -230,6 +234,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     };
 
     const regionTimezones = TIMEZONE_OPTIONS[store?.region] || TIMEZONE_OPTIONS.USA;
+    const isKogan = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'kogan';
+    const koganAuth = (form.kogan_auth_method || 'json') === 'token' ? 'token' : 'json';
 
     const buildPayload = () => {
         const cron = frequencyToCrontab(form.schedule_frequency, form.schedule_hour, form.schedule_minute);
@@ -271,7 +277,15 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                 timezone: form.schedule_timezone,
             } : { enabled: false },
         };
-        if (form.api_token?.trim()) payload.api_token = form.api_token.trim();
+        if (!isKogan && form.api_token?.trim()) payload.api_token = form.api_token.trim();
+        if (isKogan && koganAuth === 'token') {
+            if (form.api_token?.trim()) payload.api_token = form.api_token.trim();
+        }
+        if (isKogan && koganAuth === 'json') {
+            payload.kogan_sheet_id = form.kogan_sheet_id?.trim();
+            payload.kogan_tab_name = form.kogan_tab_name?.trim();
+            if (form.kogan_service_account_json?.trim()) payload.kogan_service_account_json = form.kogan_service_account_json;
+        }
         return payload;
     };
 
@@ -405,8 +419,86 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                     <Input label="Store Name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} required />
                                 </div>
                                 <div className="sm:col-span-2">
-                                    <Input label="API Token / Credentials JSON" type="password" placeholder="Leave blank to keep current token" value={form.api_token} onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))} />
-                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Leave empty to keep the existing token unchanged. Sears/Walmart can use JSON credentials.</p>
+                                    {!isKogan ? (
+                                        <>
+                                            <Input label="API Token / Credentials JSON" type="password" placeholder="Leave blank to keep current token" value={form.api_token} onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))} />
+                                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Leave empty to keep the existing token unchanged. Sears/Walmart can use JSON credentials.</p>
+                                        </>
+                                    ) : (
+                                        <div className="space-y-3">
+                                            <Select
+                                                label="Kogan connection method"
+                                                value={koganAuth}
+                                                onChange={(e) => setForm((f) => ({ ...f, kogan_auth_method: e.target.value }))}
+                                                options={[
+                                                    { value: 'json', label: 'Google Sheet JSON (supported)' },
+                                                    { value: 'token', label: 'API token (coming soon)' },
+                                                ]}
+                                            />
+                                            {koganAuth === 'token' && (
+                                                <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
+                                                    API token integration is not active yet. Use Google Sheet JSON for syncing. You can still store a token here for later.
+                                                </div>
+                                            )}
+                                            {koganAuth === 'token' ? (
+                                                <Input
+                                                    label="Kogan API token"
+                                                    type="password"
+                                                    placeholder="Leave blank to keep unchanged"
+                                                    value={form.api_token}
+                                                    onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))}
+                                                />
+                                            ) : null}
+                                            {koganAuth === 'json' ? (
+                                                <>
+                                            <Input
+                                                label="Google Spreadsheet ID"
+                                                value={form.kogan_sheet_id}
+                                                onChange={(e) => setForm((f) => ({ ...f, kogan_sheet_id: e.target.value }))}
+                                                required
+                                            />
+                                            <Input
+                                                label="Google Sheet Tab Name"
+                                                value={form.kogan_tab_name}
+                                                onChange={(e) => setForm((f) => ({ ...f, kogan_tab_name: e.target.value }))}
+                                                required
+                                            />
+                                            <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-3 space-y-2">
+                                                <div className="flex items-center justify-between gap-3">
+                                                    <div className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                                                        Service Account JSON
+                                                    </div>
+                                                    <input
+                                                        type="file"
+                                                        accept="application/json"
+                                                        onChange={(e) => {
+                                                            const file = e.target.files?.[0];
+                                                            if (!file) return;
+                                                            const reader = new FileReader();
+                                                            reader.onload = () => {
+                                                                const txt = String(reader.result || '');
+                                                                setForm((f) => ({ ...f, kogan_service_account_json: txt }));
+                                                            };
+                                                            reader.readAsText(file);
+                                                        }}
+                                                        className="block text-xs text-slate-600 dark:text-slate-300"
+                                                    />
+                                                </div>
+                                                <textarea
+                                                    value={form.kogan_service_account_json}
+                                                    onChange={(e) => setForm((f) => ({ ...f, kogan_service_account_json: e.target.value }))}
+                                                    placeholder="Paste a new downloaded service account JSON here (optional)"
+                                                    rows={6}
+                                                    className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-mono text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-none"
+                                                />
+                                                <p className="text-xs text-slate-500 dark:text-slate-400">
+                                                    Leave JSON empty to keep the existing key unchanged. The sheet must be shared with the key&apos;s <span className="font-mono">client_email</span>.
+                                                </p>
+                                            </div>
+                                                </>
+                                            ) : null}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
 

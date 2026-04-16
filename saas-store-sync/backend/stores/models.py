@@ -19,6 +19,17 @@ class Store(models.Model):
     name = models.CharField(max_length=255)
     region = models.CharField(max_length=10, choices=[('USA', 'USA'), ('AU', 'Australia')])
     api_token = EncryptedTextField(help_text="Encrypted at rest; set ENCRYPTION_KEY in production")
+    # --- Kogan via Google Sheets ---
+    # Users upload a Google Service Account JSON key; we use it to update a specific spreadsheet tab.
+    kogan_service_account_json = EncryptedTextField(null=True, blank=True)
+    kogan_sheet_id = models.CharField(max_length=200, null=True, blank=True)
+    kogan_tab_name = models.CharField(max_length=200, null=True, blank=True)
+    # Column mapping (defaults align with your Kogan template sheet)
+    kogan_sku_column = models.CharField(max_length=64, default='PRODUCT_SKU')
+    kogan_stock_column = models.CharField(max_length=64, default='STOCK')
+    kogan_price_column = models.CharField(max_length=64, default='PRICE')
+    kogan_rrp_column = models.CharField(max_length=64, default='rrp')
+    kogan_first_price_column = models.CharField(max_length=64, default='kogan_first_price')
     marketplace = models.ForeignKey(
         'marketplace.Marketplace',
         on_delete=models.SET_NULL,

@@ -566,6 +566,8 @@ def run_store_update(self, store_id):
         push_errors.append({"sku": (sku_hint or "")[:120], "error": str(err)[:500]})
 
     try:
+        bulk_supported = callable(getattr(adapter, 'update_products_bulk', None))
+        bulk_queue = []  # list of (pm, sku, price, stock)
         for pm in mappings:
             processed += 1
             price_from_fallback = False
@@ -703,11 +705,14 @@ def run_store_update(self, store_id):
 
             if should_push:
                 try:
-                    adapter.update_product(listing_id, price=float(new_price), stock=new_stock or 0)
-                    push_ok += 1
-                    pm.sync_status = 'synced'
-                    pm.last_sync_time = timezone.now()
-                    pm.save(update_fields=['sync_status', 'last_sync_time'])
+                    if bulk_supported:
+                        bulk_queue.append((pm, listing_id, float(new_price), int(new_stock or 0)))
+                    else:
+                        adapter.update_product(listing_id, price=float(new_price), stock=new_stock or 0)
+                        push_ok += 1
+                        pm.sync_status = 'synced'
+                        pm.last_sync_time = timezone.now()
+                        pm.save(update_fields=['sync_status', 'last_sync_time'])
                 except Exception as push_err:
                     logger.warning("Push failed for %s: %s", pm.marketplace_child_sku, push_err)
                     push_fail += 1
@@ -716,6 +721,28 @@ def run_store_update(self, store_id):
                 push_skipped += 1
     finally:
         close_amazon_session(session)
+
+    # Bulk push (Kogan sheets) after scraping loop
+    if bulk_supported and bulk_queue:
+        try:
+            payload = [(sku, price, stock) for (_pm, sku, price, stock) in bulk_queue]
+            res = adapter.update_products_bulk(payload) or {}
+            ok_set = set(res.get('ok') or [])
+            failed_list = res.get('failed') or []
+            now_ok = timezone.now()
+            for pm, sku, _price, _stock in bulk_queue:
+                if str(sku) in ok_set:
+                    push_ok += 1
+                    pm.sync_status = 'synced'
+                    pm.last_sync_time = now_ok
+                    pm.save(update_fields=['sync_status', 'last_sync_time'])
+            for it in failed_list[:50]:
+                push_fail += 1
+                _record_push_error(it.get('sku') or '', Exception(it.get('error') or 'Bulk push failed'))
+        except Exception as e:
+            logger.warning("Bulk push failed: %s", e)
+            push_fail += len(bulk_queue)
+            _record_push_error('bulk', e)
 
     if processed > 0 and updated == 0 and not hint:
         hint = (

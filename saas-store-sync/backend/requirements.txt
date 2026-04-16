@@ -19,3 +19,8 @@ webdriver-manager>=4.0
 beautifulsoup4>=4.12
 lxml>=5.0
 playwright>=1.46
+
+# Kogan (Google Sheets API via service account JSON)
+google-api-python-client>=2.120
+google-auth>=2.28
+google-auth-httplib2>=0.2

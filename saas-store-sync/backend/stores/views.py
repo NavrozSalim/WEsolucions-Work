@@ -60,8 +60,21 @@ class StoreViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         token_updated = 'api_token' in serializer.validated_data
         marketplace_updated = 'marketplace' in serializer.validated_data
+        kogan_updated = any(
+            k in serializer.validated_data
+            for k in (
+                'kogan_service_account_json',
+                'kogan_sheet_id',
+                'kogan_tab_name',
+                'kogan_sku_column',
+                'kogan_stock_column',
+                'kogan_price_column',
+                'kogan_rrp_column',
+                'kogan_first_price_column',
+            )
+        )
         store = serializer.save()
-        if token_updated or marketplace_updated:
+        if token_updated or marketplace_updated or kogan_updated:
             self._auto_validate_store_connection(store)
         if token_updated:
             try:
