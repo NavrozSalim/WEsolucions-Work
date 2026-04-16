@@ -95,7 +95,9 @@ class StoreSerializer(serializers.ModelSerializer):
             'sync_schedule',
         ]
         extra_kwargs = {
-            'api_token': {'write_only': True},
+            # Keep token hidden in responses; accept blank/missing at serializer layer.
+            # Non-Kogan marketplaces are validated explicitly in create().
+            'api_token': {'write_only': True, 'required': False, 'allow_blank': True},
             'kogan_service_account_json': {'write_only': True},
             'marketplace': {'allow_null': True},
             'connection_status': {'read_only': True},
