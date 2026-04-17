@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from decimal import Decimal
 from typing import Any
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
@@ -78,13 +80,38 @@ def _authenticate(request, required_scope: str) -> IngestToken:
     return tok
 
 
+_PRICE_NUM_RE = re.compile(r'(\d+(?:\.\d+)?)')
+
+
 def _coerce_price(value: Any) -> Decimal | None:
-    if value in (None, ''):
+    """Tolerant price parser.
+
+    Accepts numbers (``11.99``), clean strings (``"11.99"``) and dirty
+    strings produced by the desktop scraper such as ``"$11.99 each"``,
+    ``"$4 generics"`` or ``"$2.50 / each"``. Returns ``None`` when no
+    numeric portion is present.
+    """
+    if value is None or value == '':
         return None
-    try:
-        d = Decimal(str(value).replace(',', '').strip())
-    except Exception:
-        return None
+    if isinstance(value, (int, float, Decimal)):
+        try:
+            d = Decimal(str(value))
+        except Exception:
+            return None
+    else:
+        s = str(value).replace(',', '').strip()
+        if not s or s.upper() in ('N/A', 'NONE', 'NULL', 'NAN'):
+            return None
+        try:
+            d = Decimal(s)
+        except Exception:
+            m = _PRICE_NUM_RE.search(s)
+            if not m:
+                return None
+            try:
+                d = Decimal(m.group(1))
+            except Exception:
+                return None
     if d < 0:
         return None
     return d
@@ -188,11 +215,13 @@ class HebIngestView(APIView):
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
 
-        try:
-            heb_vendor = Vendor.objects.get(code='heb')
-        except Vendor.DoesNotExist:
+        heb_vendor_ids = list(
+            Vendor.objects.filter(Q(code='heb') | Q(code__istartswith='heb_'))
+            .values_list('id', flat=True)
+        )
+        if not heb_vendor_ids:
             return Response(
-                {'error': 'HEB vendor is not seeded in this environment.'},
+                {'error': 'No HEB vendor seeded in this environment.'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -227,11 +256,14 @@ class HebIngestView(APIView):
                 stats['skipped'] += 1
                 continue
 
-            product = (
-                Product.objects.filter(vendor=heb_vendor, vendor_url=url).first()
-                or Product.objects.filter(vendor=heb_vendor, vendor_url__iexact=url).first()
+            products = list(
+                Product.objects.filter(vendor_id__in=heb_vendor_ids, vendor_url=url)
             )
-            if product is None:
+            if not products:
+                products = list(
+                    Product.objects.filter(vendor_id__in=heb_vendor_ids, vendor_url__iexact=url)
+                )
+            if not products:
                 results.append({'index': idx, 'status': 'unmatched', 'url': url})
                 stats['skipped'] += 1
                 continue
@@ -239,28 +271,31 @@ class HebIngestView(APIView):
             stats['matched'] += 1
 
             try:
+                applied_total = 0
+                product_ids = []
                 with transaction.atomic():
-                    VendorPrice.objects.create(
-                        product=product,
-                        price=price if price is not None else None,
-                        stock=stock if (stock is not None and stock >= 0) else None,
-                        error_code=error_code[:50] if error_code else None,
-                    )
-                    applied = 0
-                    if price is not None:
-                        applied = _apply_to_mappings(
-                            product,
-                            price,
-                            0 if stock is None else stock,
-                            title,
+                    for product in products:
+                        VendorPrice.objects.create(
+                            product=product,
+                            price=price if price is not None else None,
+                            stock=stock if (stock is not None and stock >= 0) else None,
+                            error_code=error_code[:50] if error_code else None,
                         )
-                        stats['applied'] += applied
+                        if price is not None:
+                            applied_total += _apply_to_mappings(
+                                product,
+                                price,
+                                0 if stock is None else stock,
+                                title,
+                            )
+                        product_ids.append(str(product.id))
+                stats['applied'] += applied_total
                 results.append({
                     'index': idx,
                     'status': 'ok',
                     'url': url,
-                    'product_id': str(product.id),
-                    'mappings_updated': applied,
+                    'product_ids': product_ids,
+                    'mappings_updated': applied_total,
                 })
             except Exception as exc:
                 logger.exception('HEB ingest failure for %s', url)
@@ -273,3 +308,71 @@ class HebIngestView(APIView):
                 })
 
         return Response({'stats': stats, 'results': results}, status=status.HTTP_200_OK)
+
+
+class HebIngestUrlsView(APIView):
+    """Return the canonical list of HEB product URLs the catalog wants scraped.
+
+    The desktop runner calls this once at the start of each pass to pull the
+    fresh URL list from the SaaS app instead of relying on a stale local
+    ``links.txt``. URLs are pulled from active ProductMappings whose product
+    belongs to any HEB vendor (``code='heb'`` or ``code__istartswith='heb_'``).
+
+    Auth: ``Authorization: Bearer <token>`` with the same ``heb`` scope as
+    the POST endpoint.
+
+    Query params:
+        ?store_id=<uuid>  - optional, restrict to a single store
+        ?limit=<int>      - optional cap (default no cap)
+
+    Response:
+        {
+          "count": 879,
+          "fetched_at": "2026-04-17T22:00:00+00:00",
+          "urls": ["https://www.heb.com/...", ...]
+        }
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request, *args, **kwargs):
+        _authenticate(request, required_scope='heb')
+
+        heb_vendor_ids = list(
+            Vendor.objects.filter(Q(code='heb') | Q(code__istartswith='heb_'))
+            .values_list('id', flat=True)
+        )
+        if not heb_vendor_ids:
+            return Response({'count': 0, 'urls': [], 'fetched_at': timezone.now().isoformat()})
+
+        qs = (
+            ProductMapping.objects
+            .filter(is_active=True, product__vendor_id__in=heb_vendor_ids)
+            .exclude(product__vendor_url__isnull=True)
+            .exclude(product__vendor_url='')
+        )
+
+        store_id = (request.query_params.get('store_id') or '').strip()
+        if store_id:
+            qs = qs.filter(store_id=store_id)
+
+        urls_iter = (
+            qs.order_by('product__vendor_url')
+            .values_list('product__vendor_url', flat=True)
+            .distinct()
+        )
+
+        try:
+            limit = int(request.query_params.get('limit') or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        if limit > 0:
+            urls_iter = urls_iter[:limit]
+
+        urls = [u for u in urls_iter if u]
+        return Response({
+            'count': len(urls),
+            'fetched_at': timezone.now().isoformat(),
+            'urls': urls,
+        })
