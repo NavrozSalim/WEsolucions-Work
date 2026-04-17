@@ -1208,6 +1208,15 @@ def _is_block(html: str) -> tuple[bool, str]:
         if needle in lower:
             return True, "waf_challenge"
 
+    if (
+        '"errorcode"' in lower
+        and '"incidentid"' in lower
+        and '"hostname"' in lower
+    ):
+        return True, "akamai_incident"
+    if "this page could not load" in lower and "h-e-b" in lower:
+        return True, "heb_edge_block"
+
     if "select your store" in lower:
         if not any(
             x in lower
