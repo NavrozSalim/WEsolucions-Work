@@ -79,6 +79,8 @@ services:
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS}
       - DEBUG=False
+      # Nginx terminates TLS; Gunicorn is HTTP-only. Default off so Docker /health/ is not 301.
+      - SECURE_SSL_REDIRECT=${SECURE_SSL_REDIRECT:-0}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-https://${DOMAIN_NAME}}
       - FRONTEND_URL=${FRONTEND_URL:-https://${DOMAIN_NAME}}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
@@ -149,8 +151,9 @@ services:
           memory: 256M
         reservations:
           memory: 32M
+    # wget to / often gets 301 (HTTP→HTTPS); nginx -t validates config without HTTP.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null || exit 1"]
+      test: ["CMD", "nginx", "-t"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -168,6 +171,7 @@ services:
       # Django settings (same as backend — Celery imports core.settings on startup)
       - ALLOWED_HOSTS=${ALLOWED_HOSTS}
       - DEBUG=False
+      - SECURE_SSL_REDIRECT=${SECURE_SSL_REDIRECT:-0}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-https://${DOMAIN_NAME}}
       - FRONTEND_URL=${FRONTEND_URL:-https://${DOMAIN_NAME}}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
@@ -222,6 +226,7 @@ services:
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS}
       - DEBUG=False
+      - SECURE_SSL_REDIRECT=${SECURE_SSL_REDIRECT:-0}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-https://${DOMAIN_NAME}}
       - FRONTEND_URL=${FRONTEND_URL:-https://${DOMAIN_NAME}}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
