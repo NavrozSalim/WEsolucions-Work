@@ -42,9 +42,12 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.ERROR(
                     "No price returned. Common causes: blocked/captcha, wrong URL, "
-                    "unsupported domain (only amazon.* and ebay.*), or page layout changed. "
+                    "unsupported domain, or page layout changed. "
                     "For local dev, set DEMO_SCRAPE_FALLBACK=true only for demos."
                 )
             )
         else:
-            self.stdout.write(self.style.SUCCESS(f"OK — price={price!r}, stock={result.get('stock')!r}"))
+            stock = result.get("stock")
+            if stock is None:
+                stock = result.get("inventory")
+            self.stdout.write(self.style.SUCCESS(f"OK — price={price!r}, stock={stock!r}"))

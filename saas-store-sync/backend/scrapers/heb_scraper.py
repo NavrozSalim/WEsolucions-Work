@@ -190,6 +190,32 @@ def _normalize_document_title(raw: str) -> Optional[str]:
     return base[:500]
 
 
+def _normalize_title_candidate(raw: Optional[str]) -> Optional[str]:
+    t = (raw or "").strip()
+    if len(t) < 4:
+        return None
+
+    low = t.lower()
+    if low in (
+        "this site can't be reached",
+        "this site can’t be reached",
+        "access denied",
+        "error",
+        "page not found",
+        "heb",
+        "heb.com",
+    ):
+        return None
+
+    # Ignore short promo badges accidentally picked as "title" (e.g. "$2 off").
+    if re.fullmatch(r"\$\s*\d+(?:\.\d{1,2})?\s*off\b.*", low):
+        return None
+    if re.fullmatch(r"(save|deal|discount)\b.*", low) and len(t) <= 24:
+        return None
+
+    return t[:500]
+
+
 def _title_from_json_ld(soup: BeautifulSoup) -> Optional[str]:
     for script in soup.select("script[type='application/ld+json']"):
         raw = (script.string or script.get_text() or "").strip()
@@ -207,8 +233,10 @@ def _title_from_json_ld(soup: BeautifulSoup) -> Optional[str]:
                 if "Product" in types:
                     for key in ("name", "title"):
                         v = node.get(key)
-                        if isinstance(v, str) and len(v.strip()) > 3:
-                            return v.strip()[:500]
+                        if isinstance(v, str):
+                            cleaned = _normalize_title_candidate(v)
+                            if cleaned:
+                                return cleaned
                 for v in node.values():
                     got = walk(v)
                     if got:
@@ -626,9 +654,9 @@ class HebParser:
                 try:
                     val = path_fn(next_data)
                     if val and isinstance(val, str):
-                        t = val.strip()
-                        if len(t) > 3:
-                            return t[:500]
+                        cleaned = _normalize_title_candidate(val)
+                        if cleaned:
+                            return cleaned
                 except (KeyError, TypeError):
                     continue
             props = next_data.get("props") if isinstance(next_data, dict) else None
@@ -636,12 +664,14 @@ class HebParser:
                 page_props = props.get("pageProps")
                 if isinstance(page_props, dict):
                     t_deep = _deep_extract_title_from_obj(page_props, max_depth=14)
-                    if t_deep:
-                        return t_deep[:500]
+                    cleaned_deep = _normalize_title_candidate(t_deep)
+                    if cleaned_deep:
+                        return cleaned_deep
 
         t = cls._select_text(soup, cls.TITLE_SELECTORS)
-        if t and len(t.strip()) > 3:
-            return t[:500]
+        cleaned_dom = _normalize_title_candidate(t)
+        if cleaned_dom:
+            return cleaned_dom
 
         ld = _title_from_json_ld(soup)
         if ld:
@@ -649,17 +679,18 @@ class HebParser:
 
         if page_title:
             doc = _normalize_document_title(page_title)
-            if doc:
-                return doc
+            cleaned_doc = _normalize_title_candidate(doc)
+            if cleaned_doc:
+                return cleaned_doc
 
         if next_data:
             for path_fn in _NEXTDATA_TITLE_BRAND_FALLBACK:
                 try:
                     val = path_fn(next_data)
                     if val and isinstance(val, str):
-                        t = val.strip()
-                        if len(t) > 3:
-                            return t[:500]
+                        cleaned_brand = _normalize_title_candidate(val)
+                        if cleaned_brand:
+                            return cleaned_brand
                 except (KeyError, TypeError):
                     continue
         return None
