@@ -23,7 +23,12 @@ from .views import (
     StoreCriticalZeroView,
     CatalogActivityLogListView,
 )
-from .ingest_views import HebIngestView, HebIngestUrlsView
+from .ingest_views import (
+    HebIngestView,
+    HebIngestUrlsView,
+    HebIngestNextJobView,
+    HebIngestCompleteJobView,
+)
 
 router = DefaultRouter()
 router.register(r'products', ProductMappingViewSet, basename='productmapping')
@@ -51,5 +56,11 @@ urlpatterns = [
     path('stores/<uuid:store_pk>/catalog/critical-zero/', StoreCriticalZeroView.as_view(), name='catalog-critical-zero'),
     path('ingest/heb/', HebIngestView.as_view(), name='ingest-heb'),
     path('ingest/heb/urls/', HebIngestUrlsView.as_view(), name='ingest-heb-urls'),
+    path('ingest/heb/next-job/', HebIngestNextJobView.as_view(), name='ingest-heb-next-job'),
+    path(
+        'ingest/heb/jobs/<uuid:job_id>/complete/',
+        HebIngestCompleteJobView.as_view(),
+        name='ingest-heb-complete-job',
+    ),
     path('stores/<uuid:store_pk>/', include(router.urls)),
 ]

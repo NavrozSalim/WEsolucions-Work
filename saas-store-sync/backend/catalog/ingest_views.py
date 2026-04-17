@@ -26,7 +26,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from catalog.models import IngestToken, ProductMapping
+from catalog.models import HebScrapeJob, IngestToken, ProductMapping
 from products.models import Product
 from vendor.models import Vendor, VendorPrice
 
@@ -375,4 +375,130 @@ class HebIngestUrlsView(APIView):
             'count': len(urls),
             'fetched_at': timezone.now().isoformat(),
             'urls': urls,
+        })
+
+
+def _collect_heb_urls(store_id: str | None) -> list[str]:
+    """Return distinct HEB vendor_url values across all (or one) store(s)."""
+    heb_vendor_ids = list(
+        Vendor.objects.filter(Q(code='heb') | Q(code__istartswith='heb_'))
+        .values_list('id', flat=True)
+    )
+    if not heb_vendor_ids:
+        return []
+    qs = (
+        ProductMapping.objects
+        .filter(is_active=True, product__vendor_id__in=heb_vendor_ids)
+        .exclude(product__vendor_url__isnull=True)
+        .exclude(product__vendor_url='')
+    )
+    if store_id:
+        qs = qs.filter(store_id=store_id)
+    return list(
+        qs.order_by('product__vendor_url')
+        .values_list('product__vendor_url', flat=True)
+        .distinct()
+    )
+
+
+class HebIngestNextJobView(APIView):
+    """Long-running desktop runner calls this every N seconds.
+
+    - If a ``HebScrapeJob`` is ``pending``, atomically claims it (flips to
+      ``claimed``), embeds the current URL list so the runner doesn't need a
+      second call, and returns it.
+    - If nothing is pending, returns ``{"job_id": null}`` so the caller can
+      sleep and poll again.
+
+    Auth: Bearer token, scope ``heb``.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request, *args, **kwargs):
+        token = _authenticate(request, required_scope='heb')
+
+        with transaction.atomic():
+            job = (
+                HebScrapeJob.objects
+                .select_for_update(skip_locked=True)
+                .filter(status=HebScrapeJob.Status.PENDING)
+                .order_by('requested_at')
+                .first()
+            )
+            if job is None:
+                return Response({'job_id': None, 'checked_at': timezone.now().isoformat()})
+
+            urls = _collect_heb_urls(str(job.store_id) if job.store_id else None)
+            job.status = HebScrapeJob.Status.CLAIMED
+            job.claimed_at = timezone.now()
+            job.claimed_by_token = token
+            job.claimed_by_ip = _client_ip(request)
+            job.url_count = len(urls)
+            job.save(update_fields=['status', 'claimed_at', 'claimed_by_token', 'claimed_by_ip', 'url_count'])
+
+        return Response({
+            'job_id': str(job.id),
+            'store_id': str(job.store_id) if job.store_id else None,
+            'requested_at': job.requested_at.isoformat(),
+            'url_count': len(urls),
+            'urls': urls,
+        })
+
+
+class HebIngestCompleteJobView(APIView):
+    """Runner reports a claimed job as done (or failed).
+
+    Body (all fields optional):
+        {
+          "status": "done" | "failed",
+          "stats":  {"received": N, "matched": N, "applied": N, ...},
+          "note":   "free-form"
+        }
+
+    Auth: Bearer token, scope ``heb``. Only the token that claimed the job
+    may complete it (prevents cross-runner collisions when multiple desktops
+    share a token).
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request, job_id, *args, **kwargs):
+        token = _authenticate(request, required_scope='heb')
+
+        try:
+            job = HebScrapeJob.objects.get(id=job_id)
+        except HebScrapeJob.DoesNotExist:
+            return Response({'error': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if job.status not in (HebScrapeJob.Status.CLAIMED, HebScrapeJob.Status.PENDING):
+            return Response(
+                {'error': f'Job is already {job.status}.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        payload = request.data if isinstance(request.data, dict) else {}
+        wanted_status = (payload.get('status') or 'done').strip().lower()
+        if wanted_status not in ('done', 'failed'):
+            wanted_status = 'done'
+
+        stats_obj = payload.get('stats') if isinstance(payload.get('stats'), dict) else None
+        note = str(payload.get('note') or '')[:2000]
+
+        job.status = (
+            HebScrapeJob.Status.DONE if wanted_status == 'done' else HebScrapeJob.Status.FAILED
+        )
+        job.completed_at = timezone.now()
+        if stats_obj:
+            job.stats = stats_obj
+        if note:
+            job.note = note
+        job.save(update_fields=['status', 'completed_at', 'stats', 'note'])
+
+        return Response({
+            'job_id': str(job.id),
+            'status': job.status,
+            'completed_at': job.completed_at.isoformat() if job.completed_at else None,
         })

@@ -10,7 +10,7 @@ from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
-from catalog.models import ProductMapping, CatalogUpload, CatalogUploadRow, CatalogSyncLog, ReverbUpdateLog, CatalogActivityLog
+from catalog.models import ProductMapping, CatalogUpload, CatalogUploadRow, CatalogSyncLog, ReverbUpdateLog, CatalogActivityLog, HebScrapeJob
 from catalog.serializers import ProductMappingSerializer, CatalogActivityLogSerializer
 from catalog.pagination import CatalogProductPagination
 from catalog.services import validate_and_create_upload
@@ -465,9 +465,44 @@ class CatalogSyncTriggerView(APIView):
         }, status=status.HTTP_202_ACCEPTED)
 
 
+def _store_has_heb_products(store) -> bool:
+    """True when ``store`` has at least one active ProductMapping whose product
+    belongs to a HEB vendor (``code='heb'`` or ``code__istartswith='heb_'``)."""
+    from vendor.models import Vendor
+    heb_vendor_ids = list(
+        Vendor.objects.filter(Q(code='heb') | Q(code__istartswith='heb_'))
+        .values_list('id', flat=True)
+    )
+    if not heb_vendor_ids:
+        return False
+    return ProductMapping.objects.filter(
+        store=store,
+        is_active=True,
+        product__vendor_id__in=heb_vendor_ids,
+    ).exists()
+
+
 class CatalogScrapeTriggerView(APIView):
     """Trigger catalog scrape (fetch vendor price/stock, apply rules)."""
     permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _maybe_enqueue_heb_job(store, user) -> HebScrapeJob | None:
+        """If ``store`` has HEB products and no HEB job is already pending/claimed
+        for it, create a new ``HebScrapeJob`` so the desktop runner picks it up.
+
+        Returns the job row (new or existing) or ``None`` if the store has no
+        HEB products.
+        """
+        if not _store_has_heb_products(store):
+            return None
+        existing = HebScrapeJob.objects.filter(
+            store=store,
+            status__in=[HebScrapeJob.Status.PENDING, HebScrapeJob.Status.CLAIMED],
+        ).order_by('-requested_at').first()
+        if existing:
+            return existing
+        return HebScrapeJob.objects.create(store=store, requested_by=user)
 
     def post(self, request, store_pk):
         from catalog.activity_log import append_catalog_log
@@ -484,6 +519,17 @@ class CatalogScrapeTriggerView(APIView):
             action_type='user_action',
             user_id=request.user.id,
         )
+
+        heb_job = self._maybe_enqueue_heb_job(store, request.user)
+        if heb_job is not None:
+            append_catalog_log(
+                store.id,
+                f'Queued HEB scrape job {heb_job.id} for the desktop runner.',
+                action_type='heb_scrape_queued',
+                user_id=request.user.id,
+                metadata={'job_id': str(heb_job.id)},
+            )
+
         upload_id = request.data.get('upload_id')
         scope_upload = (request.data.get('scope') or '').strip().lower() == 'upload'
 
@@ -688,6 +734,24 @@ class CatalogScrapeProgressView(APIView):
         heb_pending = heb_by_status.get('pending', 0) + heb_by_status.get('needs_attention', 0) + heb_by_status.get('failed', 0)
         heb_pct = int(round(heb_scraped * 100 / heb_total)) if heb_total else 0
 
+        heb_job_payload = None
+        if heb_vendor_ids:
+            latest_job = (
+                HebScrapeJob.objects.filter(store=store)
+                .order_by('-requested_at')
+                .first()
+            )
+            if latest_job is not None:
+                heb_job_payload = {
+                    'id': str(latest_job.id),
+                    'status': latest_job.status,
+                    'requested_at': latest_job.requested_at.isoformat(),
+                    'claimed_at': latest_job.claimed_at.isoformat() if latest_job.claimed_at else None,
+                    'completed_at': latest_job.completed_at.isoformat() if latest_job.completed_at else None,
+                    'url_count': latest_job.url_count,
+                    'stats': latest_job.stats or {},
+                }
+
         return Response({
             'total': total,
             'by_status': by_status,
@@ -700,6 +764,7 @@ class CatalogScrapeProgressView(APIView):
             'heb_last_ingest_at': heb_last_ingest_at,
             'heb_ingested_last_5m': heb_ingested_last_5m,
             'heb_ingested_last_24h': heb_ingested_last_24h,
+            'heb_job': heb_job_payload,
             'checked_at': timezone.now().isoformat(),
         })
 

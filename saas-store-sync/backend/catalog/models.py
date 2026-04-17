@@ -295,6 +295,85 @@ class IngestToken(models.Model):
         return f'{self.label} [{self.token_prefix}…] ({active})'
 
 
+class HebScrapeJob(models.Model):
+    """A request for the desktop HEB runner to start a scrape pass.
+
+    Created by ``CatalogScrapeTriggerView`` whenever a store with HEB products
+    asks for a catalog scrape. The desktop runner (``poller.py``) polls
+    ``GET /api/v1/ingest/heb/next-job/`` every 30s; when it sees a pending job
+    it claims it, scrapes, uploads results through ``POST /ingest/heb/``, and
+    finally marks the job done via ``POST /ingest/heb/jobs/<id>/complete/``.
+
+    The job row is how the Catalog UI shows "queued", "running on PC",
+    "completed" progress states for the Scrape button.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        CLAIMED = 'claimed', 'Claimed'
+        DONE = 'done', 'Done'
+        FAILED = 'failed', 'Failed'
+        CANCELLED = 'cancelled', 'Cancelled'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='heb_scrape_jobs',
+        help_text='Optional: scope to a single store. Null = all HEB stores.',
+    )
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='heb_scrape_jobs',
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+
+    requested_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    claimed_by_token = models.ForeignKey(
+        IngestToken,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='claimed_heb_jobs',
+    )
+    claimed_by_ip = models.GenericIPAddressField(null=True, blank=True)
+
+    url_count = models.PositiveIntegerField(default=0, help_text='# URLs handed to runner.')
+    stats = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Runner-reported result: {"received": N, "matched": N, "applied": N, ...}',
+    )
+    note = models.TextField(blank=True, default='')
+
+    class Meta:
+        db_table = 'catalog_hebscrapejob'
+        ordering = ['-requested_at']
+        indexes = [
+            models.Index(
+                fields=['status', 'requested_at'],
+                name='catalog_heb_status_eb1d07_idx',
+            ),
+        ]
+
+    def __str__(self):
+        who = self.store.name if self.store_id else 'ALL'
+        return f'HebScrapeJob[{self.status}] {who} @ {self.requested_at:%Y-%m-%d %H:%M}'
+
+
 class ReverbUpdateLog(models.Model):
     """Per-listing push to Reverb API."""
     class Status(models.TextChoices):
