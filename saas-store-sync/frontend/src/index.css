@@ -30,3 +30,23 @@
         @apply bg-slate-50/50 dark:bg-slate-800/30;
     }
 }
+
+/* Highlight a table row for ~1.5s when its data just changed live.
+   Used by the Catalog page to draw attention to a product whose sync_status
+   flipped (e.g. pending -> scraped) without the user having to refresh. */
+@keyframes catalog-row-flash-anim {
+    0% {
+        background-color: rgba(253, 224, 71, 0.55);
+    }
+    100% {
+        background-color: transparent;
+    }
+}
+.catalog-row-flash > td {
+    animation: catalog-row-flash-anim 1.6s ease-out 1;
+}
+@media (prefers-reduced-motion: reduce) {
+    .catalog-row-flash > td {
+        animation: none;
+    }
+}

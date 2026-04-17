@@ -623,6 +623,87 @@ class CatalogSyncLogsView(APIView):
         return Response(data)
 
 
+class CatalogScrapeProgressView(APIView):
+    """Live progress counters for a store's scrape/ingest pipeline.
+
+    Designed for the Catalog UI to poll every few seconds so the Scrape button
+    can stay in a "working" state until every product has fresh data. For HEB
+    stores this tracks how many products have been populated from the desktop
+    runner's ingest feed (``/api/v1/ingest/heb/``).
+
+    Response keys:
+        total                : count of active ProductMappings for the store
+        by_status            : {'pending': N, 'scraped': N, 'synced': N, ...}
+        heb_total            : HEB-vendor active mappings for this store
+        heb_pending          : HEB rows still waiting for ingest data
+        heb_scraped          : HEB rows that have fresh prices
+        heb_pct              : 0..100 percentage of HEB rows scraped/synced
+        heb_last_ingest_at   : most recent VendorPrice ingest across HEB mappings
+                                for this store (None if the desktop runner has
+                                never posted anything that matched)
+        heb_ingested_last_5m : HEB VendorPrice rows received in last 5 min
+        heb_ingested_last_24h: HEB VendorPrice rows received in last 24 h
+        has_heb              : convenience flag for frontend
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        from datetime import timedelta
+        from vendor.models import VendorPrice, Vendor
+
+        store = get_object_or_404(Store, id=store_pk, user=request.user)
+
+        active = ProductMapping.objects.filter(store=store, is_active=True)
+        total = active.count()
+        by_status_rows = active.values('sync_status').annotate(n=Count('id'))
+        by_status = {r['sync_status']: r['n'] for r in by_status_rows}
+
+        # Match catalog/sync tasks' _is_heb_product: vendor code 'heb' or 'heb_*'.
+        heb_vendor_ids = list(
+            Vendor.objects.filter(Q(code='heb') | Q(code__istartswith='heb_')).values_list('id', flat=True),
+        )
+        heb_total = 0
+        heb_by_status = {}
+        heb_last_ingest_at = None
+        heb_ingested_last_5m = 0
+        heb_ingested_last_24h = 0
+
+        if heb_vendor_ids:
+            heb_qs = active.filter(product__vendor_id__in=heb_vendor_ids)
+            heb_total = heb_qs.count()
+            heb_rows = heb_qs.values('sync_status').annotate(n=Count('id'))
+            heb_by_status = {r['sync_status']: r['n'] for r in heb_rows}
+
+            if heb_total:
+                now = timezone.now()
+                heb_product_ids = list(heb_qs.values_list('product_id', flat=True).distinct())
+                heb_vp_for_store = VendorPrice.objects.filter(product_id__in=heb_product_ids)
+                last_vp = heb_vp_for_store.order_by('-scraped_at').values_list('scraped_at', flat=True).first()
+                heb_last_ingest_at = last_vp.isoformat() if last_vp else None
+                heb_ingested_last_5m = heb_vp_for_store.filter(scraped_at__gte=now - timedelta(minutes=5)).count()
+                heb_ingested_last_24h = heb_vp_for_store.filter(scraped_at__gte=now - timedelta(hours=24)).count()
+
+        heb_scraped = heb_by_status.get('scraped', 0) + heb_by_status.get('synced', 0)
+        heb_pending = heb_by_status.get('pending', 0) + heb_by_status.get('needs_attention', 0) + heb_by_status.get('failed', 0)
+        heb_pct = int(round(heb_scraped * 100 / heb_total)) if heb_total else 0
+
+        return Response({
+            'total': total,
+            'by_status': by_status,
+            'has_heb': bool(heb_vendor_ids and heb_total > 0),
+            'heb_total': heb_total,
+            'heb_scraped': heb_scraped,
+            'heb_pending': heb_pending,
+            'heb_by_status': heb_by_status,
+            'heb_pct': heb_pct,
+            'heb_last_ingest_at': heb_last_ingest_at,
+            'heb_ingested_last_5m': heb_ingested_last_5m,
+            'heb_ingested_last_24h': heb_ingested_last_24h,
+            'checked_at': timezone.now().isoformat(),
+        })
+
+
 class CatalogScrapeRunsView(APIView):
     """List scrape runs for a store."""
     permission_classes = [IsAuthenticated]

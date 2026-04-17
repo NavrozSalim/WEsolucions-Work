@@ -173,6 +173,16 @@ export const triggerCatalogScrape = (storeId, runInline = false, uploadId = null
     });
 };
 
+/**
+ * Live scrape progress for a store. Used by the Catalog UI to:
+ *   1. Keep the Scrape button in a "working" state until HEB rows are all
+ *      populated from the desktop runner's ingest feed.
+ *   2. Render the status strip above the product table.
+ * Cheap: one aggregation query per call.
+ */
+export const getScrapeProgress = (storeId) =>
+    api.get(`/stores/${storeId}/catalog/scrape/progress/`);
+
 /** Map store row from /catalog/stores/ to reverb | walmart | sears for sample CSV columns. */
 export const resolveMarketplaceTemplateKind = (store) => {
     if (!store) return '';

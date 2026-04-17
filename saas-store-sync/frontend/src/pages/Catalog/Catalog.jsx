@@ -37,6 +37,7 @@ import {
     triggerCatalogPushListings,
     triggerCatalogCriticalZero,
     getCatalogActivityLogs,
+    getScrapeProgress,
 } from '../../services/catalogService';
 import Button from '../../components/ui/Button';
 import Select from '../../components/ui/Select';
@@ -271,6 +272,66 @@ function formatPrice(val) {
     return isNaN(n) ? '—' : `$${n.toFixed(2)}`;
 }
 
+/**
+ * Status strip rendered above the product table for HEB-heavy stores.
+ *
+ * Shows, live, whether the desktop runner is uploading prices to this server:
+ *   - progress bar with scraped/total
+ *   - last ingest upload (relative time)
+ *   - 5-min / 24-h ingest counts
+ *   - tracking state (so the user knows the Scrape button is intentionally
+ *     still working in the background)
+ */
+function HebProgressStrip({ progress, tracking, onStopTracking }) {
+    if (!progress || !progress.has_heb) return null;
+    const pct = Math.max(0, Math.min(100, Number(progress.heb_pct || 0)));
+    const recent5 = progress.heb_ingested_last_5m || 0;
+    const recent24 = progress.heb_ingested_last_24h || 0;
+    const lastAgo = formatLastSync(progress.heb_last_ingest_at);
+    const barColor = pct >= 100
+        ? 'bg-emerald-500'
+        : recent5 > 0
+            ? 'bg-accent-500'
+            : 'bg-amber-500';
+    return (
+        <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4 mb-4 shadow-sm">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-center gap-3">
+                    <span className={`inline-flex h-2.5 w-2.5 rounded-full ${recent5 > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300 dark:bg-slate-600'}`} />
+                    <div>
+                        <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                            HEB desktop runner
+                            {tracking && (
+                                <span className="ml-2 inline-flex items-center rounded-full bg-accent-100 px-2 py-0.5 text-xs font-medium text-accent-700 dark:bg-accent-900/30 dark:text-accent-300">
+                                    tracking live
+                                </span>
+                            )}
+                        </h3>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                            {progress.heb_scraped}/{progress.heb_total} products populated · last upload {lastAgo} · {recent5} in last 5 min · {recent24} in last 24 h
+                        </p>
+                    </div>
+                </div>
+                {tracking && (
+                    <button
+                        type="button"
+                        onClick={onStopTracking}
+                        className="self-start rounded-md border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800"
+                    >
+                        Stop tracking
+                    </button>
+                )}
+            </div>
+            <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                <div
+                    className={`h-full rounded-full transition-all duration-500 ${barColor}`}
+                    style={{ width: `${pct}%` }}
+                />
+            </div>
+        </div>
+    );
+}
+
 export default function Catalog() {
     const [storeList, setStoreList] = useState([]);
     const [marketplaces, setMarketplaces] = useState([]);
@@ -314,6 +375,20 @@ export default function Catalog() {
     const [activityLogs, setActivityLogs] = useState([]);
     const [logsLoading, setLogsLoading] = useState(false);
     const [liveRefreshUntil, setLiveRefreshUntil] = useState(0);
+
+    // ---- Live scrape progress (used for HEB ingest tracking + status strip) ----
+    // scrapeProgress is the latest GET /catalog/scrape/progress/ payload.
+    // trackingScrape keeps the Scrape button in a "working" state until every
+    // HEB mapping has been populated from the desktop runner's ingest feed, so
+    // clicking it doesn't flash "0/879 done" and silently return to idle.
+    const [scrapeProgress, setScrapeProgress] = useState(null);
+    const [trackingScrape, setTrackingScrape] = useState(false);
+    const trackingScrapeRef = useRef(false);
+    useEffect(() => { trackingScrapeRef.current = trackingScrape; }, [trackingScrape]);
+    // Row IDs whose sync_status just changed — used to flash the row yellow.
+    const [flashingRowIds, setFlashingRowIds] = useState(() => new Set());
+    const prevStatusRef = useRef(new Map()); // product.id -> last seen sync_status
+    const flashTimersRef = useRef(new Map()); // product.id -> timeout id
 
     const { setSidebarActivity, clearSidebarActivity, clearCatalogActivities } = useSidebarActivity();
 
@@ -505,12 +580,15 @@ export default function Catalog() {
         if (!selectedStore) return undefined;
         const activeFlow = flowStatus === 'syncing' || flowStatus === 'scraping';
         const inGraceWindow = liveRefreshUntil > Date.now();
-        if (!activeFlow && !inGraceWindow) return undefined;
+        // While we're tracking an HEB scrape run or viewing the products table
+        // we also want rows to update live as the desktop runner posts prices.
+        const watchingProducts = viewMode === 'products';
+        if (!activeFlow && !inGraceWindow && !trackingScrape && !watchingProducts) return undefined;
 
         refreshLiveData();
         const intervalId = setInterval(refreshLiveData, 5000);
         let timeoutId = null;
-        if (!activeFlow && inGraceWindow) {
+        if (!activeFlow && !trackingScrape && !watchingProducts && inGraceWindow) {
             timeoutId = setTimeout(() => clearInterval(intervalId), Math.max(0, liveRefreshUntil - Date.now()));
         }
 
@@ -518,7 +596,96 @@ export default function Catalog() {
             clearInterval(intervalId);
             if (timeoutId) clearTimeout(timeoutId);
         };
-    }, [selectedStore, flowStatus, liveRefreshUntil, refreshLiveData]);
+    }, [selectedStore, flowStatus, liveRefreshUntil, trackingScrape, viewMode, refreshLiveData]);
+
+    // Pull scrape-progress every 5s while the user is looking at products,
+    // actively scraping, or we are still "tracking" an HEB scrape run.
+    useEffect(() => {
+        if (!selectedStore) return undefined;
+        const activeFlow = flowStatus === 'syncing' || flowStatus === 'scraping';
+        const shouldPoll =
+            activeFlow
+            || trackingScrape
+            || viewMode === 'products'
+            || liveRefreshUntil > Date.now();
+        if (!shouldPoll) return undefined;
+
+        let cancelled = false;
+        const fetchOnce = () => {
+            getScrapeProgress(selectedStore)
+                .then((res) => {
+                    if (cancelled) return;
+                    setScrapeProgress(res.data || null);
+                })
+                .catch(() => { /* transient — just ignore and retry */ });
+        };
+        fetchOnce();
+        const intervalId = setInterval(fetchOnce, 5000);
+        return () => {
+            cancelled = true;
+            clearInterval(intervalId);
+        };
+    }, [selectedStore, flowStatus, trackingScrape, viewMode, liveRefreshUntil]);
+
+    // Auto-stop tracking once every HEB mapping has ingest data (pending == 0).
+    useEffect(() => {
+        if (!trackingScrape || !scrapeProgress) return;
+        if (!scrapeProgress.has_heb) {
+            // Store has no HEB products — tracking not meaningful.
+            setTrackingScrape(false);
+            return;
+        }
+        if ((scrapeProgress.heb_pending || 0) === 0 && (scrapeProgress.heb_total || 0) > 0) {
+            setTrackingScrape(false);
+            setFlowStatus('success');
+            setMessage(
+                `All ${scrapeProgress.heb_total} HEB product(s) populated from the desktop runner.`,
+            );
+        }
+    }, [trackingScrape, scrapeProgress]);
+
+    // Whenever the products list updates, flash any row whose sync_status just
+    // changed. A brief yellow background tells the user "this just updated".
+    useEffect(() => {
+        if (!Array.isArray(products) || products.length === 0) return;
+        const prev = prevStatusRef.current;
+        const changed = [];
+        for (const p of products) {
+            const id = p.id;
+            const nowStatus = p.sync_status || 'pending';
+            const before = prev.get(id);
+            if (before !== undefined && before !== nowStatus) {
+                changed.push(id);
+            }
+            prev.set(id, nowStatus);
+        }
+        if (changed.length === 0) return;
+        setFlashingRowIds((old) => {
+            const next = new Set(old);
+            for (const id of changed) next.add(id);
+            return next;
+        });
+        for (const id of changed) {
+            const existing = flashTimersRef.current.get(id);
+            if (existing) clearTimeout(existing);
+            const t = setTimeout(() => {
+                setFlashingRowIds((old) => {
+                    if (!old.has(id)) return old;
+                    const next = new Set(old);
+                    next.delete(id);
+                    return next;
+                });
+                flashTimersRef.current.delete(id);
+            }, 1600);
+            flashTimersRef.current.set(id, t);
+        }
+    }, [products]);
+
+    // Clean up any in-flight flash timers on unmount.
+    useEffect(() => () => {
+        for (const t of flashTimersRef.current.values()) clearTimeout(t);
+        flashTimersRef.current.clear();
+    }, []);
 
     const handleBackToStores = () => {
         setSelectedStore('');
@@ -705,20 +872,54 @@ export default function Catalog() {
                     const ok = res?.data?.rows_succeeded ?? 0;
                     const proc = res?.data?.rows_processed ?? 0;
                     finishProgress(true);
-                    setFlowStatus('success');
-                    setMessage(
-                        `Scrape complete: ${ok}/${proc} product(s) updated with vendor price/stock. `
-                        + 'Marketplace push runs next in the background when the worker picks it up.',
-                    );
-                    getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
-                    getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
-                    if (viewMode === 'products') {
-                        getProducts(selectedStore).then((r) => setProducts(Array.isArray(r.data) ? r.data : []));
-                    }
-                    if (viewMode === 'logs') {
-                        getCatalogActivityLogs(selectedStore).then((r) =>
-                            setActivityLogs(Array.isArray(r.data) ? r.data : []));
-                    }
+
+                    // HEB is ingest-only — the server task returns instantly
+                    // after promoting whatever the desktop runner has posted
+                    // so far. We shift into "tracking" mode and keep the
+                    // button busy until every HEB mapping is populated.
+                    // For stores with no HEB products, behave as before.
+                    return getScrapeProgress(selectedStore)
+                        .then((p) => {
+                            const progress = p?.data || null;
+                            setScrapeProgress(progress);
+                            const shouldTrack =
+                                !uploadId
+                                && progress
+                                && progress.has_heb
+                                && (progress.heb_pending || 0) > 0;
+                            if (shouldTrack) {
+                                setTrackingScrape(true);
+                                setFlowStatus('scraping');
+                                setMessage(
+                                    `HEB: ${progress.heb_scraped}/${progress.heb_total} populated — waiting for the desktop runner to upload the remaining ${progress.heb_pending}. This updates live.`,
+                                );
+                            } else {
+                                setFlowStatus('success');
+                                setMessage(
+                                    `Scrape complete: ${ok}/${proc} product(s) updated with vendor price/stock. `
+                                    + 'Marketplace push runs next in the background when the worker picks it up.',
+                                );
+                            }
+                        })
+                        .catch(() => {
+                            // Progress endpoint failed — fall back to old behavior.
+                            setFlowStatus('success');
+                            setMessage(
+                                `Scrape complete: ${ok}/${proc} product(s) updated with vendor price/stock. `
+                                + 'Marketplace push runs next in the background when the worker picks it up.',
+                            );
+                        })
+                        .finally(() => {
+                            getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
+                            getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
+                            if (viewMode === 'products') {
+                                getProducts(selectedStore).then((r) => setProducts(Array.isArray(r.data) ? r.data : []));
+                            }
+                            if (viewMode === 'logs') {
+                                getCatalogActivityLogs(selectedStore).then((r) =>
+                                    setActivityLogs(Array.isArray(r.data) ? r.data : []));
+                            }
+                        });
                 })
                 .catch((err) => {
                     const isNetworkError = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
@@ -733,9 +934,29 @@ export default function Catalog() {
         };
 
         runScrape().finally(() => {
+            // Keep `scraping` true while we're tracking HEB progress so the
+            // button and spinner stay visible; the trackingScrape effect
+            // clears it once heb_pending hits 0.
+            if (!trackingScrapeRef.current) {
+                setScraping(false);
+                setScrapingUploadId(null);
+            }
+        });
+    };
+
+    // When tracking ends (either pending hit 0, or user cancelled), release
+    // the Scrape button.
+    useEffect(() => {
+        if (!trackingScrape) {
             setScraping(false);
             setScrapingUploadId(null);
-        });
+        }
+    }, [trackingScrape]);
+
+    const cancelScrapeTracking = () => {
+        setTrackingScrape(false);
+        setFlowStatus('');
+        setMessage('Stopped tracking HEB scrape progress. The desktop runner keeps uploading in the background.');
     };
 
     const handleExportProducts = () => {
@@ -1114,6 +1335,15 @@ export default function Catalog() {
                 </div>
             )}
 
+            {/* HEB ingest status strip — only shown when store has HEB products. */}
+            {selectedStore && viewMode === 'products' && scrapeProgress?.has_heb && (
+                <HebProgressStrip
+                    progress={scrapeProgress}
+                    tracking={trackingScrape}
+                    onStopTracking={cancelScrapeTracking}
+                />
+            )}
+
             {/* Product table (when View Products clicked) */}
             {selectedStore && viewMode === 'products' && (
                 <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden">
@@ -1176,11 +1406,27 @@ export default function Catalog() {
                                 size="sm"
                                 onClick={() => handleScrape(null)}
                                 disabled={scraping || !selectedStore}
-                                title="Re-fetch vendor price/stock for all active listings (same logic as scheduled sync scrape)"
+                                title={
+                                    trackingScrape
+                                        ? 'Scrape running — waiting for the desktop runner to finish uploading HEB prices. Click to stop tracking.'
+                                        : 'Re-fetch vendor price/stock for all active listings (HEB uses the desktop runner ingest feed).'
+                                }
                             >
-                                <RefreshCw className={`h-4 w-4 mr-1.5 ${scraping ? 'animate-spin' : ''}`} />
-                                Scrape prices
+                                <RefreshCw className={`h-4 w-4 mr-1.5 ${scraping || trackingScrape ? 'animate-spin' : ''}`} />
+                                {trackingScrape && scrapeProgress?.has_heb
+                                    ? `Scraping HEB… ${scrapeProgress.heb_scraped}/${scrapeProgress.heb_total} (${scrapeProgress.heb_pct}%)`
+                                    : 'Scrape prices'}
                             </Button>
+                            {trackingScrape && (
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={cancelScrapeTracking}
+                                    title="Stop tracking. The desktop runner keeps uploading in the background — the table will still update live."
+                                >
+                                    Stop tracking
+                                </Button>
+                            )}
                             <div className="relative flex-1 min-w-[12rem] lg:max-w-xs">
                                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                                 <input
@@ -1245,8 +1491,12 @@ export default function Catalog() {
                                     {paginatedProducts.map((product) => {
                                         const status = product.sync_status || 'pending';
                                         const margin = formatMarginCell(product);
+                                        const isFlashing = flashingRowIds.has(product.id);
                                         return (
-                                            <tr key={product.id}>
+                                            <tr
+                                                key={product.id}
+                                                className={isFlashing ? 'catalog-row-flash' : undefined}
+                                            >
                                                 <td className="align-middle font-mono text-xs text-slate-600 dark:text-slate-400 whitespace-nowrap">
                                                     {product.sku || '—'}
                                                 </td>
