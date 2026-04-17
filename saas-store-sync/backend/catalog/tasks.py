@@ -34,10 +34,10 @@ def _resolve_vendor(vendor_name_raw: str) -> Vendor | None:
 def _is_heb_product(product) -> bool:
     """Return True when ``product`` belongs to the HEB vendor.
 
-    HEB is ingest-only: prices are posted from a desktop runner to
-    ``/api/v1/ingest/heb/``. Server-side scrape tasks must skip HEB rows so
-    the listing is not marked ``failed`` / ``needs_attention`` just because
-    there was no live scrape.
+    Re-exports ``sync.tasks._is_heb_product`` style check so ``catalog.tasks``
+    does not have to import from ``sync.tasks`` at module load time (circular
+    import risk). HEB is ingest-only: prices come from the desktop runner via
+    ``/api/v1/ingest/heb/``.
     """
     vendor = getattr(product, 'vendor', None)
     code = (getattr(vendor, 'code', '') or '').lower()
@@ -392,20 +392,28 @@ def run_catalog_scrape(upload_id: str):
             if not product:
                 continue
 
-            # HEB is ingest-only: prices arrive via /api/v1/ingest/heb/ from the
-            # desktop runner. Skip here so the server never marks HEB rows
-            # 'failed' / 'needs_attention' just because there is no live scrape.
-            if _is_heb_product(product):
-                logger.info(
-                    "HEB row skipped in catalog scrape (ingest-only): sku=%s",
-                    getattr(product, 'vendor_sku', '?'),
-                )
-                continue
-
             run.rows_processed += 1
             if run.rows_processed % 10 == 0:
                 run.rows_succeeded = succeeded
                 run.save(update_fields=['rows_processed', 'rows_succeeded'])
+
+            # HEB is ingest-only: live scrape is disabled. Promote the latest
+            # ingested VendorPrice (posted by the desktop runner) onto the
+            # mapping so clicking "Scrape data" surfaces the newest PC data.
+            if _is_heb_product(product):
+                from sync.tasks import _apply_latest_heb_ingest
+                if _apply_latest_heb_ingest(pm, product, store, now):
+                    succeeded += 1
+                    logger.info(
+                        "HEB catalog row updated from ingest cache (sku=%s)",
+                        getattr(product, 'vendor_sku', '?'),
+                    )
+                else:
+                    logger.info(
+                        "HEB catalog row skipped — no ingest data yet (sku=%s)",
+                        getattr(product, 'vendor_sku', '?'),
+                    )
+                continue
 
             url = resolve_vendor_scrape_url(product, store, row)
             if not url:
@@ -672,10 +680,18 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
                 continue
             # HEB is ingest-only (see run_catalog_scrape for rationale).
             if _is_heb_product(product):
-                logger.info(
-                    "HEB row skipped in store-wide scrape (ingest-only): sku=%s",
-                    getattr(product, 'vendor_sku', '?'),
-                )
+                from sync.tasks import _apply_latest_heb_ingest
+                if _apply_latest_heb_ingest(pm, product, store, now):
+                    succeeded += 1
+                    logger.info(
+                        "HEB store-wide row updated from ingest cache (sku=%s)",
+                        getattr(product, 'vendor_sku', '?'),
+                    )
+                else:
+                    logger.info(
+                        "HEB store-wide row skipped — no ingest data yet (sku=%s)",
+                        getattr(product, 'vendor_sku', '?'),
+                    )
                 continue
             price_from_fallback = False
             pricing = _get_pricing_for_vendor(store, product.vendor_id)
