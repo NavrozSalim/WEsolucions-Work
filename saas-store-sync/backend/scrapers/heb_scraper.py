@@ -19,9 +19,10 @@ import threading
 import time
 import zipfile
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from bs4 import BeautifulSoup
+import requests
 
 from .core import ScrapeResult, detect_block, parse_price_text, random_delay
 
@@ -36,6 +37,10 @@ HEB_HOME = os.environ.get("HEB_HOME_URL", "https://www.heb.com/")
 COOKIES_FILE = os.environ.get("HEB_COOKIES_FILE", "cookies.json")
 HEB_HEADLESS = os.environ.get("HEB_HEADLESS", "1").strip().lower() not in ("0", "false", "no")
 HEB_USE_UNDETECTED = os.environ.get("HEB_USE_UNDETECTED", "1").strip().lower() not in ("0", "false", "no")
+HEB_USE_APIFY = os.environ.get("HEB_USE_APIFY", "0").strip().lower() in ("1", "true", "yes")
+HEB_APIFY_TOKEN = (os.environ.get("HEB_APIFY_TOKEN") or os.environ.get("APIFY_TOKEN") or "").strip()
+HEB_APIFY_ACTOR_ID = (os.environ.get("HEB_APIFY_ACTOR_ID") or "").strip()
+HEB_APIFY_TIMEOUT_SEC = max(10, int((os.environ.get("HEB_APIFY_TIMEOUT_SEC") or "90").strip() or "90"))
 
 # Junk/interstitial responses (~650 B) vs real PDPs; avoid 3× no_price retries on those.
 TINY_PDP_HTML_MAX_LEN = 2000
@@ -214,6 +219,100 @@ def _normalize_title_candidate(raw: Optional[str]) -> Optional[str]:
         return None
 
     return t[:500]
+
+
+def _to_int_stock(v) -> Optional[int]:
+    if isinstance(v, bool):
+        return 3 if v else 0
+    if isinstance(v, int):
+        if v < 0:
+            return 0
+        if v > 3:
+            return 3
+        return v
+    if isinstance(v, float):
+        iv = int(v)
+        if iv < 0:
+            return 0
+        if iv > 3:
+            return 3
+        return iv
+    if isinstance(v, str):
+        low = v.strip().lower()
+        if not low:
+            return None
+        if low in ("in stock", "available", "available for pickup", "available for delivery", "true", "yes"):
+            return 3
+        if low in ("out of stock", "unavailable", "false", "no"):
+            return 0
+        if low.isdigit():
+            iv = int(low)
+            if iv < 0:
+                return 0
+            if iv > 3:
+                return 3
+            return iv
+    return None
+
+
+def _extract_apify_heb_item(items) -> Optional[dict]:
+    if isinstance(items, list) and items:
+        item = items[0] if isinstance(items[0], dict) else None
+    elif isinstance(items, dict):
+        item = items
+    else:
+        item = None
+    if not isinstance(item, dict):
+        return None
+
+    def pick(*keys):
+        for k in keys:
+            if k in item and item.get(k) is not None:
+                return item.get(k)
+        return None
+
+    price_raw = pick("price", "currentPrice", "finalPrice", "salePrice", "productPrice")
+    title_raw = pick("title", "name", "productName")
+    stock_raw = pick("stock", "inventory", "inStock", "availability")
+
+    price = parse_price_text(str(price_raw)) if price_raw is not None else None
+    title = _normalize_title_candidate(str(title_raw)) if title_raw is not None else None
+    stock = _to_int_stock(stock_raw)
+
+    if price is None and title is None and stock is None:
+        return None
+    return ScrapeResult.ok(price=price, stock=stock, title=title).to_legacy()
+
+
+def _scrape_heb_via_apify(vendor_url: str) -> Optional[dict]:
+    if not HEB_USE_APIFY:
+        return None
+    if not HEB_APIFY_TOKEN or not HEB_APIFY_ACTOR_ID:
+        logger.warning("HEB Apify enabled but missing HEB_APIFY_TOKEN or HEB_APIFY_ACTOR_ID")
+        return None
+
+    actor_path = quote(HEB_APIFY_ACTOR_ID, safe="")
+    run_url = (
+        f"https://api.apify.com/v2/acts/{actor_path}/run-sync-get-dataset-items"
+        f"?token={HEB_APIFY_TOKEN}"
+    )
+    payload = {
+        "startUrls": [{"url": vendor_url}],
+        "vendorUrl": vendor_url,
+    }
+
+    try:
+        resp = requests.post(run_url, json=payload, timeout=HEB_APIFY_TIMEOUT_SEC)
+        resp.raise_for_status()
+        data = resp.json()
+        parsed = _extract_apify_heb_item(data)
+        if parsed and parsed.get("price") is not None:
+            logger.info("HEB Apify ok price=%s title=%s", parsed.get("price"), parsed.get("title"))
+            return parsed
+        logger.warning("HEB Apify returned no usable price for url=%s", vendor_url)
+    except Exception as exc:
+        logger.warning("HEB Apify request failed: %s", exc)
+    return None
 
 
 def _title_from_json_ld(soup: BeautifulSoup) -> Optional[str]:
@@ -587,9 +686,12 @@ def _dump_debug_files(
 
 class HebParser:
     TITLE_SELECTORS = (
+        "h1.sc-8e040eb0-4.bviSuy",
         "h1[data-testid*='title']",
         "h1.product-title",
+        "h1.ProductTitle",
         "[data-testid='product-title']",
+        ".product-title h1",
         "[data-qe-id='product-name']",
         "[data-qe-id*='product-name']",
         "h1",
@@ -597,6 +699,8 @@ class HebParser:
         "meta[property='og:title']",
     )
     PRICE_SELECTORS = (
+        "span.sc-659eeebc-1.ljptds",
+        ".judAEL span.sc-659eeebc-0",
         "[data-qe-id='price-label']",
         "[data-qe-id*='price']",
         "[data-testid='product-price']",
@@ -1056,6 +1160,29 @@ def _fetch_runtime_json(driver) -> tuple[str, dict]:
     return "\n".join(payloads), next_data
 
 
+def _heb_challenge_in_text(*texts: str) -> bool:
+    """Detect Akamai/Cloudflare/CAPTCHA interstitials from short strings (title, page title)."""
+    needles = (
+        "pardon our interruption",
+        "access denied",
+        "please verify you are human",
+        "cloudflare",
+        "just a moment",
+        "checking your browser",
+        "verify you are a human",
+        "attention required",
+        "cf-browser-verification",
+    )
+    for raw in texts:
+        if not raw:
+            continue
+        low = raw.lower()
+        for n in needles:
+            if n in low:
+                return True
+    return False
+
+
 def _is_block(html: str) -> tuple[bool, str]:
     blocked, reason = detect_block(html)
     if blocked:
@@ -1071,6 +1198,12 @@ def _is_block(html: str) -> tuple[bool, str]:
         "access denied",
         "service unavailable",
         "temporarily unavailable",
+        "please verify you are human",
+        "cloudflare",
+        "just a moment",
+        "checking your browser",
+        "cf-browser-verification",
+        "attention required",
     ):
         if needle in lower:
             return True, "waf_challenge"
@@ -1103,6 +1236,10 @@ def _is_block(html: str) -> tuple[bool, str]:
 
 
 def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
+    apify_result = _scrape_heb_via_apify(vendor_url)
+    if apify_result is not None:
+        return apify_result
+
     if session is None:
         session = {}
 
@@ -1139,6 +1276,24 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
                 current_url = driver.current_url or vendor_url
             except Exception:
                 pass
+
+            if _heb_challenge_in_text(page_title):
+                logger.warning(
+                    "HEB challenge page detected via title=%r attempt=%d url=%s",
+                    page_title, attempt, current_url,
+                )
+                _dump_debug_files(
+                    vendor_url, current_url, page_title, None, None, html, attempt, "blocked_title_challenge",
+                )
+                last = ScrapeResult.fail(
+                    "blocked_title_challenge",
+                    f"Blocked (title): {page_title}",
+                    html,
+                    "heb",
+                    vendor_url,
+                )
+                driver = _safe_quit_and_recreate_driver(driver, session)
+                continue
 
             runtime_json, next_data = _fetch_runtime_json(driver)
             base_html_len = len(html or "")

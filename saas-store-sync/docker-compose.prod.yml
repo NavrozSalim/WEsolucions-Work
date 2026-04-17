@@ -89,12 +89,18 @@ services:
       # HEB Selenium scraper (optional; set in .env.prod)
       - PROXY_URL=${PROXY_URL:-}
       - PROXY_URLS=${PROXY_URLS:-}
+      - COSTCO_AU_PROXY_URL=${COSTCO_AU_PROXY_URL:-}
+      - COSTCO_AU_PROXY_URLS=${COSTCO_AU_PROXY_URLS:-}
       - PROXY_ENDPOINTS=${PROXY_ENDPOINTS:-}
       - PROXY_HOST=${PROXY_HOST:-}
       - PROXY_PORT=${PROXY_PORT:-}
       - PROXY_USER=${PROXY_USER:-}
       - PROXY_PASS=${PROXY_PASS:-}
       - PROXY_SCHEME=${PROXY_SCHEME:-http}
+      - HEB_USE_APIFY=${HEB_USE_APIFY:-0}
+      - HEB_APIFY_TOKEN=${HEB_APIFY_TOKEN:-}
+      - HEB_APIFY_ACTOR_ID=${HEB_APIFY_ACTOR_ID:-}
+      - HEB_APIFY_TIMEOUT_SEC=${HEB_APIFY_TIMEOUT_SEC:-90}
     depends_on:
       db:
         condition: service_healthy
@@ -152,7 +158,7 @@ services:
 
   celery_worker:
     <<: *backend-image
-    command: celery -A core worker -l info --concurrency=2 --prefetch-multiplier=1 -O fair
+    command: celery -A core worker -l info --concurrency=1 --prefetch-multiplier=1 -O fair
     init: true
     environment:
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
@@ -173,14 +179,20 @@ services:
       # HEB Selenium scraper (optional; set in .env.prod)
       - PROXY_URL=${PROXY_URL:-}
       - PROXY_URLS=${PROXY_URLS:-}
+      - COSTCO_AU_PROXY_URL=${COSTCO_AU_PROXY_URL:-}
+      - COSTCO_AU_PROXY_URLS=${COSTCO_AU_PROXY_URLS:-}
       - PROXY_ENDPOINTS=${PROXY_ENDPOINTS:-}
       - PROXY_HOST=${PROXY_HOST:-}
       - PROXY_PORT=${PROXY_PORT:-}
       - PROXY_USER=${PROXY_USER:-}
       - PROXY_PASS=${PROXY_PASS:-}
       - PROXY_SCHEME=${PROXY_SCHEME:-http}
-      - COSTCO_AU_MIN_REQUEST_GAP_SEC=${COSTCO_AU_MIN_REQUEST_GAP_SEC:-8}
-      - COSTCO_AU_LOCK_WAIT_SEC=${COSTCO_AU_LOCK_WAIT_SEC:-40}
+      - HEB_USE_APIFY=${HEB_USE_APIFY:-0}
+      - HEB_APIFY_TOKEN=${HEB_APIFY_TOKEN:-}
+      - HEB_APIFY_ACTOR_ID=${HEB_APIFY_ACTOR_ID:-}
+      - HEB_APIFY_TIMEOUT_SEC=${HEB_APIFY_TIMEOUT_SEC:-90}
+      - COSTCO_AU_MIN_REQUEST_GAP_SEC=${COSTCO_AU_MIN_REQUEST_GAP_SEC:-20}
+      - COSTCO_AU_LOCK_WAIT_SEC=${COSTCO_AU_LOCK_WAIT_SEC:-120}
     depends_on:
       db:
         condition: service_healthy
