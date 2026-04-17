@@ -31,6 +31,19 @@ def _resolve_vendor(vendor_name_raw: str) -> Vendor | None:
     return None
 
 
+def _is_heb_product(product) -> bool:
+    """Return True when ``product`` belongs to the HEB vendor.
+
+    HEB is ingest-only: prices are posted from a desktop runner to
+    ``/api/v1/ingest/heb/``. Server-side scrape tasks must skip HEB rows so
+    the listing is not marked ``failed`` / ``needs_attention`` just because
+    there was no live scrape.
+    """
+    vendor = getattr(product, 'vendor', None)
+    code = (getattr(vendor, 'code', '') or '').lower()
+    return code == 'heb' or code.startswith('heb_')
+
+
 def _normalize_action(action_raw: str) -> str:
     """Return add, update, or delete."""
     a = (action_raw or '').strip().lower()
@@ -379,6 +392,16 @@ def run_catalog_scrape(upload_id: str):
             if not product:
                 continue
 
+            # HEB is ingest-only: prices arrive via /api/v1/ingest/heb/ from the
+            # desktop runner. Skip here so the server never marks HEB rows
+            # 'failed' / 'needs_attention' just because there is no live scrape.
+            if _is_heb_product(product):
+                logger.info(
+                    "HEB row skipped in catalog scrape (ingest-only): sku=%s",
+                    getattr(product, 'vendor_sku', '?'),
+                )
+                continue
+
             run.rows_processed += 1
             if run.rows_processed % 10 == 0:
                 run.rows_succeeded = succeeded
@@ -646,6 +669,13 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
             processed += 1
             product = pm.product
             if not product:
+                continue
+            # HEB is ingest-only (see run_catalog_scrape for rationale).
+            if _is_heb_product(product):
+                logger.info(
+                    "HEB row skipped in store-wide scrape (ingest-only): sku=%s",
+                    getattr(product, 'vendor_sku', '?'),
+                )
                 continue
             price_from_fallback = False
             pricing = _get_pricing_for_vendor(store, product.vendor_id)

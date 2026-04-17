@@ -18,6 +18,19 @@ from scrapers import get_price_and_stock, close_amazon_session
 from catalog.vendor_price_fallback import get_last_known_vendor_price_stock, resolve_vendor_price_for_listing
 
 
+def _is_heb_product(product) -> bool:
+    """Return True when ``product`` belongs to the HEB vendor.
+
+    HEB is ingest-only: prices are POSTed from a desktop runner to
+    ``/api/v1/ingest/heb/``. Server-side scrape loops must skip HEB rows so
+    the listing is not marked ``failed`` / ``needs_attention`` just because
+    there was no live scrape.
+    """
+    vendor = getattr(product, 'vendor', None)
+    code = (getattr(vendor, 'code', '') or '').lower()
+    return code == 'heb' or code.startswith('heb_')
+
+
 def _heb_product_id_from_sku(sku: str):
     """
     Pick the HEB PDP numeric id from a composite SKU (e.g. AHJH-150275-0311-PK3).
@@ -364,6 +377,13 @@ def run_store_sync(self, store_id):
     try:
         for pm in mappings:
             processed += 1
+            # HEB is ingest-only; data comes from /api/v1/ingest/heb/.
+            if pm.product and _is_heb_product(pm.product):
+                logger.info(
+                    "HEB row skipped in run_store_update (ingest-only): sku=%s",
+                    getattr(pm.product, 'vendor_sku', '?'),
+                )
+                continue
             price_from_fallback = False
             pricing = _get_pricing_for_vendor(store, pm.product.vendor_id)
             inventory = _get_inventory_for_vendor(store, pm.product.vendor_id)
@@ -570,6 +590,13 @@ def run_store_update(self, store_id):
         bulk_queue = []  # list of (pm, sku, price, stock)
         for pm in mappings:
             processed += 1
+            # HEB is ingest-only; data comes from /api/v1/ingest/heb/.
+            if pm.product and _is_heb_product(pm.product):
+                logger.info(
+                    "HEB row skipped in sync+push loop (ingest-only): sku=%s",
+                    getattr(pm.product, 'vendor_sku', '?'),
+                )
+                continue
             price_from_fallback = False
             pricing = _get_pricing_for_vendor(store, pm.product.vendor_id)
             inventory = _get_inventory_for_vendor(store, pm.product.vendor_id)
