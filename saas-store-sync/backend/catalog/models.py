@@ -252,6 +252,49 @@ class CatalogSyncLog(models.Model):
         ordering = ['-created_at']
 
 
+class IngestToken(models.Model):
+    """Bearer token used by external runners (e.g. desktop HEB scraper) to push scraped results.
+
+    Stores a SHA-256 hash of the token; the plaintext is printed once by
+    `manage.py create_ingest_token`. Match is by ``token_hash``.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    label = models.CharField(max_length=128, help_text='Human-friendly label, e.g. "heb-pc-navroz".')
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    token_prefix = models.CharField(
+        max_length=12,
+        blank=True,
+        default='',
+        help_text='First few characters of the plaintext token for identification (non-secret).',
+    )
+    scopes = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Allowed scopes, e.g. ["heb"]. Empty list = deny all.',
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='ingest_tokens',
+    )
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    last_used_ip = models.GenericIPAddressField(null=True, blank=True)
+    last_used_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        db_table = 'catalog_ingesttoken'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        active = 'active' if self.is_active else 'disabled'
+        return f'{self.label} [{self.token_prefix}…] ({active})'
+
+
 class ReverbUpdateLog(models.Model):
     """Per-listing push to Reverb API."""
     class Status(models.TextChoices):
