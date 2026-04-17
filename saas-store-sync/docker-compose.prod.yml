@@ -88,7 +88,7 @@ services:
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
       - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
       - CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE=${CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE:-}
-      # HEB Selenium scraper (optional; set in .env.prod)
+      # Scraper proxies (Costco AU + generic; HEB is ingest-only via /api/v1/ingest/heb/)
       - PROXY_URL=${PROXY_URL:-}
       - PROXY_URLS=${PROXY_URLS:-}
       - COSTCO_AU_PROXY_URL=${COSTCO_AU_PROXY_URL:-}
@@ -99,10 +99,6 @@ services:
       - PROXY_USER=${PROXY_USER:-}
       - PROXY_PASS=${PROXY_PASS:-}
       - PROXY_SCHEME=${PROXY_SCHEME:-http}
-      - HEB_USE_APIFY=${HEB_USE_APIFY:-0}
-      - HEB_APIFY_TOKEN=${HEB_APIFY_TOKEN:-}
-      - HEB_APIFY_ACTOR_ID=${HEB_APIFY_ACTOR_ID:-}
-      - HEB_APIFY_TIMEOUT_SEC=${HEB_APIFY_TIMEOUT_SEC:-90}
     depends_on:
       db:
         condition: service_healthy
@@ -180,7 +176,7 @@ services:
       - CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE=${CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE:-}
       # eBay: Selenium-first on VPS; set EBAY_HTTP_FIRST=1 only on clean/residential IPs
       - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-0}
-      # HEB Selenium scraper (optional; set in .env.prod)
+      # Scraper proxies (Costco AU + generic; HEB is ingest-only via /api/v1/ingest/heb/)
       - PROXY_URL=${PROXY_URL:-}
       - PROXY_URLS=${PROXY_URLS:-}
       - COSTCO_AU_PROXY_URL=${COSTCO_AU_PROXY_URL:-}
@@ -191,10 +187,6 @@ services:
       - PROXY_USER=${PROXY_USER:-}
       - PROXY_PASS=${PROXY_PASS:-}
       - PROXY_SCHEME=${PROXY_SCHEME:-http}
-      - HEB_USE_APIFY=${HEB_USE_APIFY:-0}
-      - HEB_APIFY_TOKEN=${HEB_APIFY_TOKEN:-}
-      - HEB_APIFY_ACTOR_ID=${HEB_APIFY_ACTOR_ID:-}
-      - HEB_APIFY_TIMEOUT_SEC=${HEB_APIFY_TIMEOUT_SEC:-90}
       - COSTCO_AU_MIN_REQUEST_GAP_SEC=${COSTCO_AU_MIN_REQUEST_GAP_SEC:-20}
       - COSTCO_AU_LOCK_WAIT_SEC=${COSTCO_AU_LOCK_WAIT_SEC:-120}
     depends_on:

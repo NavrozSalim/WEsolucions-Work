@@ -1,9 +1,16 @@
 """
 Scraper dispatcher.
 
-Routes vendor URLs to the correct scraper (Amazon US, Amazon AU, eBay)
+Routes vendor URLs to the correct scraper (Amazon US, Amazon AU, eBay, Costco AU)
 based on domain. Each scraper returns {"price": float|None, "stock": int|None}
-and may include "title" (str) when extracted—same shape for Amazon US and eBay.
+and may include "title" (str) when extracted — same shape for Amazon US and eBay.
+
+HEB is **not** scraped server-side. HEB PDPs are Akamai-protected from datacenter
+IPs, so the source of truth for HEB pricing is the desktop runner that POSTs to
+``/api/v1/ingest/heb/``. The dispatcher therefore short-circuits HEB URLs with
+``error_code=heb_ingest_only``; the catalog scrape task then falls back to the
+latest ``VendorPrice`` (written by the ingest endpoint) via
+``resolve_vendor_price_for_listing``.
 
 Usage in tasks:
     from scrapers import get_price_and_stock, close_amazon_session
@@ -25,8 +32,6 @@ _scrape_amazon_us = None
 _close_amazon_us = None
 _scrape_amazon_legacy = None
 _close_amazon_legacy = None
-_scrape_heb = None
-_close_heb = None
 _scrape_costco_au = None
 _close_costco_au = None
 
@@ -57,20 +62,6 @@ def _get_amazon_legacy_scraper():
             _scrape_amazon_legacy = _placeholder_scrape
             _close_amazon_legacy = lambda s: None
     return _scrape_amazon_legacy, _close_amazon_legacy
-
-
-def _get_heb_scraper():
-    global _scrape_heb, _close_heb
-    if _scrape_heb is None:
-        try:
-            from .heb_scraper import scrape_heb, close_heb_session
-            _scrape_heb = scrape_heb
-            _close_heb = close_heb_session
-        except ImportError as exc:
-            logger.warning("HEB scraper unavailable: %s", exc)
-            _scrape_heb = _placeholder_scrape
-            _close_heb = lambda s: None
-    return _scrape_heb, _close_heb
 
 
 def _get_costco_au_scraper():
@@ -109,12 +100,30 @@ def _rewrite_url_for_region(vendor_url: str, region: str) -> str:
     return vendor_url
 
 
+def _heb_ingest_only_result() -> dict:
+    """HEB has no server-side scraper; data comes from the /api/v1/ingest/heb/ endpoint."""
+    return {
+        "price": None,
+        "inventory": None,
+        "title": None,
+        "error_code": "heb_ingest_only",
+        "error_message": (
+            "HEB is ingest-only on the server; the desktop runner POSTs prices to "
+            "/api/v1/ingest/heb/. The task will fall back to the latest VendorPrice."
+        ),
+    }
+
+
 def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> dict:
     """
     Main entry point: resolve vendor URL → scraper → return price + stock.
 
-    Routing uses the **URL host/path only** (Amazon, eBay, HEB, …). It does not depend on
-    which marketplace the listing is sold on (Reverb, Walmart, Sears, etc.).
+    Routing uses the **URL host/path only** (Amazon, eBay, Costco AU, …). It does not
+    depend on which marketplace the listing is sold on (Reverb, Walmart, Sears, etc.).
+
+    HEB URLs are intentionally **not** scraped here: Akamai blocks datacenter IPs,
+    so HEB prices arrive via the ingest API instead. We return a sentinel result
+    so the catalog task falls back to the latest ``VendorPrice`` row.
 
     Parameters
     ----------
@@ -127,8 +136,9 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
 
     Returns
     -------
-    dict with keys "price" (float|None), "stock" (int|None), and optionally
-    "title" (str) when the page exposes a product title.
+    dict with keys "price" (float|None), "inventory" (int|None), and optionally
+    "title" (str) when the page exposes a product title. May also include
+    "error_code" / "error_message" when the row is skipped.
     """
     vendor_url = _rewrite_url_for_region(vendor_url, region)
     url_lower = (vendor_url or "").lower()
@@ -148,9 +158,8 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
         return _normalize_scrape_payload(scrape_ebay(vendor_url, region, session))
 
     if "heb.com" in url_lower:
-        scrape_fn, _ = _get_heb_scraper()
-        logger.debug("Routing to HEB scraper: %s", vendor_url[:80])
-        return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
+        logger.info("HEB URL skipped server-side (ingest-only): %s", vendor_url[:80])
+        return _normalize_scrape_payload(_heb_ingest_only_result())
 
     if "costco.com.au" in url_lower:
         scrape_fn, _ = _get_costco_au_scraper()
@@ -172,20 +181,26 @@ def _normalize_scrape_payload(result: dict | None) -> dict:
     - price
     - inventory
     - title
+    - error_code / error_message (optional, preserved when present)
     """
     result = result or {}
     inventory = result.get("inventory")
     if inventory is None:
         inventory = result.get("stock")
-    return {
+    payload = {
         "price": result.get("price"),
         "inventory": inventory,
         "title": result.get("title"),
     }
+    if result.get("error_code"):
+        payload["error_code"] = result["error_code"]
+    if result.get("error_message"):
+        payload["error_message"] = result["error_message"]
+    return payload
 
 
 def close_amazon_session(session):
-    """Close all browser sessions (Amazon US, Amazon AU, eBay) held in this session dict."""
+    """Close all browser sessions (Amazon US, Amazon AU, eBay, Costco AU) held in this session dict."""
     if session is None:
         return
     _, close_us = _get_amazon_us_scraper()
@@ -197,8 +212,6 @@ def close_amazon_session(session):
         close_ebay_session(session)
     except ImportError:
         pass
-    _, close_heb = _get_heb_scraper()
-    close_heb(session)
     _, close_costco_au = _get_costco_au_scraper()
     close_costco_au(session)
 
