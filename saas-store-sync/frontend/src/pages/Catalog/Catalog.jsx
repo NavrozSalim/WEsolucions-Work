@@ -38,6 +38,7 @@ import {
     triggerCatalogCriticalZero,
     getCatalogActivityLogs,
     getScrapeProgress,
+    cancelCatalogScrape,
 } from '../../services/catalogService';
 import Button from '../../components/ui/Button';
 import Select from '../../components/ui/Select';
@@ -75,6 +76,17 @@ function formatDate(iso) {
     if (!iso) return '—';
     const d = new Date(iso);
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+/** Short, user-friendly "~12 min" / "~45 sec" / "~1 h 5 min" from seconds. */
+function formatEtaShort(seconds) {
+    if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return null;
+    const s = Math.round(seconds);
+    if (s < 60) return `~${s} sec`;
+    if (s < 3600) return `~${Math.round(s / 60)} min`;
+    const h = Math.floor(s / 3600);
+    const m = Math.round((s - h * 3600) / 60);
+    return m === 0 ? `~${h} h` : `~${h} h ${m} min`;
 }
 
 /** Prefer server detail for 4xx/5xx so users see useful text instead of only "status code 500". */
@@ -282,7 +294,7 @@ function formatPrice(val) {
  *   - tracking state (so the user knows the Scrape button is intentionally
  *     still working in the background)
  */
-function HebProgressStrip({ progress, tracking, onStopTracking }) {
+function HebProgressStrip({ progress, tracking, onStopScrape, stopping }) {
     if (!progress || !progress.has_heb) return null;
     const pct = Math.max(0, Math.min(100, Number(progress.heb_pct || 0)));
     const recent5 = progress.heb_ingested_last_5m || 0;
@@ -293,6 +305,57 @@ function HebProgressStrip({ progress, tracking, onStopTracking }) {
         : recent5 > 0
             ? 'bg-accent-500'
             : 'bg-amber-500';
+
+    const job = progress.heb_job;
+    const queue = progress.heb_queue;
+    const jobStatus = job?.status;
+    const isPending = jobStatus === 'pending';
+    const isClaimed = jobStatus === 'claimed';
+    const isActive = isPending || isClaimed;
+    const ahead = queue?.ahead_count || 0;
+    const etaLabel = formatEtaShort(queue?.eta_seconds);
+    const runningOther = queue?.currently_running && !queue.currently_running.is_this_store
+        ? queue.currently_running.store_name
+        : null;
+
+    let statusPill = null;
+    if (isPending) {
+        statusPill = (
+            <span className="ml-2 inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+                queued
+            </span>
+        );
+    } else if (isClaimed) {
+        statusPill = (
+            <span className="ml-2 inline-flex items-center rounded-full bg-accent-100 px-2 py-0.5 text-xs font-medium text-accent-700 dark:bg-accent-900/30 dark:text-accent-300">
+                scraping
+            </span>
+        );
+    } else if (tracking) {
+        statusPill = (
+            <span className="ml-2 inline-flex items-center rounded-full bg-accent-100 px-2 py-0.5 text-xs font-medium text-accent-700 dark:bg-accent-900/30 dark:text-accent-300">
+                tracking live
+            </span>
+        );
+    }
+
+    let queueLine = null;
+    if (isPending) {
+        const parts = [];
+        if (ahead > 0) {
+            parts.push(`${ahead} store${ahead === 1 ? '' : 's'} ahead of you`);
+        } else {
+            parts.push('next in line');
+        }
+        if (runningOther) parts.push(`scraping "${runningOther}" now`);
+        if (etaLabel) parts.push(`starts in ${etaLabel}`);
+        queueLine = (
+            <p className="text-xs text-amber-600 dark:text-amber-300 mt-0.5">
+                Pending — {parts.join(' · ')}.
+            </p>
+        );
+    }
+
     return (
         <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4 mb-4 shadow-sm">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -301,24 +364,22 @@ function HebProgressStrip({ progress, tracking, onStopTracking }) {
                     <div>
                         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                             HEB desktop runner
-                            {tracking && (
-                                <span className="ml-2 inline-flex items-center rounded-full bg-accent-100 px-2 py-0.5 text-xs font-medium text-accent-700 dark:bg-accent-900/30 dark:text-accent-300">
-                                    tracking live
-                                </span>
-                            )}
+                            {statusPill}
                         </h3>
                         <p className="text-xs text-slate-500 dark:text-slate-400">
                             {progress.heb_scraped}/{progress.heb_total} products populated · last upload {lastAgo} · {recent5} in last 5 min · {recent24} in last 24 h
                         </p>
+                        {queueLine}
                     </div>
                 </div>
-                {tracking && (
+                {isActive && (
                     <button
                         type="button"
-                        onClick={onStopTracking}
-                        className="self-start rounded-md border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800"
+                        onClick={onStopScrape}
+                        disabled={stopping}
+                        className="self-start rounded-md border border-rose-200 px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-60 dark:border-rose-800 dark:text-rose-300 dark:hover:bg-rose-900/30"
                     >
-                        Stop tracking
+                        {stopping ? 'Stopping…' : 'Stop Scraping'}
                     </button>
                 )}
             </div>
@@ -385,6 +446,7 @@ export default function Catalog() {
     const [trackingScrape, setTrackingScrape] = useState(false);
     const trackingScrapeRef = useRef(false);
     useEffect(() => { trackingScrapeRef.current = trackingScrape; }, [trackingScrape]);
+    const [stoppingScrape, setStoppingScrape] = useState(false);
     // Row IDs whose sync_status just changed — used to flash the row yellow.
     const [flashingRowIds, setFlashingRowIds] = useState(() => new Set());
     const prevStatusRef = useRef(new Map()); // product.id -> last seen sync_status
@@ -627,12 +689,25 @@ export default function Catalog() {
         };
     }, [selectedStore, flowStatus, trackingScrape, viewMode, liveRefreshUntil]);
 
-    // Auto-stop tracking once every HEB mapping has ingest data (pending == 0).
+    // Auto-stop tracking when the job reaches a terminal state or every HEB
+    // mapping has ingest data.
     useEffect(() => {
         if (!trackingScrape || !scrapeProgress) return;
         if (!scrapeProgress.has_heb) {
-            // Store has no HEB products — tracking not meaningful.
             setTrackingScrape(false);
+            return;
+        }
+        const jobStatus = scrapeProgress.heb_job?.status;
+        if (jobStatus === 'cancelled') {
+            setTrackingScrape(false);
+            setFlowStatus('');
+            setMessage('HEB scrape was cancelled.');
+            return;
+        }
+        if (jobStatus === 'failed') {
+            setTrackingScrape(false);
+            setFlowStatus('failed');
+            setMessage('HEB scrape failed on the desktop runner.');
             return;
         }
         if ((scrapeProgress.heb_pending || 0) === 0 && (scrapeProgress.heb_total || 0) > 0) {
@@ -824,7 +899,7 @@ export default function Catalog() {
                     const proc = scrape.rows_processed ?? 0;
                     scrapeMsg = ` Vendor prices scraped: ${ok}/${proc} row(s).`;
                 } else if (scrape?.skipped) {
-                    scrapeMsg = ' (Scrape skipped — run “Scrape prices” after a successful sync.)';
+                    scrapeMsg = ' (Scrape skipped — run “Start Scraping” after a successful sync.)';
                 } else if (scrape?.error) {
                     scrapeMsg = ` Scrape warning: ${scrape.error}`;
                 }
@@ -953,10 +1028,30 @@ export default function Catalog() {
         }
     }, [trackingScrape]);
 
-    const cancelScrapeTracking = () => {
-        setTrackingScrape(false);
-        setFlowStatus('');
-        setMessage('Stopped tracking HEB scrape progress. The desktop runner keeps uploading in the background.');
+    const handleStopScrape = () => {
+        if (!selectedStore || stoppingScrape) return;
+        setStoppingScrape(true);
+        setMessage('Stopping the HEB scrape…');
+        cancelCatalogScrape(selectedStore)
+            .then((res) => {
+                const cancelledId = res?.data?.cancelled;
+                setTrackingScrape(false);
+                setFlowStatus(cancelledId ? 'success' : '');
+                setMessage(
+                    cancelledId
+                        ? 'HEB scrape cancelled. The desktop runner will stop on its next check.'
+                        : 'No active HEB scrape to stop.',
+                );
+                getScrapeProgress(selectedStore)
+                    .then((p) => setScrapeProgress(p.data || null))
+                    .catch(() => {});
+            })
+            .catch((err) => {
+                setMessage(formatCatalogError(err) || 'Failed to stop the scrape.');
+            })
+            .finally(() => {
+                setStoppingScrape(false);
+            });
     };
 
     const handleExportProducts = () => {
@@ -1328,7 +1423,7 @@ export default function Catalog() {
                             </p>
                             <Button variant="primary" onClick={handleSyncFromModal} disabled={syncing}>
                                 <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
-                                Sync &amp; scrape prices
+                                Sync &amp; Start Scraping
                             </Button>
                         </div>
                     )}
@@ -1340,7 +1435,8 @@ export default function Catalog() {
                 <HebProgressStrip
                     progress={scrapeProgress}
                     tracking={trackingScrape}
-                    onStopTracking={cancelScrapeTracking}
+                    onStopScrape={handleStopScrape}
+                    stopping={stoppingScrape}
                 />
             )}
 
@@ -1401,32 +1497,61 @@ export default function Catalog() {
                                     </Button>
                                 </div>
                             </div>
-                            <Button
-                                variant="secondary"
-                                size="sm"
-                                onClick={() => handleScrape(null)}
-                                disabled={scraping || !selectedStore}
-                                title={
-                                    trackingScrape
-                                        ? 'Scrape running — waiting for the desktop runner to finish uploading HEB prices. Click to stop tracking.'
-                                        : 'Re-fetch vendor price/stock for all active listings (HEB uses the desktop runner ingest feed).'
+                            {(() => {
+                                const hebJobStatus = scrapeProgress?.heb_job?.status;
+                                const isPending = hebJobStatus === 'pending';
+                                const isClaimed = hebJobStatus === 'claimed';
+                                const isActive = isPending || isClaimed || trackingScrape;
+                                const aheadCount = scrapeProgress?.heb_queue?.ahead_count || 0;
+                                const etaLabel = formatEtaShort(scrapeProgress?.heb_queue?.eta_seconds);
+
+                                let label = 'Start Scraping';
+                                if (isPending) {
+                                    label = aheadCount > 0
+                                        ? `Pending — ${aheadCount} ahead${etaLabel ? ` (${etaLabel})` : ''}`
+                                        : `Pending — next in line${etaLabel ? ` (${etaLabel})` : ''}`;
+                                } else if (trackingScrape && scrapeProgress?.has_heb) {
+                                    label = `Scraping HEB… ${scrapeProgress.heb_scraped}/${scrapeProgress.heb_total} (${scrapeProgress.heb_pct}%)`;
+                                } else if (isClaimed) {
+                                    label = 'Scraping…';
                                 }
-                            >
-                                <RefreshCw className={`h-4 w-4 mr-1.5 ${scraping || trackingScrape ? 'animate-spin' : ''}`} />
-                                {trackingScrape && scrapeProgress?.has_heb
-                                    ? `Scraping HEB… ${scrapeProgress.heb_scraped}/${scrapeProgress.heb_total} (${scrapeProgress.heb_pct}%)`
-                                    : 'Scrape prices'}
-                            </Button>
-                            {trackingScrape && (
-                                <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={cancelScrapeTracking}
-                                    title="Stop tracking. The desktop runner keeps uploading in the background — the table will still update live."
-                                >
-                                    Stop tracking
-                                </Button>
-                            )}
+
+                                let titleText;
+                                if (isPending) {
+                                    titleText = 'Another store is currently scraping. This store will start automatically when the runner is free.';
+                                } else if (isActive) {
+                                    titleText = 'Scrape running — use "Stop Scraping" to cancel.';
+                                } else {
+                                    titleText = 'Re-fetch vendor price/stock for all active listings (HEB uses the desktop runner ingest feed).';
+                                }
+
+                                return (
+                                    <>
+                                        <Button
+                                            variant="secondary"
+                                            size="sm"
+                                            onClick={() => handleScrape(null)}
+                                            disabled={scraping || isActive || !selectedStore}
+                                            title={titleText}
+                                        >
+                                            <RefreshCw className={`h-4 w-4 mr-1.5 ${scraping || isActive ? 'animate-spin' : ''}`} />
+                                            {label}
+                                        </Button>
+                                        {isActive && (
+                                            <Button
+                                                variant="secondary"
+                                                size="sm"
+                                                onClick={handleStopScrape}
+                                                disabled={stoppingScrape}
+                                                className="border-rose-200 text-rose-700 hover:bg-rose-50 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/40"
+                                                title="Cancel the scrape. The desktop runner stops on its next check."
+                                            >
+                                                {stoppingScrape ? 'Stopping…' : 'Stop Scraping'}
+                                            </Button>
+                                        )}
+                                    </>
+                                );
+                            })()}
                             <div className="relative flex-1 min-w-[12rem] lg:max-w-xs">
                                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                                 <input
@@ -1623,7 +1748,7 @@ export default function Catalog() {
                             <EmptyState
                                 icon={ScrollText}
                                 title="No activity yet"
-                                description="Run Scrape prices, Manual sync, or scheduled updates — events will appear here."
+                                description="Run Start Scraping, Manual sync, or scheduled updates — events will appear here."
                             />
                         ) : (
                             <ul className="divide-y divide-slate-100 dark:divide-slate-700/80">

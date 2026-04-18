@@ -183,6 +183,14 @@ export const triggerCatalogScrape = (storeId, runInline = false, uploadId = null
 export const getScrapeProgress = (storeId) =>
     api.get(`/stores/${storeId}/catalog/scrape/progress/`);
 
+/**
+ * Cancel the store's currently queued or running HEB scrape job. Server flips
+ * the latest pending/claimed HebScrapeJob to ``cancelled``. The desktop runner
+ * should detect this via its next job-status probe and stop worker processes.
+ */
+export const cancelCatalogScrape = (storeId) =>
+    api.post(`/stores/${storeId}/catalog/scrape/cancel/`, {});
+
 /** Map store row from /catalog/stores/ to reverb | walmart | sears for sample CSV columns. */
 export const resolveMarketplaceTemplateKind = (store) => {
     if (!store) return '';

@@ -611,6 +611,67 @@ class CatalogScrapeTriggerView(APIView):
         }, status=status.HTTP_202_ACCEPTED)
 
 
+class CatalogScrapeCancelView(APIView):
+    """Cancel a running or queued HEB scrape for a store.
+
+    Flips the latest ``PENDING`` or ``CLAIMED`` ``HebScrapeJob`` for this store
+    to ``CANCELLED``. A claimed job is flipped too so the desktop runner can
+    pick up the change (runner polls ``GET /ingest/heb/jobs/<id>/`` to detect
+    cancellation mid-run).
+
+    Safe to call when there is no active job — returns 200 with
+    ``cancelled: null`` in that case so the UI can just optimistically call
+    this without pre-checking.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        from catalog.activity_log import append_catalog_log
+
+        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        job = (
+            HebScrapeJob.objects.filter(
+                store=store,
+                status__in=[
+                    HebScrapeJob.Status.PENDING,
+                    HebScrapeJob.Status.CLAIMED,
+                ],
+            )
+            .order_by('-requested_at')
+            .first()
+        )
+        if job is None:
+            return Response(
+                {'cancelled': None, 'detail': 'No active scrape for this store.'},
+                status=status.HTTP_200_OK,
+            )
+
+        prior_status = job.status
+        job.status = HebScrapeJob.Status.CANCELLED
+        job.completed_at = timezone.now()
+        job.note = (job.note or '') + (f'\nCancelled by user @ {job.completed_at.isoformat()}').strip()
+        job.save(update_fields=['status', 'completed_at', 'note'])
+
+        append_catalog_log(
+            store.id,
+            'You cancelled the running HEB scrape.',
+            action_type='heb_scrape_cancelled',
+            user_id=request.user.id,
+            metadata={'job_id': str(job.id), 'prior_status': prior_status},
+        )
+
+        return Response(
+            {
+                'cancelled': str(job.id),
+                'prior_status': prior_status,
+                'status': job.status,
+                'completed_at': job.completed_at.isoformat(),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class CatalogUpdateTriggerView(APIView):
     """Trigger catalog update to Reverb (background job)."""
     permission_classes = [IsAuthenticated]
@@ -667,6 +728,84 @@ class CatalogSyncLogsView(APIView):
             for l in logs
         ]
         return Response(data)
+
+
+def _compute_heb_queue_payload(store, latest_job):
+    """Return queue/ETA info for the Catalog UI.
+
+    - ``position``     : 1 = this store is next up; ``None`` if this store is
+                        not currently waiting in line (either running already,
+                        or has no pending job).
+    - ``ahead_count``  : number of pending jobs ahead of this store.
+    - ``eta_seconds``  : approximate seconds until this store's job starts
+                        running, derived from recent completed runs. ``None``
+                        if we have no recent history to base it on.
+    - ``currently_running``  : payload for whichever job is currently CLAIMED
+                                (so the UI can say "Store X is scraping now").
+    - ``average_seconds``    : avg duration of the last ~10 completed runs.
+    """
+    pending_qs = (
+        HebScrapeJob.objects
+        .filter(status=HebScrapeJob.Status.PENDING)
+        .order_by('requested_at')
+    )
+
+    position = None
+    ahead_count = 0
+    if latest_job and latest_job.status == HebScrapeJob.Status.PENDING:
+        ahead_ids = list(pending_qs.values_list('id', flat=True))
+        try:
+            position = ahead_ids.index(latest_job.id) + 1
+        except ValueError:
+            position = None
+        ahead_count = max(0, (position or 1) - 1)
+
+    recent_done = (
+        HebScrapeJob.objects
+        .filter(
+            status=HebScrapeJob.Status.DONE,
+            claimed_at__isnull=False,
+            completed_at__isnull=False,
+        )
+        .order_by('-completed_at')[:10]
+    )
+    durations = []
+    for j in recent_done:
+        if j.claimed_at and j.completed_at:
+            d = (j.completed_at - j.claimed_at).total_seconds()
+            if d > 0:
+                durations.append(d)
+    avg_seconds = int(round(sum(durations) / len(durations))) if durations else None
+
+    eta_seconds = None
+    if position is not None and avg_seconds:
+        eta_seconds = int(position * avg_seconds)
+
+    running = (
+        HebScrapeJob.objects
+        .select_related('store')
+        .filter(status=HebScrapeJob.Status.CLAIMED)
+        .order_by('claimed_at')
+        .first()
+    )
+    currently_running = None
+    if running is not None:
+        is_this_store = (running.store_id == store.id)
+        currently_running = {
+            'job_id': str(running.id),
+            'store_id': str(running.store_id) if running.store_id else None,
+            'store_name': running.store.name if running.store_id else 'All HEB stores',
+            'claimed_at': running.claimed_at.isoformat() if running.claimed_at else None,
+            'is_this_store': is_this_store,
+        }
+
+    return {
+        'position': position,
+        'ahead_count': ahead_count,
+        'eta_seconds': eta_seconds,
+        'average_seconds': avg_seconds,
+        'currently_running': currently_running,
+    }
 
 
 class CatalogScrapeProgressView(APIView):
@@ -735,6 +874,7 @@ class CatalogScrapeProgressView(APIView):
         heb_pct = int(round(heb_scraped * 100 / heb_total)) if heb_total else 0
 
         heb_job_payload = None
+        heb_queue_payload = None
         if heb_vendor_ids:
             latest_job = (
                 HebScrapeJob.objects.filter(store=store)
@@ -752,6 +892,8 @@ class CatalogScrapeProgressView(APIView):
                     'stats': latest_job.stats or {},
                 }
 
+            heb_queue_payload = _compute_heb_queue_payload(store, latest_job)
+
         return Response({
             'total': total,
             'by_status': by_status,
@@ -765,6 +907,7 @@ class CatalogScrapeProgressView(APIView):
             'heb_ingested_last_5m': heb_ingested_last_5m,
             'heb_ingested_last_24h': heb_ingested_last_24h,
             'heb_job': heb_job_payload,
+            'heb_queue': heb_queue_payload,
             'checked_at': timezone.now().isoformat(),
         })
 

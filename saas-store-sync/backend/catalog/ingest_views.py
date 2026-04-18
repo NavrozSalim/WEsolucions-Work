@@ -447,6 +447,36 @@ class HebIngestNextJobView(APIView):
         })
 
 
+class HebIngestJobStatusView(APIView):
+    """Runner-facing job status probe.
+
+    Lets the desktop poller check ``GET /ingest/heb/jobs/<id>/`` mid-run so it
+    can detect cancellation (status flipped to ``cancelled`` by the web UI)
+    and stop its worker subprocesses instead of finishing a job nobody wants.
+
+    Auth: Bearer token, scope ``heb``.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request, job_id, *args, **kwargs):
+        _authenticate(request, required_scope='heb')
+        try:
+            job = HebScrapeJob.objects.get(id=job_id)
+        except HebScrapeJob.DoesNotExist:
+            return Response({'error': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({
+            'job_id': str(job.id),
+            'status': job.status,
+            'requested_at': job.requested_at.isoformat(),
+            'claimed_at': job.claimed_at.isoformat() if job.claimed_at else None,
+            'completed_at': job.completed_at.isoformat() if job.completed_at else None,
+            'cancelled': job.status == HebScrapeJob.Status.CANCELLED,
+        })
+
+
 class HebIngestCompleteJobView(APIView):
     """Runner reports a claimed job as done (or failed).
 

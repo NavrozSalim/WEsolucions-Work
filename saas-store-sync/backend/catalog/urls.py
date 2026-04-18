@@ -10,6 +10,7 @@ from .views import (
     StoreCatalogUploadView,
     CatalogSyncTriggerView,
     CatalogScrapeTriggerView,
+    CatalogScrapeCancelView,
     CatalogScrapeProgressView,
     CatalogUpdateTriggerView,
     CatalogJobStatusView,
@@ -27,6 +28,7 @@ from .ingest_views import (
     HebIngestView,
     HebIngestUrlsView,
     HebIngestNextJobView,
+    HebIngestJobStatusView,
     HebIngestCompleteJobView,
 )
 
@@ -44,6 +46,7 @@ urlpatterns = [
     path('stores/<uuid:store_pk>/catalog/uploads/<uuid:upload_id>/errors/', CatalogUploadErrorFileView.as_view(), name='store-catalog-upload-errors'),
     path('stores/<uuid:store_pk>/catalog/sync/', CatalogSyncTriggerView.as_view(), name='store-catalog-sync'),
     path('stores/<uuid:store_pk>/catalog/scrape/', CatalogScrapeTriggerView.as_view(), name='store-catalog-scrape'),
+    path('stores/<uuid:store_pk>/catalog/scrape/cancel/', CatalogScrapeCancelView.as_view(), name='store-catalog-scrape-cancel'),
     path('stores/<uuid:store_pk>/catalog/scrape/progress/', CatalogScrapeProgressView.as_view(), name='store-catalog-scrape-progress'),
     path('stores/<uuid:store_pk>/catalog/scrape/runs/', CatalogScrapeRunsView.as_view(), name='store-catalog-scrape-runs'),
     path('stores/<uuid:store_pk>/catalog/update/', CatalogUpdateTriggerView.as_view(), name='store-catalog-update'),
@@ -57,6 +60,11 @@ urlpatterns = [
     path('ingest/heb/', HebIngestView.as_view(), name='ingest-heb'),
     path('ingest/heb/urls/', HebIngestUrlsView.as_view(), name='ingest-heb-urls'),
     path('ingest/heb/next-job/', HebIngestNextJobView.as_view(), name='ingest-heb-next-job'),
+    path(
+        'ingest/heb/jobs/<uuid:job_id>/',
+        HebIngestJobStatusView.as_view(),
+        name='ingest-heb-job-status',
+    ),
     path(
         'ingest/heb/jobs/<uuid:job_id>/complete/',
         HebIngestCompleteJobView.as_view(),
