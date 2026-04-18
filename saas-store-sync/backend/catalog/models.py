@@ -322,7 +322,7 @@ class HebScrapeJob(models.Model):
         null=True,
         blank=True,
         related_name='heb_scrape_jobs',
-        help_text='Optional: scope to a single store. Null = all HEB stores.',
+        help_text='Optional: scope to a single store. Null = all vendor stores.',
     )
     requested_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -330,6 +330,16 @@ class HebScrapeJob(models.Model):
         null=True,
         blank=True,
         related_name='heb_scrape_jobs',
+    )
+    vendor_code = models.CharField(
+        max_length=32,
+        default='heb',
+        db_index=True,
+        help_text=(
+            "Which desktop-runner vendor this job belongs to. One of "
+            "'heb', 'costco', etc. Desktop pollers filter on this so each "
+            "runner only picks up jobs for its vendor."
+        ),
     )
     status = models.CharField(
         max_length=20,
@@ -366,6 +376,10 @@ class HebScrapeJob(models.Model):
             models.Index(
                 fields=['status', 'requested_at'],
                 name='catalog_heb_status_eb1d07_idx',
+            ),
+            models.Index(
+                fields=['vendor_code', 'status', 'requested_at'],
+                name='catalog_heb_vendor_status_idx',
             ),
         ]
 

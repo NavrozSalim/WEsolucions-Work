@@ -1,16 +1,17 @@
 """
 Scraper dispatcher.
 
-Routes vendor URLs to the correct scraper (Amazon US, Amazon AU, eBay, Costco AU)
-based on domain. Each scraper returns {"price": float|None, "stock": int|None}
-and may include "title" (str) when extracted — same shape for Amazon US and eBay.
+Routes vendor URLs to the correct scraper (Amazon US, Amazon AU, eBay) based on
+domain. Each scraper returns {"price": float|None, "stock": int|None} and may
+include "title" (str) when extracted — same shape for Amazon US and eBay.
 
-HEB is **not** scraped server-side. HEB PDPs are Akamai-protected from datacenter
-IPs, so the source of truth for HEB pricing is the desktop runner that POSTs to
-``/api/v1/ingest/heb/``. The dispatcher therefore short-circuits HEB URLs with
-``error_code=heb_ingest_only``; the catalog scrape task then falls back to the
-latest ``VendorPrice`` (written by the ingest endpoint) via
-``resolve_vendor_price_for_listing``.
+HEB and Costco AU are **not** scraped server-side. Their PDPs are protected by
+Akamai / Cloudflare Bot Management from datacenter IPs, so the source of truth
+for their pricing is the desktop runner that POSTs to
+``/api/v1/ingest/heb/`` or ``/api/v1/ingest/costco/``. The dispatcher
+short-circuits those URLs with a ``*_ingest_only`` sentinel; the catalog scrape
+task then falls back to the latest ``VendorPrice`` (written by the ingest
+endpoint) via ``resolve_vendor_price_for_listing``.
 
 Usage in tasks:
     from scrapers import get_price_and_stock, close_amazon_session
@@ -32,8 +33,6 @@ _scrape_amazon_us = None
 _close_amazon_us = None
 _scrape_amazon_legacy = None
 _close_amazon_legacy = None
-_scrape_costco_au = None
-_close_costco_au = None
 
 
 def _get_amazon_us_scraper():
@@ -62,20 +61,6 @@ def _get_amazon_legacy_scraper():
             _scrape_amazon_legacy = _placeholder_scrape
             _close_amazon_legacy = lambda s: None
     return _scrape_amazon_legacy, _close_amazon_legacy
-
-
-def _get_costco_au_scraper():
-    global _scrape_costco_au, _close_costco_au
-    if _scrape_costco_au is None:
-        try:
-            from .costco_au_scraper import scrape_costco_au, close_costco_au_session
-            _scrape_costco_au = scrape_costco_au
-            _close_costco_au = close_costco_au_session
-        except ImportError as exc:
-            logger.warning("Costco AU scraper unavailable: %s", exc)
-            _scrape_costco_au = _placeholder_scrape
-            _close_costco_au = lambda s: None
-    return _scrape_costco_au, _close_costco_au
 
 
 def _rewrite_url_for_region(vendor_url: str, region: str) -> str:
@@ -110,6 +95,20 @@ def _heb_ingest_only_result() -> dict:
         "error_message": (
             "HEB is ingest-only on the server; the desktop runner POSTs prices to "
             "/api/v1/ingest/heb/. The task will fall back to the latest VendorPrice."
+        ),
+    }
+
+
+def _costco_ingest_only_result() -> dict:
+    """Costco AU has no server-side scraper; data comes from the /api/v1/ingest/costco/ endpoint."""
+    return {
+        "price": None,
+        "inventory": None,
+        "title": None,
+        "error_code": "costco_ingest_only",
+        "error_message": (
+            "Costco AU is ingest-only on the server; the desktop runner POSTs prices to "
+            "/api/v1/ingest/costco/. The task will fall back to the latest VendorPrice."
         ),
     }
 
@@ -162,9 +161,8 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
         return _normalize_scrape_payload(_heb_ingest_only_result())
 
     if "costco.com.au" in url_lower:
-        scrape_fn, _ = _get_costco_au_scraper()
-        logger.debug("Routing to Costco AU scraper: %s", vendor_url[:80])
-        return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
+        logger.info("Costco AU URL skipped server-side (ingest-only): %s", vendor_url[:80])
+        return _normalize_scrape_payload(_costco_ingest_only_result())
 
     logger.warning("No scraper registered for URL: %s", vendor_url[:80])
     return _placeholder_scrape(vendor_url, region)
@@ -200,7 +198,7 @@ def _normalize_scrape_payload(result: dict | None) -> dict:
 
 
 def close_amazon_session(session):
-    """Close all browser sessions (Amazon US, Amazon AU, eBay, Costco AU) held in this session dict."""
+    """Close all browser sessions (Amazon US, Amazon AU, eBay) held in this session dict."""
     if session is None:
         return
     _, close_us = _get_amazon_us_scraper()
@@ -212,8 +210,6 @@ def close_amazon_session(session):
         close_ebay_session(session)
     except ImportError:
         pass
-    _, close_costco_au = _get_costco_au_scraper()
-    close_costco_au(session)
 
 
 __all__ = ["get_price_and_stock", "close_amazon_session"]

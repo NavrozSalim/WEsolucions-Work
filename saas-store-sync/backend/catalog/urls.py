@@ -30,6 +30,11 @@ from .ingest_views import (
     HebIngestNextJobView,
     HebIngestJobStatusView,
     HebIngestCompleteJobView,
+    VendorIngestView,
+    VendorIngestUrlsView,
+    VendorIngestNextJobView,
+    VendorIngestJobStatusView,
+    VendorIngestCompleteJobView,
 )
 
 router = DefaultRouter()
@@ -69,6 +74,27 @@ urlpatterns = [
         'ingest/heb/jobs/<uuid:job_id>/complete/',
         HebIngestCompleteJobView.as_view(),
         name='ingest-heb-complete-job',
+    ),
+    path('ingest/<str:vendor>/', VendorIngestView.as_view(), name='ingest-vendor'),
+    path(
+        'ingest/<str:vendor>/urls/',
+        VendorIngestUrlsView.as_view(),
+        name='ingest-vendor-urls',
+    ),
+    path(
+        'ingest/<str:vendor>/next-job/',
+        VendorIngestNextJobView.as_view(),
+        name='ingest-vendor-next-job',
+    ),
+    path(
+        'ingest/<str:vendor>/jobs/<uuid:job_id>/',
+        VendorIngestJobStatusView.as_view(),
+        name='ingest-vendor-job-status',
+    ),
+    path(
+        'ingest/<str:vendor>/jobs/<uuid:job_id>/complete/',
+        VendorIngestCompleteJobView.as_view(),
+        name='ingest-vendor-complete-job',
     ),
     path('stores/<uuid:store_pk>/', include(router.urls)),
 ]

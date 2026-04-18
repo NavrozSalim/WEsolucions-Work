@@ -465,21 +465,43 @@ class CatalogSyncTriggerView(APIView):
         }, status=status.HTTP_202_ACCEPTED)
 
 
-def _store_has_heb_products(store) -> bool:
-    """True when ``store`` has at least one active ProductMapping whose product
-    belongs to a HEB vendor (``code='heb'`` or ``code__istartswith='heb_'``)."""
+def _vendor_db_ids_for(vendor_code: str) -> list:
+    """Resolve a desktop-runner ``vendor_code`` (e.g. 'heb', 'costco') into
+    the matching ``Vendor.id`` list in the DB. Uses the registry declared in
+    ``catalog.ingest_views.SUPPORTED_VENDORS`` so the catalog + ingest layers
+    stay in sync.
+    """
+    from catalog.ingest_views import SUPPORTED_VENDORS
     from vendor.models import Vendor
-    heb_vendor_ids = list(
-        Vendor.objects.filter(Q(code='heb') | Q(code__istartswith='heb_'))
-        .values_list('id', flat=True)
-    )
-    if not heb_vendor_ids:
+
+    cfg = SUPPORTED_VENDORS.get(vendor_code)
+    if not cfg:
+        return []
+    codes = list(cfg.get('vendor_db_codes') or [])
+    prefix = cfg.get('vendor_db_code_prefix')
+    q = Q(code__in=codes) if codes else Q()
+    if prefix:
+        q = q | Q(code__istartswith=prefix)
+    return list(Vendor.objects.filter(q).values_list('id', flat=True))
+
+
+def _store_has_vendor_products(store, vendor_code: str) -> bool:
+    """True when ``store`` has at least one active ProductMapping whose product
+    belongs to a desktop-runner vendor identified by ``vendor_code``."""
+    vendor_ids = _vendor_db_ids_for(vendor_code)
+    if not vendor_ids:
         return False
     return ProductMapping.objects.filter(
         store=store,
         is_active=True,
-        product__vendor_id__in=heb_vendor_ids,
+        product__vendor_id__in=vendor_ids,
     ).exists()
+
+
+def _store_has_heb_products(store) -> bool:
+    """Legacy alias retained for any external callers. Prefer
+    ``_store_has_vendor_products(store, 'heb')`` in new code."""
+    return _store_has_vendor_products(store, 'heb')
 
 
 class CatalogScrapeTriggerView(APIView):
@@ -487,22 +509,47 @@ class CatalogScrapeTriggerView(APIView):
     permission_classes = [IsAuthenticated]
 
     @staticmethod
-    def _maybe_enqueue_heb_job(store, user) -> HebScrapeJob | None:
-        """If ``store`` has HEB products and no HEB job is already pending/claimed
-        for it, create a new ``HebScrapeJob`` so the desktop runner picks it up.
+    def _maybe_enqueue_vendor_job(store, user, vendor_code: str) -> HebScrapeJob | None:
+        """Create (or return existing) ``HebScrapeJob`` row for ``vendor_code``
+        if ``store`` actually has products for that vendor.
 
-        Returns the job row (new or existing) or ``None`` if the store has no
-        HEB products.
+        Returns ``None`` if the store has nothing for this vendor — callers
+        should silently skip that vendor in that case.
         """
-        if not _store_has_heb_products(store):
+        if not _store_has_vendor_products(store, vendor_code):
             return None
         existing = HebScrapeJob.objects.filter(
             store=store,
+            vendor_code=vendor_code,
             status__in=[HebScrapeJob.Status.PENDING, HebScrapeJob.Status.CLAIMED],
         ).order_by('-requested_at').first()
         if existing:
             return existing
-        return HebScrapeJob.objects.create(store=store, requested_by=user)
+        return HebScrapeJob.objects.create(
+            store=store,
+            requested_by=user,
+            vendor_code=vendor_code,
+        )
+
+    @classmethod
+    def _maybe_enqueue_desktop_jobs(cls, store, user) -> list:
+        """Walk every supported desktop-runner vendor and enqueue a job for
+        each one that has products in ``store``. Returns a list of
+        ``(vendor_code, job)`` tuples for the ones that got queued (new or
+        pre-existing pending/claimed).
+        """
+        from catalog.ingest_views import SUPPORTED_VENDORS
+        jobs: list = []
+        for vendor_code in SUPPORTED_VENDORS.keys():
+            job = cls._maybe_enqueue_vendor_job(store, user, vendor_code)
+            if job is not None:
+                jobs.append((vendor_code, job))
+        return jobs
+
+    @classmethod
+    def _maybe_enqueue_heb_job(cls, store, user) -> HebScrapeJob | None:
+        """Backward-compat shim for the HEB-specific helper."""
+        return cls._maybe_enqueue_vendor_job(store, user, 'heb')
 
     def post(self, request, store_pk):
         from catalog.activity_log import append_catalog_log
@@ -520,14 +567,14 @@ class CatalogScrapeTriggerView(APIView):
             user_id=request.user.id,
         )
 
-        heb_job = self._maybe_enqueue_heb_job(store, request.user)
-        if heb_job is not None:
+        desktop_jobs = self._maybe_enqueue_desktop_jobs(store, request.user)
+        for vendor_code, vendor_job in desktop_jobs:
             append_catalog_log(
                 store.id,
-                f'Queued HEB scrape job {heb_job.id} for the desktop runner.',
-                action_type='heb_scrape_queued',
+                f'Queued {vendor_code.upper()} scrape job {vendor_job.id} for the desktop runner.',
+                action_type=f'{vendor_code}_scrape_queued',
                 user_id=request.user.id,
-                metadata={'job_id': str(heb_job.id)},
+                metadata={'job_id': str(vendor_job.id), 'vendor': vendor_code},
             )
 
         upload_id = request.data.get('upload_id')
@@ -612,61 +659,83 @@ class CatalogScrapeTriggerView(APIView):
 
 
 class CatalogScrapeCancelView(APIView):
-    """Cancel a running or queued HEB scrape for a store.
+    """Cancel running or queued desktop-runner scrapes for a store.
 
-    Flips the latest ``PENDING`` or ``CLAIMED`` ``HebScrapeJob`` for this store
-    to ``CANCELLED``. A claimed job is flipped too so the desktop runner can
-    pick up the change (runner polls ``GET /ingest/heb/jobs/<id>/`` to detect
-    cancellation mid-run).
+    By default cancels every active job (``PENDING`` or ``CLAIMED``) across
+    all supported vendors for this store. Pass ``?vendor=heb`` (or
+    ``?vendor=costco``) to scope the cancellation to a single vendor.
 
     Safe to call when there is no active job — returns 200 with
-    ``cancelled: null`` in that case so the UI can just optimistically call
-    this without pre-checking.
+    ``cancelled: []`` so the UI can call this optimistically.
     """
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request, store_pk):
         from catalog.activity_log import append_catalog_log
+        from catalog.ingest_views import SUPPORTED_VENDORS
 
         store = get_object_or_404(Store, id=store_pk, user=request.user)
-        job = (
-            HebScrapeJob.objects.filter(
-                store=store,
-                status__in=[
-                    HebScrapeJob.Status.PENDING,
-                    HebScrapeJob.Status.CLAIMED,
-                ],
-            )
-            .order_by('-requested_at')
-            .first()
-        )
-        if job is None:
+
+        vendor_filter = (request.query_params.get('vendor') or '').strip().lower()
+        if vendor_filter and vendor_filter not in SUPPORTED_VENDORS:
             return Response(
-                {'cancelled': None, 'detail': 'No active scrape for this store.'},
+                {'error': f'Unknown vendor "{vendor_filter}".'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        qs = HebScrapeJob.objects.filter(
+            store=store,
+            status__in=[
+                HebScrapeJob.Status.PENDING,
+                HebScrapeJob.Status.CLAIMED,
+            ],
+        ).order_by('-requested_at')
+        if vendor_filter:
+            qs = qs.filter(vendor_code=vendor_filter)
+
+        jobs = list(qs)
+        if not jobs:
+            return Response(
+                {'cancelled': [], 'detail': 'No active scrape for this store.'},
                 status=status.HTTP_200_OK,
             )
 
-        prior_status = job.status
-        job.status = HebScrapeJob.Status.CANCELLED
-        job.completed_at = timezone.now()
-        job.note = (job.note or '') + (f'\nCancelled by user @ {job.completed_at.isoformat()}').strip()
-        job.save(update_fields=['status', 'completed_at', 'note'])
+        now = timezone.now()
+        cancelled_payload = []
+        for job in jobs:
+            prior_status = job.status
+            job.status = HebScrapeJob.Status.CANCELLED
+            job.completed_at = now
+            job.note = (job.note or '') + (f'\nCancelled by user @ {now.isoformat()}').strip()
+            job.save(update_fields=['status', 'completed_at', 'note'])
 
-        append_catalog_log(
-            store.id,
-            'You cancelled the running HEB scrape.',
-            action_type='heb_scrape_cancelled',
-            user_id=request.user.id,
-            metadata={'job_id': str(job.id), 'prior_status': prior_status},
-        )
+            append_catalog_log(
+                store.id,
+                f'You cancelled the running {job.vendor_code.upper()} scrape.',
+                action_type=f'{job.vendor_code}_scrape_cancelled',
+                user_id=request.user.id,
+                metadata={
+                    'job_id': str(job.id),
+                    'prior_status': prior_status,
+                    'vendor': job.vendor_code,
+                },
+            )
+            cancelled_payload.append({
+                'job_id': str(job.id),
+                'vendor': job.vendor_code,
+                'prior_status': prior_status,
+                'status': job.status,
+                'completed_at': now.isoformat(),
+            })
 
         return Response(
             {
-                'cancelled': str(job.id),
-                'prior_status': prior_status,
-                'status': job.status,
-                'completed_at': job.completed_at.isoformat(),
+                'cancelled': cancelled_payload,
+                # Back-compat fields for older frontend builds that only look
+                # at a single cancelled job.
+                'job_id': cancelled_payload[0]['job_id'] if cancelled_payload else None,
+                'status': cancelled_payload[0]['status'] if cancelled_payload else None,
             },
             status=status.HTTP_200_OK,
         )
@@ -730,23 +799,24 @@ class CatalogSyncLogsView(APIView):
         return Response(data)
 
 
-def _compute_heb_queue_payload(store, latest_job):
-    """Return queue/ETA info for the Catalog UI.
+def _compute_vendor_queue_payload(store, vendor_code: str, latest_job):
+    """Return queue/ETA info for the Catalog UI, scoped to a single vendor.
+
+    Only jobs with matching ``vendor_code`` are considered — a HEB job never
+    delays a Costco queue and vice versa (each has its own desktop poller).
 
     - ``position``     : 1 = this store is next up; ``None`` if this store is
-                        not currently waiting in line (either running already,
-                        or has no pending job).
+                        not currently waiting in line.
     - ``ahead_count``  : number of pending jobs ahead of this store.
-    - ``eta_seconds``  : approximate seconds until this store's job starts
-                        running, derived from recent completed runs. ``None``
-                        if we have no recent history to base it on.
+    - ``eta_seconds``  : approximate seconds until this store's job starts,
+                        derived from recent completed runs.
     - ``currently_running``  : payload for whichever job is currently CLAIMED
-                                (so the UI can say "Store X is scraping now").
+                                for this vendor.
     - ``average_seconds``    : avg duration of the last ~10 completed runs.
     """
+    base_qs = HebScrapeJob.objects.filter(vendor_code=vendor_code)
     pending_qs = (
-        HebScrapeJob.objects
-        .filter(status=HebScrapeJob.Status.PENDING)
+        base_qs.filter(status=HebScrapeJob.Status.PENDING)
         .order_by('requested_at')
     )
 
@@ -761,8 +831,7 @@ def _compute_heb_queue_payload(store, latest_job):
         ahead_count = max(0, (position or 1) - 1)
 
     recent_done = (
-        HebScrapeJob.objects
-        .filter(
+        base_qs.filter(
             status=HebScrapeJob.Status.DONE,
             claimed_at__isnull=False,
             completed_at__isnull=False,
@@ -782,8 +851,7 @@ def _compute_heb_queue_payload(store, latest_job):
         eta_seconds = int(position * avg_seconds)
 
     running = (
-        HebScrapeJob.objects
-        .select_related('store')
+        base_qs.select_related('store')
         .filter(status=HebScrapeJob.Status.CLAIMED)
         .order_by('claimed_at')
         .first()
@@ -794,18 +862,27 @@ def _compute_heb_queue_payload(store, latest_job):
         currently_running = {
             'job_id': str(running.id),
             'store_id': str(running.store_id) if running.store_id else None,
-            'store_name': running.store.name if running.store_id else 'All HEB stores',
+            'store_name': (
+                running.store.name if running.store_id
+                else f'All {vendor_code.upper()} stores'
+            ),
             'claimed_at': running.claimed_at.isoformat() if running.claimed_at else None,
             'is_this_store': is_this_store,
         }
 
     return {
+        'vendor': vendor_code,
         'position': position,
         'ahead_count': ahead_count,
         'eta_seconds': eta_seconds,
         'average_seconds': avg_seconds,
         'currently_running': currently_running,
     }
+
+
+def _compute_heb_queue_payload(store, latest_job):
+    """Legacy alias retained for any external callers."""
+    return _compute_vendor_queue_payload(store, 'heb', latest_job)
 
 
 class CatalogScrapeProgressView(APIView):
@@ -835,7 +912,8 @@ class CatalogScrapeProgressView(APIView):
 
     def get(self, request, store_pk):
         from datetime import timedelta
-        from vendor.models import VendorPrice, Vendor
+        from vendor.models import VendorPrice
+        from catalog.ingest_views import SUPPORTED_VENDORS
 
         store = get_object_or_404(Store, id=store_pk, user=request.user)
 
@@ -844,46 +922,51 @@ class CatalogScrapeProgressView(APIView):
         by_status_rows = active.values('sync_status').annotate(n=Count('id'))
         by_status = {r['sync_status']: r['n'] for r in by_status_rows}
 
-        # Match catalog/sync tasks' _is_heb_product: vendor code 'heb' or 'heb_*'.
-        heb_vendor_ids = list(
-            Vendor.objects.filter(Q(code='heb') | Q(code__istartswith='heb_')).values_list('id', flat=True),
-        )
-        heb_total = 0
-        heb_by_status = {}
-        heb_last_ingest_at = None
-        heb_ingested_last_5m = 0
-        heb_ingested_last_24h = 0
+        now = timezone.now()
+        vendors_payload: dict[str, dict] = {}
 
-        if heb_vendor_ids:
-            heb_qs = active.filter(product__vendor_id__in=heb_vendor_ids)
-            heb_total = heb_qs.count()
-            heb_rows = heb_qs.values('sync_status').annotate(n=Count('id'))
-            heb_by_status = {r['sync_status']: r['n'] for r in heb_rows}
+        # Per-vendor progress/queue — iterate every registered desktop vendor so
+        # the frontend can render one progress strip per vendor the store uses.
+        for vendor_code in SUPPORTED_VENDORS.keys():
+            vendor_ids = _vendor_db_ids_for(vendor_code)
+            if not vendor_ids:
+                continue
 
-            if heb_total:
-                now = timezone.now()
-                heb_product_ids = list(heb_qs.values_list('product_id', flat=True).distinct())
-                heb_vp_for_store = VendorPrice.objects.filter(product_id__in=heb_product_ids)
-                last_vp = heb_vp_for_store.order_by('-scraped_at').values_list('scraped_at', flat=True).first()
-                heb_last_ingest_at = last_vp.isoformat() if last_vp else None
-                heb_ingested_last_5m = heb_vp_for_store.filter(scraped_at__gte=now - timedelta(minutes=5)).count()
-                heb_ingested_last_24h = heb_vp_for_store.filter(scraped_at__gte=now - timedelta(hours=24)).count()
+            vq = active.filter(product__vendor_id__in=vendor_ids)
+            v_total = vq.count()
+            v_rows = vq.values('sync_status').annotate(n=Count('id'))
+            v_by_status = {r['sync_status']: r['n'] for r in v_rows}
 
-        heb_scraped = heb_by_status.get('scraped', 0) + heb_by_status.get('synced', 0)
-        heb_pending = heb_by_status.get('pending', 0) + heb_by_status.get('needs_attention', 0) + heb_by_status.get('failed', 0)
-        heb_pct = int(round(heb_scraped * 100 / heb_total)) if heb_total else 0
+            v_last_ingest_at = None
+            v_ingested_last_5m = 0
+            v_ingested_last_24h = 0
+            if v_total:
+                v_product_ids = list(vq.values_list('product_id', flat=True).distinct())
+                vp_qs = VendorPrice.objects.filter(product_id__in=v_product_ids)
+                last_vp = vp_qs.order_by('-scraped_at').values_list('scraped_at', flat=True).first()
+                v_last_ingest_at = last_vp.isoformat() if last_vp else None
+                v_ingested_last_5m = vp_qs.filter(scraped_at__gte=now - timedelta(minutes=5)).count()
+                v_ingested_last_24h = vp_qs.filter(scraped_at__gte=now - timedelta(hours=24)).count()
 
-        heb_job_payload = None
-        heb_queue_payload = None
-        if heb_vendor_ids:
+            v_scraped = v_by_status.get('scraped', 0) + v_by_status.get('synced', 0)
+            v_pending = (
+                v_by_status.get('pending', 0)
+                + v_by_status.get('needs_attention', 0)
+                + v_by_status.get('failed', 0)
+            )
+            v_pct = int(round(v_scraped * 100 / v_total)) if v_total else 0
+
             latest_job = (
-                HebScrapeJob.objects.filter(store=store)
+                HebScrapeJob.objects
+                .filter(store=store, vendor_code=vendor_code)
                 .order_by('-requested_at')
                 .first()
             )
+            v_job_payload = None
             if latest_job is not None:
-                heb_job_payload = {
+                v_job_payload = {
                     'id': str(latest_job.id),
+                    'vendor': latest_job.vendor_code,
                     'status': latest_job.status,
                     'requested_at': latest_job.requested_at.isoformat(),
                     'claimed_at': latest_job.claimed_at.isoformat() if latest_job.claimed_at else None,
@@ -891,24 +974,49 @@ class CatalogScrapeProgressView(APIView):
                     'url_count': latest_job.url_count,
                     'stats': latest_job.stats or {},
                 }
+            v_queue_payload = _compute_vendor_queue_payload(store, vendor_code, latest_job)
 
-            heb_queue_payload = _compute_heb_queue_payload(store, latest_job)
+            vendors_payload[vendor_code] = {
+                'vendor': vendor_code,
+                'label': SUPPORTED_VENDORS[vendor_code].get('label', vendor_code.upper()),
+                'has_products': v_total > 0,
+                'total': v_total,
+                'scraped': v_scraped,
+                'pending': v_pending,
+                'by_status': v_by_status,
+                'pct': v_pct,
+                'last_ingest_at': v_last_ingest_at,
+                'ingested_last_5m': v_ingested_last_5m,
+                'ingested_last_24h': v_ingested_last_24h,
+                'job': v_job_payload,
+                'queue': v_queue_payload,
+            }
+
+        # Backward-compat: flatten the HEB payload into the top-level `heb_*`
+        # keys that the current frontend build still reads.
+        heb = vendors_payload.get('heb') or {}
+        heb_total = heb.get('total', 0)
+        heb_scraped = heb.get('scraped', 0)
+        heb_pending = heb.get('pending', 0)
 
         return Response({
             'total': total,
             'by_status': by_status,
-            'has_heb': bool(heb_vendor_ids and heb_total > 0),
+            'has_heb': bool(heb_total > 0),
             'heb_total': heb_total,
             'heb_scraped': heb_scraped,
             'heb_pending': heb_pending,
-            'heb_by_status': heb_by_status,
-            'heb_pct': heb_pct,
-            'heb_last_ingest_at': heb_last_ingest_at,
-            'heb_ingested_last_5m': heb_ingested_last_5m,
-            'heb_ingested_last_24h': heb_ingested_last_24h,
-            'heb_job': heb_job_payload,
-            'heb_queue': heb_queue_payload,
-            'checked_at': timezone.now().isoformat(),
+            'heb_by_status': heb.get('by_status', {}),
+            'heb_pct': heb.get('pct', 0),
+            'heb_last_ingest_at': heb.get('last_ingest_at'),
+            'heb_ingested_last_5m': heb.get('ingested_last_5m', 0),
+            'heb_ingested_last_24h': heb.get('ingested_last_24h', 0),
+            'heb_job': heb.get('job'),
+            'heb_queue': heb.get('queue'),
+            # New vendor-aware payload. Frontend should migrate to reading
+            # from here so adding another vendor doesn't touch this endpoint.
+            'vendors': vendors_payload,
+            'checked_at': now.isoformat(),
         })
 
 

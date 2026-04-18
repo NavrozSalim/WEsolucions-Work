@@ -19,6 +19,7 @@ from typing import Any
 
 from django.db import transaction
 from django.db.models import Q
+from django.http import Http404
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
@@ -35,6 +36,63 @@ logger = logging.getLogger(__name__)
 
 
 MAX_BATCH_ITEMS = 500
+
+
+# --------------------------------------------------------------------------- #
+# Vendor registry                                                              #
+# --------------------------------------------------------------------------- #
+# Every desktop-runner vendor is declared here. The generic ingest views read
+# from this map so adding a new vendor (e.g. walmart-desktop) is just a new
+# entry + one bearer-token scope + one desktop folder.
+#
+# Fields:
+#   scope            : IngestToken.scopes value required for this vendor
+#   vendor_db_codes  : Vendor.code values that count as "this vendor" in the DB
+#                      (supports prefix variants like 'heb_west' via startswith)
+#   url_host_contains: URLs must contain this substring to be accepted (prevents
+#                      uploading HEB data to the Costco endpoint by accident)
+#   label            : human-readable name, used in log messages/UI
+#
+# Existing HebScrapeJob rows have vendor_code='heb' via migration default.
+SUPPORTED_VENDORS: dict[str, dict[str, Any]] = {
+    'heb': {
+        'scope': 'heb',
+        'vendor_db_codes': ['heb'],
+        'vendor_db_code_prefix': 'heb_',
+        'url_host_contains': 'heb.com',
+        'label': 'HEB',
+    },
+    'costco': {
+        'scope': 'costco',
+        'vendor_db_codes': ['costcoau', 'costco'],
+        'vendor_db_code_prefix': 'costco_',
+        'url_host_contains': 'costco.',
+        'label': 'Costco',
+    },
+}
+
+
+def _vendor_cfg(vendor: str) -> dict[str, Any]:
+    """Return the registry entry for ``vendor`` or raise a 404-style error.
+
+    Raised errors bubble up as HTTP 404 via the views' ``AllowAny`` setup —
+    safer than 500 for an unknown path slug.
+    """
+    cfg = SUPPORTED_VENDORS.get((vendor or '').strip().lower())
+    if not cfg:
+        raise Http404(f'Unknown ingest vendor "{vendor}".')
+    return cfg
+
+
+def _vendor_db_ids(vendor: str) -> list:
+    """Resolve ``vendor`` to a list of ``Vendor.id`` values usable in queries."""
+    cfg = _vendor_cfg(vendor)
+    codes = list(cfg.get('vendor_db_codes') or [])
+    prefix = cfg.get('vendor_db_code_prefix')
+    q = Q(code__in=codes) if codes else Q()
+    if prefix:
+        q = q | Q(code__istartswith=prefix)
+    return list(Vendor.objects.filter(q).values_list('id', flat=True))
 
 
 def _hash_token(raw: str) -> str:
@@ -193,14 +251,22 @@ def _apply_to_mappings(product: Product, vendor_price: Decimal, vendor_stock: in
     return applied
 
 
-class HebIngestView(APIView):
-    """Accept a batch of HEB scrape results from an external runner."""
+class VendorIngestView(APIView):
+    """Accept a batch of scrape results from a desktop runner for any vendor.
+
+    Route: ``POST /api/v1/ingest/<vendor>/``  where ``<vendor>`` is a key in
+    ``SUPPORTED_VENDORS`` (e.g. ``heb``, ``costco``).
+
+    The logic is identical across vendors — only the token scope, the DB
+    vendor filter, and the URL host check differ.
+    """
 
     permission_classes = [AllowAny]
     authentication_classes = []
 
-    def post(self, request, *args, **kwargs):
-        _authenticate(request, required_scope='heb')
+    def post(self, request, vendor=None, *args, **kwargs):
+        cfg = _vendor_cfg(vendor)
+        _authenticate(request, required_scope=cfg['scope'])
 
         payload = request.data if isinstance(request.data, dict) else {}
         items = payload.get('items')
@@ -215,15 +281,14 @@ class HebIngestView(APIView):
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
 
-        heb_vendor_ids = list(
-            Vendor.objects.filter(Q(code='heb') | Q(code__istartswith='heb_'))
-            .values_list('id', flat=True)
-        )
-        if not heb_vendor_ids:
+        vendor_ids = _vendor_db_ids(vendor)
+        if not vendor_ids:
             return Response(
-                {'error': 'No HEB vendor seeded in this environment.'},
+                {'error': f"No {cfg['label']} vendor seeded in this environment."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+        url_must_contain = cfg['url_host_contains'].lower()
 
         results = []
         stats = {'received': len(items), 'matched': 0, 'applied': 0, 'skipped': 0, 'errors': 0}
@@ -239,8 +304,12 @@ class HebIngestView(APIView):
                 results.append({'index': idx, 'status': 'error', 'reason': 'missing url'})
                 stats['errors'] += 1
                 continue
-            if 'heb.com' not in url.lower():
-                results.append({'index': idx, 'status': 'error', 'reason': 'not an HEB url'})
+            if url_must_contain not in url.lower():
+                results.append({
+                    'index': idx,
+                    'status': 'error',
+                    'reason': f"not a {cfg['label']} url",
+                })
                 stats['errors'] += 1
                 continue
 
@@ -257,11 +326,11 @@ class HebIngestView(APIView):
                 continue
 
             products = list(
-                Product.objects.filter(vendor_id__in=heb_vendor_ids, vendor_url=url)
+                Product.objects.filter(vendor_id__in=vendor_ids, vendor_url=url)
             )
             if not products:
                 products = list(
-                    Product.objects.filter(vendor_id__in=heb_vendor_ids, vendor_url__iexact=url)
+                    Product.objects.filter(vendor_id__in=vendor_ids, vendor_url__iexact=url)
                 )
             if not products:
                 results.append({'index': idx, 'status': 'unmatched', 'url': url})
@@ -298,7 +367,7 @@ class HebIngestView(APIView):
                     'mappings_updated': applied_total,
                 })
             except Exception as exc:
-                logger.exception('HEB ingest failure for %s', url)
+                logger.exception('%s ingest failure for %s', cfg['label'], url)
                 stats['errors'] += 1
                 results.append({
                     'index': idx,
@@ -310,45 +379,49 @@ class HebIngestView(APIView):
         return Response({'stats': stats, 'results': results}, status=status.HTTP_200_OK)
 
 
-class HebIngestUrlsView(APIView):
-    """Return the canonical list of HEB product URLs the catalog wants scraped.
+class HebIngestView(VendorIngestView):
+    """Backward-compat wrapper for ``POST /api/v1/ingest/heb/``.
 
-    The desktop runner calls this once at the start of each pass to pull the
-    fresh URL list from the SaaS app instead of relying on a stale local
-    ``links.txt``. URLs are pulled from active ProductMappings whose product
-    belongs to any HEB vendor (``code='heb'`` or ``code__istartswith='heb_'``).
+    Retained because existing desktop tokens + poller installations hit this
+    exact path. New integrations should use ``POST /api/v1/ingest/<vendor>/``.
+    """
 
-    Auth: ``Authorization: Bearer <token>`` with the same ``heb`` scope as
-    the POST endpoint.
+    def post(self, request, *args, **kwargs):
+        return super().post(request, vendor='heb', *args, **kwargs)
+
+
+class VendorIngestUrlsView(APIView):
+    """Return the canonical list of product URLs the catalog wants scraped for
+    a given desktop-runner vendor.
+
+    Route: ``GET /api/v1/ingest/<vendor>/urls/``
+
+    The desktop runner calls this at the start of each pass instead of
+    relying on a stale local ``links.txt``. URLs come from active
+    ProductMappings whose product belongs to any DB vendor that maps to the
+    requested ``<vendor>`` (see ``SUPPORTED_VENDORS``).
+
+    Auth: ``Authorization: Bearer <token>`` with the matching scope.
 
     Query params:
         ?store_id=<uuid>  - optional, restrict to a single store
         ?limit=<int>      - optional cap (default no cap)
-
-    Response:
-        {
-          "count": 879,
-          "fetched_at": "2026-04-17T22:00:00+00:00",
-          "urls": ["https://www.heb.com/...", ...]
-        }
     """
 
     permission_classes = [AllowAny]
     authentication_classes = []
 
-    def get(self, request, *args, **kwargs):
-        _authenticate(request, required_scope='heb')
+    def get(self, request, vendor=None, *args, **kwargs):
+        cfg = _vendor_cfg(vendor)
+        _authenticate(request, required_scope=cfg['scope'])
 
-        heb_vendor_ids = list(
-            Vendor.objects.filter(Q(code='heb') | Q(code__istartswith='heb_'))
-            .values_list('id', flat=True)
-        )
-        if not heb_vendor_ids:
+        vendor_ids = _vendor_db_ids(vendor)
+        if not vendor_ids:
             return Response({'count': 0, 'urls': [], 'fetched_at': timezone.now().isoformat()})
 
         qs = (
             ProductMapping.objects
-            .filter(is_active=True, product__vendor_id__in=heb_vendor_ids)
+            .filter(is_active=True, product__vendor_id__in=vendor_ids)
             .exclude(product__vendor_url__isnull=True)
             .exclude(product__vendor_url='')
         )
@@ -378,17 +451,21 @@ class HebIngestUrlsView(APIView):
         })
 
 
-def _collect_heb_urls(store_id: str | None) -> list[str]:
-    """Return distinct HEB vendor_url values across all (or one) store(s)."""
-    heb_vendor_ids = list(
-        Vendor.objects.filter(Q(code='heb') | Q(code__istartswith='heb_'))
-        .values_list('id', flat=True)
-    )
-    if not heb_vendor_ids:
+class HebIngestUrlsView(VendorIngestUrlsView):
+    """Backward-compat wrapper for ``GET /api/v1/ingest/heb/urls/``."""
+
+    def get(self, request, *args, **kwargs):
+        return super().get(request, vendor='heb', *args, **kwargs)
+
+
+def _collect_vendor_urls(store_id: str | None, vendor: str = 'heb') -> list[str]:
+    """Return distinct vendor_url values for ``vendor`` across all (or one) store(s)."""
+    vendor_ids = _vendor_db_ids(vendor)
+    if not vendor_ids:
         return []
     qs = (
         ProductMapping.objects
-        .filter(is_active=True, product__vendor_id__in=heb_vendor_ids)
+        .filter(is_active=True, product__vendor_id__in=vendor_ids)
         .exclude(product__vendor_url__isnull=True)
         .exclude(product__vendor_url='')
     )
@@ -401,36 +478,39 @@ def _collect_heb_urls(store_id: str | None) -> list[str]:
     )
 
 
-class HebIngestNextJobView(APIView):
+class VendorIngestNextJobView(APIView):
     """Long-running desktop runner calls this every N seconds.
 
-    - If a ``HebScrapeJob`` is ``pending``, atomically claims it (flips to
-      ``claimed``), embeds the current URL list so the runner doesn't need a
-      second call, and returns it.
-    - If nothing is pending, returns ``{"job_id": null}`` so the caller can
-      sleep and poll again.
+    Route: ``GET /api/v1/ingest/<vendor>/next-job/``
 
-    Auth: Bearer token, scope ``heb``.
+    - If a ``HebScrapeJob`` row with matching ``vendor_code`` is pending,
+      atomically claims it (flips to ``claimed``), embeds the current URL
+      list so the runner doesn't need a second call, and returns it.
+    - If nothing is pending for that vendor, returns ``{"job_id": null}``.
     """
 
     permission_classes = [AllowAny]
     authentication_classes = []
 
-    def get(self, request, *args, **kwargs):
-        token = _authenticate(request, required_scope='heb')
+    def get(self, request, vendor=None, *args, **kwargs):
+        cfg = _vendor_cfg(vendor)
+        token = _authenticate(request, required_scope=cfg['scope'])
 
         with transaction.atomic():
             job = (
                 HebScrapeJob.objects
                 .select_for_update(skip_locked=True)
-                .filter(status=HebScrapeJob.Status.PENDING)
+                .filter(status=HebScrapeJob.Status.PENDING, vendor_code=vendor)
                 .order_by('requested_at')
                 .first()
             )
             if job is None:
                 return Response({'job_id': None, 'checked_at': timezone.now().isoformat()})
 
-            urls = _collect_heb_urls(str(job.store_id) if job.store_id else None)
+            urls = _collect_vendor_urls(
+                str(job.store_id) if job.store_id else None,
+                vendor=vendor,
+            )
             job.status = HebScrapeJob.Status.CLAIMED
             job.claimed_at = timezone.now()
             job.claimed_by_token = token
@@ -441,34 +521,40 @@ class HebIngestNextJobView(APIView):
         return Response({
             'job_id': str(job.id),
             'store_id': str(job.store_id) if job.store_id else None,
+            'vendor': vendor,
             'requested_at': job.requested_at.isoformat(),
             'url_count': len(urls),
             'urls': urls,
         })
 
 
-class HebIngestJobStatusView(APIView):
-    """Runner-facing job status probe.
+class HebIngestNextJobView(VendorIngestNextJobView):
+    """Backward-compat wrapper for ``GET /api/v1/ingest/heb/next-job/``."""
 
-    Lets the desktop poller check ``GET /ingest/heb/jobs/<id>/`` mid-run so it
-    can detect cancellation (status flipped to ``cancelled`` by the web UI)
-    and stop its worker subprocesses instead of finishing a job nobody wants.
+    def get(self, request, *args, **kwargs):
+        return super().get(request, vendor='heb', *args, **kwargs)
 
-    Auth: Bearer token, scope ``heb``.
+
+class VendorIngestJobStatusView(APIView):
+    """Runner-facing job status probe for cancellation detection.
+
+    Route: ``GET /api/v1/ingest/<vendor>/jobs/<job_id>/``
     """
 
     permission_classes = [AllowAny]
     authentication_classes = []
 
-    def get(self, request, job_id, *args, **kwargs):
-        _authenticate(request, required_scope='heb')
+    def get(self, request, job_id, vendor=None, *args, **kwargs):
+        cfg = _vendor_cfg(vendor)
+        _authenticate(request, required_scope=cfg['scope'])
         try:
-            job = HebScrapeJob.objects.get(id=job_id)
+            job = HebScrapeJob.objects.get(id=job_id, vendor_code=vendor)
         except HebScrapeJob.DoesNotExist:
             return Response({'error': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         return Response({
             'job_id': str(job.id),
+            'vendor': job.vendor_code,
             'status': job.status,
             'requested_at': job.requested_at.isoformat(),
             'claimed_at': job.claimed_at.isoformat() if job.claimed_at else None,
@@ -477,7 +563,14 @@ class HebIngestJobStatusView(APIView):
         })
 
 
-class HebIngestCompleteJobView(APIView):
+class HebIngestJobStatusView(VendorIngestJobStatusView):
+    """Backward-compat wrapper for ``GET /api/v1/ingest/heb/jobs/<id>/``."""
+
+    def get(self, request, job_id, *args, **kwargs):
+        return super().get(request, job_id=job_id, vendor='heb', *args, **kwargs)
+
+
+class VendorIngestCompleteJobView(APIView):
     """Runner reports a claimed job as done (or failed).
 
     Body (all fields optional):
@@ -487,19 +580,18 @@ class HebIngestCompleteJobView(APIView):
           "note":   "free-form"
         }
 
-    Auth: Bearer token, scope ``heb``. Only the token that claimed the job
-    may complete it (prevents cross-runner collisions when multiple desktops
-    share a token).
+    Route: ``POST /api/v1/ingest/<vendor>/jobs/<job_id>/complete/``
     """
 
     permission_classes = [AllowAny]
     authentication_classes = []
 
-    def post(self, request, job_id, *args, **kwargs):
-        token = _authenticate(request, required_scope='heb')
+    def post(self, request, job_id, vendor=None, *args, **kwargs):
+        cfg = _vendor_cfg(vendor)
+        _authenticate(request, required_scope=cfg['scope'])
 
         try:
-            job = HebScrapeJob.objects.get(id=job_id)
+            job = HebScrapeJob.objects.get(id=job_id, vendor_code=vendor)
         except HebScrapeJob.DoesNotExist:
             return Response({'error': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -529,6 +621,14 @@ class HebIngestCompleteJobView(APIView):
 
         return Response({
             'job_id': str(job.id),
+            'vendor': job.vendor_code,
             'status': job.status,
             'completed_at': job.completed_at.isoformat() if job.completed_at else None,
         })
+
+
+class HebIngestCompleteJobView(VendorIngestCompleteJobView):
+    """Backward-compat wrapper for ``POST /api/v1/ingest/heb/jobs/<id>/complete/``."""
+
+    def post(self, request, job_id, *args, **kwargs):
+        return super().post(request, job_id=job_id, vendor='heb', *args, **kwargs)
