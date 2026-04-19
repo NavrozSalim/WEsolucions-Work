@@ -987,12 +987,19 @@ export default function Catalog() {
                 .catch((err) => {
                     const isNetErr = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
                     if (isNetErr && attempt < MAX_RETRIES) {
-                        setMessage(`Network error, retrying automatically (${attempt + 1}/${MAX_RETRIES})...`);
-                        return new Promise((r) => setTimeout(r, 2000)).then(runSync);
+                        setMessage(`Network hiccup detected, retrying automatically in a few seconds (attempt ${attempt + 1}/${MAX_RETRIES})… Your sync job is still running in the background.`);
+                        return new Promise((r) => setTimeout(r, 5000)).then(runSync);
                     }
                     finishProgress(false);
-                    setFlowStatus('failed');
-                    setMessage(formatCatalogError(err));
+                    if (isNetErr) {
+                        setFlowStatus('syncing');
+                        setMessage(
+                            'The sync job was queued but the browser lost contact with the server. It will keep running in the background — refresh the page in a minute to see the results.',
+                        );
+                    } else {
+                        setFlowStatus('failed');
+                        setMessage(formatCatalogError(err));
+                    }
                 });
         };
 
@@ -1077,12 +1084,19 @@ export default function Catalog() {
                 .catch((err) => {
                     const isNetworkError = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
                     if (isNetworkError && attempt < MAX_RETRIES) {
-                        setMessage(`Network error, retrying automatically… (attempt ${attempt + 1}/${MAX_RETRIES})`);
-                        return new Promise((resolve) => setTimeout(resolve, 2000)).then(runScrape);
+                        setMessage(`Network hiccup detected, retrying automatically in a few seconds (attempt ${attempt + 1}/${MAX_RETRIES})… Your scrape job is still running in the background.`);
+                        return new Promise((resolve) => setTimeout(resolve, 5000)).then(runScrape);
                     }
                     finishProgress(false);
-                    setFlowStatus('failed');
-                    setMessage(formatCatalogError(err));
+                    if (isNetworkError) {
+                        setFlowStatus('scraping');
+                        setMessage(
+                            'The scrape job was queued but the browser lost contact with the server. It will keep running in the background — refresh the page in a minute to see updated prices.',
+                        );
+                    } else {
+                        setFlowStatus('failed');
+                        setMessage(formatCatalogError(err));
+                    }
                 });
         };
 

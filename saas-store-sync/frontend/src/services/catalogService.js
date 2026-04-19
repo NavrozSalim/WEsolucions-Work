@@ -86,14 +86,23 @@ export const uploadCatalog = (file, storeId) => {
 };
 
 /** Poll a Celery job via the existing sync-job-status endpoint.
- *  Rejects with code='NO_WORKER' if the task stays pending too long (Celery not running). */
+ *  Tolerates transient network errors while polling — a single nginx/HTTP2
+ *  hiccup must not kill a long-running scrape (and cause the outer layer to
+ *  spawn a duplicate Celery task). Only rejects when the task itself fails,
+ *  MAX_POLL_FAILS consecutive polls error at the network level, or the total
+ *  wait exceeds maxWaitMs.
+ *  Rejects with code='NO_WORKER' if the task stays pending longer than
+ *  workerGraceMs (Celery not running). */
 function pollCeleryJob(storeId, jobId, { intervalMs = 2000, maxWaitMs = 600000, workerGraceMs = 10000 } = {}) {
     const start = Date.now();
+    const MAX_POLL_FAILS = 6;
     let sawStarted = false;
+    let consecutiveFails = 0;
     return new Promise((resolve, reject) => {
         const poll = () => {
             api.get(`/stores/${storeId}/sync/jobs/${jobId}/`)
                 .then((res) => {
+                    consecutiveFails = 0;
                     const d = res.data;
                     if (d.status !== 'pending') sawStarted = true;
                     if (d.ready) {
@@ -110,7 +119,14 @@ function pollCeleryJob(storeId, jobId, { intervalMs = 2000, maxWaitMs = 600000, 
                     }
                     setTimeout(poll, intervalMs);
                 })
-                .catch(reject);
+                .catch((err) => {
+                    const isNetErr = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
+                    if (isNetErr && consecutiveFails < MAX_POLL_FAILS && Date.now() - start < maxWaitMs) {
+                        consecutiveFails += 1;
+                        return setTimeout(poll, intervalMs);
+                    }
+                    return reject(err);
+                });
         };
         poll();
     });
@@ -248,11 +264,14 @@ export const exportCatalogProducts = (storeId, { syncStatus } = {}) => {
 
 function pollCatalogCeleryJob(storeId, jobId, { intervalMs = 2000, maxWaitMs = 600000, workerGraceMs = 10000 } = {}) {
     const start = Date.now();
+    const MAX_POLL_FAILS = 6;
     let sawStarted = false;
+    let consecutiveFails = 0;
     return new Promise((resolve, reject) => {
         const poll = () => {
             api.get(`/stores/${storeId}/catalog/jobs/${jobId}/`)
                 .then((res) => {
+                    consecutiveFails = 0;
                     const d = res.data;
                     if (d.status !== 'pending') sawStarted = true;
                     if (d.ready) {
@@ -269,7 +288,14 @@ function pollCatalogCeleryJob(storeId, jobId, { intervalMs = 2000, maxWaitMs = 6
                     }
                     setTimeout(poll, intervalMs);
                 })
-                .catch(reject);
+                .catch((err) => {
+                    const isNetErr = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
+                    if (isNetErr && consecutiveFails < MAX_POLL_FAILS && Date.now() - start < maxWaitMs) {
+                        consecutiveFails += 1;
+                        return setTimeout(poll, intervalMs);
+                    }
+                    return reject(err);
+                });
         };
         poll();
     });

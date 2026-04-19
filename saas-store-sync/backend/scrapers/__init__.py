@@ -64,7 +64,15 @@ def _get_amazon_legacy_scraper():
 
 
 def _rewrite_url_for_region(vendor_url: str, region: str) -> str:
-    """Rewrite vendor URL domain to match the user-selected store region."""
+    """Promote a bare ``amazon.com`` / ``ebay.com`` URL to the AU TLD when the
+    store says it's an AU store.
+
+    Intentionally **non-destructive**: an explicit ``amazon.com.au`` or
+    ``ebay.com.au`` URL is never rewritten back to the US TLD, even if the
+    store region is ``USA``. This protects the common case where a US store
+    still carries AU-sourced products (AmazonAU / EbayAU vendor rows) and
+    shouldn't have those URLs silently broken.
+    """
     if not vendor_url or not region:
         return vendor_url
     r = region.upper()
@@ -73,14 +81,10 @@ def _rewrite_url_for_region(vendor_url: str, region: str) -> str:
     if "amazon." in url_lower:
         if r == "AU" and "amazon.com.au" not in url_lower:
             return vendor_url.replace("amazon.com", "amazon.com.au")
-        if r == "USA" and "amazon.com.au" in url_lower:
-            return vendor_url.replace("amazon.com.au", "amazon.com")
 
     if "ebay." in url_lower:
         if r == "AU" and "ebay.com.au" not in url_lower:
             return vendor_url.replace("ebay.com", "ebay.com.au")
-        if r == "USA" and "ebay.com.au" in url_lower:
-            return vendor_url.replace("ebay.com.au", "ebay.com")
 
     return vendor_url
 
@@ -151,15 +155,18 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
     if "amazon." in url_lower:
         if "amazon.com.au" in url_lower:
             scrape_fn, _ = _get_amazon_legacy_scraper()
-            logger.debug("Routing to Amazon AU scraper: %s", vendor_url[:80])
+            logger.info("Routing to Amazon AU scraper: %s", vendor_url[:80])
             return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
         scrape_fn, _ = _get_amazon_us_scraper()
-        logger.debug("Routing to Amazon US scraper: %s", vendor_url[:80])
+        logger.info("Routing to Amazon US scraper: %s", vendor_url[:80])
         return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
 
     if "ebay." in url_lower:
         from .ebay_scraper import scrape_ebay
-        logger.debug("Routing to eBay scraper: %s", vendor_url[:80])
+        region_tag = "AU" if "ebay.com.au" in url_lower else (
+            region.upper() if region else "USA"
+        )
+        logger.info("Routing to eBay %s scraper: %s", region_tag, vendor_url[:80])
         return _normalize_scrape_payload(scrape_ebay(vendor_url, region, session))
 
     if "heb.com" in url_lower:
