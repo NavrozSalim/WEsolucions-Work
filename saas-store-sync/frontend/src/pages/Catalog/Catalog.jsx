@@ -285,7 +285,55 @@ function formatPrice(val) {
 }
 
 /**
- * Status strip rendered above the product table for HEB-heavy stores.
+ * Pull a normalized list of per-vendor progress summaries from the server's
+ * scrape-progress payload.
+ *
+ * The backend returns a ``vendors`` dict keyed by code (e.g. ``heb``,
+ * ``costco``) with a uniform shape — see ``CatalogScrapeProgressView`` in
+ * ``backend/catalog/views.py``. If an older server build is in play we fall
+ * back to synthesizing a single HEB entry from the legacy flat ``heb_*``
+ * keys so the UI keeps working during rollout.
+ */
+function getVendorSummaries(progress) {
+    if (!progress) return [];
+    if (progress.vendors && typeof progress.vendors === 'object') {
+        return Object.entries(progress.vendors)
+            .filter(([, v]) => v && v.has_products)
+            .map(([code, v]) => ({ code, ...v }));
+    }
+    if (progress.has_heb) {
+        return [{
+            code: 'heb',
+            label: 'HEB',
+            has_products: true,
+            total: progress.heb_total,
+            scraped: progress.heb_scraped,
+            pending: progress.heb_pending,
+            by_status: progress.heb_by_status,
+            pct: progress.heb_pct,
+            last_ingest_at: progress.heb_last_ingest_at,
+            ingested_last_5m: progress.heb_ingested_last_5m,
+            ingested_last_24h: progress.heb_ingested_last_24h,
+            job: progress.heb_job,
+            queue: progress.heb_queue,
+        }];
+    }
+    return [];
+}
+
+/**
+ * Pick the vendor that should drive the Scrape button label and tracking
+ * state when a store has products from multiple desktop-runner vendors.
+ * Prefer one that still has pending work; otherwise fall back to the first.
+ */
+function getActiveVendor(vendors) {
+    if (!Array.isArray(vendors) || vendors.length === 0) return null;
+    return vendors.find((v) => (v.pending || 0) > 0) || vendors[0];
+}
+
+/**
+ * Status strip rendered above the product table for stores with products
+ * from a desktop-runner vendor (HEB, Costco, …).
  *
  * Shows, live, whether the desktop runner is uploading prices to this server:
  *   - progress bar with scraped/total
@@ -294,20 +342,21 @@ function formatPrice(val) {
  *   - tracking state (so the user knows the Scrape button is intentionally
  *     still working in the background)
  */
-function HebProgressStrip({ progress, tracking, onStopScrape, stopping }) {
-    if (!progress || !progress.has_heb) return null;
-    const pct = Math.max(0, Math.min(100, Number(progress.heb_pct || 0)));
-    const recent5 = progress.heb_ingested_last_5m || 0;
-    const recent24 = progress.heb_ingested_last_24h || 0;
-    const lastAgo = formatLastSync(progress.heb_last_ingest_at);
+function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
+    if (!vendor || !vendor.has_products) return null;
+    const label = vendor.label || (vendor.code || 'vendor').toUpperCase();
+    const pct = Math.max(0, Math.min(100, Number(vendor.pct || 0)));
+    const recent5 = vendor.ingested_last_5m || 0;
+    const recent24 = vendor.ingested_last_24h || 0;
+    const lastAgo = formatLastSync(vendor.last_ingest_at);
     const barColor = pct >= 100
         ? 'bg-emerald-500'
         : recent5 > 0
             ? 'bg-accent-500'
             : 'bg-amber-500';
 
-    const job = progress.heb_job;
-    const queue = progress.heb_queue;
+    const job = vendor.job;
+    const queue = vendor.queue;
     const jobStatus = job?.status;
     const isPending = jobStatus === 'pending';
     const isClaimed = jobStatus === 'claimed';
@@ -363,11 +412,11 @@ function HebProgressStrip({ progress, tracking, onStopScrape, stopping }) {
                     <span className={`inline-flex h-2.5 w-2.5 rounded-full ${recent5 > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300 dark:bg-slate-600'}`} />
                     <div>
                         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                            HEB desktop runner
+                            {label} desktop runner
                             {statusPill}
                         </h3>
                         <p className="text-xs text-slate-500 dark:text-slate-400">
-                            {progress.heb_scraped}/{progress.heb_total} products populated · last upload {lastAgo} · {recent5} in last 5 min · {recent24} in last 24 h
+                            {vendor.scraped || 0}/{vendor.total || 0} products populated · last upload {lastAgo} · {recent5} in last 5 min · {recent24} in last 24 h
                         </p>
                         {queueLine}
                     </div>
@@ -689,32 +738,40 @@ export default function Catalog() {
         };
     }, [selectedStore, flowStatus, trackingScrape, viewMode, liveRefreshUntil]);
 
-    // Auto-stop tracking when the job reaches a terminal state or every HEB
-    // mapping has ingest data.
+    // Auto-stop tracking when every desktop-runner vendor the store uses has
+    // either completed, failed, been cancelled, or has no pending rows left.
+    // Works uniformly for HEB, Costco, and any future ingest-only vendor.
     useEffect(() => {
         if (!trackingScrape || !scrapeProgress) return;
-        if (!scrapeProgress.has_heb) {
+        const vendors = getVendorSummaries(scrapeProgress);
+        if (vendors.length === 0) {
             setTrackingScrape(false);
             return;
         }
-        const jobStatus = scrapeProgress.heb_job?.status;
+        const active = getActiveVendor(vendors);
+        const activeLabel = active?.label || (active?.code || 'vendor').toUpperCase();
+        const jobStatus = active?.job?.status;
         if (jobStatus === 'cancelled') {
             setTrackingScrape(false);
             setFlowStatus('');
-            setMessage('HEB scrape was cancelled.');
+            setMessage(`${activeLabel} scrape was cancelled.`);
             return;
         }
         if (jobStatus === 'failed') {
             setTrackingScrape(false);
             setFlowStatus('failed');
-            setMessage('HEB scrape failed on the desktop runner.');
+            setMessage(`${activeLabel} scrape failed on the desktop runner.`);
             return;
         }
-        if ((scrapeProgress.heb_pending || 0) === 0 && (scrapeProgress.heb_total || 0) > 0) {
+        const allDone = vendors.every((v) => (v.pending || 0) === 0 && (v.total || 0) > 0);
+        if (allDone) {
             setTrackingScrape(false);
             setFlowStatus('success');
+            const parts = vendors.map(
+                (v) => `${v.total} ${v.label || v.code.toUpperCase()}`,
+            );
             setMessage(
-                `All ${scrapeProgress.heb_total} HEB product(s) populated from the desktop runner.`,
+                `All ${parts.join(' + ')} product(s) populated from the desktop runner.`,
             );
         }
     }, [trackingScrape, scrapeProgress]);
@@ -948,25 +1005,30 @@ export default function Catalog() {
                     const proc = res?.data?.rows_processed ?? 0;
                     finishProgress(true);
 
-                    // HEB is ingest-only — the server task returns instantly
-                    // after promoting whatever the desktop runner has posted
-                    // so far. We shift into "tracking" mode and keep the
-                    // button busy until every HEB mapping is populated.
-                    // For stores with no HEB products, behave as before.
+                    // Desktop-runner vendors (HEB, Costco, …) are ingest-only
+                    // on the server: the scrape task returns instantly after
+                    // promoting whatever the desktop runner has posted so
+                    // far. We shift into "tracking" mode and keep the button
+                    // busy until every ingest-only mapping is populated. For
+                    // stores with no ingest-only vendors, behave as before.
                     return getScrapeProgress(selectedStore)
                         .then((p) => {
                             const progress = p?.data || null;
                             setScrapeProgress(progress);
-                            const shouldTrack =
-                                !uploadId
-                                && progress
-                                && progress.has_heb
-                                && (progress.heb_pending || 0) > 0;
+                            const vendors = getVendorSummaries(progress);
+                            const pendingVendors = vendors.filter(
+                                (v) => (v.pending || 0) > 0,
+                            );
+                            const shouldTrack = !uploadId && pendingVendors.length > 0;
                             if (shouldTrack) {
                                 setTrackingScrape(true);
                                 setFlowStatus('scraping');
+                                const parts = pendingVendors.map((v) => {
+                                    const lbl = v.label || (v.code || '').toUpperCase();
+                                    return `${lbl}: ${v.scraped || 0}/${v.total || 0} populated (${v.pending} remaining)`;
+                                });
                                 setMessage(
-                                    `HEB: ${progress.heb_scraped}/${progress.heb_total} populated — waiting for the desktop runner to upload the remaining ${progress.heb_pending}. This updates live.`,
+                                    `${parts.join(' · ')} — waiting for the desktop runner to upload the remaining rows. This updates live.`,
                                 );
                             } else {
                                 setFlowStatus('success');
@@ -1009,9 +1071,10 @@ export default function Catalog() {
         };
 
         runScrape().finally(() => {
-            // Keep `scraping` true while we're tracking HEB progress so the
-            // button and spinner stay visible; the trackingScrape effect
-            // clears it once heb_pending hits 0.
+            // Keep `scraping` true while we're tracking desktop-runner
+            // progress so the button and spinner stay visible; the
+            // trackingScrape effect clears it once every tracked vendor has
+            // pending=0.
             if (!trackingScrapeRef.current) {
                 setScraping(false);
                 setScrapingUploadId(null);
@@ -1031,7 +1094,10 @@ export default function Catalog() {
     const handleStopScrape = () => {
         if (!selectedStore || stoppingScrape) return;
         setStoppingScrape(true);
-        setMessage('Stopping the HEB scrape…');
+        const activeVendor = getActiveVendor(getVendorSummaries(scrapeProgress));
+        const vendorLabel = activeVendor?.label
+            || (activeVendor?.code || 'desktop').toUpperCase();
+        setMessage(`Stopping the ${vendorLabel} scrape…`);
         cancelCatalogScrape(selectedStore)
             .then((res) => {
                 const cancelledId = res?.data?.cancelled;
@@ -1039,8 +1105,8 @@ export default function Catalog() {
                 setFlowStatus(cancelledId ? 'success' : '');
                 setMessage(
                     cancelledId
-                        ? 'HEB scrape cancelled. The desktop runner will stop on its next check.'
-                        : 'No active HEB scrape to stop.',
+                        ? `${vendorLabel} scrape cancelled. The desktop runner will stop on its next check.`
+                        : `No active ${vendorLabel} scrape to stop.`,
                 );
                 getScrapeProgress(selectedStore)
                     .then((p) => setScrapeProgress(p.data || null))
@@ -1430,15 +1496,19 @@ export default function Catalog() {
                 </div>
             )}
 
-            {/* HEB ingest status strip — only shown when store has HEB products. */}
-            {selectedStore && viewMode === 'products' && scrapeProgress?.has_heb && (
-                <HebProgressStrip
-                    progress={scrapeProgress}
-                    tracking={trackingScrape}
-                    onStopScrape={handleStopScrape}
-                    stopping={stoppingScrape}
-                />
-            )}
+            {/* Desktop-runner ingest status strips — one per vendor the store
+                uses (HEB, Costco, …). Backend exposes them uniformly under
+                ``scrapeProgress.vendors``. */}
+            {selectedStore && viewMode === 'products'
+                && getVendorSummaries(scrapeProgress).map((vendor) => (
+                    <VendorProgressStrip
+                        key={vendor.code}
+                        vendor={vendor}
+                        tracking={trackingScrape}
+                        onStopScrape={handleStopScrape}
+                        stopping={stoppingScrape}
+                    />
+                ))}
 
             {/* Product table (when View Products clicked) */}
             {selectedStore && viewMode === 'products' && (
@@ -1498,20 +1568,24 @@ export default function Catalog() {
                                 </div>
                             </div>
                             {(() => {
-                                const hebJobStatus = scrapeProgress?.heb_job?.status;
-                                const isPending = hebJobStatus === 'pending';
-                                const isClaimed = hebJobStatus === 'claimed';
+                                const vendorList = getVendorSummaries(scrapeProgress);
+                                const activeVendor = getActiveVendor(vendorList);
+                                const activeLabel = activeVendor?.label
+                                    || (activeVendor?.code || '').toUpperCase();
+                                const activeJobStatus = activeVendor?.job?.status;
+                                const isPending = activeJobStatus === 'pending';
+                                const isClaimed = activeJobStatus === 'claimed';
                                 const isActive = isPending || isClaimed || trackingScrape;
-                                const aheadCount = scrapeProgress?.heb_queue?.ahead_count || 0;
-                                const etaLabel = formatEtaShort(scrapeProgress?.heb_queue?.eta_seconds);
+                                const aheadCount = activeVendor?.queue?.ahead_count || 0;
+                                const etaLabel = formatEtaShort(activeVendor?.queue?.eta_seconds);
 
                                 let label = 'Start Scraping';
                                 if (isPending) {
                                     label = aheadCount > 0
                                         ? `Pending — ${aheadCount} ahead${etaLabel ? ` (${etaLabel})` : ''}`
                                         : `Pending — next in line${etaLabel ? ` (${etaLabel})` : ''}`;
-                                } else if (trackingScrape && scrapeProgress?.has_heb) {
-                                    label = `Scraping HEB… ${scrapeProgress.heb_scraped}/${scrapeProgress.heb_total} (${scrapeProgress.heb_pct}%)`;
+                                } else if (trackingScrape && activeVendor) {
+                                    label = `Scraping ${activeLabel}… ${activeVendor.scraped || 0}/${activeVendor.total || 0} (${activeVendor.pct || 0}%)`;
                                 } else if (isClaimed) {
                                     label = 'Scraping…';
                                 }
@@ -1521,8 +1595,13 @@ export default function Catalog() {
                                     titleText = 'Another store is currently scraping. This store will start automatically when the runner is free.';
                                 } else if (isActive) {
                                     titleText = 'Scrape running — use "Stop Scraping" to cancel.';
+                                } else if (vendorList.length > 0) {
+                                    const labels = vendorList
+                                        .map((v) => v.label || (v.code || '').toUpperCase())
+                                        .join(' / ');
+                                    titleText = `Re-fetch vendor price/stock for all active listings (${labels} use the desktop runner ingest feed).`;
                                 } else {
-                                    titleText = 'Re-fetch vendor price/stock for all active listings (HEB uses the desktop runner ingest feed).';
+                                    titleText = 'Re-fetch vendor price/stock for all active listings.';
                                 }
 
                                 return (
