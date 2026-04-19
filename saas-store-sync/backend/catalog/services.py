@@ -19,9 +19,13 @@ EXPECTED_COLUMNS = INTERNAL_FIELDS
 
 # Canonical vendor codes the catalog upload accepts. The user-facing vendor
 # labels in the sample templates and dropdowns must match these names.
+#
+# Kogan is deliberately excluded — Kogan is a *marketplace* (see the Kogan
+# Google Sheets adapter in ``store_adapters/kogan_adapter.py`` and the
+# ``kogan`` row in the ``Marketplace`` table), not a product vendor.
 CANONICAL_VENDOR_NAMES = (
     'AmazonUS', 'AmazonAU', 'EbayUS', 'EbayAU',
-    'VevorAU', 'CostcoAU', 'HebUS', 'KoganAU',
+    'VevorAU', 'CostcoAU', 'HebUS',
 )
 
 # Map of normalized user input -> canonical Vendor.code. Anything not in this
@@ -41,8 +45,6 @@ _VENDOR_ALIAS_TO_CODE: dict[str, str] = {
     'costco_au': 'costcoau', 'costco': 'costcoau',
     'hebus': 'hebus', 'heb us': 'hebus', 'heb-us': 'hebus',
     'heb_us': 'hebus', 'heb': 'hebus',
-    'koganau': 'koganau', 'kogan au': 'koganau', 'kogan-au': 'koganau',
-    'kogan_au': 'koganau', 'kogan': 'koganau',
 }
 
 
