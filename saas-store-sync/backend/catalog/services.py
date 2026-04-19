@@ -138,9 +138,17 @@ def validate_and_create_upload(
     vendors_by_name.update({v.code.lower(): v for v in Vendor.objects.all()})
     vendors_by_code = {v.code.lower(): v for v in Vendor.objects.all()}
     is_reverb = store_is_reverb(store)
-    marketplace_code = (getattr(store.marketplace, 'code', '') or '').strip().lower()
-    marketplace_name = (getattr(store.marketplace, 'name', '') or '').strip().lower()
-    is_walmart = marketplace_code == 'walmart' or marketplace_name == 'walmart'
+
+    # pack_qty / prep_fees / shipping_fees are required on Add/Update rows
+    # whenever the store's pricing settings include at least one tier with
+    # ``margin_type='fixed'`` — the fixed-profit formula cannot be evaluated
+    # without them. This is marketplace-agnostic: any vendor can use the
+    # fixed method, not just Walmart.
+    from stores.models import StorePriceRangeMargin
+    requires_fixed_inputs = StorePriceRangeMargin.objects.filter(
+        price_settings__store=store,
+        margin_type='fixed',
+    ).exists()
 
     with transaction.atomic():
         upload = CatalogUpload.objects.create(
@@ -238,15 +246,24 @@ def validate_and_create_upload(
                             f"Row {row_num}: Vendor SKU, Marketplace Child SKU, Vendor ID, or Marketplace Parent SKU required for Add"
                         )
                         continue
-            if is_walmart and action_norm in ('add', 'update'):
+            if requires_fixed_inputs and action_norm in ('add', 'update'):
                 if _normalize(pack_qty_raw) is None:
-                    errors.append(f"Row {row_num}: Walmart requires Pack QTY for {action_norm.title()}")
+                    errors.append(
+                        f"Row {row_num}: Pack QTY required for {action_norm.title()} "
+                        f"(store uses a fixed pricing tier)"
+                    )
                     continue
                 if _normalize(prep_fees_raw) is None:
-                    errors.append(f"Row {row_num}: Walmart requires Prep Fees for {action_norm.title()}")
+                    errors.append(
+                        f"Row {row_num}: Prep Fees required for {action_norm.title()} "
+                        f"(store uses a fixed pricing tier)"
+                    )
                     continue
                 if _normalize(shipping_fees_raw) is None:
-                    errors.append(f"Row {row_num}: Walmart requires Shipping Fees for {action_norm.title()}")
+                    errors.append(
+                        f"Row {row_num}: Shipping Fees required for {action_norm.title()} "
+                        f"(store uses a fixed pricing tier)"
+                    )
                     continue
             elif action_norm == 'delete':
                 id_val = (

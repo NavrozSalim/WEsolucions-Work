@@ -208,8 +208,10 @@ def _apply_to_mappings(product: Product, vendor_price: Decimal, vendor_stock: in
         _apply_inventory,
         _get_pricing_for_vendor,
         _get_inventory_for_vendor,
-        _is_walmart_store,
+        _has_fixed_tier,
+        _missing_fixed_inputs,
     )
+    from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
 
     mappings = list(
         ProductMapping.objects.select_related('store', 'store__marketplace')
@@ -225,11 +227,27 @@ def _apply_to_mappings(product: Product, vendor_price: Decimal, vendor_stock: in
         try:
             pricing = _get_pricing_for_vendor(store, product.vendor_id)
             inventory = _get_inventory_for_vendor(store, product.vendor_id)
+
+            if vendor_price is not None and _has_fixed_tier(pricing):
+                tier_now = resolve_margin_tier_for_raw_cost(pricing, vendor_price)
+                if tier_now is not None and getattr(tier_now, 'margin_type', '') == 'fixed':
+                    missing_inputs = _missing_fixed_inputs(pm)
+                    if missing_inputs:
+                        pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
+                        pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
+                        pm.scrape_error = (
+                            f'missing_fixed_inputs: Fixed pricing requires '
+                            f'{", ".join(missing_inputs)} on the catalog row.'
+                        )
+                        pm.save(update_fields=[
+                            'failed_sync_count', 'sync_status', 'scrape_error',
+                        ])
+                        continue
+
             new_price = (
                 _apply_pricing(
                     vendor_price,
                     pricing,
-                    is_walmart=_is_walmart_store(store),
                     pack_qty=getattr(pm, 'pack_qty', None),
                     prep_fees=getattr(pm, 'prep_fees', None),
                     shipping_fees=getattr(pm, 'shipping_fees', None),

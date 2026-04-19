@@ -8,7 +8,6 @@ import re
 logger = logging.getLogger(__name__)
 
 from stores.models import Store, StoreVendorPriceSettings, StoreVendorInventorySettings
-from stores.pricing_excel import apply_excel_pricing
 from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
 from catalog.models import ProductMapping
 from catalog.reverb_catalog import listing_sku_lookup_order
@@ -264,17 +263,37 @@ def _apply_pricing(
     vendor_price,
     pricing_settings,
     *,
-    is_walmart=False,
     pack_qty=None,
     prep_fees=None,
     shipping_fees=None,
 ):
     """
-    cost_with_tax = vendor_price * (1 + purchase_tax_percentage/100).
-    Per tier: margin_type fixed → list = cost_with_tax + margin_value.
-    margin_type percentage → Excel: D = cost_with_tax, F = tier(D), G = D*100/(100-F-E), then rounding.
-    Walmart + percentage tier: same revenue math as Walmart fixed, but profit = (cost×pack_qty) after tax × (tier%/100).
-    No tier: cost_with_tax * multiplier + optional_fee, then rounding.
+    Marketplace-agnostic pricing engine. Every store / marketplace uses the
+    same three methods; which one runs depends purely on the matched tier's
+    ``margin_type``.
+
+    Inputs (all resolved from ``StoreVendorPriceSettings`` + the tier matched
+    for ``vendor_price``)::
+
+        D = vendor_price * (1 + purchase_tax_percentage/100)   # cost with tax
+        F = tier.margin_percentage                             # user-configured
+        E = marketplace_fees_percentage                        # from store
+
+    Methods::
+
+        direct      -> price = vendor_price * F
+                      (F is used as a raw multiplier, tax ignored)
+        fixed       -> _fixed_post_price(cost, tax, fee, profit=F,
+                                          pack_qty, prep_fees, shipping_fees)
+                      (F is treated as a flat profit in dollars; requires the
+                       per-product pack/prep/ship fields)
+        percentage  -> price = D * 100 / (100 - F - E)
+                      (Excel formula: VendorPrice+Tax divided by the "what's
+                       left after margin + marketplace fee")
+
+    If no tier matches, or the percentage denominator is non-positive, we
+    fall back to ``cost_with_tax * multiplier + optional_fee``.  Rounding is
+    applied last via ``rounding_option``.
     """
     if vendor_price is None or pricing_settings is None:
         return Decimal(str(vendor_price)) if vendor_price is not None else None
@@ -294,18 +313,18 @@ def _apply_pricing(
 
     cost = _safe_float(vendor_price, 0.0)
     tax_pct = _safe_float(getattr(pricing_settings, 'purchase_tax_percentage', 0), 0.0)
+    fee_pct = _safe_float(getattr(pricing_settings, 'marketplace_fees_percentage', 0), 0.0)
     cost_with_tax = cost * (1 + tax_pct / 100)
 
-    def _walmart_post_price(profit_dollars: float) -> float:
-        """PostPrice = final_selling - shipping, with marketplace fee in denominator."""
+    def _fixed_post_price(profit_dollars: float) -> float:
+        """PostPrice = final_selling - shipping, with marketplace fee in the
+        denominator. Uses per-product pack_qty / prep_fees / shipping_fees."""
         pq = _safe_float(pack_qty, 1.0)
         pf = _safe_float(prep_fees, 0.0)
         sf = _safe_float(shipping_fees, 0.0)
-        fee_pct = _safe_float(getattr(pricing_settings, 'marketplace_fees_percentage', 0), 0.0)
         if pq <= 0:
             pq = 1.0
-        vendor_total = cost * pq
-        vendor_total_with_tax = vendor_total * (1 + tax_pct / 100)
+        vendor_total_with_tax = (cost * pq) * (1 + tax_pct / 100)
         denom = 1 - (fee_pct / 100)
         if denom <= 0:
             return vendor_total_with_tax + profit_dollars
@@ -320,28 +339,12 @@ def _apply_pricing(
         if m_type == 'direct':
             price = cost * margin_val
         elif m_type == 'fixed':
-            if is_walmart:
-                price = _walmart_post_price(margin_val)
-            else:
-                price = cost_with_tax + margin_val
-        elif is_walmart and m_type == 'percentage':
-            pq = _safe_float(pack_qty, 1.0)
-            if pq <= 0:
-                pq = 1.0
-            vendor_total = cost * pq
-            vendor_total_with_tax = vendor_total * (1 + tax_pct / 100)
-            profit_dollars = vendor_total_with_tax * (margin_val / 100)
-            price = _walmart_post_price(profit_dollars)
-        else:
-            excel_dec = apply_excel_pricing(
-                cost,
-                tax_pct,
-                _safe_float(getattr(pricing_settings, 'marketplace_fees_percentage', 0), 0.0),
-                str(pricing_settings.rounding_option or 'none'),
-            )
-            if excel_dec is not None:
-                return excel_dec
-            # Denominator invalid (F+E>=100): fall through to multiplier like Amazon path
+            price = _fixed_post_price(margin_val)
+        elif m_type == 'percentage':
+            denom = 100.0 - margin_val - fee_pct
+            if denom > 0:
+                price = cost_with_tax * 100.0 / denom
+            # else: denominator invalid (F+E>=100) → fall through to multiplier
 
     if price is None:
         price = cost_with_tax * _safe_float(getattr(pricing_settings, 'multiplier', 1), 1.0) + _safe_float(getattr(pricing_settings, 'optional_fee', 0), 0.0)
@@ -358,10 +361,33 @@ def _apply_pricing(
     return Decimal(str(round(price, 2)))
 
 
-def _is_walmart_store(store):
-    code = (getattr(store.marketplace, 'code', '') or '').strip().lower()
-    name = (getattr(store.marketplace, 'name', '') or '').strip().lower()
-    return code == 'walmart' or name == 'walmart'
+def _has_fixed_tier(pricing_settings) -> bool:
+    """Does this store have at least one Price Range Margin whose
+    ``margin_type`` is ``fixed``? Used by the catalog upload validator and
+    the scrape pipeline to decide whether ``pack_qty / prep_fees /
+    shipping_fees`` are required on a product row.
+
+    Returns False when ``pricing_settings`` is None or has no tiers
+    configured.
+    """
+    if pricing_settings is None:
+        return False
+    try:
+        return pricing_settings.range_margins.filter(margin_type='fixed').exists()
+    except Exception:
+        return False
+
+
+def _missing_fixed_inputs(pm) -> list:
+    """Return the names of pack_qty / prep_fees / shipping_fees that are
+    missing on ``pm`` — used to short-circuit the scrape when the matched
+    tier is ``fixed`` and the product hasn't been filled in yet."""
+    missing = []
+    for field in ('pack_qty', 'prep_fees', 'shipping_fees'):
+        v = getattr(pm, field, None)
+        if v is None:
+            missing.append(field)
+    return missing
 
 
 def _apply_inventory(vendor_stock, inventory_settings):
@@ -428,7 +454,6 @@ def _apply_latest_heb_ingest(pm, product, store, now=None, *, scrape_title: str 
     new_price = _apply_pricing(
         vendor_price,
         pricing,
-        is_walmart=_is_walmart_store(store),
         pack_qty=getattr(pm, 'pack_qty', None),
         prep_fees=getattr(pm, 'prep_fees', None),
         shipping_fees=getattr(pm, 'shipping_fees', None),
@@ -527,11 +552,24 @@ def run_store_sync(self, store_id):
 
             if vendor_stock is None or vendor_stock <= 0:
                 vendor_stock = 0
+
+            if _has_fixed_tier(pricing):
+                tier_now = resolve_margin_tier_for_raw_cost(pricing, vendor_price)
+                if tier_now is not None and getattr(tier_now, 'margin_type', '') == 'fixed':
+                    missing = _missing_fixed_inputs(pm)
+                    if missing:
+                        _fail_mapping(
+                            pm,
+                            'missing_fixed_inputs',
+                            f"Fixed pricing requires {', '.join(missing)} on the catalog row.",
+                        )
+                        error_summary = 'missing_fixed_inputs' if not error_summary else error_summary
+                        continue
+
             new_price = (
                 _apply_pricing(
                     vendor_price,
                     pricing,
-                    is_walmart=_is_walmart_store(store),
                     pack_qty=getattr(pm, 'pack_qty', None),
                     prep_fees=getattr(pm, 'prep_fees', None),
                     shipping_fees=getattr(pm, 'shipping_fees', None),
@@ -763,12 +801,24 @@ def run_store_update(self, store_id):
             if vendor_stock is None or vendor_stock <= 0:
                 vendor_stock = 0
 
+            if _has_fixed_tier(pricing):
+                tier_now = resolve_margin_tier_for_raw_cost(pricing, vendor_price)
+                if tier_now is not None and getattr(tier_now, 'margin_type', '') == 'fixed':
+                    missing = _missing_fixed_inputs(pm)
+                    if missing:
+                        _fail_mapping(
+                            pm,
+                            'missing_fixed_inputs',
+                            f"Fixed pricing requires {', '.join(missing)} on the catalog row.",
+                        )
+                        error_summary = 'missing_fixed_inputs' if not error_summary else error_summary
+                        continue
+
             prev_vp = VendorPrice.objects.filter(product=pm.product).order_by('-scraped_at').first()
             new_price = (
                 _apply_pricing(
                     vendor_price,
                     pricing,
-                    is_walmart=_is_walmart_store(store),
                     pack_qty=getattr(pm, 'pack_qty', None),
                     prep_fees=getattr(pm, 'prep_fees', None),
                     shipping_fees=getattr(pm, 'shipping_fees', None),

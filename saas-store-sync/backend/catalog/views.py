@@ -58,6 +58,7 @@ class CatalogStoresView(APIView):
 
     def get(self, request):
         from sync.models import SyncSchedule
+        from stores.models import StorePriceRangeMargin
 
         stores = Store.objects.filter(user=request.user).select_related('marketplace').annotate(
             product_count=Count('products', filter=Q(products__is_active=True)),
@@ -70,6 +71,18 @@ class CatalogStoresView(APIView):
             str(s.store_id): s
             for s in SyncSchedule.objects.filter(store_id__in=store_ids)
         }
+        # Stores that have at least one fixed-margin tier on any vendor —
+        # those stores need the catalog UI to surface the Pack QTY / Prep
+        # Fees / Shipping Fees columns.
+        fixed_tier_store_ids = set(
+            StorePriceRangeMargin.objects
+            .filter(
+                price_settings__store_id__in=store_ids,
+                margin_type='fixed',
+            )
+            .values_list('price_settings__store_id', flat=True)
+            .distinct()
+        )
         data = []
         for s in stores:
             sch = sched_map.get(str(s.id))
@@ -81,6 +94,7 @@ class CatalogStoresView(APIView):
                 'marketplace_code': (s.marketplace.code or '').strip() if s.marketplace else None,
                 'product_count': s.product_count,
                 'schedule_active': sch.is_active if sch else None,
+                'has_fixed_tier': s.id in fixed_tier_store_ids,
             })
         return Response(data)
 

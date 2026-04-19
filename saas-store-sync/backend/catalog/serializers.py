@@ -1,7 +1,6 @@
 from rest_framework import serializers
 from catalog.models import ProductMapping, CatalogActivityLog
 from stores.models import StoreVendorPriceSettings
-from stores.pricing_excel import excel_margin_tier_percent
 from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
 
 
@@ -93,8 +92,11 @@ class ProductMappingSerializer(serializers.ModelSerializer):
 
     def get_margin_display(self, obj):
         """
-        Align catalog Margin column with Excel: for percentage tiers, F = tier(D) where D = vendor+tax.
-        For fixed tiers, show the fixed add-on. Fallback tier: em dash.
+        Show the tier's own configured margin. ``percentage`` / ``direct`` /
+        ``fixed`` all read their value straight from
+        ``StorePriceRangeMargin.margin_percentage`` — the same number used by
+        ``sync.tasks._apply_pricing``, so the catalog column and the priced
+        ``store_price`` can never drift apart.
         """
         try:
             price = getattr(obj, 'latest_vendor_price', None)
@@ -107,19 +109,60 @@ class ProductMappingSerializer(serializers.ModelSerializer):
             ps = _pricing_settings_for_product(obj.store, obj.product.vendor_id)
             if not ps:
                 return None
-            tax_pct = float(ps.purchase_tax_percentage or 0)
-            cost_with_tax = cost * (1 + tax_pct / 100)
             tier = resolve_margin_tier_for_raw_cost(ps, cost)
             if tier is None:
                 return '—'
             m_type = getattr(tier, 'margin_type', 'percentage') or 'percentage'
+            val = float(tier.margin_percentage or 0)
             if m_type == 'direct':
-                mult = float(tier.margin_percentage or 0)
-                return f'×{mult:g}'
+                return f'×{val:g}'
             if m_type == 'fixed':
-                amt = float(tier.margin_percentage or 0)
-                return f'+${amt:.2f}'
-            f_pct = excel_margin_tier_percent(cost_with_tax)
-            return f'+{f_pct:.0f}%'
+                return f'+${val:.2f}'
+            return f'+{val:g}%'
         except Exception:
             return None
+
+    def validate(self, attrs):
+        """Enforce ``pack_qty / prep_fees / shipping_fees`` when the store's
+        matched pricing tier is ``fixed`` — the flat-profit + pack-qty
+        formula cannot be evaluated without them. Applied on PATCH/PUT of
+        existing mappings; the CSV upload path enforces the same rule in
+        ``catalog.services.import_catalog_upload``.
+        """
+        instance = getattr(self, 'instance', None)
+        if instance is None:
+            return attrs
+
+        def _resolve(field):
+            if field in attrs:
+                return attrs[field]
+            return getattr(instance, field, None)
+
+        store = getattr(instance, 'store', None)
+        product = getattr(instance, 'product', None)
+        vendor_id = getattr(product, 'vendor_id', None)
+        if not store or not vendor_id:
+            return attrs
+
+        ps = _pricing_settings_for_product(store, vendor_id)
+        if not ps:
+            return attrs
+
+        vp = None
+        if product is not None:
+            vp = product.vendor_prices.order_by('-scraped_at').first()
+        cost = float(vp.price) if vp and vp.price is not None else None
+        if cost is None:
+            return attrs
+
+        tier = resolve_margin_tier_for_raw_cost(ps, cost)
+        if tier is None or getattr(tier, 'margin_type', '') != 'fixed':
+            return attrs
+
+        errors = {}
+        for field in ('pack_qty', 'prep_fees', 'shipping_fees'):
+            if _resolve(field) in (None, ''):
+                errors[field] = 'Required for fixed pricing tier.'
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs

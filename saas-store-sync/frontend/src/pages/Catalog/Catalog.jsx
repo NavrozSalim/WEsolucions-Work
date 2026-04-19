@@ -39,6 +39,7 @@ import {
     getCatalogActivityLogs,
     getScrapeProgress,
     cancelCatalogScrape,
+    updateProductMapping,
 } from '../../services/catalogService';
 import Button from '../../components/ui/Button';
 import Select from '../../components/ui/Select';
@@ -284,6 +285,102 @@ function formatPrice(val) {
     return isNaN(n) ? '—' : `$${n.toFixed(2)}`;
 }
 
+/** Compact numeric display for Pack QTY / Prep Fees / Shipping Fees columns.
+ *  Uses up to 2 decimal places and strips trailing zeros so "1.0000" shows as
+ *  "1" and "0.5000" shows as "0.5". Returns em-dash for null/empty/NaN.
+ */
+function formatNumericCell(val) {
+    if (val == null || val === '') return '—';
+    const n = parseFloat(val);
+    if (isNaN(n)) return '—';
+    return n.toFixed(2).replace(/\.?0+$/, '');
+}
+
+/** Inline-editable numeric cell used by the Pack / Prep / Ship columns.
+ *  Click the value → turns into an input; Enter or blur submits, Esc cancels.
+ *  ``onSave`` is fired with the new numeric value (or ``null`` on empty) and
+ *  must return a Promise so we can show a spinner + revert on failure.
+ */
+function EditableNumericCell({ value, onSave, disabled = false, fieldLabel = 'value' }) {
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState('');
+    const [saving, setSaving] = useState(false);
+    const inputRef = useRef(null);
+
+    useEffect(() => {
+        if (editing && inputRef.current) {
+            inputRef.current.focus();
+            inputRef.current.select();
+        }
+    }, [editing]);
+
+    const startEditing = () => {
+        if (disabled || saving) return;
+        setDraft(value == null ? '' : String(value));
+        setEditing(true);
+    };
+
+    const commit = async () => {
+        const trimmed = draft.trim();
+        const parsed = trimmed === '' ? null : Number(trimmed);
+        if (trimmed !== '' && (isNaN(parsed) || parsed < 0)) {
+            setEditing(false);
+            return;
+        }
+        const current = value == null ? null : Number(value);
+        if (current === parsed || (current == null && parsed == null)) {
+            setEditing(false);
+            return;
+        }
+        setSaving(true);
+        try {
+            await onSave(parsed);
+            setEditing(false);
+        } catch {
+            // keep the editor open on failure so the user can fix or cancel
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    if (editing) {
+        return (
+            <input
+                ref={inputRef}
+                type="number"
+                step="0.01"
+                min="0"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onBlur={commit}
+                onKeyDown={(e) => {
+                    if (e.key === 'Enter') commit();
+                    else if (e.key === 'Escape') setEditing(false);
+                }}
+                disabled={saving}
+                className="w-20 rounded border border-slate-300 bg-white px-1.5 py-0.5 text-right text-xs font-mono text-slate-900 focus:border-accent-500 focus:outline-none focus:ring-1 focus:ring-accent-500 disabled:opacity-60 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                aria-label={`Edit ${fieldLabel}`}
+            />
+        );
+    }
+
+    return (
+        <button
+            type="button"
+            onClick={startEditing}
+            disabled={disabled}
+            title={disabled ? undefined : `Click to edit ${fieldLabel}`}
+            className={`inline-block min-w-[3rem] rounded px-1.5 py-0.5 text-right font-mono text-xs tabular-nums ${
+                value == null
+                    ? 'text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20'
+                    : 'text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
+            } ${disabled ? 'cursor-not-allowed opacity-60' : 'cursor-text'} ${saving ? 'animate-pulse' : ''}`}
+        >
+            {formatNumericCell(value)}
+        </button>
+    );
+}
+
 /**
  * Pull a normalized list of per-vendor progress summaries from the server's
  * scrape-progress payload.
@@ -520,6 +617,11 @@ export default function Catalog() {
     const { setSidebarActivity, clearSidebarActivity, clearCatalogActivities } = useSidebarActivity();
 
     const selectedStoreData = storeList.find((s) => s.id === selectedStore);
+    // Only show Pack QTY / Prep Fees / Shipping Fees columns when the store
+    // has at least one ``margin_type='fixed'`` tier configured. The backend
+    // (CatalogStoresView) exposes this via ``has_fixed_tier`` so we don't
+    // need a separate round-trip to the pricing-settings endpoint.
+    const showFixedColumns = Boolean(selectedStoreData?.has_fixed_tier);
 
     useEffect(
         () => () => {
@@ -881,6 +983,36 @@ export default function Catalog() {
             .catch((err) => setMessage(formatCatalogError(err) || 'Reset failed'))
             .finally(() => setResettingId(null));
     };
+
+    // Inline edit for Pack QTY / Prep Fees / Shipping Fees. Optimistically
+    // updates the row, then persists via PATCH. On failure we re-throw so the
+    // cell editor can revert its saving state.
+    const handleUpdateProductField = useCallback(
+        (product, field, value) => {
+            if (!selectedStore) return Promise.reject(new Error('No store selected'));
+            const prevValue = product[field];
+            setProducts((list) =>
+                list.map((p) => (p.id === product.id ? { ...p, [field]: value } : p)),
+            );
+            return updateProductMapping(selectedStore, product.id, { [field]: value })
+                .then((res) => {
+                    const updated = res?.data;
+                    if (updated && typeof updated === 'object') {
+                        setProducts((list) =>
+                            list.map((p) => (p.id === product.id ? { ...p, ...updated } : p)),
+                        );
+                    }
+                })
+                .catch((err) => {
+                    setProducts((list) =>
+                        list.map((p) => (p.id === product.id ? { ...p, [field]: prevValue } : p)),
+                    );
+                    setMessage(formatCatalogError(err) || `Failed to update ${field}`);
+                    throw err;
+                });
+        },
+        [selectedStore],
+    );
 
     const startProgress = useCallback(() => {
         setProgress(0);
@@ -1715,6 +1847,13 @@ export default function Catalog() {
                                         <th className="w-[90px] whitespace-nowrap text-right">Vendor price</th>
                                         <th className="w-[80px] whitespace-nowrap text-right">Price</th>
                                         <th className="w-[60px] whitespace-nowrap text-right">Stock</th>
+                                        {showFixedColumns && (
+                                            <>
+                                                <th className="w-[70px] whitespace-nowrap text-right" title="Required when the store uses a fixed pricing tier.">Pack QTY</th>
+                                                <th className="w-[70px] whitespace-nowrap text-right" title="Required when the store uses a fixed pricing tier.">Prep Fees</th>
+                                                <th className="w-[70px] whitespace-nowrap text-right" title="Required when the store uses a fixed pricing tier.">Shipping</th>
+                                            </>
+                                        )}
                                         <th className="w-[90px] whitespace-nowrap text-center">Status</th>
                                         <th className="w-[70px] whitespace-nowrap text-right">Margin</th>
                                         <th className="w-[100px] whitespace-nowrap">Last Status</th>
@@ -1754,6 +1893,31 @@ export default function Catalog() {
                                                 </td>
                                                 <td className="text-right font-mono text-sm align-middle whitespace-nowrap">{formatPrice(product.store_price)}</td>
                                                 <td className="text-right font-mono text-sm align-middle">{product.store_stock ?? '—'}</td>
+                                                {showFixedColumns && (
+                                                    <>
+                                                        <td className="text-right align-middle whitespace-nowrap">
+                                                            <EditableNumericCell
+                                                                value={product.pack_qty}
+                                                                fieldLabel="pack qty"
+                                                                onSave={(v) => handleUpdateProductField(product, 'pack_qty', v)}
+                                                            />
+                                                        </td>
+                                                        <td className="text-right align-middle whitespace-nowrap">
+                                                            <EditableNumericCell
+                                                                value={product.prep_fees}
+                                                                fieldLabel="prep fees"
+                                                                onSave={(v) => handleUpdateProductField(product, 'prep_fees', v)}
+                                                            />
+                                                        </td>
+                                                        <td className="text-right align-middle whitespace-nowrap">
+                                                            <EditableNumericCell
+                                                                value={product.shipping_fees}
+                                                                fieldLabel="shipping fees"
+                                                                onSave={(v) => handleUpdateProductField(product, 'shipping_fees', v)}
+                                                            />
+                                                        </td>
+                                                    </>
+                                                )}
                                                 <td className="text-center align-middle whitespace-nowrap">
                                                     <Badge
                                                         variant={syncStatusVariant[status] || syncStatusVariant.pending}

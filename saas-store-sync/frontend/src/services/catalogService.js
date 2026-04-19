@@ -31,6 +31,14 @@ export const deleteProduct = (storeId, productId) => api.delete(`/stores/${store
 export const resetProductSyncStatus = (storeId, productId) =>
     api.post(`/stores/${storeId}/products/${productId}/reset_sync_status/`);
 
+/** Patch editable fields on a ProductMapping (currently pack_qty / prep_fees /
+ *  shipping_fees for the Fixed pricing method). Partial update — backend
+ *  serializer validates that all three are present when the matched tier is
+ *  ``fixed``.
+ */
+export const updateProductMapping = (storeId, productId, patch) =>
+    api.patch(`/stores/${storeId}/products/${productId}/`, patch);
+
 export const clearCatalog = (storeId) => api.delete(`/stores/${storeId}/catalog/clear/`);
 
 /** List upload history for a store */

@@ -395,8 +395,16 @@ def run_catalog_scrape(upload_id: str):
     Call directly or via catalog_scrape_task.
     """
     from sync.models import ScrapeRun
-    from sync.tasks import _get_pricing_for_vendor, _apply_pricing, _apply_inventory, _is_walmart_store
+    from sync.tasks import (
+        _get_pricing_for_vendor,
+        _apply_pricing,
+        _apply_inventory,
+        _has_fixed_tier,
+        _missing_fixed_inputs,
+        _fail_mapping,
+    )
     from sync.tasks import _get_inventory_for_vendor, resolve_vendor_scrape_url, _inventory_from_scrape_result
+    from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
     from vendor.models import VendorPrice
     from scrapers import get_price_and_stock, close_amazon_session
 
@@ -533,11 +541,24 @@ def run_catalog_scrape(upload_id: str):
 
                 pricing = _get_pricing_for_vendor(store, product.vendor_id)
                 inventory = _get_inventory_for_vendor(store, product.vendor_id)
+
+                if _has_fixed_tier(pricing):
+                    tier_now = resolve_margin_tier_for_raw_cost(pricing, vendor_price)
+                    if tier_now is not None and getattr(tier_now, 'margin_type', '') == 'fixed':
+                        missing_inputs = _missing_fixed_inputs(pm)
+                        if missing_inputs:
+                            _fail_mapping(
+                                pm,
+                                'missing_fixed_inputs',
+                                f"Fixed pricing requires {', '.join(missing_inputs)} on the catalog row.",
+                            )
+                            failed += 1
+                            continue
+
                 new_price = (
                     _apply_pricing(
                         vendor_price,
                         pricing,
-                        is_walmart=_is_walmart_store(store),
                         pack_qty=getattr(pm, 'pack_qty', None),
                         prep_fees=getattr(pm, 'prep_fees', None),
                         shipping_fees=getattr(pm, 'shipping_fees', None),
@@ -629,12 +650,15 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
     from sync.tasks import (
         _apply_inventory,
         _apply_pricing,
+        _fail_mapping,
         _get_inventory_for_vendor,
         _get_pricing_for_vendor,
-        _is_walmart_store,
+        _has_fixed_tier,
+        _missing_fixed_inputs,
         resolve_vendor_scrape_url,
         _inventory_from_scrape_result,
     )
+    from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
     from vendor.models import VendorPrice
 
     from catalog.activity_log import append_catalog_log
@@ -734,11 +758,24 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
                 vendor_stock = 0
 
             try:
+                if _has_fixed_tier(pricing):
+                    tier_now = resolve_margin_tier_for_raw_cost(pricing, vendor_price)
+                    if tier_now is not None and getattr(tier_now, 'margin_type', '') == 'fixed':
+                        missing_inputs = _missing_fixed_inputs(pm)
+                        if missing_inputs:
+                            _fail_mapping(
+                                pm,
+                                'missing_fixed_inputs',
+                                f"Fixed pricing requires {', '.join(missing_inputs)} on the catalog row.",
+                            )
+                            failed += 1
+                            error_summary = 'missing_fixed_inputs' if not error_summary else error_summary
+                            continue
+
                 new_price = (
                     _apply_pricing(
                         vendor_price,
                         pricing,
-                        is_walmart=_is_walmart_store(store),
                         pack_qty=getattr(pm, 'pack_qty', None),
                         prep_fees=getattr(pm, 'prep_fees', None),
                         shipping_fees=getattr(pm, 'shipping_fees', None),
@@ -840,7 +877,6 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
         _apply_pricing,
         _get_inventory_for_vendor,
         _get_pricing_for_vendor,
-        _is_walmart_store,
     )
     from vendor.models import Vendor, VendorPrice
     from stores.models import Store
@@ -910,7 +946,6 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
             new_price = _apply_pricing(
                 price,
                 pricing,
-                is_walmart=_is_walmart_store(store),
                 pack_qty=getattr(pm, 'pack_qty', None),
                 prep_fees=getattr(pm, 'prep_fees', None),
                 shipping_fees=getattr(pm, 'shipping_fees', None),
