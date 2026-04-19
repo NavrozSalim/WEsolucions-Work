@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Plus, Clock, Trash2 } from 'lucide-react';
+import { X, Plus, Clock, Trash2, Copy } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
@@ -138,6 +138,23 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
         }));
     };
     const removeVendorPrice = (i) => setForm((f) => ({ ...f, vendor_price_settings: f.vendor_price_settings.filter((_, idx) => idx !== i) }));
+    const duplicateVendorPrice = (i) => setForm((f) => {
+        const src = f.vendor_price_settings[i];
+        if (!src) return f;
+        const cloned = {
+            ...src,
+            id: undefined,
+            vendor_id: '',
+            range_margins: (src.range_margins || []).map((rm) => ({
+                ...rm,
+                id: undefined,
+                price_range_id: undefined,
+            })),
+        };
+        const next = [...f.vendor_price_settings];
+        next.splice(i + 1, 0, cloned);
+        return { ...f, vendor_price_settings: next };
+    });
     const updateVendorPrice = (i, field, value) => {
         setForm((f) => {
             const next = [...f.vendor_price_settings];
@@ -605,6 +622,16 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                                 className="w-full max-w-md"
                                             />
                                         </div>
+                                        <Button
+                                            type="button"
+                                            variant="secondary"
+                                            size="sm"
+                                            className="shrink-0"
+                                            onClick={() => duplicateVendorPrice(i)}
+                                            title="Clone these margin settings for a different vendor"
+                                        >
+                                            <Copy className="h-4 w-4 mr-1.5 inline" aria-hidden /> Duplicate
+                                        </Button>
                                         <Button type="button" variant="danger" size="sm" className="shrink-0" onClick={() => removeVendorPrice(i)}>
                                             <Trash2 className="h-4 w-4 mr-1.5 inline" aria-hidden /> Delete vendor
                                         </Button>

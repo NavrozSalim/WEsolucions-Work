@@ -80,6 +80,9 @@ class ProductMappingSerializer(serializers.ModelSerializer):
 
     def get_vendor_price(self, obj):
         try:
+            price = getattr(obj, 'latest_vendor_price', None)
+            if price is not None:
+                return float(price)
             vp = obj.product.vendor_prices.order_by('-scraped_at').first()
             return float(vp.price) if vp and vp.price else None
         except Exception:
@@ -91,10 +94,13 @@ class ProductMappingSerializer(serializers.ModelSerializer):
         For fixed tiers, show the fixed add-on. Fallback tier: em dash.
         """
         try:
-            vp = obj.product.vendor_prices.order_by('-scraped_at').first()
-            if not vp or vp.price is None:
-                return None
-            cost = float(vp.price)
+            price = getattr(obj, 'latest_vendor_price', None)
+            if price is None:
+                vp = obj.product.vendor_prices.order_by('-scraped_at').first()
+                if not vp or vp.price is None:
+                    return None
+                price = vp.price
+            cost = float(price)
             ps = _pricing_settings_for_product(obj.store, obj.product.vendor_id)
             if not ps:
                 return None

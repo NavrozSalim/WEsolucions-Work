@@ -57,17 +57,31 @@ MAX_BATCH_ITEMS = 500
 SUPPORTED_VENDORS: dict[str, dict[str, Any]] = {
     'heb': {
         'scope': 'heb',
-        'vendor_db_codes': ['heb'],
+        'vendor_db_codes': ['heb', 'hebus'],
         'vendor_db_code_prefix': 'heb_',
         'url_host_contains': 'heb.com',
         'label': 'HEB',
+        'runner': 'desktop',
     },
     'costco': {
         'scope': 'costco',
         'vendor_db_codes': ['costcoau', 'costco'],
         'vendor_db_code_prefix': 'costco_',
         'url_host_contains': 'costco.',
-        'label': 'Costco',
+        'label': 'CostcoAU',
+        'runner': 'desktop',
+    },
+    'vevor': {
+        # Vevor AU is refreshed by a server-side Celery task from a public S3
+        # XLSX feed (see ``catalog.tasks.run_vevor_au_ingest``). There is no
+        # desktop runner and no inbound ingest endpoint for it — the scope /
+        # url_host_contains values are kept only so shared helpers still work.
+        'scope': 'vevor',
+        'vendor_db_codes': ['vevorau', 'vevor'],
+        'vendor_db_code_prefix': 'vevor_',
+        'url_host_contains': 'vevor.com.au',
+        'label': 'VevorAU',
+        'runner': 'server',
     },
 }
 

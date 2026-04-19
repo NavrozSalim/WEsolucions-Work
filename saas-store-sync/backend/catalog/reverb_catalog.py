@@ -1,6 +1,6 @@
 """Marketplace-specific catalog rules (Reverb, eBay vendor rows) and listing SKU order."""
 
-_EBAY_VENDOR_CODES = frozenset({'ebay', 'ebayau', 'ebay_au', 'ebay_us'})
+_EBAY_VENDOR_CODES = frozenset({'ebay', 'ebayus', 'ebayau', 'ebay_au', 'ebay_us'})
 
 
 def vendor_is_ebay(vendor, vendor_name_raw: str = '') -> bool:

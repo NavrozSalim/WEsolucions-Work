@@ -26,8 +26,9 @@ from products.models import Product
 from stores.models import Store
 from rest_framework.permissions import IsAuthenticated
 from audit.utils import log_action
-from django.db.models import Count, Q, Prefetch
+from django.db.models import Count, Q, Prefetch, OuterRef, Subquery
 from stores.models import StoreVendorPriceSettings
+from vendor.models import VendorPrice
 
 
 def _upload_action_reason_from_rows(rows):
@@ -91,12 +92,18 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         store_id = self.kwargs.get('store_pk')
+        latest_vp = VendorPrice.objects.filter(
+            product=OuterRef('product_id')
+        ).order_by('-scraped_at')
         qs = ProductMapping.objects.filter(is_active=True).select_related(
             'product',
             'product__vendor',
             'store',
+        ).annotate(
+            latest_vendor_price=Subquery(latest_vp.values('price')[:1]),
+            latest_vendor_stock=Subquery(latest_vp.values('stock')[:1]),
+            latest_vendor_at=Subquery(latest_vp.values('scraped_at')[:1]),
         ).prefetch_related(
-            'product__vendor_prices',
             Prefetch(
                 'store__vendor_price_settings',
                 queryset=StoreVendorPriceSettings.objects.prefetch_related(
@@ -504,6 +511,27 @@ def _store_has_heb_products(store) -> bool:
     return _store_has_vendor_products(store, 'heb')
 
 
+def _dispatch_server_vendor_job(vendor_code: str, store, job) -> None:
+    """Fire the Celery task for a server-side vendor (e.g. VevorAU) and flip
+    the tracking ``HebScrapeJob`` row into the ``CLAIMED`` state so the UI
+    progress strip shows "running" instead of staying in "queued" forever.
+    """
+    from django.utils import timezone as _tz
+
+    if vendor_code == 'vevor':
+        try:
+            from catalog.tasks import vevor_au_ingest_task
+            vevor_au_ingest_task.delay(str(store.id), str(job.id))
+            job.status = HebScrapeJob.Status.CLAIMED
+            job.claimed_at = _tz.now()
+            job.save(update_fields=['status', 'claimed_at'])
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                'Failed to dispatch VevorAU Celery task for job %s', job.id,
+            )
+
+
 class CatalogScrapeTriggerView(APIView):
     """Trigger catalog scrape (fetch vendor price/stock, apply rules)."""
     permission_classes = [IsAuthenticated]
@@ -513,9 +541,15 @@ class CatalogScrapeTriggerView(APIView):
         """Create (or return existing) ``HebScrapeJob`` row for ``vendor_code``
         if ``store`` actually has products for that vendor.
 
+        For vendors whose ``runner`` is ``'server'`` (e.g. VevorAU), the Celery
+        task is dispatched here so the job starts immediately instead of
+        waiting for a desktop poller to claim it.
+
         Returns ``None`` if the store has nothing for this vendor — callers
         should silently skip that vendor in that case.
         """
+        from catalog.ingest_views import SUPPORTED_VENDORS
+
         if not _store_has_vendor_products(store, vendor_code):
             return None
         existing = HebScrapeJob.objects.filter(
@@ -525,11 +559,15 @@ class CatalogScrapeTriggerView(APIView):
         ).order_by('-requested_at').first()
         if existing:
             return existing
-        return HebScrapeJob.objects.create(
+        job = HebScrapeJob.objects.create(
             store=store,
             requested_by=user,
             vendor_code=vendor_code,
         )
+        runner = (SUPPORTED_VENDORS.get(vendor_code) or {}).get('runner', 'desktop')
+        if runner == 'server':
+            _dispatch_server_vendor_job(vendor_code, store, job)
+        return job
 
     @classmethod
     def _maybe_enqueue_desktop_jobs(cls, store, user) -> list:
@@ -925,10 +963,46 @@ class CatalogScrapeProgressView(APIView):
         now = timezone.now()
         vendors_payload: dict[str, dict] = {}
 
-        # Per-vendor progress/queue — iterate every registered desktop vendor so
-        # the frontend can render one progress strip per vendor the store uses.
-        for vendor_code in SUPPORTED_VENDORS.keys():
-            vendor_ids = _vendor_db_ids_for(vendor_code)
+        # Progress is rendered for EVERY vendor the store has listings for —
+        # not just the registered desktop/server runners. Amazon & eBay rows
+        # get a "scraped N / M" strip too, even though they have no ingest
+        # queue. Start by collecting every vendor code that actually appears
+        # in this store's active mappings; then layer the runner metadata
+        # from ``SUPPORTED_VENDORS`` on top.
+        from vendor.models import Vendor as _Vendor
+        store_vendor_codes = list(
+            active.values_list('product__vendor__code', flat=True).distinct()
+        )
+        store_vendor_codes = [c for c in store_vendor_codes if c]
+
+        runner_codes = set(SUPPORTED_VENDORS.keys())
+        other_codes = []
+        for raw_code in store_vendor_codes:
+            rc = (raw_code or '').strip().lower()
+            if not rc:
+                continue
+            mapped = rc
+            if rc in ('heb', 'hebus') or rc.startswith('heb_'):
+                mapped = 'heb'
+            elif rc in ('costcoau', 'costco') or rc.startswith('costco_'):
+                mapped = 'costco'
+            elif rc in ('vevorau', 'vevor') or rc.startswith('vevor_'):
+                mapped = 'vevor'
+            if mapped in runner_codes:
+                continue
+            if rc not in other_codes:
+                other_codes.append(rc)
+
+        iter_codes = list(SUPPORTED_VENDORS.keys()) + other_codes
+        for vendor_code in iter_codes:
+            is_runner = vendor_code in runner_codes
+            vendor_ids = (
+                _vendor_db_ids_for(vendor_code) if is_runner
+                else list(
+                    _Vendor.objects.filter(code__iexact=vendor_code)
+                    .values_list('id', flat=True)
+                )
+            )
             if not vendor_ids:
                 continue
 
@@ -956,29 +1030,39 @@ class CatalogScrapeProgressView(APIView):
             )
             v_pct = int(round(v_scraped * 100 / v_total)) if v_total else 0
 
-            latest_job = (
-                HebScrapeJob.objects
-                .filter(store=store, vendor_code=vendor_code)
-                .order_by('-requested_at')
-                .first()
-            )
+            latest_job = None
             v_job_payload = None
-            if latest_job is not None:
-                v_job_payload = {
-                    'id': str(latest_job.id),
-                    'vendor': latest_job.vendor_code,
-                    'status': latest_job.status,
-                    'requested_at': latest_job.requested_at.isoformat(),
-                    'claimed_at': latest_job.claimed_at.isoformat() if latest_job.claimed_at else None,
-                    'completed_at': latest_job.completed_at.isoformat() if latest_job.completed_at else None,
-                    'url_count': latest_job.url_count,
-                    'stats': latest_job.stats or {},
-                }
-            v_queue_payload = _compute_vendor_queue_payload(store, vendor_code, latest_job)
+            v_queue_payload = None
+            if is_runner:
+                latest_job = (
+                    HebScrapeJob.objects
+                    .filter(store=store, vendor_code=vendor_code)
+                    .order_by('-requested_at')
+                    .first()
+                )
+                if latest_job is not None:
+                    v_job_payload = {
+                        'id': str(latest_job.id),
+                        'vendor': latest_job.vendor_code,
+                        'status': latest_job.status,
+                        'requested_at': latest_job.requested_at.isoformat(),
+                        'claimed_at': latest_job.claimed_at.isoformat() if latest_job.claimed_at else None,
+                        'completed_at': latest_job.completed_at.isoformat() if latest_job.completed_at else None,
+                        'url_count': latest_job.url_count,
+                        'stats': latest_job.stats or {},
+                    }
+                v_queue_payload = _compute_vendor_queue_payload(store, vendor_code, latest_job)
+
+            default_label = vendor_code.upper()
+            label = (
+                SUPPORTED_VENDORS.get(vendor_code, {}).get('label', default_label)
+                if is_runner
+                else default_label
+            )
 
             vendors_payload[vendor_code] = {
                 'vendor': vendor_code,
-                'label': SUPPORTED_VENDORS[vendor_code].get('label', vendor_code.upper()),
+                'label': label,
                 'has_products': v_total > 0,
                 'total': v_total,
                 'scraped': v_scraped,
@@ -990,6 +1074,10 @@ class CatalogScrapeProgressView(APIView):
                 'ingested_last_24h': v_ingested_last_24h,
                 'job': v_job_payload,
                 'queue': v_queue_payload,
+                'runner': (
+                    SUPPORTED_VENDORS.get(vendor_code, {}).get('runner', 'desktop')
+                    if is_runner else 'live'
+                ),
             }
 
         # Backward-compat: flatten the HEB payload into the top-level `heb_*`

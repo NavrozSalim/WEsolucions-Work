@@ -17,6 +17,43 @@ from vendor.models import Vendor
 EXPECTED_COLUMNS = INTERNAL_FIELDS
 
 
+# Canonical vendor codes the catalog upload accepts. The user-facing vendor
+# labels in the sample templates and dropdowns must match these names.
+CANONICAL_VENDOR_NAMES = (
+    'AmazonUS', 'AmazonAU', 'EbayUS', 'EbayAU',
+    'VevorAU', 'CostcoAU', 'HebUS', 'KoganAU',
+)
+
+# Map of normalized user input -> canonical Vendor.code. Anything not in this
+# map still falls back to a direct Vendor.name/Vendor.code lookup, so legacy
+# data keeps working, but the recommended / enforced list is the canonical one.
+_VENDOR_ALIAS_TO_CODE: dict[str, str] = {
+    'amazonus': 'amazonus', 'amazonusa': 'amazonus', 'amazon us': 'amazonus',
+    'amazon-us': 'amazonus', 'amazon_us': 'amazonus', 'amazon': 'amazonus',
+    'amazonau': 'amazonau', 'amazon au': 'amazonau',
+    'amazon-au': 'amazonau', 'amazon_au': 'amazonau',
+    'ebayus': 'ebayus', 'ebay us': 'ebayus', 'ebay-us': 'ebayus',
+    'ebay_us': 'ebayus', 'ebay': 'ebayus',
+    'ebayau': 'ebayau', 'ebay au': 'ebayau', 'ebay-au': 'ebayau', 'ebay_au': 'ebayau',
+    'vevorau': 'vevorau', 'vevor au': 'vevorau', 'vevor-au': 'vevorau',
+    'vevor_au': 'vevorau', 'vevor': 'vevorau',
+    'costcoau': 'costcoau', 'costco au': 'costcoau', 'costco-au': 'costcoau',
+    'costco_au': 'costcoau', 'costco': 'costcoau',
+    'hebus': 'hebus', 'heb us': 'hebus', 'heb-us': 'hebus',
+    'heb_us': 'hebus', 'heb': 'hebus',
+    'koganau': 'koganau', 'kogan au': 'koganau', 'kogan-au': 'koganau',
+    'kogan_au': 'koganau', 'kogan': 'koganau',
+}
+
+
+def resolve_canonical_vendor_code(raw: str) -> str | None:
+    """Normalize user-typed vendor text to a canonical Vendor.code."""
+    if not raw:
+        return None
+    key = str(raw).strip().lower()
+    return _VENDOR_ALIAS_TO_CODE.get(key)
+
+
 def _parse_xlsx(file_obj) -> list[list[Any]]:
     """Parse XLSX and return list of rows."""
     import openpyxl
@@ -97,6 +134,7 @@ def validate_and_create_upload(
     store_name_lower = store.name.lower()
     vendors_by_name = {v.name.lower(): v for v in Vendor.objects.all()}
     vendors_by_name.update({v.code.lower(): v for v in Vendor.objects.all()})
+    vendors_by_code = {v.code.lower(): v for v in Vendor.objects.all()}
     is_reverb = store_is_reverb(store)
     marketplace_code = (getattr(store.marketplace, 'code', '') or '').strip().lower()
     marketplace_name = (getattr(store.marketplace, 'name', '') or '').strip().lower()
@@ -153,6 +191,16 @@ def validate_and_create_upload(
 
             vn = _normalize(vendor_name_raw)
             vendor = vendors_by_name.get(vn.lower()) if vn else None
+            if not vendor and vn:
+                canon = resolve_canonical_vendor_code(vn)
+                if canon:
+                    vendor = vendors_by_code.get(canon)
+            if not vendor and vn:
+                errors.append(
+                    f"Row {row_num}: Unknown vendor '{vendor_name_raw}'. "
+                    f"Use one of: {', '.join(CANONICAL_VENDOR_NAMES)}."
+                )
+                continue
             is_ebay_v = vendor_is_ebay(vendor, vendor_name_raw)
 
             if action_norm == 'add':

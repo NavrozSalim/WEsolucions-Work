@@ -18,7 +18,9 @@ from vendor.models import Vendor
 
 
 def _resolve_vendor(vendor_name_raw: str) -> Vendor | None:
-    """Resolve vendor by name or code."""
+    """Resolve vendor by name, code, or canonical alias."""
+    from .services import resolve_canonical_vendor_code
+
     vn = _normalize(vendor_name_raw)
     if not vn:
         return None
@@ -28,6 +30,9 @@ def _resolve_vendor(vendor_name_raw: str) -> Vendor | None:
             return v
         if v.code and v.code.lower() == vn_lower:
             return v
+    canon = resolve_canonical_vendor_code(vn)
+    if canon:
+        return Vendor.objects.filter(code__iexact=canon).first()
     return None
 
 
@@ -41,7 +46,7 @@ def _is_heb_product(product) -> bool:
     """
     vendor = getattr(product, 'vendor', None)
     code = (getattr(vendor, 'code', '') or '').lower()
-    return code == 'heb' or code.startswith('heb_')
+    return code in ('heb', 'hebus') or code.startswith('heb_')
 
 
 def _normalize_action(action_raw: str) -> str:
@@ -882,6 +887,161 @@ def catalog_scrape_task(self, upload_id: str):
 def catalog_scrape_store_task(self, store_id: str):
     """Celery: scrape all active listings for a store (no marketplace push)."""
     return run_store_wide_catalog_scrape(store_id)
+
+
+def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = None) -> dict:
+    """Refresh VendorPrice rows for Vevor AU products from the public S3 XLSX feed.
+
+    Called by ``CatalogScrapeTriggerView`` whenever a store with Vevor AU
+    products is scraped. Downloads the feed once, builds a SKU -> price/stock
+    lookup, then writes the latest values to ``VendorPrice`` for every
+    matching ``Product`` and refreshes the store's ``ProductMapping``
+    (posted price + stock, with margin rules applied).
+
+    Passing ``store_id=None`` updates every store that has Vevor AU listings.
+    """
+    from decimal import Decimal
+
+    from scrapers.vevor_au import (
+        VEVOR_AU_FEED_URL,
+        fetch_vevor_feed,
+        load_veror_via_excel_positions,
+        lookup_sku,
+    )
+    from sync.tasks import (
+        _apply_inventory,
+        _apply_pricing,
+        _get_inventory_for_vendor,
+        _get_pricing_for_vendor,
+        _is_walmart_store,
+    )
+    from vendor.models import Vendor, VendorPrice
+    from stores.models import Store
+
+    vevor_codes = ('vevorau', 'vevor_au', 'vevor-au', 'vevor')
+    vendor_ids = list(
+        Vendor.objects.filter(code__iregex=r'^vevor(au|_au|-au)?$')
+        .values_list('id', flat=True)
+    )
+    if not vendor_ids:
+        return {'status': 'no_vendor', 'message': 'Vevor vendor not seeded.', 'updated': 0}
+
+    try:
+        xlsx_path = fetch_vevor_feed(VEVOR_AU_FEED_URL)
+    except Exception as e:
+        logger.exception('Vevor AU feed download failed: %s', e)
+        return {'status': 'failed', 'error': str(e), 'updated': 0}
+
+    try:
+        lookup, lookup_compact, pos_rows = load_veror_via_excel_positions(xlsx_path)
+    except Exception as e:
+        logger.exception('Vevor AU feed parse failed: %s', e)
+        return {'status': 'failed', 'error': str(e), 'updated': 0}
+    finally:
+        try:
+            import os as _os
+            _os.unlink(xlsx_path)
+        except Exception:
+            pass
+
+    if not lookup:
+        return {'status': 'empty_feed', 'feed_rows': pos_rows, 'updated': 0}
+
+    pm_qs = ProductMapping.objects.filter(
+        is_active=True,
+        product__vendor_id__in=vendor_ids,
+    ).select_related('product', 'product__vendor', 'store')
+    if store_id:
+        pm_qs = pm_qs.filter(store_id=store_id)
+
+    now = timezone.now()
+    matched = missing = updated_rows = 0
+
+    for pm in pm_qs.iterator():
+        product = pm.product
+        if not product:
+            continue
+        raw_sku = (product.vendor_sku or '').strip()
+        entry = lookup_sku(lookup, lookup_compact, raw_sku)
+        if not entry:
+            missing += 1
+            continue
+        matched += 1
+        try:
+            price = Decimal(str(entry['Posted Price'] or 0))
+            stock_val = int(entry.get('Posted Inventory') or 0)
+        except Exception:
+            missing += 1
+            continue
+
+        VendorPrice.objects.create(product=product, price=price, stock=stock_val)
+
+        try:
+            store = pm.store
+            pricing = _get_pricing_for_vendor(store, product.vendor_id)
+            inventory = _get_inventory_for_vendor(store, product.vendor_id)
+            new_price = _apply_pricing(
+                price,
+                pricing,
+                is_walmart=_is_walmart_store(store),
+                pack_qty=getattr(pm, 'pack_qty', None),
+                prep_fees=getattr(pm, 'prep_fees', None),
+                shipping_fees=getattr(pm, 'shipping_fees', None),
+            )
+            if new_price is None:
+                new_price = price
+            new_stock = _apply_inventory(stock_val, inventory)
+            pm.store_price = new_price
+            pm.store_stock = new_stock
+            pm.sync_status = 'scraped'
+            pm.failed_sync_count = 0
+            pm.last_scrape_time = now
+            pm.save(update_fields=[
+                'store_price', 'store_stock', 'sync_status',
+                'failed_sync_count', 'last_scrape_time',
+            ])
+            updated_rows += 1
+        except Exception as apply_err:
+            logger.exception(
+                'Vevor AU apply failed for SKU %s (store=%s): %s',
+                product.vendor_sku, pm.store_id, apply_err,
+            )
+
+    result = {
+        'status': 'ok',
+        'feed_rows': pos_rows,
+        'feed_unique_skus': len(lookup),
+        'matched': matched,
+        'missing': missing,
+        'updated': updated_rows,
+        'store_id': str(store_id) if store_id else None,
+        'job_id': str(job_id) if job_id else None,
+    }
+
+    if job_id:
+        try:
+            from catalog.models import HebScrapeJob
+            job = HebScrapeJob.objects.filter(id=job_id).first()
+            if job and job.status != HebScrapeJob.Status.DONE:
+                job.status = HebScrapeJob.Status.DONE
+                job.completed_at = timezone.now()
+                job.stats = {
+                    'received': pos_rows,
+                    'matched': matched,
+                    'applied': updated_rows,
+                }
+                job.save(update_fields=['status', 'completed_at', 'stats'])
+        except Exception:
+            logger.exception('Failed to mark VevorAU job %s done', job_id)
+
+    logger.info('Vevor AU ingest summary: %s', result)
+    return result
+
+
+@shared_task(bind=True, max_retries=3, name='catalog.run_vevor_au_ingest')
+def vevor_au_ingest_task(self, store_id: str | None = None, job_id: str | None = None):
+    """Celery entrypoint for the Vevor AU XLSX feed refresh."""
+    return run_vevor_au_ingest(store_id=store_id, job_id=job_id)
 
 
 @shared_task(bind=True, max_retries=3)

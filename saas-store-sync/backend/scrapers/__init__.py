@@ -113,6 +113,12 @@ def _costco_ingest_only_result() -> dict:
     }
 
 
+def _vevor_ingest_only_result() -> dict:
+    """Vevor AU is refreshed from the public S3 XLSX feed, not per-URL scraped."""
+    from .vevor_au import _ingest_only_result as _res
+    return _res()
+
+
 def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> dict:
     """
     Main entry point: resolve vendor URL → scraper → return price + stock.
@@ -163,6 +169,10 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
     if "costco.com.au" in url_lower:
         logger.info("Costco AU URL skipped server-side (ingest-only): %s", vendor_url[:80])
         return _normalize_scrape_payload(_costco_ingest_only_result())
+
+    if "vevor.com.au" in url_lower or "vevor.au" in url_lower:
+        logger.info("Vevor AU URL skipped server-side (feed ingest): %s", vendor_url[:80])
+        return _normalize_scrape_payload(_vevor_ingest_only_result())
 
     logger.warning("No scraper registered for URL: %s", vendor_url[:80])
     return _placeholder_scrape(vendor_url, region)

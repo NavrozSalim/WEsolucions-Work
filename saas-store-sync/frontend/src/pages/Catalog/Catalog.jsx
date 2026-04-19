@@ -345,6 +345,12 @@ function getActiveVendor(vendors) {
 function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
     if (!vendor || !vendor.has_products) return null;
     const label = vendor.label || (vendor.code || 'vendor').toUpperCase();
+    const runner = vendor.runner || 'live';
+    const runnerLabel = runner === 'desktop'
+        ? 'desktop runner'
+        : runner === 'server'
+            ? 'feed ingest'
+            : 'live scrape';
     const pct = Math.max(0, Math.min(100, Number(vendor.pct || 0)));
     const recent5 = vendor.ingested_last_5m || 0;
     const recent24 = vendor.ingested_last_24h || 0;
@@ -397,10 +403,20 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
             parts.push('next in line');
         }
         if (runningOther) parts.push(`scraping "${runningOther}" now`);
-        if (etaLabel) parts.push(`starts in ${etaLabel}`);
+        if (etaLabel) {
+            parts.push(`starts in ~${etaLabel}`);
+        } else if (ahead > 0) {
+            parts.push('start time TBD — depends on the runs ahead');
+        }
         queueLine = (
             <p className="text-xs text-amber-600 dark:text-amber-300 mt-0.5">
-                Pending — {parts.join(' · ')}.
+                Pending — {parts.join(' · ')}. Your job will run automatically once the queue clears; no need to retry.
+            </p>
+        );
+    } else if (isClaimed) {
+        queueLine = (
+            <p className="text-xs text-accent-600 dark:text-accent-300 mt-0.5">
+                Running now — prices will populate as the {runnerLabel} uploads them. Safe to close this tab.
             </p>
         );
     }
@@ -412,7 +428,7 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
                     <span className={`inline-flex h-2.5 w-2.5 rounded-full ${recent5 > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300 dark:bg-slate-600'}`} />
                     <div>
                         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                            {label} desktop runner
+                            {label} {runnerLabel}
                             {statusPill}
                         </h3>
                         <p className="text-xs text-slate-500 dark:text-slate-400">

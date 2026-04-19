@@ -8,6 +8,14 @@ app = Celery('core')
 
 app.config_from_object('django.conf:settings', namespace='CELERY')
 
+# Durability: keep long-running scrape/ingest jobs in the broker until the
+# worker ACKs completion. If a worker is killed mid-task the job is
+# re-delivered instead of silently dropped, so user-initiated scrapes never
+# vanish just because the server was busy.
+app.conf.task_acks_late = True
+app.conf.task_reject_on_worker_lost = True
+app.conf.worker_prefetch_multiplier = 1
+
 app.autodiscover_tasks()
 
 app.conf.beat_schedule = {

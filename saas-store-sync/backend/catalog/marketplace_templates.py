@@ -40,7 +40,7 @@ def store_marketplace_kind(store: Store) -> str:
     code = (getattr(m, 'code', '') or '').strip().lower()
     name = (getattr(m, 'name', '') or '').strip().lower()
 
-    if code in ('reverb', 'walmart', 'sears'):
+    if code in ('reverb', 'walmart', 'sears', 'kogan'):
         return code
     if 'walmart' in name:
         return 'walmart'
@@ -48,7 +48,9 @@ def store_marketplace_kind(store: Store) -> str:
         return 'sears'
     if 'reverb' in name:
         return 'reverb'
-    if name in ('reverb', 'walmart', 'sears'):
+    if 'kogan' in name:
+        return 'kogan'
+    if name in ('reverb', 'walmart', 'sears', 'kogan'):
         return name
     return 'other'
 
@@ -107,7 +109,7 @@ def build_field_indices(header: list, store: Store) -> dict[str, int | None]:
 
     kind = store_marketplace_kind(store)
     if sku_i is not None:
-        if kind == 'reverb':
+        if kind in ('reverb', 'kogan'):
             if idx['marketplace parent sku'] is None:
                 idx['marketplace parent sku'] = sku_i
         elif kind == 'walmart':
@@ -140,15 +142,16 @@ def validate_marketplace_headers(indices: dict[str, int | None], store: Store) -
 
     kind = store_marketplace_kind(store)
 
-    if kind == 'reverb':
+    if kind in ('reverb', 'kogan'):
+        label = 'Kogan' if kind == 'kogan' else 'Reverb'
         has_listing_sku = _req('marketplace parent sku')
         has_vendor_ref = _req('vendor url') or _req('vendor id')
         if not has_listing_sku:
             return (
-                'Reverb uploads require a listing SKU column: use "SKU" or "Marketplace Parent SKU".'
+                f'{label} uploads require a listing SKU column: use "SKU" or "Marketplace Parent SKU".'
             )
         if not has_vendor_ref:
-            return 'Reverb uploads require "Vendor URL" and/or "Vendor ID" (for vendor lookup and scraping).'
+            return f'{label} uploads require "Vendor URL" and/or "Vendor ID" (for vendor lookup and scraping).'
 
     elif kind == 'walmart':
         for col, label in (
@@ -320,7 +323,8 @@ def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]
         ]
         return headers, rows
 
-    # reverb: minimal template
+    # reverb / kogan: minimal template (identical columns & semantics)
+    marketplace_label = 'Kogan' if kind == 'kogan' else 'Reverb'
     headers = [
         'Vendor Name',
         'Vendor ID',
@@ -332,18 +336,18 @@ def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]
     ]
     rows = [
         [
-            'Amazon',
+            'AmazonUS',
             '',
-            'Reverb',
+            marketplace_label,
             'My Store',
             'LISTING-SKU-001',
             'https://www.amazon.com/dp/B0TEST123',
             'Add',
         ],
         [
-            'eBay',
+            'EbayUS',
             '123456789',
-            'Reverb',
+            marketplace_label,
             'My Store',
             'LISTING-SKU-002',
             '',
@@ -433,7 +437,7 @@ def upload_row_to_cells(
             r.vendor_url_raw or '',
             r.action_raw or 'Add',
         ]
-    elif kind == 'reverb':
+    elif kind in ('reverb', 'kogan'):
         cells = [
             r.vendor_name_raw or '',
             r.vendor_id_raw or '',

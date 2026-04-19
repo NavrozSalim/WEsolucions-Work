@@ -28,7 +28,7 @@ def _is_heb_product(product) -> bool:
     """
     vendor = getattr(product, 'vendor', None)
     code = (getattr(vendor, 'code', '') or '').lower()
-    return code == 'heb' or code.startswith('heb_')
+    return code in ('heb', 'hebus') or code.startswith('heb_')
 
 
 def _heb_product_id_from_sku(sku: str):
@@ -100,15 +100,15 @@ def _resolve_vendor_url(product, store):
     if not sku:
         return None
     region = (store.region or 'USA').upper()
-    if vcode in ('amazon', 'amazonusa', 'amazonau', 'amazon_us', 'amazon_au'):
-        if region == 'AU':
+    if vcode in ('amazon', 'amazonus', 'amazonusa', 'amazonau', 'amazon_us', 'amazon_au'):
+        if region == 'AU' or vcode.endswith('au'):
             return f"https://www.amazon.com.au/dp/{sku}"
         return f"https://www.amazon.com/dp/{sku}"
-    if vcode in ('ebay', 'ebayau', 'ebay_au', 'ebay_us'):
-        if region == 'AU':
+    if vcode in ('ebay', 'ebayus', 'ebayau', 'ebay_au', 'ebay_us'):
+        if region == 'AU' or vcode.endswith('au'):
             return f"https://www.ebay.com.au/itm/{sku}"
         return f"https://www.ebay.com/itm/{sku}"
-    if vcode == 'heb' or vcode.startswith('heb_'):
+    if vcode in ('heb', 'hebus') or vcode.startswith('heb_'):
         pid = _heb_product_id_from_sku(sku)
         if pid:
             return f"https://www.heb.com/product-detail/{pid}"
@@ -128,15 +128,15 @@ def _vendor_url_from_vendor_id(vendor, vendor_id: str, region: str) -> str | Non
     if not vid:
         return None
     r = (region or 'USA').upper()
-    if vcode in ('amazon', 'amazonusa', 'amazonau', 'amazon_us', 'amazon_au'):
-        if r == 'AU':
+    if vcode in ('amazon', 'amazonus', 'amazonusa', 'amazonau', 'amazon_us', 'amazon_au'):
+        if r == 'AU' or vcode.endswith('au'):
             return f'https://www.amazon.com.au/dp/{vid}'
         return f'https://www.amazon.com/dp/{vid}'
-    if vcode in ('ebay', 'ebayau', 'ebay_au', 'ebay_us'):
-        if r == 'AU':
+    if vcode in ('ebay', 'ebayus', 'ebayau', 'ebay_au', 'ebay_us'):
+        if r == 'AU' or vcode.endswith('au'):
             return f'https://www.ebay.com.au/itm/{vid}'
         return f'https://www.ebay.com/itm/{vid}'
-    if vcode == 'heb' or vcode.startswith('heb_'):
+    if vcode in ('heb', 'hebus') or vcode.startswith('heb_'):
         if vid.isdigit() and 5 <= len(vid) <= 12:
             return f'https://www.heb.com/product-detail/{vid}'
     if vcode in ('costcoau', 'costco_au', 'costco-au'):

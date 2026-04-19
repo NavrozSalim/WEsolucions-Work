@@ -114,6 +114,122 @@ class StoreViewSet(viewsets.ModelViewSet):
         except Exception:
             pass  # Don't block delete if audit fails
 
+    @action(detail=True, methods=['post'], url_path='duplicate-vendor-settings')
+    def duplicate_vendor_settings(self, request, pk=None):
+        """Clone an existing per-vendor pricing+inventory setup to another vendor.
+
+        Body: ``{"from_vendor_id": "<uuid>", "to_vendor_id": "<uuid>"}``.
+        Copies ``StoreVendorPriceSettings`` (with every ``StorePriceRangeMargin``)
+        and ``StoreVendorInventorySettings`` onto ``to_vendor_id`` without touching
+        ``from_vendor_id``. Overwrites any existing settings for the target vendor
+        so the user can re-clone after tweaking.
+        """
+        from django.db import transaction
+        from stores.models import (
+            StorePriceRangeMargin,
+            StoreVendorInventorySettings,
+            StoreVendorPriceSettings,
+        )
+        from vendor.models import Vendor
+
+        store = self.get_object()
+        from_vendor_id = request.data.get('from_vendor_id')
+        to_vendor_id = request.data.get('to_vendor_id')
+        if not from_vendor_id or not to_vendor_id:
+            return Response(
+                {'detail': 'from_vendor_id and to_vendor_id are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if str(from_vendor_id) == str(to_vendor_id):
+            return Response(
+                {'detail': 'Source and target vendor must differ.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            from_vendor = Vendor.objects.get(id=from_vendor_id)
+            to_vendor = Vendor.objects.get(id=to_vendor_id)
+        except Vendor.DoesNotExist:
+            return Response({'detail': 'Vendor not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        src = StoreVendorPriceSettings.objects.filter(store=store, vendor=from_vendor).first()
+        if not src:
+            return Response(
+                {'detail': f'No price settings configured for vendor "{from_vendor.name}".'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        with transaction.atomic():
+            StoreVendorPriceSettings.objects.filter(store=store, vendor=to_vendor).delete()
+            target = StoreVendorPriceSettings.objects.create(
+                store=store,
+                vendor=to_vendor,
+                purchase_tax_percentage=src.purchase_tax_percentage,
+                marketplace_fees_percentage=src.marketplace_fees_percentage,
+                multiplier=src.multiplier,
+                optional_fee=src.optional_fee,
+                rounding_option=src.rounding_option,
+                continuous_update=src.continuous_update,
+            )
+            for m in src.range_margins.all():
+                StorePriceRangeMargin.objects.create(
+                    price_settings=target,
+                    price_range=m.price_range,
+                    margin_type=m.margin_type,
+                    margin_percentage=m.margin_percentage,
+                    minimum_margin_cents=m.minimum_margin_cents,
+                    dont_pay_discount_percentage=m.dont_pay_discount_percentage,
+                )
+
+            src_inv = StoreVendorInventorySettings.objects.filter(
+                store=store, vendor=from_vendor,
+            ).first()
+            if src_inv:
+                StoreVendorInventorySettings.objects.filter(
+                    store=store, vendor=to_vendor,
+                ).delete()
+                new_inv = StoreVendorInventorySettings.objects.create(
+                    store=store,
+                    vendor=to_vendor,
+                    rule_type=src_inv.rule_type,
+                    default_multiplier=src_inv.default_multiplier,
+                    default_value=src_inv.default_value,
+                    zero_if_low=src_inv.zero_if_low,
+                )
+                for rm in src_inv.range_multipliers.all():
+                    new_inv.range_multipliers.create(
+                        from_value=rm.from_value,
+                        to_value=rm.to_value,
+                        range_type=rm.range_type,
+                        multiplier=rm.multiplier,
+                        fixed_value=rm.fixed_value,
+                    )
+
+        try:
+            log_action(
+                request.user,
+                'vendor_settings_duplicated',
+                'store', store.id,
+                {
+                    'store': store.name,
+                    'from_vendor': from_vendor.code,
+                    'to_vendor': to_vendor.code,
+                },
+                request,
+            )
+        except Exception:
+            pass
+
+        return Response(
+            {
+                'store_id': str(store.id),
+                'from_vendor_id': str(from_vendor.id),
+                'to_vendor_id': str(to_vendor.id),
+                'tiers_copied': src.range_margins.count(),
+                'inventory_copied': bool(src_inv),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
     @action(detail=True, methods=['post'])
     def validate(self, request, pk=None):
         """Validate store API token / connection. Persists connection_status."""
