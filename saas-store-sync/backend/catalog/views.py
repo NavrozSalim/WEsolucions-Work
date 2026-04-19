@@ -117,11 +117,15 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def reset_sync_status(self, request, store_pk=None, pk=None):
-        """Reset failed_sync_count and sync_status to retry a 'needs_attention' product."""
+        """Reset failed_sync_count, sync_status and scrape_error so the next
+        catalog scrape retries this product cleanly. Does **not** trigger a
+        scrape on its own — the UI should follow up with the standard
+        'Scrape data' flow."""
         pm = self.get_object()
         pm.failed_sync_count = 0
         pm.sync_status = 'pending'
-        pm.save()
+        pm.scrape_error = None
+        pm.save(update_fields=['failed_sync_count', 'sync_status', 'scrape_error'])
         return Response({'status': 'reset', 'message': f'Ready to retry sync for {pm.product.vendor_sku}'})
 
     @action(detail=False, methods=['get'])

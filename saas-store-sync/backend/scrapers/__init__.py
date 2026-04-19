@@ -5,13 +5,16 @@ Routes vendor URLs to the correct scraper (Amazon US, Amazon AU, eBay) based on
 domain. Each scraper returns {"price": float|None, "stock": int|None} and may
 include "title" (str) when extracted — same shape for Amazon US and eBay.
 
-HEB and Costco AU are **not** scraped server-side. Their PDPs are protected by
-Akamai / Cloudflare Bot Management from datacenter IPs, so the source of truth
-for their pricing is the desktop runner that POSTs to
-``/api/v1/ingest/heb/`` or ``/api/v1/ingest/costco/``. The dispatcher
-short-circuits those URLs with a ``*_ingest_only`` sentinel; the catalog scrape
-task then falls back to the latest ``VendorPrice`` (written by the ingest
-endpoint) via ``resolve_vendor_price_for_listing``.
+HEB, Costco AU and Vevor AU are **not** scraped server-side. Their PDPs are
+protected by Akamai / Cloudflare Bot Management from datacenter IPs, so the
+source of truth for their pricing is the desktop runner (HEB, Costco) or the
+public S3 XLSX feed (Vevor AU). Those flows write directly to ``VendorPrice``
+via ``/api/v1/ingest/heb/``, ``/api/v1/ingest/costco/`` and
+``catalog.tasks.run_vevor_au_ingest``. The catalog scrape task detects these
+vendors (``_is_ingest_only_product``) and promotes the latest VendorPrice
+through the store's current pricing rules — it **never** uses a stale
+VendorPrice in place of a failed live scrape for Amazon / eBay / generic
+vendors.
 
 Usage in tasks:
     from scrapers import get_price_and_stock, close_amazon_session

@@ -52,7 +52,10 @@ class ProductMappingSerializer(serializers.ModelSerializer):
             'vendor_price',
             'margin_display',
         ]
-        read_only_fields = ('store_price', 'store_stock', 'sync_status', 'last_sync_time', 'last_scrape_time')
+        read_only_fields = (
+            'store_price', 'store_stock', 'sync_status',
+            'last_sync_time', 'last_scrape_time', 'scrape_error',
+        )
 
     def get_vendor_url(self, obj):
         try:

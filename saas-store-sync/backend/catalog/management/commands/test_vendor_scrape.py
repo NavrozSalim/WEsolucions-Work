@@ -42,8 +42,7 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.ERROR(
                     "No price returned. Common causes: blocked/captcha, wrong URL, "
-                    "unsupported domain, or page layout changed. "
-                    "For local dev, set DEMO_SCRAPE_FALLBACK=true only for demos."
+                    "unsupported domain, or page layout changed."
                 )
             )
         else:

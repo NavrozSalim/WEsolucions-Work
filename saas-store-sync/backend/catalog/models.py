@@ -43,6 +43,14 @@ class ProductMapping(models.Model):
         blank=True,
         help_text='Last successful scrape that applied vendor price/stock locally.',
     )
+    scrape_error = models.TextField(
+        null=True,
+        blank=True,
+        help_text=(
+            'Short reason the most recent scrape failed (e.g. "amazon_captcha", '
+            '"ebay_blocked", "no_vendor_url"). Cleared on the next success.'
+        ),
+    )
 
     class Meta:
         db_table = 'catalog_productmapping'

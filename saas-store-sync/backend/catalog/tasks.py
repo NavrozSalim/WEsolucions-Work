@@ -12,9 +12,49 @@ logger = logging.getLogger(__name__)
 from .models import CatalogUpload, CatalogUploadRow, CatalogSyncLog, ProductMapping
 from .reverb_catalog import listing_sku_lookup_order, store_is_reverb, vendor_is_ebay
 from .services import _normalize
-from .vendor_price_fallback import get_last_known_vendor_price_stock, resolve_vendor_price_for_listing
+from .vendor_price_fallback import get_last_known_vendor_price_stock
 from products.models import Product
 from vendor.models import Vendor
+
+
+def _is_ingest_only_product(product) -> bool:
+    """True when the vendor has no live server-side scraper (prices come from
+    the desktop runner or the Vevor S3 XLSX feed). Those flows write to
+    ``ProductMapping`` directly via the ingest endpoints, so the catalog
+    scrape task must never clobber them with a 'failed' flag just because
+    the HTTP dispatcher returned an ``*_ingest_only_result`` sentinel.
+    """
+    vendor = getattr(product, 'vendor', None)
+    code = (getattr(vendor, 'code', '') or '').lower()
+    if code in ('heb', 'hebus', 'costcoau', 'costco_au', 'costco-au', 'vevor', 'vevorau'):
+        return True
+    if code.startswith('heb_') or code.startswith('costco_') or code.startswith('vevor_'):
+        return True
+    return False
+
+
+def _fail_mapping(pm, code: str, message: str = '') -> None:
+    """Mark a ProductMapping as a strict scrape failure.
+
+    Clears ``store_price`` + ``store_stock`` (so nothing gets pushed to the
+    marketplace), stores a short reason in ``scrape_error``, escalates
+    ``sync_status`` to ``needs_attention`` after 3 consecutive failures.
+    """
+    pm.store_price = None
+    pm.store_stock = None
+    pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
+    pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
+    reason = (code or 'scrape_failed').strip() or 'scrape_failed'
+    if message:
+        reason = f'{reason}: {str(message)[:240]}'
+    pm.scrape_error = reason[:512]
+    pm.save(update_fields=[
+        'store_price',
+        'store_stock',
+        'failed_sync_count',
+        'sync_status',
+        'scrape_error',
+    ])
 
 
 def _resolve_vendor(vendor_name_raw: str) -> Vendor | None:
@@ -402,21 +442,27 @@ def run_catalog_scrape(upload_id: str):
                 run.rows_succeeded = succeeded
                 run.save(update_fields=['rows_processed', 'rows_succeeded'])
 
-            # HEB is ingest-only: live scrape is disabled. Promote the latest
-            # ingested VendorPrice (posted by the desktop runner) onto the
-            # mapping so clicking "Scrape data" surfaces the newest PC data.
-            if _is_heb_product(product):
+            # Ingest-only vendors (HEB, Costco AU, Vevor AU) have no live
+            # server-side scraper. The ingest endpoint — or the Vevor feed
+            # task — has already written store_price/store_stock straight
+            # to the ProductMapping. We just re-apply the *latest* VendorPrice
+            # through the store's current pricing rules so margin edits take
+            # effect without a fresh ingest. If there's no VendorPrice yet,
+            # skip silently (not a failure — the runner/feed will populate).
+            if _is_ingest_only_product(product):
                 from sync.tasks import _apply_latest_heb_ingest
                 if _apply_latest_heb_ingest(pm, product, store, now):
                     succeeded += 1
                     logger.info(
-                        "HEB catalog row updated from ingest cache (sku=%s)",
+                        "Ingest-only row refreshed (sku=%s vendor=%s)",
                         getattr(product, 'vendor_sku', '?'),
+                        (product.vendor.code if product.vendor else '?'),
                     )
                 else:
                     logger.info(
-                        "HEB catalog row skipped — no ingest data yet (sku=%s)",
+                        "Ingest-only row skipped — no ingest data yet (sku=%s vendor=%s)",
                         getattr(product, 'vendor_sku', '?'),
+                        (product.vendor.code if product.vendor else '?'),
                     )
                 continue
 
@@ -428,16 +474,10 @@ def run_catalog_scrape(upload_id: str):
                     row.row_number,
                     product.vendor_sku,
                 )
-                pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-                pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                pm.save(update_fields=['failed_sync_count', 'sync_status'])
+                _fail_mapping(pm, 'no_vendor_url', 'Product has no vendor URL or resolvable SKU.')
                 failed += 1
                 continue
 
-            price_from_fallback = False
-
-            import os
-            use_demo_fallback = os.getenv('DEMO_SCRAPE_FALLBACK', 'false').lower() in ('1', 'true', 'yes')
             scrape_title = ''
             logger.info(
                 "Scraping row %d: sku=%s vendor=%s region=%s url=%s",
@@ -448,6 +488,8 @@ def run_catalog_scrape(upload_id: str):
                 url[:120],
             )
 
+            vendor_price = None
+            vendor_stock = 0
             result = {}
             try:
                 result = get_price_and_stock(url, store.region or '', session)
@@ -458,75 +500,28 @@ def run_catalog_scrape(upload_id: str):
                     scrape_title = (result.get('title') or '').strip()[:500]
             except Exception as scrape_err:
                 logger.exception(
-                    "Scrape failed for %s (url=%s): %s", product.vendor_sku, url, scrape_err
+                    "Scrape failed for %s (url=%s): %s",
+                    product.vendor_sku, url, scrape_err,
                 )
-                if use_demo_fallback:
-                    vendor_price = 29.99
-                    vendor_stock = 5
-                else:
-                    p_cached, s_cached = get_last_known_vendor_price_stock(product)
-                    if p_cached is not None:
-                        vendor_price = p_cached
-                        vendor_stock = s_cached
-                        price_from_fallback = True
-                        scrape_title = ''
-                        logger.warning(
-                            "Scrape error for %s; using last known vendor price %.2f from DB",
-                            product.vendor_sku,
-                            p_cached,
-                        )
-                    else:
-                        pm.store_price = None
-                        pm.store_stock = None
-                        pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-                        pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                        pm.save(
-                            update_fields=[
-                                'store_price',
-                                'store_stock',
-                                'failed_sync_count',
-                                'sync_status',
-                            ]
-                        )
-                        failed += 1
-                        continue
+                _fail_mapping(pm, 'scrape_exception', str(scrape_err))
+                failed += 1
+                continue
 
-            # Demo fallback: when scraper returns None (Selenium not set up, Amazon blocks, etc.)
-            if vendor_price is None and use_demo_fallback:
-                vendor_price = 29.99
-                vendor_stock = vendor_stock if vendor_stock and vendor_stock > 0 else 5
-
-            vendor_price, vendor_stock, from_db = resolve_vendor_price_for_listing(
-                product, vendor_price, vendor_stock
-            )
-            price_from_fallback = price_from_fallback or from_db
-            if from_db:
-                logger.warning(
-                    "No live vendor price for %s; using cached price %.2f from DB for listing math",
-                    product.vendor_sku,
-                    vendor_price,
-                )
-
-            if vendor_price is None and not use_demo_fallback:
+            if vendor_price is None:
+                err_code = (
+                    result.get('error_code') if isinstance(result, dict) else None
+                ) or 'no_price'
+                err_msg = (
+                    result.get('error_message') if isinstance(result, dict) else ''
+                ) or ''
                 logger.warning(
                     "Catalog scrape no price sku=%s url=%s code=%s msg=%s",
                     product.vendor_sku,
                     url[:160],
-                    result.get("error_code") if isinstance(result, dict) else None,
-                    (result.get("error_message") or "")[:300] if isinstance(result, dict) else "",
+                    err_code,
+                    err_msg[:300],
                 )
-                pm.store_price = None
-                pm.store_stock = None
-                pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-                pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                pm.save(
-                    update_fields=[
-                        'store_price',
-                        'store_stock',
-                        'failed_sync_count',
-                        'sync_status',
-                    ]
-                )
+                _fail_mapping(pm, err_code, err_msg)
                 failed += 1
                 continue
 
@@ -553,19 +548,22 @@ def run_catalog_scrape(upload_id: str):
                     new_price = Decimal(str(vendor_price))
                 new_stock = _apply_inventory(vendor_stock, inventory)
 
-                if vendor_price is not None and not price_from_fallback:
-                    VendorPrice.objects.create(
-                        product=product,
-                        price=Decimal(str(vendor_price)),
-                        stock=int(vendor_stock),
-                    )
+                VendorPrice.objects.create(
+                    product=product,
+                    price=Decimal(str(vendor_price)),
+                    stock=int(vendor_stock),
+                )
 
                 pm.store_price = new_price
                 pm.store_stock = new_stock
                 pm.sync_status = 'scraped'
                 pm.failed_sync_count = 0
                 pm.last_scrape_time = now
-                save_fields = ['store_price', 'store_stock', 'sync_status', 'failed_sync_count', 'last_scrape_time']
+                pm.scrape_error = None
+                save_fields = [
+                    'store_price', 'store_stock', 'sync_status',
+                    'failed_sync_count', 'last_scrape_time', 'scrape_error',
+                ]
                 if scrape_title:
                     pm.title = scrape_title
                     save_fields.append('title')
@@ -576,18 +574,7 @@ def run_catalog_scrape(upload_id: str):
                     'Pricing/inventory apply failed for SKU %s (store=%s): %s',
                     product.vendor_sku, store.id, apply_err,
                 )
-                pm.store_price = None
-                pm.store_stock = None
-                pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-                pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                pm.save(
-                    update_fields=[
-                        'store_price',
-                        'store_stock',
-                        'failed_sync_count',
-                        'sync_status',
-                    ]
-                )
+                _fail_mapping(pm, 'pricing_apply_error', str(apply_err))
                 failed += 1
                 continue
     except Exception as loop_err:
@@ -673,36 +660,37 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
     now = timezone.now()
     error_summary = None
 
-    import os
-
-    use_demo_fallback = os.getenv('DEMO_SCRAPE_FALLBACK', 'false').lower() in ('1', 'true', 'yes')
-
     try:
         for pm in mappings:
             processed += 1
             product = pm.product
             if not product:
                 continue
-            # HEB is ingest-only (see run_catalog_scrape for rationale).
-            if _is_heb_product(product):
+            # Ingest-only vendors (HEB, Costco AU, Vevor AU) — see
+            # ``run_catalog_scrape`` for rationale.
+            if _is_ingest_only_product(product):
                 from sync.tasks import _apply_latest_heb_ingest
                 if _apply_latest_heb_ingest(pm, product, store, now):
                     succeeded += 1
                     logger.info(
-                        "HEB store-wide row updated from ingest cache (sku=%s)",
+                        "Ingest-only row (store-wide) refreshed (sku=%s vendor=%s)",
                         getattr(product, 'vendor_sku', '?'),
+                        (product.vendor.code if product.vendor else '?'),
                     )
                 else:
                     logger.info(
-                        "HEB store-wide row skipped — no ingest data yet (sku=%s)",
+                        "Ingest-only row (store-wide) skipped — no ingest data yet (sku=%s vendor=%s)",
                         getattr(product, 'vendor_sku', '?'),
+                        (product.vendor.code if product.vendor else '?'),
                     )
                 continue
-            price_from_fallback = False
             pricing = _get_pricing_for_vendor(store, product.vendor_id)
             inventory = _get_inventory_for_vendor(store, product.vendor_id)
 
             url = resolve_vendor_scrape_url(product, store, None)
+            vendor_price = None
+            vendor_stock = 0
+            scrape_title = ''
             result = {}
             try:
                 if not url:
@@ -718,79 +706,28 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
                     url[:120] if url else '',
                     e,
                 )
-                if use_demo_fallback:
-                    vendor_price = 29.99
-                    vendor_stock = 5
-                    scrape_title = ''
-                else:
-                    p_cached, s_cached = get_last_known_vendor_price_stock(product)
-                    if p_cached is not None:
-                        vendor_price = p_cached
-                        vendor_stock = s_cached
-                        price_from_fallback = True
-                        scrape_title = ''
-                        logger.warning(
-                            'Store scrape exception for %s; using last known vendor price %.2f from DB',
-                            product.vendor_sku,
-                            p_cached,
-                        )
-                    else:
-                        pm.store_price = None
-                        pm.store_stock = None
-                        pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-                        pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                        pm.save(
-                            update_fields=[
-                                'store_price',
-                                'store_stock',
-                                'failed_sync_count',
-                                'sync_status',
-                            ]
-                        )
-                        failed += 1
-                        error_summary = str(e) if not error_summary else error_summary
-                        continue
+                _fail_mapping(pm, 'scrape_exception', str(e))
+                failed += 1
+                error_summary = str(e) if not error_summary else error_summary
+                continue
 
-            if vendor_price is None and use_demo_fallback:
-                vendor_price = 29.99
-                vendor_stock = vendor_stock if vendor_stock and vendor_stock > 0 else 5
-
-            vendor_price, vendor_stock, from_db = resolve_vendor_price_for_listing(
-                product, vendor_price, vendor_stock
-            )
-            price_from_fallback = price_from_fallback or from_db
-            if from_db:
-                logger.warning(
-                    'No live vendor price for %s; using cached price %.2f from DB for listing math',
-                    product.vendor_sku,
-                    vendor_price,
-                )
-
-            if vendor_price is None and not use_demo_fallback:
+            if vendor_price is None:
+                err_code = (
+                    result.get('error_code') if isinstance(result, dict) else None
+                ) or 'no_price'
+                err_msg = (
+                    result.get('error_message') if isinstance(result, dict) else ''
+                ) or ''
                 logger.warning(
                     "Store-wide scrape no price sku=%s url=%s code=%s msg=%s",
                     product.vendor_sku,
                     (url or "")[:160],
-                    result.get("error_code") if isinstance(result, dict) else None,
-                    (result.get("error_message") or "")[:300] if isinstance(result, dict) else "",
+                    err_code,
+                    err_msg[:300],
                 )
-                pm.store_price = None
-                pm.store_stock = None
-                pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-                pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                pm.save(
-                    update_fields=[
-                        'store_price',
-                        'store_stock',
-                        'failed_sync_count',
-                        'sync_status',
-                    ]
-                )
+                _fail_mapping(pm, err_code, err_msg)
                 failed += 1
-                err_hint = (
-                    result.get("error_code") if isinstance(result, dict) else None
-                ) or "no_price"
-                error_summary = err_hint if not error_summary else error_summary
+                error_summary = err_code if not error_summary else error_summary
                 continue
 
             if vendor_stock is None or vendor_stock <= 0:
@@ -812,24 +749,25 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
                     new_price = Decimal(str(vendor_price))
                 new_stock = _apply_inventory(vendor_stock, inventory)
 
-                if not price_from_fallback:
-                    VendorPrice.objects.create(
-                        product=product,
-                        price=Decimal(str(vendor_price)),
-                        stock=vendor_stock or 0,
-                    )
+                VendorPrice.objects.create(
+                    product=product,
+                    price=Decimal(str(vendor_price)),
+                    stock=vendor_stock or 0,
+                )
 
                 pm.store_price = new_price
                 pm.store_stock = new_stock
                 pm.sync_status = 'scraped'
                 pm.failed_sync_count = 0
                 pm.last_scrape_time = now
+                pm.scrape_error = None
                 save_fields = [
                     'store_price',
                     'store_stock',
                     'sync_status',
                     'failed_sync_count',
                     'last_scrape_time',
+                    'scrape_error',
                 ]
                 if scrape_title:
                     pm.title = scrape_title
@@ -843,18 +781,7 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
                     store.id,
                     apply_err,
                 )
-                pm.store_price = None
-                pm.store_stock = None
-                pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-                pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                pm.save(
-                    update_fields=[
-                        'store_price',
-                        'store_stock',
-                        'failed_sync_count',
-                        'sync_status',
-                    ]
-                )
+                _fail_mapping(pm, 'pricing_apply_error', str(apply_err))
                 failed += 1
                 continue
     finally:

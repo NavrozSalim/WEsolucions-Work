@@ -9,10 +9,11 @@ const variants = {
     accent: 'bg-accent-50 dark:bg-accent-900/30 text-accent-700 dark:text-accent-400',
 };
 
-export default function Badge({ children, variant = 'default', className = '' }) {
+export default function Badge({ children, variant = 'default', className = '', ...rest }) {
     return (
         <span
             className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${variants[variant]} ${className}`}
+            {...rest}
         >
             {children}
         </span>

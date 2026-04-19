@@ -1755,21 +1755,33 @@ export default function Catalog() {
                                                 <td className="text-right font-mono text-sm align-middle whitespace-nowrap">{formatPrice(product.store_price)}</td>
                                                 <td className="text-right font-mono text-sm align-middle">{product.store_stock ?? '—'}</td>
                                                 <td className="text-center align-middle whitespace-nowrap">
-                                                    <Badge variant={syncStatusVariant[status] || syncStatusVariant.pending}>
+                                                    <Badge
+                                                        variant={syncStatusVariant[status] || syncStatusVariant.pending}
+                                                        title={
+                                                            product.scrape_error && (status === 'failed' || status === 'needs_attention')
+                                                                ? `Last scrape error: ${product.scrape_error}`
+                                                                : undefined
+                                                        }
+                                                    >
                                                         {syncStatusLabel[status] || syncStatusLabel.pending}
                                                     </Badge>
                                                 </td>
                                                 <td className="text-right text-sm text-slate-600 dark:text-slate-400 align-middle whitespace-nowrap">{margin}</td>
                                                 <td className="text-slate-500 dark:text-slate-400 text-xs align-middle whitespace-nowrap">{formatLastStatus(product)}</td>
                                                 <td className="text-right align-middle">
-                                                    {status === 'needs_attention' ? (
+                                                    {(status === 'needs_attention' || status === 'failed') ? (
                                                         <button
                                                             onClick={() => handleResetSyncStatus(product)}
                                                             disabled={resettingId === product.id}
+                                                            title={
+                                                                product.scrape_error
+                                                                    ? `Reason: ${product.scrape_error}. Click to clear the failure flag, then run Scrape data to retry.`
+                                                                    : 'Clear the failure flag, then run Scrape data to retry.'
+                                                            }
                                                             className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-accent-600 dark:text-accent-400 hover:bg-accent-50 dark:hover:bg-accent-900/20 transition"
                                                         >
                                                             <RotateCcw className={`h-3.5 w-3.5 ${resettingId === product.id ? 'animate-spin' : ''}`} />
-                                                            Resync
+                                                            {status === 'failed' ? 'Retry' : 'Resync'}
                                                         </button>
                                                     ) : (
                                                         '—'

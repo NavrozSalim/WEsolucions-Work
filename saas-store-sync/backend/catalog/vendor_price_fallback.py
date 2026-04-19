@@ -1,7 +1,12 @@
-"""
-Reuse the latest VendorPrice row when a live scrape returns no price or errors.
+"""Latest-VendorPrice lookup used to promote ingest-only feeds
+(HEB desktop runner, Costco AU desktop runner, Vevor AU S3 feed) onto a
+``ProductMapping`` through the store's current pricing rules.
 
-Avoids empty posted price (store_price) while the UI still shows vendor_price from history.
+This module **must not** be used to hide a failed live scrape: the
+catalog/sync tasks have been rewritten to clear ``store_price`` and mark
+the mapping ``failed`` when a live scraper returns no data, rather than
+silently pushing a stale VendorPrice. See
+``catalog.tasks._fail_mapping`` and ``sync.tasks._fail_mapping``.
 """
 from __future__ import annotations
 
@@ -15,9 +20,13 @@ from vendor.models import VendorPrice
 
 
 def get_last_known_vendor_price_stock(product) -> Tuple[Optional[float], int]:
-    """
-    Latest VendorPrice with non-null price, if within VENDOR_PRICE_FALLBACK_MAX_AGE_DAYS (default 14).
-    Returns (None, 0) if none or too old. max_age 0 or negative disables the age check.
+    """Latest ``VendorPrice`` with a non-null price, if within
+    ``VENDOR_PRICE_FALLBACK_MAX_AGE_DAYS`` (default 14 days).
+
+    Returns ``(None, 0)`` when no row is found or when the most recent row
+    is older than the configured cutoff. A cutoff of ``0`` or a negative
+    value disables the age check (useful for Vevor AU whose feed only
+    refreshes a few times a day).
     """
     try:
         max_age_days = int(os.getenv("VENDOR_PRICE_FALLBACK_MAX_AGE_DAYS", "14"))
@@ -35,23 +44,3 @@ def get_last_known_vendor_price_stock(product) -> Tuple[Optional[float], int]:
         if timezone.now() - vp.scraped_at > timedelta(days=max_age_days):
             return None, 0
     return float(vp.price), int(vp.stock or 0)
-
-
-def resolve_vendor_price_for_listing(
-    product,
-    scraped_price,
-    scraped_stock,
-) -> Tuple[Optional[float], int, bool]:
-    """
-    If scraped_price is set, normalize stock and return (price, stock, used_fallback=False).
-    Else try DB history; return (price, stock, used_fallback=True) or (None, 0, False).
-    """
-    if scraped_price is not None:
-        s = 0 if scraped_stock is None else int(scraped_stock)
-        if s < 0:
-            s = 0
-        return float(scraped_price), s, False
-    p, s = get_last_known_vendor_price_stock(product)
-    if p is not None:
-        return p, s, True
-    return None, 0, False
