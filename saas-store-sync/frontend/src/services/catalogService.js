@@ -98,7 +98,7 @@ export const downloadCatalogUploadErrors = (storeId, uploadId) =>
         window.URL.revokeObjectURL(url);
     });
 
-/** Store-scoped upload. Creates CatalogUpload + rows. Call triggerCatalogSync after to create ProductMappings. */
+/** Store-scoped upload. Creates CatalogUpload + rows. Run Sync catalog (triggerCatalogSync) separately to create ProductMappings. */
 export const uploadCatalog = (file, storeId) => {
     const formData = new FormData();
     formData.append('file', file);

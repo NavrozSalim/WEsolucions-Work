@@ -234,7 +234,7 @@ export default function UpdateWithFileModal({
                             variant="primary"
                             disabled={!storeId || !file || loading}
                         >
-                            {loading ? 'Uploading & Syncing…' : 'Upload & Sync'}
+                            {loading ? 'Uploading…' : 'Upload Catalog'}
                         </Button>
                     </div>
                 </form>

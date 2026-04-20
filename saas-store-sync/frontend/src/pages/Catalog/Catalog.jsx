@@ -147,7 +147,7 @@ function UploadActionsDropdown({ upload, storeId, syncing, scraping, syncingUplo
 
     if (['pending', 'validated'].includes(u.status)) {
         items.push({
-            label: 'Sync',
+            label: 'Sync catalog',
             icon: <RefreshCw className={`h-4 w-4 shrink-0 ${syncing && syncingUploadId === u.id ? 'animate-spin' : ''}`} />,
             onClick: () => onSync(u.id),
             disabled: syncing,
@@ -1101,43 +1101,26 @@ export default function Catalog() {
             return;
         }
         setUploading(true);
-        setFlowStatus('syncing');
-        setMessage('Uploading file and syncing products…');
-        startProgress();
+        setFlowStatus('');
+        setMessage('Uploading catalog…');
         uploadCatalog(file, selectedStore)
-            .then((res) => {
+            .then(() => {
                 setUploadModalOpen(false);
                 setModalFile(null);
                 setModalTemplate('standard');
-                getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
-                const latestUploadId = res.data?.upload_id || null;
-                return triggerCatalogSync(selectedStore, false, latestUploadId, { autoScrape: true });
+                return getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
             })
-            .then((syncRes) => {
-                const added = syncRes?.data?.added ?? 0;
-                const scrape = syncRes?.data?.scrape;
-                let scrapeMsg = '';
-                if (scrape && !scrape.error && !scrape.skipped) {
-                    const ok = scrape.rows_succeeded ?? 0;
-                    const proc = scrape.rows_processed ?? 0;
-                    scrapeMsg = ` Vendor prices scraped: ${ok}/${proc} row(s).`;
-                } else if (scrape?.skipped) {
-                    scrapeMsg = ' (Scrape skipped.)';
-                } else if (scrape?.error) {
-                    scrapeMsg = ` Scrape warning: ${scrape.error}`;
-                }
-                finishProgress(true);
-                setFlowStatus('success');
+            .then(() => {
+                setFlowStatus('ready to sync');
                 setMessage(
-                    (added > 0 ? `Upload & sync complete. ${added} product(s) created.` : 'Upload & sync complete.') + scrapeMsg,
+                    'Catalog uploaded. Open Upload history and click Sync catalog to create products. '
+                    + 'Vendor prices update when you click Start Scraping or when your schedule runs.',
                 );
-                getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
             })
             .catch((err) => {
-                finishProgress(false);
                 setFlowStatus('failed');
-                setMessage(formatCatalogError(err) || 'Upload or sync failed');
+                setMessage(formatCatalogError(err) || 'Upload failed');
             })
             .finally(() => setUploading(false));
     };
@@ -1147,7 +1130,7 @@ export default function Catalog() {
         setSyncing(true);
         setFlowStatus('syncing');
         setSyncingUploadId(uploadId);
-        setMessage('Syncing with marketplace and fetching vendor prices…');
+        setMessage('Syncing catalog — creating products (vendor scrape runs only via Start Scraping or schedule)…');
         startProgress();
 
         const MAX_RETRIES = 3;
@@ -1155,7 +1138,7 @@ export default function Catalog() {
 
         const runSync = () => {
             attempt++;
-            return triggerCatalogSync(selectedStore, false, uploadId, { autoScrape: true })
+            return triggerCatalogSync(selectedStore, false, uploadId, { autoScrape: false })
                 .then((res) => {
                 const added = res?.data?.added ?? 0;
                 const scrape = res?.data?.scrape;
@@ -1458,7 +1441,7 @@ export default function Catalog() {
         <div className="space-y-6">
             <PageHeader
                 title="Catalog"
-                description="Pick a store, upload a file, and sync listings to your marketplace. Use All stores to choose a different store."
+                description="Pick a store, upload a catalog file, run Sync catalog to create products, then Start Scraping or use your schedule for vendor prices."
             />
 
             {(flowStatus || message) && flowStatus !== 'syncing' && flowStatus !== 'scraping' && (
@@ -1551,7 +1534,7 @@ export default function Catalog() {
                                 disabled={uploading}
                             >
                                 <UploadCloud className="h-4 w-4 mr-1.5" />
-                                Upload &amp; Sync
+                                Upload Catalog
                             </Button>
                         </div>
                     </div>
@@ -1626,7 +1609,7 @@ export default function Catalog() {
                             <EmptyState
                                 icon={FileText}
                                 title="No uploads yet"
-                                description="Upload a catalog file with Upload & Sync in the bar above."
+                                description="Upload a catalog file with Upload Catalog in the bar above, then Sync catalog in this list."
                                 action={
                                     <Button
                                         variant="primary"
@@ -1635,7 +1618,7 @@ export default function Catalog() {
                                         disabled={!selectedStore || uploading}
                                     >
                                         <UploadCloud className="h-4 w-4 mr-1.5" />
-                                        Upload &amp; Sync
+                                        Upload Catalog
                                     </Button>
                                 }
                             />
@@ -1703,11 +1686,11 @@ export default function Catalog() {
                     {hasPendingUpload && flowStatus === 'ready to sync' && (
                         <div className="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 space-y-2">
                             <p className="text-xs text-slate-500 dark:text-slate-400">
-                                Next step creates products from your file, then automatically scrapes vendor URLs for price and stock (may take a minute for Amazon).
+                                Next step creates products from your file. Use Start Scraping (or your schedule) when you want vendor prices and stock.
                             </p>
                             <Button variant="primary" onClick={handleSyncFromModal} disabled={syncing}>
                                 <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
-                                Sync &amp; Start Scraping
+                                Sync catalog
                             </Button>
                         </div>
                     )}
@@ -1887,7 +1870,7 @@ export default function Catalog() {
                             <EmptyState
                                 icon={Package}
                                 title="No products"
-                                description="Upload a catalog file and run Sync to create products."
+                                description="Upload a catalog, run Sync catalog, then Start Scraping for vendor data."
                                 action={
                                     <Button variant="secondary" size="sm" onClick={handleBackToHistory}>
                                         View upload history
