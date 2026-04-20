@@ -908,16 +908,22 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
         if not product:
             continue
         raw_sku = (product.vendor_sku or '').strip()
+        if not raw_sku:
+            missing += 1
+            _fail_mapping(pm, 'vevor_feed_sku_missing', 'Missing vendor SKU')
+            continue
         entry = lookup_sku(lookup, lookup_compact, raw_sku)
         if not entry:
             missing += 1
+            _fail_mapping(pm, 'vevor_feed_sku_missing', 'SKU not in Vevor AU XLSX feed')
             continue
         matched += 1
         try:
             price = Decimal(str(entry['Posted Price'] or 0))
             stock_val = int(entry.get('Posted Inventory') or 0)
-        except Exception:
+        except Exception as parse_err:
             missing += 1
+            _fail_mapping(pm, 'vevor_feed_row_invalid', str(parse_err)[:240])
             continue
 
         VendorPrice.objects.create(product=product, price=price, stock=stock_val)
@@ -941,9 +947,10 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
             pm.sync_status = 'scraped'
             pm.failed_sync_count = 0
             pm.last_scrape_time = now
+            pm.scrape_error = None
             pm.save(update_fields=[
                 'store_price', 'store_stock', 'sync_status',
-                'failed_sync_count', 'last_scrape_time',
+                'failed_sync_count', 'last_scrape_time', 'scrape_error',
             ])
             updated_rows += 1
         except Exception as apply_err:
