@@ -1674,7 +1674,11 @@ export default function Catalog() {
                                             <td className="text-sm align-middle">
                                                 {u.marketplace || '—'}
                                             </td>
-                                            <td className="text-right text-sm tabular-nums align-middle whitespace-nowrap">{u.processed_rows ?? u.total_rows ?? '—'}</td>
+                                            <td className="text-right text-sm tabular-nums align-middle whitespace-nowrap">
+                                                {u.status === 'processing' && (u.total_rows ?? 0) > 0
+                                                    ? `${u.processed_rows} / ${u.total_rows}`
+                                                    : (u.total_rows ?? '—')}
+                                            </td>
                                             <td className="text-sm text-slate-600 dark:text-slate-400 align-middle whitespace-nowrap" title={u.reason || undefined}>
                                                 {u.reason || '—'}
                                             </td>
