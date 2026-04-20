@@ -51,7 +51,7 @@ class KoganSheetConfig:
     tab_name: str
     sku_col_name: str = "PRODUCT_SKU"
     stock_col_name: str = "STOCK"
-    price_col_name: str = "PRICE"
+    price_col_name: str = "kogan_first_price"
 
 
 class KoganAdapter(BaseStoreAdapter):
@@ -89,7 +89,10 @@ class KoganAdapter(BaseStoreAdapter):
             tab_name=tab,
             sku_col_name=(getattr(self.store, "kogan_sku_column", None) or "PRODUCT_SKU").strip() or "PRODUCT_SKU",
             stock_col_name=(getattr(self.store, "kogan_stock_column", None) or "STOCK").strip() or "STOCK",
-            price_col_name=(getattr(self.store, "kogan_price_column", None) or "PRICE").strip() or "PRICE",
+            price_col_name=(
+                getattr(self.store, "kogan_first_price_column", None) or "kogan_first_price"
+            ).strip()
+            or "kogan_first_price",
         )
 
     def _get_service(self):
