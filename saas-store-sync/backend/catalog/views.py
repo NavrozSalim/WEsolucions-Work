@@ -9,6 +9,7 @@ from django.conf import settings
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.db.models import Q
 
 from catalog.models import ProductMapping, CatalogUpload, CatalogUploadRow, CatalogSyncLog, ReverbUpdateLog, CatalogActivityLog, HebScrapeJob
 from catalog.serializers import ProductMappingSerializer, CatalogActivityLogSerializer
@@ -332,13 +333,23 @@ class CatalogUploadDeleteView(APIView):
     def delete(self, request, store_pk, upload_id):
         store = get_object_or_404(Store, id=store_pk, user=request.user)
         upload = get_object_or_404(CatalogUpload, id=upload_id, store=store)
-        rows = list(upload.rows.select_related('product_mapping').all())
-        pm_ids = [r.product_mapping_id for r in rows if r.product_mapping_id]
+        rows = list(upload.rows.select_related('product_mapping', 'product').all())
+        pm_ids = {r.product_mapping_id for r in rows if r.product_mapping_id}
+        product_ids = {r.product_id for r in rows if r.product_id}
+        mapping_filter = Q()
+        if pm_ids:
+            mapping_filter |= Q(pk__in=pm_ids)
+        if product_ids:
+            mapping_filter |= Q(product_id__in=product_ids)
+        deleted_count = 0
+        if pm_ids or product_ids:
+            qs = ProductMapping.objects.filter(store=store).filter(mapping_filter)
+            deleted_count = qs.count()
+            qs.delete()
         upload.delete()
-        ProductMapping.objects.filter(id__in=pm_ids, store=store).delete()
         log_action(
             request.user, 'catalog_upload_deleted', 'catalog_upload', str(upload_id),
-            metadata={'store_id': str(store.id), 'deleted_mappings': len(pm_ids)}, request=request
+            metadata={'store_id': str(store.id), 'deleted_mappings': deleted_count}, request=request
         )
         return Response({"message": "Upload and linked product mappings deleted."}, status=status.HTTP_200_OK)
 

@@ -1440,6 +1440,22 @@ export default function Catalog() {
                 setMessage('Upload and linked products deleted.');
                 getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
+                if (selectedStore) {
+                    productsFetchGenRef.current += 1;
+                    const gen = productsFetchGenRef.current;
+                    getProducts(selectedStore, {
+                        page: currentPage,
+                        pageSize: PRODUCTS_PER_PAGE,
+                        q: debouncedSearch,
+                        status: statusFilter,
+                    })
+                        .then((res) => {
+                            if (gen !== productsFetchGenRef.current) return;
+                            setProducts(Array.isArray(res.data) ? res.data : []);
+                            setTotalProductCount(Number.isFinite(res.count) ? res.count : 0);
+                        })
+                        .catch(() => { /* next navigation will refetch */ });
+                }
             })
             .catch((err) => setMessage(formatCatalogError(err) || 'Failed to delete upload'))
             .finally(() => setDeletingUploadId(null));
