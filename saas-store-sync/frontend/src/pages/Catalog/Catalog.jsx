@@ -1136,7 +1136,7 @@ export default function Catalog() {
             .then(() => {
                 setFlowStatus('ready to sync');
                 setMessage(
-                    'Catalog uploaded. Open Upload history and click Sync catalog to create products. '
+                    'Catalog uploaded. Open Upload history and click Ready to Upload to create products. '
                     + 'Vendor prices update when you click Start Scraping or when your schedule runs.',
                 );
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
@@ -1464,7 +1464,7 @@ export default function Catalog() {
         <div className="space-y-6">
             <PageHeader
                 title="Catalog"
-                description="Pick a store, upload a catalog file, run Sync catalog to create products, then Start Scraping or use your schedule for vendor prices."
+                description="Pick a store, upload a catalog file, use Ready to Upload (upload history) to create products, then Start Scraping or use your schedule for vendor prices."
             />
 
             {(flowStatus || message) && flowStatus !== 'syncing' && flowStatus !== 'scraping' && (
@@ -1632,7 +1632,7 @@ export default function Catalog() {
                             <EmptyState
                                 icon={FileText}
                                 title="No uploads yet"
-                                description="Upload a catalog file with Upload Catalog in the bar above, then Sync catalog in this list."
+                                description="Upload a catalog file with Upload Catalog in the bar above, then Ready to Upload below when it appears."
                                 action={
                                     <Button
                                         variant="primary"
@@ -1713,11 +1713,11 @@ export default function Catalog() {
                     {hasPendingUpload && flowStatus === 'ready to sync' && (
                         <div className="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 space-y-2">
                             <p className="text-xs text-slate-500 dark:text-slate-400">
-                                Next step creates products from your file. Use Start Scraping (or your schedule) when you want vendor prices and stock.
+                                Ready to Upload creates products from your file. Use Start Scraping (or your schedule) when you want vendor prices and stock.
                             </p>
                             <Button variant="primary" onClick={handleSyncFromModal} disabled={syncing}>
                                 <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
-                                Sync catalog
+                                Ready to Upload
                             </Button>
                         </div>
                     )}
@@ -1899,7 +1899,7 @@ export default function Catalog() {
                             <EmptyState
                                 icon={Package}
                                 title="No products"
-                                description="Upload a catalog, run Sync catalog, then Start Scraping for vendor data."
+                                description="Upload a catalog, use Ready to Upload in upload history, then Start Scraping for vendor data."
                                 action={
                                     <Button variant="secondary" size="sm" onClick={handleBackToHistory}>
                                         View upload history

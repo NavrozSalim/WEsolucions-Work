@@ -114,6 +114,9 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
 
     const usedPriceVendorIds = form.vendor_price_settings.map((v) => v.vendor_id).filter(Boolean);
     const usedInventoryVendorIds = form.vendor_inventory_settings.map((v) => v.vendor_id).filter(Boolean);
+    const priceVendorIdSet = new Set(usedPriceVendorIds.map((id) => String(id)));
+    const inventoryVendorIdSet = new Set(usedInventoryVendorIds.map((id) => String(id)));
+    const priceVendorsMissingInventory = [...priceVendorIdSet].filter((id) => !inventoryVendorIdSet.has(id));
 
     const addVendorPrice = (vendorId) => {
         const vid = vendorId || selectedVendorPrice;
@@ -332,6 +335,14 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const validateStep3 = () => {
         const errs = [];
         if (!form.vendor_inventory_settings.some((vi) => vi.vendor_id)) errs.push('Add at least one vendor with inventory ranges');
+        if (priceVendorsMissingInventory.length) {
+            const labels = priceVendorsMissingInventory.map(
+                (id) => vendors.find((v) => String(v.id) === id)?.name || id,
+            );
+            errs.push(
+                `Every vendor on the Price step must also appear under Inventory. Add or restore: ${labels.join(', ')}`,
+            );
+        }
         return errs;
     };
 
@@ -720,6 +731,13 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                     {/* Step 3: Inventory */}
                     {step === 3 && (
                         <div className="space-y-3 w-full">
+                            {priceVendorsMissingInventory.length > 0 && (
+                                <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50/90 dark:bg-amber-950/40 px-4 py-3 text-sm text-amber-900 dark:text-amber-100">
+                                    <span className="font-medium">Price vendors need inventory: </span>
+                                    {priceVendorsMissingInventory.map((id) => vendors.find((v) => String(v.id) === id)?.name || id).join(', ')}
+                                    . Add each one below (or go back to Price and remove unused vendors).
+                                </div>
+                            )}
                             <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/40 p-4 space-y-3">
                                 <p className="text-sm text-slate-600 dark:text-slate-300">Add at least one vendor with inventory ranges. Default range: 0 – 999999999.</p>
                                 <div className="flex flex-col sm:flex-row gap-3 sm:items-end">
@@ -791,7 +809,18 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                 </div>
                 <div className="flex-shrink-0 flex justify-between items-center border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-8 py-5">
                     <Button variant="ghost" onClick={() => setStep((s) => s - 1)} disabled={step === 1}>Back</Button>
-                    <Button variant="primary" onClick={handleSubmit} disabled={loading || (step === 2 && !form.vendor_price_settings.some((vp) => vp.vendor_id)) || (step === 3 && !form.vendor_inventory_settings.some((vi) => vi.vendor_id))}>
+                    <Button
+                        variant="primary"
+                        onClick={handleSubmit}
+                        disabled={
+                            loading
+                            || (step === 2 && !form.vendor_price_settings.some((vp) => vp.vendor_id))
+                            || (step === 3 && (
+                                !form.vendor_inventory_settings.some((vi) => vi.vendor_id)
+                                || priceVendorsMissingInventory.length > 0
+                            ))
+                        }
+                    >
                         {loading ? 'Saving…' : step < 3 ? 'Continue' : 'Save Settings'}
                     </Button>
                 </div>

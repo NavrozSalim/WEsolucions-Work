@@ -189,6 +189,7 @@ class StoreSerializer(serializers.ModelSerializer):
                     'name': 'A store with this name and marketplace already exists.',
                 }) from None
             raise
+        self._validate_inventory_covers_price_vendors(price_settings_data, inventory_settings_data)
         self._save_vendor_price_settings(store, price_settings_data, Vendor)
         self._save_vendor_inventory_settings(store, inventory_settings_data, Vendor)
         self._save_sync_schedule(store, req.get('sync_schedule'), SyncSchedule)
@@ -247,9 +248,28 @@ class StoreSerializer(serializers.ModelSerializer):
                     'name': 'A store with this name and marketplace already exists.',
                 }) from None
             raise
-        if 'vendor_price_settings' in req:
+        price_in = 'vendor_price_settings' in req
+        inv_in = 'vendor_inventory_settings' in req
+        if price_in and inv_in:
+            self._validate_inventory_covers_price_vendors(
+                req['vendor_price_settings'], req['vendor_inventory_settings'],
+            )
+        elif inv_in and not price_in:
+            price_snapshot = [
+                {'vendor_id': str(x.vendor_id)}
+                for x in instance.vendor_price_settings.all()
+            ]
+            self._validate_inventory_covers_price_vendors(price_snapshot, req['vendor_inventory_settings'])
+        elif price_in and not inv_in:
+            inv_snapshot = [
+                {'vendor_id': str(x.vendor_id)}
+                for x in instance.vendor_inventory_settings.all()
+            ]
+            self._validate_inventory_covers_price_vendors(req['vendor_price_settings'], inv_snapshot)
+
+        if price_in:
             self._save_vendor_price_settings(instance, req['vendor_price_settings'], Vendor)
-        if 'vendor_inventory_settings' in req:
+        if inv_in:
             self._save_vendor_inventory_settings(instance, req['vendor_inventory_settings'], Vendor)
         if 'sync_schedule' in req:
             self._save_sync_schedule(instance, req['sync_schedule'], SyncSchedule)
@@ -335,6 +355,33 @@ class StoreSerializer(serializers.ModelSerializer):
                 raise ValidationError({
                     'vendor_price_settings': f'The last price tier "To" must be {max_v}.',
                 })
+
+    @staticmethod
+    def _validate_inventory_covers_price_vendors(price_data, inventory_data):
+        """Every vendor with price settings must have inventory settings (same request or DB)."""
+        if not isinstance(price_data, list):
+            price_data = []
+        if not isinstance(inventory_data, list):
+            inventory_data = []
+        price_vendors = set()
+        for item in price_data:
+            vid = item.get('vendor_id') or item.get('vendor')
+            if vid:
+                price_vendors.add(str(vid))
+        inv_vendors = set()
+        for item in inventory_data:
+            vid = item.get('vendor_id') or item.get('vendor')
+            if vid:
+                inv_vendors.add(str(vid))
+        missing = price_vendors - inv_vendors
+        if not missing:
+            return
+        raise ValidationError({
+            'vendor_inventory_settings': (
+                'Each vendor configured under Price must also have Inventory ranges. '
+                f'Missing vendor id(s): {", ".join(sorted(missing))}.'
+            ),
+        })
 
     def _save_vendor_price_settings(self, store, data, Vendor):
         if not isinstance(data, list):
