@@ -221,6 +221,23 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
         }));
     };
     const removeVendorInventory = (i) => setForm((f) => ({ ...f, vendor_inventory_settings: f.vendor_inventory_settings.filter((_, idx) => idx !== i) }));
+    const duplicateVendorInventory = (i) => setForm((f) => {
+        const src = f.vendor_inventory_settings[i];
+        if (!src) return f;
+        const cloned = {
+            vendor_id: '',
+            range_multipliers: (src.range_multipliers || []).map((rm) => ({
+                from_value: rm.from_value ?? 0,
+                to_value: rm.to_value !== null && rm.to_value !== undefined ? rm.to_value : '',
+                range_type: rm.range_type ?? 'multiplier',
+                multiplier: rm.multiplier ?? 0.5,
+                fixed_value: rm.fixed_value ?? null,
+            })),
+        };
+        const next = [...f.vendor_inventory_settings];
+        next.splice(i + 1, 0, cloned);
+        return { ...f, vendor_inventory_settings: next };
+    });
     const updateVendorInventory = (i, field, value) => {
         setForm((f) => {
             const next = [...f.vendor_inventory_settings];
@@ -771,6 +788,16 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                                 className="w-full max-w-md"
                                         />
                                         </div>
+                                        <Button
+                                            type="button"
+                                            variant="secondary"
+                                            size="sm"
+                                            className="shrink-0"
+                                            onClick={() => duplicateVendorInventory(i)}
+                                            title="Clone these inventory ranges for another vendor"
+                                        >
+                                            <Copy className="h-4 w-4 mr-1.5 inline" aria-hidden /> Duplicate
+                                        </Button>
                                         <Button type="button" variant="danger" size="sm" className="shrink-0" onClick={() => removeVendorInventory(i)}>
                                             <Trash2 className="h-4 w-4 mr-1.5 inline" aria-hidden /> Delete vendor
                                         </Button>
