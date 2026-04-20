@@ -4,8 +4,6 @@ from .views import health, ready, metrics
 
 urlpatterns = [
     path('health/', health),
-    # Alias for monitors/scripts that assume health lives under the API prefix.
-    path('api/v1/health/', health),
     path('ready/', ready),
     path('metrics/', metrics),
     path('admin/', admin.site.urls),
