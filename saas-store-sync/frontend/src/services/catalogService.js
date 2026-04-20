@@ -3,24 +3,39 @@ import api from './api';
 export const getCatalogStores = (marketplaceId) =>
     api.get(marketplaceId ? `/catalog/stores/?marketplace_id=${marketplaceId}` : '/catalog/stores/');
 
-/** Fetch all product pages (server uses pagination). */
-export const getProducts = async (storeId) => {
-    const pageSize = 200;
-    let page = 1;
-    const all = [];
-    let hasNext = true;
-    while (hasNext) {
-        const res = await api.get(`/stores/${storeId}/products/`, {
-            params: { page, page_size: pageSize },
-        });
-        const d = res.data;
-        const chunk = Array.isArray(d?.results) ? d.results : Array.isArray(d) ? d : [];
-        all.push(...chunk);
-        hasNext = Boolean(d?.next);
-        page += 1;
-        if (page > 200) break;
-    }
-    return { data: all };
+/** Fetch a single page of product mappings.
+ *
+ * Server pagination lives on the ProductMappingViewSet; we deliberately
+ * surface one page at a time so the catalog UI renders immediately even
+ * on stores with tens of thousands of rows. Search (``q``) and sync
+ * status (``status``) are pushed down to SQL, not filtered client-side.
+ *
+ * Returns ``{ data, count, page, pageSize, totalPages, next, previous }``.
+ */
+export const getProducts = async (storeId, options = {}) => {
+    const page = Math.max(1, options.page || 1);
+    const pageSize = Math.max(1, Math.min(500, options.pageSize || 50));
+    const params = { page, page_size: pageSize };
+    const q = (options.q || '').trim();
+    if (q) params.q = q;
+    const status = (options.status || '').trim();
+    if (status) params.sync_status = status;
+    const config = { params };
+    if (options.signal) config.signal = options.signal;
+
+    const res = await api.get(`/stores/${storeId}/products/`, config);
+    const d = res.data;
+    const results = Array.isArray(d?.results) ? d.results : Array.isArray(d) ? d : [];
+    const count = Number.isFinite(d?.count) ? d.count : results.length;
+    return {
+        data: results,
+        count,
+        page,
+        pageSize,
+        totalPages: Math.max(1, Math.ceil(count / pageSize)),
+        next: d?.next || null,
+        previous: d?.previous || null,
+    };
 };
 
 export const getCatalogActivityLogs = (storeId) =>

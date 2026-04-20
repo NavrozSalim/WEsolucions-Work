@@ -126,8 +126,32 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
             ),
         )
         if store_id:
-            return qs.filter(store_id=store_id, store__user=self.request.user)
-        return qs.filter(store__user=self.request.user)
+            qs = qs.filter(store_id=store_id, store__user=self.request.user)
+        else:
+            qs = qs.filter(store__user=self.request.user)
+
+        # Server-side filters so the catalog page doesn't have to load every
+        # row just to search / filter. Used by the frontend when the user
+        # types in the search box or picks a sync-status pill.
+        params = getattr(self.request, 'query_params', None) or {}
+        status_filter = (params.get('sync_status') or '').strip()
+        if status_filter:
+            qs = qs.filter(sync_status=status_filter)
+
+        search = (params.get('q') or params.get('search') or '').strip()
+        if search:
+            qs = qs.filter(
+                Q(product__vendor_sku__icontains=search)
+                | Q(marketplace_child_sku__icontains=search)
+                | Q(marketplace_parent_sku__icontains=search)
+                | Q(title__icontains=search)
+                | Q(product__vendor__name__icontains=search)
+                | Q(product__vendor__code__icontains=search)
+            )
+
+        # Deterministic ordering so client-side pagination never shows the
+        # same row twice across pages.
+        return qs.order_by('product__vendor_sku', 'id')
 
     @action(detail=True, methods=['post'])
     def reset_sync_status(self, request, store_pk=None, pk=None):

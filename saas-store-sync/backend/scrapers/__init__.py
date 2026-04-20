@@ -8,13 +8,13 @@ include "title" (str) when extracted — same shape for Amazon US and eBay.
 HEB, Costco AU and Vevor AU are **not** scraped server-side. Their PDPs are
 protected by Akamai / Cloudflare Bot Management from datacenter IPs, so the
 source of truth for their pricing is the desktop runner (HEB, Costco) or the
-public S3 XLSX feed (Vevor AU). Those flows write directly to ``VendorPrice``
-via ``/api/v1/ingest/heb/``, ``/api/v1/ingest/costco/`` and
-``catalog.tasks.run_vevor_au_ingest``. The catalog scrape task detects these
-vendors (``_is_ingest_only_product``) and promotes the latest VendorPrice
-through the store's current pricing rules — it **never** uses a stale
-VendorPrice in place of a failed live scrape for Amazon / eBay / generic
-vendors.
+public S3 XLSX feed (Vevor AU). Those flows write directly to both
+``VendorPrice`` **and** ``ProductMapping`` (store_price / store_stock /
+last_scrape_time) via ``/api/v1/ingest/heb/``, ``/api/v1/ingest/costco/`` and
+``catalog.tasks.run_vevor_au_ingest``. The catalog scrape and store-sync
+tasks detect these vendors (``_is_ingest_only_product``) and skip them
+entirely — they never re-apply an older VendorPrice row as a substitute
+for fresh scrape data.
 
 Usage in tasks:
     from scrapers import get_price_and_stock, close_amazon_session

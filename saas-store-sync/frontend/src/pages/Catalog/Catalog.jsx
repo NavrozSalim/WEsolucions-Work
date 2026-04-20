@@ -589,7 +589,10 @@ export default function Catalog() {
     const [progress, setProgress] = useState(0);
     const progressRef = useRef(null);
     const [currentPage, setCurrentPage] = useState(1);
-    const PRODUCTS_PER_PAGE = 10;
+    const PRODUCTS_PER_PAGE = 25;
+    const [totalProductCount, setTotalProductCount] = useState(0);
+    const [debouncedSearch, setDebouncedSearch] = useState('');
+    const productsFetchGenRef = useRef(0);
     const [exportScope, setExportScope] = useState('all');
     const [exportDownloading, setExportDownloading] = useState(false);
     const [manualPushLoading, setManualPushLoading] = useState(false);
@@ -630,6 +633,28 @@ export default function Catalog() {
         [clearCatalogActivities],
     );
 
+    // Re-fetch the current product page with the active filters. Used after
+    // mutations (reset status, scrape, manual push, critical action, inline
+    // edits) so the visible rows reflect server state without loading every
+    // product across every page.
+    const refreshProducts = useCallback(() => {
+        if (!selectedStore || viewMode !== 'products') return;
+        productsFetchGenRef.current += 1;
+        const gen = productsFetchGenRef.current;
+        getProducts(selectedStore, {
+            page: currentPage,
+            pageSize: PRODUCTS_PER_PAGE,
+            q: debouncedSearch,
+            status: statusFilter,
+        })
+            .then((res) => {
+                if (gen !== productsFetchGenRef.current) return;
+                setProducts(Array.isArray(res.data) ? res.data : []);
+                setTotalProductCount(Number.isFinite(res.count) ? res.count : 0);
+            })
+            .catch(() => { /* silent — next scheduled re-fetch will retry */ });
+    }, [selectedStore, viewMode, currentPage, debouncedSearch, statusFilter]);
+
     const refreshLiveData = useCallback(() => {
         if (!selectedStore) return;
         getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
@@ -637,12 +662,12 @@ export default function Catalog() {
             .then((r) => setUploads(Array.isArray(r.data) ? r.data : []))
             .catch(() => {});
         if (viewMode === 'products') {
-            getProducts(selectedStore).then((r) => setProducts(Array.isArray(r.data) ? r.data : []));
+            refreshProducts();
         } else if (viewMode === 'logs') {
             getCatalogActivityLogs(selectedStore).then((r) =>
                 setActivityLogs(Array.isArray(r.data) ? r.data : []));
         }
-    }, [selectedStore, selectedMarketplace, viewMode]);
+    }, [selectedStore, selectedMarketplace, viewMode, refreshProducts]);
 
     const fetchUploadHistory = useCallback((storeId, signal) => {
         const id = ++uploadsFetchGenRef.current;
@@ -686,18 +711,54 @@ export default function Catalog() {
         return () => ac.abort();
     }, [selectedStore, viewMode, uploadsReloadNonce, fetchUploadHistory]);
 
+    // Debounce the search box so typing doesn't fire a request per keystroke.
     useEffect(() => {
-        if (!selectedStore || viewMode !== 'products') return;
+        const t = setTimeout(() => setDebouncedSearch(search.trim()), 250);
+        return () => clearTimeout(t);
+    }, [search]);
+
+    // Reset to page 1 whenever the filter criteria or store change. Without
+    // this, switching from "all" to a narrow filter could leave ``currentPage``
+    // pointing beyond the new result set and flash an empty table.
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [debouncedSearch, statusFilter, selectedStore]);
+
+    // Fetch one page of products from the server — this is the hot path
+    // that used to take 40+ seconds because the old code looped through
+    // every page up to 40,000 items before rendering. Now we fetch exactly
+    // PRODUCTS_PER_PAGE rows, push search / status filters down to SQL,
+    // and show the page as soon as it arrives.
+    useEffect(() => {
+        if (!selectedStore || viewMode !== 'products') return undefined;
+        const gen = ++productsFetchGenRef.current;
+        const ac = new AbortController();
         setProductsLoading(true);
         setMessage('');
-        getProducts(selectedStore)
-            .then((res) => setProducts(Array.isArray(res.data) ? res.data : []))
+        getProducts(selectedStore, {
+            page: currentPage,
+            pageSize: PRODUCTS_PER_PAGE,
+            q: debouncedSearch,
+            status: statusFilter,
+            signal: ac.signal,
+        })
+            .then((res) => {
+                if (gen !== productsFetchGenRef.current) return;
+                setProducts(Array.isArray(res.data) ? res.data : []);
+                setTotalProductCount(Number.isFinite(res.count) ? res.count : 0);
+            })
             .catch((err) => {
+                if (ac.signal.aborted) return;
+                if (gen !== productsFetchGenRef.current) return;
                 setProducts([]);
+                setTotalProductCount(0);
                 setMessage(formatCatalogError(err));
             })
-            .finally(() => setProductsLoading(false));
-    }, [selectedStore, viewMode]);
+            .finally(() => {
+                if (gen === productsFetchGenRef.current) setProductsLoading(false);
+            });
+        return () => ac.abort();
+    }, [selectedStore, viewMode, currentPage, debouncedSearch, statusFilter]);
 
     useEffect(() => {
         if (!selectedStore || viewMode !== 'logs') return;
@@ -978,7 +1039,7 @@ export default function Catalog() {
         resetProductSyncStatus(selectedStore, product.id)
             .then(() => {
                 setMessage(`Reset ${product.sku}. Ready to retry sync.`);
-                getProducts(selectedStore).then((r) => setProducts(Array.isArray(r.data) ? r.data : []));
+                refreshProducts();
             })
             .catch((err) => setMessage(formatCatalogError(err) || 'Reset failed'))
             .finally(() => setResettingId(null));
@@ -1205,7 +1266,7 @@ export default function Catalog() {
                             getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
                             getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
                             if (viewMode === 'products') {
-                                getProducts(selectedStore).then((r) => setProducts(Array.isArray(r.data) ? r.data : []));
+                                refreshProducts();
                             }
                             if (viewMode === 'logs') {
                                 getCatalogActivityLogs(selectedStore).then((r) =>
@@ -1319,7 +1380,7 @@ export default function Catalog() {
                     + 'Scheduled automatic updates for this store are turned off until you enable them again in store settings.',
                 );
                 if (viewMode === 'products') {
-                    getProducts(selectedStore).then((r) => setProducts(Array.isArray(r.data) ? r.data : []));
+                    refreshProducts();
                 }
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
                 if (viewMode === 'logs') {
@@ -1348,7 +1409,7 @@ export default function Catalog() {
                 );
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
                 if (viewMode === 'products') {
-                    getProducts(selectedStore).then((r) => setProducts(Array.isArray(r.data) ? r.data : []));
+                    refreshProducts();
                 }
             })
             .catch((err) => {
@@ -1378,23 +1439,18 @@ export default function Catalog() {
             .finally(() => setDeletingUploadId(null));
     };
 
-    const filteredProducts = products.filter((p) => {
-        const matchSearch = !search ||
-            (p.sku?.toLowerCase().includes(search.toLowerCase())) ||
-            (p.title?.toLowerCase().includes(search.toLowerCase())) ||
-            (p.vendor_name?.toLowerCase().includes(search.toLowerCase()));
-        const matchStatus = !statusFilter || (p.sync_status || 'pending') === statusFilter;
-        return matchSearch && matchStatus;
-    });
-
-    const totalPages = Math.max(1, Math.ceil(filteredProducts.length / PRODUCTS_PER_PAGE));
-    const safePage = Math.min(currentPage, totalPages);
-    const paginatedProducts = filteredProducts.slice(
-        (safePage - 1) * PRODUCTS_PER_PAGE,
-        safePage * PRODUCTS_PER_PAGE,
+    // ``products`` already contains exactly one server page filtered by the
+    // active search / status — no client-side slicing is needed. We keep
+    // ``filteredProducts`` as an alias so the existing JSX below doesn't
+    // need to be rewritten.
+    const filteredProducts = products;
+    const totalPages = Math.max(
+        1,
+        Math.ceil(totalProductCount / PRODUCTS_PER_PAGE),
     );
-
-    useEffect(() => { setCurrentPage(1); }, [search, statusFilter, selectedStore]);
+    const safePage = Math.min(Math.max(1, currentPage), totalPages);
+    const paginatedProducts = filteredProducts;
+    const hasActiveFilters = Boolean(debouncedSearch || statusFilter);
 
     const hasPendingUpload = uploads.some((u) => ['pending', 'validated'].includes(u.status));
 
@@ -1679,9 +1735,11 @@ export default function Catalog() {
                         <div>
                             <h2 className="text-section font-medium text-slate-900 dark:text-slate-100">Product listings</h2>
                             <p className="text-xs text-slate-500 dark:text-slate-400">
-                                {filteredProducts.length === products.length
-                                    ? `${products.length} products`
-                                    : `${filteredProducts.length} of ${products.length} products`}
+                                {productsLoading
+                                    ? 'Loading…'
+                                    : hasActiveFilters
+                                        ? `${totalProductCount.toLocaleString()} match${totalProductCount === 1 ? '' : 'es'}`
+                                        : `${totalProductCount.toLocaleString()} product${totalProductCount === 1 ? '' : 's'}`}
                             </p>
                         </div>
                         <div className="flex w-full flex-1 flex-col gap-2 lg:flex-row lg:flex-wrap lg:justify-end lg:items-center lg:max-w-none">
@@ -1959,11 +2017,11 @@ export default function Catalog() {
                         )}
                     </div>
 
-                    {filteredProducts.length > PRODUCTS_PER_PAGE && (
+                    {totalProductCount > PRODUCTS_PER_PAGE && (
                         <div className="flex items-center justify-between border-t border-slate-200 dark:border-slate-700 px-4 py-3">
                             <p className="text-sm text-slate-500 dark:text-slate-400">
-                                Showing <span className="font-medium text-slate-700 dark:text-slate-300">{(safePage - 1) * PRODUCTS_PER_PAGE + 1}</span>–<span className="font-medium text-slate-700 dark:text-slate-300">{Math.min(safePage * PRODUCTS_PER_PAGE, filteredProducts.length)}</span> of{' '}
-                                <span className="font-medium text-slate-700 dark:text-slate-300">{filteredProducts.length}</span> products
+                                Showing <span className="font-medium text-slate-700 dark:text-slate-300">{totalProductCount === 0 ? 0 : (safePage - 1) * PRODUCTS_PER_PAGE + 1}</span>–<span className="font-medium text-slate-700 dark:text-slate-300">{Math.min(safePage * PRODUCTS_PER_PAGE, totalProductCount)}</span> of{' '}
+                                <span className="font-medium text-slate-700 dark:text-slate-300">{totalProductCount.toLocaleString()}</span> products
                             </p>
                             <div className="flex items-center gap-1">
                                 <button

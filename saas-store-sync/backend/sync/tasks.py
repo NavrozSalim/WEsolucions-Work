@@ -14,8 +14,6 @@ from catalog.reverb_catalog import listing_sku_lookup_order
 from vendor.models import VendorPrice
 from sync.models import StoreSyncRun
 from scrapers import get_price_and_stock, close_amazon_session
-from catalog.vendor_price_fallback import get_last_known_vendor_price_stock
-
 
 def _is_heb_product(product) -> bool:
     """Return True when ``product`` belongs to the HEB vendor.
@@ -33,9 +31,10 @@ def _is_heb_product(product) -> bool:
 def _is_ingest_only_product(product) -> bool:
     """Vendors whose price/stock comes from a desktop runner or S3 feed
     (HEB, Costco AU, Vevor AU). There is no live server-side scraper for
-    these; ``_apply_latest_heb_ingest`` promotes the most recent VendorPrice
-    through the current pricing rules so margin edits take effect without
-    a new ingest."""
+    these — the ingest endpoint writes ``ProductMapping.store_price`` /
+    ``store_stock`` / ``last_scrape_time`` directly on every POST, and
+    server-side scrape/sync loops skip these rows so old VendorPrice data
+    is never silently re-applied."""
     vendor = getattr(product, 'vendor', None)
     code = (getattr(vendor, 'code', '') or '').lower()
     if code in ('heb', 'hebus', 'costcoau', 'costco_au', 'costco-au', 'vevor', 'vevorau'):
@@ -423,64 +422,6 @@ def _apply_inventory(vendor_stock, inventory_settings):
     return int(vendor_stock)
 
 
-def _apply_latest_heb_ingest(pm, product, store, now=None, *, scrape_title: str = '') -> bool:
-    """Promote the most recent ingested VendorPrice onto a HEB ProductMapping.
-
-    HEB is ingest-only on the server: the desktop runner POSTs scraped prices
-    to ``/api/v1/ingest/heb/``. When the user clicks "Scrape data" we don't
-    hit the internet for HEB — we just re-apply the newest ``VendorPrice`` row
-    that the ingest API stored.
-
-    Returns
-    -------
-    bool
-        True if the mapping was updated (caller should count this as a
-        success), False if there is no recent VendorPrice to apply (caller
-        should simply skip; never mark HEB as ``failed``).
-    """
-    p, s = get_last_known_vendor_price_stock(product)
-    if p is None:
-        return False
-
-    try:
-        vendor_price = Decimal(str(p))
-    except Exception:
-        return False
-    vendor_stock = int(s or 0)
-
-    pricing = _get_pricing_for_vendor(store, product.vendor_id)
-    inventory = _get_inventory_for_vendor(store, product.vendor_id)
-
-    new_price = _apply_pricing(
-        vendor_price,
-        pricing,
-        pack_qty=getattr(pm, 'pack_qty', None),
-        prep_fees=getattr(pm, 'prep_fees', None),
-        shipping_fees=getattr(pm, 'shipping_fees', None),
-    )
-    if new_price is None:
-        new_price = vendor_price
-    new_stock = _apply_inventory(vendor_stock, inventory)
-
-    pm.store_price = new_price
-    pm.store_stock = new_stock
-    pm.sync_status = 'scraped'
-    pm.failed_sync_count = 0
-    pm.last_scrape_time = now or timezone.now()
-    update_fields = [
-        'store_price',
-        'store_stock',
-        'sync_status',
-        'failed_sync_count',
-        'last_scrape_time',
-    ]
-    if scrape_title:
-        pm.title = scrape_title[:500]
-        update_fields.append('title')
-    pm.save(update_fields=update_fields)
-    return True
-
-
 @shared_task(bind=True, max_retries=3)
 def run_store_sync(self, store_id):
     """Scrape vendor URLs for a store's products, apply rules, update listings, log results."""
@@ -498,24 +439,17 @@ def run_store_sync(self, store_id):
     try:
         for pm in mappings:
             processed += 1
-            # HEB is ingest-only; live scrape is disabled. Promote the latest
-            # ingested VendorPrice (posted by the desktop runner) onto the
-            # mapping. Never mark HEB rows as 'failed' just because there's
-            # no cached price yet — that's the job of the ingest API.
+            # Ingest-only vendors (HEB, Costco AU, Vevor AU): the desktop
+            # runner / S3 feed writes store_price + store_stock directly via
+            # the ingest endpoint. Do NOT re-apply older VendorPrice rows
+            # here — the mapping already holds whatever the most recent
+            # fresh scrape produced. Skip silently and never mark 'failed'.
             if pm.product and _is_ingest_only_product(pm.product):
-                if _apply_latest_heb_ingest(pm, pm.product, store, now):
-                    updated += 1
-                    logger.info(
-                        "Ingest-only row refreshed (sku=%s vendor=%s)",
-                        getattr(pm.product, 'vendor_sku', '?'),
-                        (pm.product.vendor.code if pm.product.vendor else '?'),
-                    )
-                else:
-                    logger.info(
-                        "Ingest-only row skipped, no ingest data yet (sku=%s vendor=%s)",
-                        getattr(pm.product, 'vendor_sku', '?'),
-                        (pm.product.vendor.code if pm.product.vendor else '?'),
-                    )
+                logger.info(
+                    "Ingest-only row untouched (sku=%s vendor=%s)",
+                    getattr(pm.product, 'vendor_sku', '?'),
+                    (pm.product.vendor.code if pm.product.vendor else '?'),
+                )
                 continue
             pricing = _get_pricing_for_vendor(store, pm.product.vendor_id)
             inventory = _get_inventory_for_vendor(store, pm.product.vendor_id)
@@ -705,62 +639,62 @@ def run_store_update(self, store_id):
         bulk_queue = []  # list of (pm, sku, price, stock)
         for pm in mappings:
             processed += 1
-            # HEB is ingest-only; promote latest VendorPrice to the mapping
-            # (see _apply_latest_heb_ingest). If a marketplace listing id is
-            # resolvable we still queue the HEB row for push so any freshly
-            # ingested price flows through to the marketplace on this run.
+            # Ingest-only vendors (HEB, Costco AU, Vevor AU): do NOT
+            # re-apply old VendorPrice rows. Whatever the last fresh
+            # ingest wrote onto ``pm.store_price`` / ``pm.store_stock`` is
+            # what we push to the marketplace on this run; if the ingest
+            # hasn't landed yet, skip silently.
             if pm.product and _is_ingest_only_product(pm.product):
-                if _apply_latest_heb_ingest(pm, pm.product, store, now):
-                    updated += 1
-                    listing_id = pm.marketplace_id
-                    if not listing_id:
-                        lookup = getattr(adapter, 'lookup_listing_by_sku', None)
-                        if lookup:
-                            for sku_candidate in listing_sku_lookup_order(pm, store):
-                                listing_id = lookup(sku_candidate)
-                                if listing_id:
-                                    pm.marketplace_id = listing_id
-                                    if not pm.marketplace_child_sku:
-                                        pm.marketplace_child_sku = sku_candidate
-                                        pm.save(update_fields=['marketplace_id', 'marketplace_child_sku'])
-                                    else:
-                                        pm.save(update_fields=['marketplace_id'])
-                                    break
-                    if listing_id and pm.store_price is not None:
-                        try:
-                            if bulk_supported:
-                                bulk_queue.append(
-                                    (pm, listing_id, float(pm.store_price), int(pm.store_stock or 0))
-                                )
-                            else:
-                                adapter.update_product(
-                                    listing_id,
-                                    price=float(pm.store_price),
-                                    stock=int(pm.store_stock or 0),
-                                )
-                                push_ok += 1
-                                pm.sync_status = 'synced'
-                                pm.last_sync_time = timezone.now()
-                                pm.save(update_fields=['sync_status', 'last_sync_time'])
-                        except Exception as push_err:
-                            logger.warning(
-                                "Push failed for HEB %s: %s",
-                                pm.marketplace_child_sku,
-                                push_err,
-                            )
-                            push_fail += 1
-                            _record_push_error(
-                                pm.marketplace_child_sku or pm.product.vendor_sku,
-                                push_err,
-                            )
-                    elif pm.store_price is not None and not listing_id:
-                        push_skipped += 1
-                else:
+                if pm.store_price is None:
                     logger.info(
-                        "Ingest-only row skipped, no ingest data yet (sku=%s vendor=%s)",
+                        "Ingest-only row skipped, no fresh scrape yet (sku=%s vendor=%s)",
                         getattr(pm.product, 'vendor_sku', '?'),
                         (pm.product.vendor.code if pm.product.vendor else '?'),
                     )
+                    continue
+                listing_id = pm.marketplace_id
+                if not listing_id:
+                    lookup = getattr(adapter, 'lookup_listing_by_sku', None)
+                    if lookup:
+                        for sku_candidate in listing_sku_lookup_order(pm, store):
+                            listing_id = lookup(sku_candidate)
+                            if listing_id:
+                                pm.marketplace_id = listing_id
+                                if not pm.marketplace_child_sku:
+                                    pm.marketplace_child_sku = sku_candidate
+                                    pm.save(update_fields=['marketplace_id', 'marketplace_child_sku'])
+                                else:
+                                    pm.save(update_fields=['marketplace_id'])
+                                break
+                if listing_id:
+                    try:
+                        if bulk_supported:
+                            bulk_queue.append(
+                                (pm, listing_id, float(pm.store_price), int(pm.store_stock or 0))
+                            )
+                        else:
+                            adapter.update_product(
+                                listing_id,
+                                price=float(pm.store_price),
+                                stock=int(pm.store_stock or 0),
+                            )
+                            push_ok += 1
+                            pm.sync_status = 'synced'
+                            pm.last_sync_time = timezone.now()
+                            pm.save(update_fields=['sync_status', 'last_sync_time'])
+                    except Exception as push_err:
+                        logger.warning(
+                            "Push failed for ingest-only %s: %s",
+                            pm.marketplace_child_sku,
+                            push_err,
+                        )
+                        push_fail += 1
+                        _record_push_error(
+                            pm.marketplace_child_sku or pm.product.vendor_sku,
+                            push_err,
+                        )
+                else:
+                    push_skipped += 1
                 continue
             pricing = _get_pricing_for_vendor(store, pm.product.vendor_id)
             inventory = _get_inventory_for_vendor(store, pm.product.vendor_id)

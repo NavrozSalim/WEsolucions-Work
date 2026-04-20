@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 from .models import CatalogUpload, CatalogUploadRow, CatalogSyncLog, ProductMapping
 from .reverb_catalog import listing_sku_lookup_order, store_is_reverb, vendor_is_ebay
 from .services import _normalize
-from .vendor_price_fallback import get_last_known_vendor_price_stock
 from products.models import Product
 from vendor.models import Vendor
 
@@ -451,27 +450,19 @@ def run_catalog_scrape(upload_id: str):
                 run.save(update_fields=['rows_processed', 'rows_succeeded'])
 
             # Ingest-only vendors (HEB, Costco AU, Vevor AU) have no live
-            # server-side scraper. The ingest endpoint — or the Vevor feed
-            # task — has already written store_price/store_stock straight
-            # to the ProductMapping. We just re-apply the *latest* VendorPrice
-            # through the store's current pricing rules so margin edits take
-            # effect without a fresh ingest. If there's no VendorPrice yet,
-            # skip silently (not a failure — the runner/feed will populate).
+            # server-side scraper. Only fresh data from the desktop runner
+            # (or the Vevor feed) should ever appear on the mapping; we do
+            # NOT re-apply old VendorPrice rows here. The runner writes
+            # store_price / store_stock / last_scrape_time directly via the
+            # ingest endpoint when it POSTs a new batch. This click just
+            # enqueued the scrape job (see CatalogScrapeTriggerView) — the
+            # row stays untouched until fresh data arrives.
             if _is_ingest_only_product(product):
-                from sync.tasks import _apply_latest_heb_ingest
-                if _apply_latest_heb_ingest(pm, product, store, now):
-                    succeeded += 1
-                    logger.info(
-                        "Ingest-only row refreshed (sku=%s vendor=%s)",
-                        getattr(product, 'vendor_sku', '?'),
-                        (product.vendor.code if product.vendor else '?'),
-                    )
-                else:
-                    logger.info(
-                        "Ingest-only row skipped — no ingest data yet (sku=%s vendor=%s)",
-                        getattr(product, 'vendor_sku', '?'),
-                        (product.vendor.code if product.vendor else '?'),
-                    )
+                logger.info(
+                    "Ingest-only row left untouched — awaiting fresh scrape (sku=%s vendor=%s)",
+                    getattr(product, 'vendor_sku', '?'),
+                    (product.vendor.code if product.vendor else '?'),
+                )
                 continue
 
             url = resolve_vendor_scrape_url(product, store, row)
@@ -690,23 +681,15 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
             product = pm.product
             if not product:
                 continue
-            # Ingest-only vendors (HEB, Costco AU, Vevor AU) — see
-            # ``run_catalog_scrape`` for rationale.
+            # Ingest-only vendors: never re-apply old VendorPrice — only
+            # fresh runner / feed POSTs mutate these rows. See
+            # ``run_catalog_scrape`` for the same policy.
             if _is_ingest_only_product(product):
-                from sync.tasks import _apply_latest_heb_ingest
-                if _apply_latest_heb_ingest(pm, product, store, now):
-                    succeeded += 1
-                    logger.info(
-                        "Ingest-only row (store-wide) refreshed (sku=%s vendor=%s)",
-                        getattr(product, 'vendor_sku', '?'),
-                        (product.vendor.code if product.vendor else '?'),
-                    )
-                else:
-                    logger.info(
-                        "Ingest-only row (store-wide) skipped — no ingest data yet (sku=%s vendor=%s)",
-                        getattr(product, 'vendor_sku', '?'),
-                        (product.vendor.code if product.vendor else '?'),
-                    )
+                logger.info(
+                    "Ingest-only row (store-wide) left untouched — awaiting fresh scrape (sku=%s vendor=%s)",
+                    getattr(product, 'vendor_sku', '?'),
+                    (product.vendor.code if product.vendor else '?'),
+                )
                 continue
             pricing = _get_pricing_for_vendor(store, product.vendor_id)
             inventory = _get_inventory_for_vendor(store, product.vendor_id)
