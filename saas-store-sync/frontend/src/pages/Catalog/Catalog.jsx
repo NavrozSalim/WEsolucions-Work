@@ -570,7 +570,8 @@ export default function Catalog() {
     const [uploadsError, setUploadsError] = useState('');
     const [uploadsReloadNonce, setUploadsReloadNonce] = useState(0);
     const uploadsFetchGenRef = useRef(0);
-    const [productsLoading, setProductsLoading] = useState(false);
+    /** True while the active products page request is in flight. */
+    const [productsFetching, setProductsFetching] = useState(false);
     const [uploading, setUploading] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [flowStatus, setFlowStatus] = useState(''); // file uploaded | ready to sync | syncing | success | failed
@@ -593,6 +594,8 @@ export default function Catalog() {
     const [totalProductCount, setTotalProductCount] = useState(0);
     const [debouncedSearch, setDebouncedSearch] = useState('');
     const productsFetchGenRef = useRef(0);
+    /** When store / search / status filter change, clear rows; page-only changes keep prior rows (stale-while-revalidate). */
+    const productsListBaseKeyRef = useRef('');
     const [exportScope, setExportScope] = useState('all');
     const [exportDownloading, setExportDownloading] = useState(false);
     const [manualPushLoading, setManualPushLoading] = useState(false);
@@ -731,9 +734,16 @@ export default function Catalog() {
     // and show the page as soon as it arrives.
     useEffect(() => {
         if (!selectedStore || viewMode !== 'products') return undefined;
+        const listBaseKey = `${selectedStore}|${debouncedSearch}|${statusFilter}`;
+        if (productsListBaseKeyRef.current !== listBaseKey) {
+            productsListBaseKeyRef.current = listBaseKey;
+            setProducts([]);
+            setTotalProductCount(0);
+        }
+
         const gen = ++productsFetchGenRef.current;
         const ac = new AbortController();
-        setProductsLoading(true);
+        setProductsFetching(true);
         setMessage('');
         getProducts(selectedStore, {
             page: currentPage,
@@ -755,7 +765,7 @@ export default function Catalog() {
                 setMessage(formatCatalogError(err));
             })
             .finally(() => {
-                if (gen === productsFetchGenRef.current) setProductsLoading(false);
+                if (gen === productsFetchGenRef.current) setProductsFetching(false);
             });
         return () => ac.abort();
     }, [selectedStore, viewMode, currentPage, debouncedSearch, statusFilter]);
@@ -796,16 +806,20 @@ export default function Catalog() {
     }, [uploadsLoading, selectedStore, viewMode, setSidebarActivity, clearSidebarActivity]);
 
     useEffect(() => {
-        if (productsLoading && selectedStore && viewMode === 'products') {
+        const bootstrapping =
+            productsFetching
+            && selectedStore
+            && viewMode === 'products'
+            && products.length === 0;
+        if (bootstrapping) {
             setSidebarActivity('catalog-products', {
                 title: 'Product listings',
-                description:
-                    'Downloading all products (paginated). Large stores can take a minute while the API returns each page.',
+                description: 'Loading the first page from the server…',
             });
         } else {
             clearSidebarActivity('catalog-products');
         }
-    }, [productsLoading, selectedStore, viewMode, setSidebarActivity, clearSidebarActivity]);
+    }, [productsFetching, products.length, selectedStore, viewMode, setSidebarActivity, clearSidebarActivity]);
 
     useEffect(() => {
         if (logsLoading && selectedStore && viewMode === 'logs') {
@@ -870,15 +884,16 @@ export default function Catalog() {
         if (!selectedStore) return undefined;
         const activeFlow = flowStatus === 'syncing' || flowStatus === 'scraping';
         const inGraceWindow = liveRefreshUntil > Date.now();
-        // While we're tracking an HEB scrape run or viewing the products table
-        // we also want rows to update live as the desktop runner posts prices.
-        const watchingProducts = viewMode === 'products';
-        if (!activeFlow && !inGraceWindow && !trackingScrape && !watchingProducts) return undefined;
+        // Poll stores/uploads/products only during sync/scrape, desktop-runner
+        // tracking, or a short post-success grace window — not on every idle
+        // Products tab (avoids hammering the API every 5s).
+        const needsLivePolling = activeFlow || inGraceWindow || trackingScrape;
+        if (!needsLivePolling) return undefined;
 
         refreshLiveData();
         const intervalId = setInterval(refreshLiveData, 5000);
         let timeoutId = null;
-        if (!activeFlow && !trackingScrape && !watchingProducts && inGraceWindow) {
+        if (!activeFlow && !trackingScrape && inGraceWindow) {
             timeoutId = setTimeout(() => clearInterval(intervalId), Math.max(0, liveRefreshUntil - Date.now()));
         }
 
@@ -886,18 +901,26 @@ export default function Catalog() {
             clearInterval(intervalId);
             if (timeoutId) clearTimeout(timeoutId);
         };
-    }, [selectedStore, flowStatus, liveRefreshUntil, trackingScrape, viewMode, refreshLiveData]);
+    }, [selectedStore, flowStatus, liveRefreshUntil, trackingScrape, refreshLiveData]);
 
-    // Pull scrape-progress every 5s while the user is looking at products,
-    // actively scraping, or we are still "tracking" an HEB scrape run.
+    // One scrape-progress fetch when opening Products (no interval while idle).
+    useEffect(() => {
+        if (!selectedStore || viewMode !== 'products') return undefined;
+        let cancelled = false;
+        getScrapeProgress(selectedStore)
+            .then((res) => {
+                if (!cancelled) setScrapeProgress(res.data || null);
+            })
+            .catch(() => { /* ignore */ });
+        return () => { cancelled = true; };
+    }, [selectedStore, viewMode]);
+
+    // Poll scrape-progress every 5s only while sync/scrape, tracking, or grace window.
     useEffect(() => {
         if (!selectedStore) return undefined;
         const activeFlow = flowStatus === 'syncing' || flowStatus === 'scraping';
-        const shouldPoll =
-            activeFlow
-            || trackingScrape
-            || viewMode === 'products'
-            || liveRefreshUntil > Date.now();
+        const inGraceWindow = liveRefreshUntil > Date.now();
+        const shouldPoll = activeFlow || trackingScrape || inGraceWindow;
         if (!shouldPoll) return undefined;
 
         let cancelled = false;
@@ -915,7 +938,7 @@ export default function Catalog() {
             cancelled = true;
             clearInterval(intervalId);
         };
-    }, [selectedStore, flowStatus, trackingScrape, viewMode, liveRefreshUntil]);
+    }, [selectedStore, flowStatus, trackingScrape, liveRefreshUntil]);
 
     // Auto-stop tracking when every desktop-runner vendor the store uses has
     // either completed, failed, been cancelled, or has no pending rows left.
@@ -1718,11 +1741,13 @@ export default function Catalog() {
                         <div>
                             <h2 className="text-section font-medium text-slate-900 dark:text-slate-100">Product listings</h2>
                             <p className="text-xs text-slate-500 dark:text-slate-400">
-                                {productsLoading
+                                {productsFetching && products.length === 0
                                     ? 'Loading…'
-                                    : hasActiveFilters
-                                        ? `${totalProductCount.toLocaleString()} match${totalProductCount === 1 ? '' : 'es'}`
-                                        : `${totalProductCount.toLocaleString()} product${totalProductCount === 1 ? '' : 's'}`}
+                                    : productsFetching && products.length > 0
+                                        ? 'Updating page…'
+                                        : hasActiveFilters
+                                            ? `${totalProductCount.toLocaleString()} match${totalProductCount === 1 ? '' : 'es'}`
+                                            : `${totalProductCount.toLocaleString()} product${totalProductCount === 1 ? '' : 's'}`}
                             </p>
                         </div>
                         <div className="flex w-full flex-1 flex-col gap-2 lg:flex-row lg:flex-wrap lg:justify-end lg:items-center lg:max-w-none">
@@ -1859,14 +1884,14 @@ export default function Catalog() {
                     </div>
 
                     <div className="overflow-x-auto">
-                        {productsLoading ? (
+                        {productsFetching && products.length === 0 ? (
                             <div className="flex justify-center py-16">
                                 <div className="flex flex-col items-center gap-3">
                                     <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-200 dark:border-slate-700 border-t-accent-500" />
                                     <p className="text-sm text-slate-500 dark:text-slate-400">Loading products…</p>
                                 </div>
                             </div>
-                        ) : filteredProducts.length === 0 ? (
+                        ) : !productsFetching && filteredProducts.length === 0 ? (
                             <EmptyState
                                 icon={Package}
                                 title="No products"
@@ -1878,7 +1903,19 @@ export default function Catalog() {
                                 }
                             />
                         ) : (
-                            <table className="table-base">
+                            <div className="relative">
+                                {productsFetching && products.length > 0 ? (
+                                    <div
+                                        className="absolute inset-0 z-10 flex items-start justify-center bg-white/60 dark:bg-slate-900/60 pt-10 pointer-events-none"
+                                        aria-hidden
+                                    >
+                                        <span className="inline-flex items-center gap-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-600 dark:text-slate-300 shadow-sm">
+                                            <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 dark:border-slate-600 border-t-accent-500" />
+                                            Loading page…
+                                        </span>
+                                    </div>
+                                ) : null}
+                                <table className="table-base">
                                 <thead>
                                     <tr>
                                         <th className="whitespace-nowrap">SKU</th>
@@ -1997,6 +2034,7 @@ export default function Catalog() {
                                     })}
                                 </tbody>
                             </table>
+                            </div>
                         )}
                     </div>
 
@@ -2010,7 +2048,7 @@ export default function Catalog() {
                                 <button
                                     type="button"
                                     onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                                    disabled={safePage <= 1}
+                                    disabled={safePage <= 1 || productsFetching}
                                     className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
                                 >
                                     Previous
@@ -2030,11 +2068,12 @@ export default function Catalog() {
                                                 key={pg}
                                                 type="button"
                                                 onClick={() => setCurrentPage(pg)}
+                                                disabled={productsFetching}
                                                 className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
                                                     pg === safePage
                                                         ? 'bg-accent-600 text-white dark:bg-accent-500'
                                                         : 'border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
-                                                }`}
+                                                } disabled:opacity-40 disabled:cursor-not-allowed`}
                                             >
                                                 {pg}
                                             </button>
@@ -2043,7 +2082,7 @@ export default function Catalog() {
                                 <button
                                     type="button"
                                     onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                                    disabled={safePage >= totalPages}
+                                    disabled={safePage >= totalPages || productsFetching}
                                     className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
                                 >
                                     Next
