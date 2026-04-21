@@ -4,7 +4,8 @@ Catalog Celery tasks: sync, scrape, update.
 import logging
 from datetime import timedelta
 
-from celery import shared_task
+from celery import chord, group, shared_task
+from django.conf import settings
 from django.utils import timezone
 from django.db import transaction
 from decimal import Decimal
@@ -404,66 +405,34 @@ def catalog_sync_task(self, upload_id: str):
     return run_catalog_sync(upload_id)
 
 
-def run_catalog_scrape(upload_id: str):
-    """
-    Scrape vendor URLs for rows in upload, apply pricing/inventory rules, update ProductMapping.
-
-    Only ``ProductMapping`` rows with ``sync_status='pending'`` are processed; successfully
-    scraped rows become ``scraped``, failures become ``failed`` / ``needs_attention``.
-    When nothing is left pending, this run simply finishes (no further passes).
-
-    If no server-scraped listing leaves ``pending`` within
-    ``SCRAPER_STALL_NO_PENDING_PROGRESS`` (10 minutes), the run stops early;
-    ingest-only rows do not start that timer until the first live-scrape row.
-    """
-    from sync.models import ScrapeRun
-    from sync.tasks import (
-        _get_pricing_for_vendor,
-        _apply_pricing,
-        _apply_inventory,
-        _has_fixed_tier,
-        _missing_fixed_inputs,
-        _fail_mapping,
-    )
-    from sync.tasks import _get_inventory_for_vendor, resolve_vendor_scrape_url, _inventory_from_scrape_result
-    from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
-    from vendor.models import VendorPrice
-    from scrapers import get_price_and_stock, close_amazon_session
-
-    try:
-        upload = CatalogUpload.objects.select_related('store', 'store__marketplace').get(id=upload_id)
-    except CatalogUpload.DoesNotExist:
-        return {'error': 'Upload not found', 'upload_id': upload_id}
-
+def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, session, run, emit_stall_log: bool):
+    """Shared loop for upload-scrape. *run* None = parallel chunk (skip ScrapeRun writes)."""
     from catalog.activity_log import append_catalog_log
+    from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
+    from sync.tasks import (
+        _apply_inventory,
+        _apply_pricing,
+        _fail_mapping,
+        _get_inventory_for_vendor,
+        _get_pricing_for_vendor,
+        _has_fixed_tier,
+        _inventory_from_scrape_result,
+        _missing_fixed_inputs,
+        resolve_vendor_scrape_url,
+    )
+    from vendor.models import VendorPrice
+    from scrapers import get_price_and_stock
 
-    store = upload.store
-    append_catalog_log(
-        store.id,
-        f'Vendor scrape started for upload “{upload.original_filename}” at '
-        f'{timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}.',
-        action_type='scrape_start',
-        metadata={'upload_id': str(upload_id), 'scope': 'upload'},
-    )
-    run = ScrapeRun.objects.create(
-        catalog_upload=upload,
-        store=store,
-        status=ScrapeRun.Status.RUNNING,
-    )
-    session = {}
-    succeeded, failed = 0, 0
-    fatal_error = None
+    succeeded = 0
+    failed = 0
     stalled_out = False
+    fatal_error = None
+    last_progress_at = None
+    now = timezone.now()
+    rows_visited = 0
+    row_counter = 0
 
     try:
-        rows = upload.rows.filter(
-            product_mapping__isnull=False,
-            product_mapping__is_active=True,
-            product_mapping__sync_status='pending',
-        ).select_related('product_mapping', 'product_mapping__product', 'product_mapping__product__vendor')
-        now = timezone.now()
-        last_progress_at = None
-
         for row in rows:
             pm = row.product_mapping
             product = pm.product
@@ -472,19 +441,14 @@ def run_catalog_scrape(upload_id: str):
             if pm.sync_status != 'pending':
                 continue
 
-            run.rows_processed += 1
-            if run.rows_processed % 10 == 0:
-                run.rows_succeeded = succeeded
-                run.save(update_fields=['rows_processed', 'rows_succeeded'])
+            rows_visited += 1
+            row_counter += 1
+            if run is not None:
+                run.rows_processed += 1
+                if run.rows_processed % 10 == 0:
+                    run.rows_succeeded = succeeded
+                    run.save(update_fields=['rows_processed', 'rows_succeeded'])
 
-            # Ingest-only vendors (HEB, Costco AU, Vevor AU) have no live
-            # server-side scraper. Only fresh data from the desktop runner
-            # (or the Vevor feed) should ever appear on the mapping; we do
-            # NOT re-apply old VendorPrice rows here. The runner writes
-            # store_price / store_stock / last_scrape_time directly via the
-            # ingest endpoint when it POSTs a new batch. This click just
-            # enqueued the scrape job (see CatalogScrapeTriggerView) — the
-            # row stays untouched until fresh data arrives.
             if _is_ingest_only_product(product):
                 logger.info(
                     "Ingest-only row left untouched — awaiting fresh scrape (sku=%s vendor=%s)",
@@ -505,14 +469,15 @@ def run_catalog_scrape(upload_id: str):
                     store.id,
                     SCRAPER_STALL_NO_PENDING_PROGRESS,
                 )
-                append_catalog_log(
-                    store.id,
-                    f'Vendor scrape stopped early: nothing moved off Pending for '
-                    f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes '
-                    f'(scraper may be hung or blocked). Remaining rows stay Pending.',
-                    action_type='scrape_stalled',
-                    metadata={'upload_id': str(upload_id), 'scope': 'upload'},
-                )
+                if emit_stall_log:
+                    append_catalog_log(
+                        store.id,
+                        f'Vendor scrape stopped early: nothing moved off Pending for '
+                        f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes '
+                        f'(scraper may be hung or blocked). Remaining rows stay Pending.',
+                        action_type='scrape_stalled',
+                        metadata={'upload_id': str(upload_id), 'scope': 'upload'},
+                    )
                 break
 
             url = resolve_vendor_scrape_url(product, store, row)
@@ -531,7 +496,7 @@ def run_catalog_scrape(upload_id: str):
             scrape_title = ''
             logger.info(
                 "Scraping row %d: sku=%s vendor=%s region=%s url=%s",
-                run.rows_processed,
+                row_counter,
                 product.vendor_sku,
                 (product.vendor.code if product.vendor else '?'),
                 store.region or 'USA',
@@ -581,8 +546,6 @@ def run_catalog_scrape(upload_id: str):
                 vendor_stock = 0
 
             try:
-                from decimal import Decimal
-
                 pricing = _get_pricing_for_vendor(store, product.vendor_id)
                 inventory = _get_inventory_for_vendor(store, product.vendor_id)
 
@@ -646,8 +609,110 @@ def run_catalog_scrape(upload_id: str):
                 last_progress_at = timezone.now()
                 continue
     except Exception as loop_err:
-        fatal_error = loop_err
+        fatal_error = str(loop_err)
         logger.exception('Catalog scrape aborted: %s', loop_err)
+
+    return {
+        'succeeded': succeeded,
+        'failed': failed,
+        'stalled_out': stalled_out,
+        'fatal_error': fatal_error,
+        'rows_visited': rows_visited,
+    }
+
+
+def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
+    """
+    Scrape vendor URLs for rows in upload, apply pricing/inventory rules, update ProductMapping.
+
+    Only ``ProductMapping`` rows with ``sync_status='pending'`` are processed; successfully
+    scraped rows become ``scraped``, failures become ``failed`` / ``needs_attention``.
+    When nothing is left pending, this run simply finishes (no further passes).
+
+    If no server-scraped listing leaves ``pending`` within
+    ``SCRAPER_STALL_NO_PENDING_PROGRESS`` (10 minutes), the run stops early;
+    ingest-only rows do not start that timer until the first live-scrape row.
+
+    When *parallel* is True (Celery entrypoint) and ``CATALOG_SCRAPE_CHUNK_SIZE`` > 0 and
+    there are more pending rows than the chunk size, work is split across a chord of tasks
+    (each with its own Amazon/eBay session).
+    """
+    from scrapers import close_amazon_session
+    from sync.models import ScrapeRun
+
+    from catalog.activity_log import append_catalog_log
+
+    try:
+        upload = CatalogUpload.objects.select_related('store', 'store__marketplace').get(id=upload_id)
+    except CatalogUpload.DoesNotExist:
+        return {'error': 'Upload not found', 'upload_id': upload_id}
+
+    store = upload.store
+    append_catalog_log(
+        store.id,
+        f'Vendor scrape started for upload “{upload.original_filename}” at '
+        f'{timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}.',
+        action_type='scrape_start',
+        metadata={'upload_id': str(upload_id), 'scope': 'upload'},
+    )
+
+    rows_qs = upload.rows.filter(
+        product_mapping__isnull=False,
+        product_mapping__is_active=True,
+        product_mapping__sync_status='pending',
+    ).order_by('row_number')
+
+    row_ids = list(rows_qs.values_list('id', flat=True))
+    chunk_sz = int(getattr(settings, 'CATALOG_SCRAPE_CHUNK_SIZE', 0) or 0)
+    use_parallel = bool(parallel and chunk_sz > 0 and len(row_ids) > chunk_sz)
+
+    if use_parallel:
+        run = ScrapeRun.objects.create(
+            catalog_upload=upload,
+            store=store,
+            status=ScrapeRun.Status.RUNNING,
+        )
+        chunks = [row_ids[i : i + chunk_sz] for i in range(0, len(row_ids), chunk_sz)]
+        chunk_sigs = [
+            catalog_scrape_upload_chunk_task.si(str(upload_id), str(run.id), [str(x) for x in ch])
+            for ch in chunks
+        ]
+        chord(group(chunk_sigs))(catalog_scrape_upload_finalize.s(str(upload_id), str(run.id)))
+        return {
+            'upload_id': str(upload_id),
+            'run_id': str(run.id),
+            'parallel': True,
+            'chunks': len(chunks),
+            'status': 'running',
+            'message': 'Scrape running in parallel chunks; see activity log when complete.',
+        }
+
+    run = ScrapeRun.objects.create(
+        catalog_upload=upload,
+        store=store,
+        status=ScrapeRun.Status.RUNNING,
+    )
+    session = {}
+    succeeded = failed = 0
+    fatal_error = None
+    stalled_out = False
+
+    try:
+        stats = _process_catalog_upload_scrape_rows(
+            rows_qs.select_related(
+                'product_mapping', 'product_mapping__product', 'product_mapping__product__vendor',
+            ),
+            upload=upload,
+            store=store,
+            upload_id=upload_id,
+            session=session,
+            run=run,
+            emit_stall_log=True,
+        )
+        succeeded = stats['succeeded']
+        failed = stats['failed']
+        stalled_out = stats['stalled_out']
+        fatal_error = stats['fatal_error']
     finally:
         close_amazon_session(session)
 
@@ -655,7 +720,7 @@ def run_catalog_scrape(upload_id: str):
     run.rows_succeeded = succeeded
     if fatal_error:
         run.status = ScrapeRun.Status.FAILED
-        run.error_summary = str(fatal_error)[:2000]
+        run.error_summary = fatal_error[:2000]
     elif stalled_out:
         run.status = (
             ScrapeRun.Status.PARTIAL
@@ -681,7 +746,7 @@ def run_catalog_scrape(upload_id: str):
         'stalled': stalled_out,
     }
     if fatal_error:
-        out['error'] = str(fatal_error)
+        out['error'] = fatal_error
     finish_msg = (
         f'Vendor scrape finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
         f'{succeeded} row(s) updated, {failed} failed, {run.rows_processed} processed.'
@@ -702,27 +767,148 @@ def run_catalog_scrape(upload_id: str):
             'stalled': stalled_out,
         },
     )
-    # Intentionally do not auto-push after scrape.
-    # "synced" should only come from explicit Manual sync or scheduled sync runs.
     return out
 
 
-def run_store_wide_catalog_scrape(store_id: str) -> dict:
-    """
-    Scrape vendor URLs for active listings whose ``sync_status`` is ``pending`` only.
+@shared_task(bind=True, max_retries=3)
+def catalog_scrape_upload_chunk_task(self, upload_id: str, scrape_run_id: str, row_ids: list):
+    """Process one chunk of catalog upload rows (parallel scrape)."""
+    from scrapers import close_amazon_session
 
-    Rows become ``scraped`` on success or ``failed`` / ``needs_attention`` on failure;
-    ingest-only vendors are skipped and stay ``pending`` until the desktop runner posts data.
-    When there are no pending server-scrapable rows left, the task exits (failures are not
-    retried automatically).
+    try:
+        upload = CatalogUpload.objects.select_related('store', 'store__marketplace').get(id=upload_id)
+    except CatalogUpload.DoesNotExist:
+        return {
+            'error': 'Upload not found',
+            'succeeded': 0,
+            'failed': 0,
+            'stalled_out': False,
+            'rows_visited': 0,
+        }
 
-    Stalls: if no listing leaves ``pending`` within ``SCRAPER_STALL_NO_PENDING_PROGRESS``
-    between server-scrapable rows, the task stops early (does not bulk-fail remaining rows).
-    """
+    store = upload.store
+    session = {}
+    try:
+        rows = (
+            CatalogUploadRow.objects.filter(id__in=row_ids)
+            .select_related('product_mapping', 'product_mapping__product', 'product_mapping__product__vendor')
+            .order_by('row_number')
+        )
+        stats = _process_catalog_upload_scrape_rows(
+            rows,
+            upload=upload,
+            store=store,
+            upload_id=upload_id,
+            session=session,
+            run=None,
+            emit_stall_log=False,
+        )
+    finally:
+        close_amazon_session(session)
+    return stats
+
+
+@shared_task
+def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
+    """Chord callback: finalize ScrapeRun + activity log after all upload chunks finish."""
+    from sync.models import ScrapeRun
+
+    from catalog.activity_log import append_catalog_log
+
+    try:
+        upload = CatalogUpload.objects.select_related('store', 'store__marketplace').get(id=upload_id)
+    except CatalogUpload.DoesNotExist:
+        return {'error': 'Upload not found', 'upload_id': upload_id}
+
+    store = upload.store
+    try:
+        run = ScrapeRun.objects.get(id=scrape_run_id, catalog_upload=upload)
+    except ScrapeRun.DoesNotExist:
+        return {'error': 'ScrapeRun not found', 'upload_id': upload_id}
+
+    succeeded = failed = rows_processed = 0
+    stalled_out = False
+    fatal_parts: list[str] = []
+
+    if not isinstance(results, list):
+        results = []
+
+    for r in results:
+        if isinstance(r, Exception):
+            fatal_parts.append(str(r))
+            continue
+        if not isinstance(r, dict):
+            continue
+        if r.get('fatal_error'):
+            fatal_parts.append(str(r['fatal_error']))
+        if r.get('error'):
+            fatal_parts.append(str(r['error']))
+        succeeded += int(r.get('succeeded', 0))
+        failed += int(r.get('failed', 0))
+        stalled_out = stalled_out or bool(r.get('stalled_out'))
+        rows_processed += int(r.get('rows_visited', 0))
+
+    fatal_error = '; '.join(fatal_parts) if fatal_parts else None
+
+    run.finished_at = timezone.now()
+    run.rows_processed = rows_processed
+    run.rows_succeeded = succeeded
+    if fatal_error:
+        run.status = ScrapeRun.Status.FAILED
+        run.error_summary = fatal_error[:2000]
+    elif stalled_out:
+        run.status = (
+            ScrapeRun.Status.PARTIAL
+            if (succeeded > 0 or failed > 0)
+            else ScrapeRun.Status.FAILED
+        )
+        run.error_summary = (
+            f'Stalled: no listing left Pending within {int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+        )
+    else:
+        run.status = ScrapeRun.Status.FAILED if succeeded == 0 and rows_processed > 0 else (
+            ScrapeRun.Status.PARTIAL if failed else ScrapeRun.Status.SUCCESS
+        )
+    run.save()
+
+    finish_msg = (
+        f'Vendor scrape finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
+        f'{succeeded} row(s) updated, {failed} failed, {rows_processed} processed (parallel chunks).'
+    )
+    if stalled_out:
+        finish_msg += (
+            f' Stopped early: no progress moving listings off Pending for '
+            f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+        )
+    append_catalog_log(
+        store.id,
+        finish_msg,
+        action_type='scrape_end',
+        metadata={
+            'rows_succeeded': succeeded,
+            'failed': failed,
+            'upload_id': str(upload_id),
+            'stalled': stalled_out,
+            'parallel': True,
+        },
+    )
+    return {
+        'upload_id': str(upload_id),
+        'run_id': str(run.id),
+        'status': run.status,
+        'rows_processed': rows_processed,
+        'rows_succeeded': succeeded,
+        'failed': failed,
+        'stalled': stalled_out,
+    }
+
+
+def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, emit_stall_log: bool):
+    """Inner loop for store-wide scrape (single process or one parallel chunk)."""
     from decimal import Decimal
 
-    from scrapers import close_amazon_session, get_price_and_stock
-    from stores.models import Store
+    from catalog.activity_log import append_catalog_log
+    from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
     from sync.tasks import (
         _apply_inventory,
         _apply_pricing,
@@ -730,37 +916,19 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
         _get_inventory_for_vendor,
         _get_pricing_for_vendor,
         _has_fixed_tier,
+        _inventory_from_scrape_result,
         _missing_fixed_inputs,
         resolve_vendor_scrape_url,
-        _inventory_from_scrape_result,
     )
-    from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
     from vendor.models import VendorPrice
+    from scrapers import get_price_and_stock
 
-    from catalog.activity_log import append_catalog_log
-
-    try:
-        store = Store.objects.select_related('marketplace').get(id=store_id)
-    except Store.DoesNotExist:
-        return {'error': 'store_not_found', 'store_id': str(store_id)}
-
-    append_catalog_log(
-        store.id,
-        f'Store-wide vendor scrape started at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")} '
-        f'for active listings with sync_status=pending.',
-        action_type='scrape_start',
-        metadata={'scope': 'store'},
-    )
-
-    mappings = ProductMapping.objects.filter(
-        store=store, is_active=True, sync_status='pending',
-    ).select_related('product', 'product__vendor')
-    session: dict = {}
     processed = succeeded = failed = 0
     now = timezone.now()
     error_summary = None
     stalled_out = False
     last_progress_at = None
+    fatal_error = None
 
     try:
         for pm in mappings:
@@ -768,9 +936,6 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
             product = pm.product
             if not product:
                 continue
-            # Ingest-only vendors: never re-apply old VendorPrice — only
-            # fresh runner / feed POSTs mutate these rows. See
-            # ``run_catalog_scrape`` for the same policy.
             if _is_ingest_only_product(product):
                 logger.info(
                     "Ingest-only row (store-wide) left untouched — awaiting fresh scrape (sku=%s vendor=%s)",
@@ -793,13 +958,14 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
                     store.id,
                     stall_msg,
                 )
-                append_catalog_log(
-                    store.id,
-                    f'Store-wide vendor scrape stopped early: {stall_msg} '
-                    f'(scraper may be hung or blocked). Remaining server-scrapable rows stay Pending.',
-                    action_type='scrape_stalled',
-                    metadata={'scope': 'store'},
-                )
+                if emit_stall_log:
+                    append_catalog_log(
+                        store.id,
+                        f'Store-wide vendor scrape stopped early: {stall_msg} '
+                        f'(scraper may be hung or blocked). Remaining server-scrapable rows stay Pending.',
+                        action_type='scrape_stalled',
+                        metadata={'scope': 'store'},
+                    )
                 error_summary = stall_msg if not error_summary else error_summary
                 break
 
@@ -921,8 +1087,86 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
                 failed += 1
                 last_progress_at = timezone.now()
                 continue
+    except Exception as loop_err:
+        fatal_error = str(loop_err)
+        logger.exception('Store-wide scrape aborted: %s', loop_err)
+
+    return {
+        'rows_processed': processed,
+        'rows_succeeded': succeeded,
+        'failed': failed,
+        'error_summary': error_summary,
+        'stalled': stalled_out,
+        'fatal_error': fatal_error,
+    }
+
+
+def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> dict:
+    """
+    Scrape vendor URLs for active listings whose ``sync_status`` is ``pending`` only.
+
+    Parallel mode (Celery + ``CATALOG_SCRAPE_CHUNK_SIZE``) splits pending mappings across
+    tasks, each with its own Amazon/eBay session.
+    """
+    from scrapers import close_amazon_session
+    from stores.models import Store
+
+    from catalog.activity_log import append_catalog_log
+
+    try:
+        store = Store.objects.select_related('marketplace').get(id=store_id)
+    except Store.DoesNotExist:
+        return {'error': 'store_not_found', 'store_id': str(store_id)}
+
+    append_catalog_log(
+        store.id,
+        f'Store-wide vendor scrape started at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")} '
+        f'for active listings with sync_status=pending.',
+        action_type='scrape_start',
+        metadata={'scope': 'store'},
+    )
+
+    base_qs = ProductMapping.objects.filter(
+        store=store, is_active=True, sync_status='pending',
+    ).order_by('id')
+
+    mapping_ids = list(base_qs.values_list('id', flat=True))
+    chunk_sz = int(getattr(settings, 'CATALOG_SCRAPE_CHUNK_SIZE', 0) or 0)
+    use_parallel = bool(parallel and chunk_sz > 0 and len(mapping_ids) > chunk_sz)
+
+    if use_parallel:
+        chunks = [mapping_ids[i : i + chunk_sz] for i in range(0, len(mapping_ids), chunk_sz)]
+        sigs = [
+            catalog_scrape_store_chunk_task.si(str(store_id), [str(x) for x in ch])
+            for ch in chunks
+        ]
+        chord(group(sigs))(catalog_scrape_store_finalize.s(str(store_id)))
+        return {
+            'store_id': str(store_id),
+            'scope': 'store',
+            'parallel': True,
+            'chunks': len(chunks),
+            'status': 'running',
+            'message': 'Store-wide scrape running in parallel chunks; see activity log when complete.',
+        }
+
+    session: dict = {}
+    try:
+        stats = _process_store_wide_scrape_mappings(
+            base_qs.select_related('product', 'product__vendor'),
+            store=store,
+            store_id=store_id,
+            session=session,
+            emit_stall_log=True,
+        )
     finally:
         close_amazon_session(session)
+
+    succeeded = stats['rows_succeeded']
+    failed = stats['failed']
+    processed = stats['rows_processed']
+    error_summary = stats['error_summary']
+    stalled_out = stats['stalled']
 
     end_meta = {
         'rows_succeeded': succeeded,
@@ -957,15 +1201,123 @@ def run_store_wide_catalog_scrape(store_id: str) -> dict:
 
 
 @shared_task(bind=True, max_retries=3)
+def catalog_scrape_store_chunk_task(self, store_id: str, mapping_ids: list):
+    from scrapers import close_amazon_session
+    from stores.models import Store
+
+    try:
+        store = Store.objects.select_related('marketplace').get(id=store_id)
+    except Store.DoesNotExist:
+        return {
+            'error': 'store_not_found',
+            'rows_processed': 0,
+            'rows_succeeded': 0,
+            'failed': 0,
+            'error_summary': None,
+            'stalled': False,
+        }
+
+    session: dict = {}
+    try:
+        mappings = (
+            ProductMapping.objects.filter(id__in=mapping_ids, store=store)
+            .select_related('product', 'product__vendor')
+            .order_by('id')
+        )
+        stats = _process_store_wide_scrape_mappings(
+            mappings,
+            store=store,
+            store_id=store_id,
+            session=session,
+            emit_stall_log=False,
+        )
+    finally:
+        close_amazon_session(session)
+    return stats
+
+
+@shared_task
+def catalog_scrape_store_finalize(results, store_id: str):
+    from stores.models import Store
+
+    from catalog.activity_log import append_catalog_log
+
+    try:
+        store = Store.objects.select_related('marketplace').get(id=store_id)
+    except Store.DoesNotExist:
+        return {'error': 'store_not_found', 'store_id': str(store_id)}
+
+    processed = succeeded = failed = 0
+    stalled_out = False
+    error_summary = None
+    fatal_parts: list[str] = []
+
+    if not isinstance(results, list):
+        results = []
+
+    for r in results:
+        if isinstance(r, Exception):
+            fatal_parts.append(str(r))
+            continue
+        if not isinstance(r, dict):
+            continue
+        if r.get('fatal_error'):
+            fatal_parts.append(str(r['fatal_error']))
+        if r.get('error'):
+            fatal_parts.append(str(r['error']))
+        succeeded += int(r.get('rows_succeeded', 0))
+        failed += int(r.get('failed', 0))
+        processed += int(r.get('rows_processed', 0))
+        stalled_out = stalled_out or bool(r.get('stalled'))
+        es = r.get('error_summary')
+        if es and not error_summary:
+            error_summary = str(es)
+
+    end_meta = {
+        'rows_succeeded': succeeded,
+        'failed': failed,
+        'rows_processed': processed,
+        'stalled': stalled_out,
+        'parallel': True,
+    }
+    end_msg = (
+        f'Store-wide vendor scrape finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
+        f'{succeeded} listing(s) updated, {failed} failed, {processed} processed (parallel chunks).'
+    )
+    if fatal_parts:
+        end_msg += ' Errors: ' + '; '.join(fatal_parts[:5])
+    if stalled_out:
+        end_msg += (
+            f' Stopped early: no progress moving listings off Pending for '
+            f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+        )
+    append_catalog_log(
+        store.id,
+        end_msg,
+        action_type='scrape_end',
+        metadata=end_meta,
+    )
+    return {
+        'store_id': str(store_id),
+        'scope': 'store',
+        'rows_processed': processed,
+        'rows_succeeded': succeeded,
+        'failed': failed,
+        'error_summary': error_summary or ('; '.join(fatal_parts) if fatal_parts else None),
+        'stalled': stalled_out,
+    }
+
+
+@shared_task(bind=True, max_retries=3)
 def catalog_scrape_task(self, upload_id: str):
     """Celery wrapper for run_catalog_scrape."""
-    return run_catalog_scrape(upload_id)
+    return run_catalog_scrape(upload_id, parallel=True)
 
 
 @shared_task(bind=True, max_retries=3)
 def catalog_scrape_store_task(self, store_id: str):
     """Celery: scrape all active listings for a store (no marketplace push)."""
-    return run_store_wide_catalog_scrape(store_id)
+    return run_store_wide_catalog_scrape(store_id, parallel=True)
 
 
 def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = None) -> dict:

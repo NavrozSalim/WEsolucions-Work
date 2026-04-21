@@ -51,6 +51,13 @@ else:
         'on',
     )
 
+# Split catalog scrapes across parallel Celery tasks (separate Amazon/eBay sessions per chunk).
+# 0 = always one task (legacy). Typical prod: 300–600 with worker concurrency ≥ 2.
+try:
+    CATALOG_SCRAPE_CHUNK_SIZE = max(0, int(os.getenv('CATALOG_SCRAPE_CHUNK_SIZE', '400')))
+except ValueError:
+    CATALOG_SCRAPE_CHUNK_SIZE = 400
+
 if DEBUG:
     ALLOWED_HOSTS = _env_list('ALLOWED_HOSTS', 'localhost,127.0.0.1,backend')
 else:
