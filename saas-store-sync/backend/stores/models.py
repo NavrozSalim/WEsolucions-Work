@@ -49,6 +49,15 @@ class Store(models.Model):
         db_index=True,
         help_text='When reached, active catalog listings sync_status reset to pending (24h after marketplace sync).',
     )
+    catalog_zero_pending_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            'When server-scrapable listings first had none in Pending; 24h after this, '
+            'scraped/synced non-ingest-only rows return to Pending. Cleared if Pending reappears.'
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
