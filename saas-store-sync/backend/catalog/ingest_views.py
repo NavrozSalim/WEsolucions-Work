@@ -71,6 +71,37 @@ SUPPORTED_VENDORS: dict[str, dict[str, Any]] = {
         'label': 'CostcoAU',
         'runner': 'desktop',
     },
+    # Amazon / eBay: desktop runners POST batches (same poller + chunk pool model
+    # as HEB/Costco). URL host guards keep AU rows off the US ingest endpoint
+    # and vice versa (``amazon.com/`` is not a substring of ``amazon.com.au``).
+    'amazon_au': {
+        'scope': 'amazon_au',
+        'vendor_db_codes': ['amazonau', 'amazon_au', 'amazon-au'],
+        'url_host_contains': 'amazon.com.au',
+        'label': 'AmazonAU',
+        'runner': 'desktop',
+    },
+    'amazon_us': {
+        'scope': 'amazon_us',
+        'vendor_db_codes': ['amazonus', 'amazonusa', 'amazon_us', 'amazon-us', 'amazon'],
+        'url_host_contains': 'amazon.com/',
+        'label': 'AmazonUS',
+        'runner': 'desktop',
+    },
+    'ebay_au': {
+        'scope': 'ebay_au',
+        'vendor_db_codes': ['ebayau', 'ebay_au', 'ebay-au'],
+        'url_host_contains': 'ebay.com.au',
+        'label': 'EbayAU',
+        'runner': 'desktop',
+    },
+    'ebay_us': {
+        'scope': 'ebay_us',
+        'vendor_db_codes': ['ebayus', 'ebay_us', 'ebay-us', 'ebay'],
+        'url_host_contains': 'ebay.com/',
+        'label': 'EbayUS',
+        'runner': 'desktop',
+    },
     'vevor': {
         # Vevor AU is refreshed by a server-side Celery task from a public S3
         # XLSX feed (see ``catalog.tasks.run_vevor_au_ingest``). There is no

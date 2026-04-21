@@ -1,7 +1,12 @@
 """Create an ingest API token.
 
-Example:
+Examples:
     python manage.py create_ingest_token --label heb-pc-navroz --scopes heb
+    python manage.py create_ingest_token --label desk-shared --scopes heb costco
+    python manage.py create_ingest_token --label desk-ae --scopes amazon_au amazon_us ebay_au ebay_us
+
+One token can list every scope your runners need. Extend scopes on an existing
+``IngestToken`` in Django admin if you add new desktop vendors later.
 
 Prints the plaintext token once; only its SHA-256 hash is stored in DB.
 """
