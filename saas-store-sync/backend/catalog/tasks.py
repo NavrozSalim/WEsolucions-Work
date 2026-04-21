@@ -32,26 +32,7 @@ def _is_ingest_only_product(product) -> bool:
     """
     vendor = getattr(product, 'vendor', None)
     code = (getattr(vendor, 'code', '') or '').lower()
-    if code in (
-        'heb',
-        'hebus',
-        'costcoau',
-        'costco_au',
-        'costco-au',
-        'vevor',
-        'vevorau',
-        'amazonus',
-        'amazonusa',
-        'amazonau',
-        'amazon_us',
-        'amazon-au',
-        'ebayus',
-        'ebayau',
-        'ebay_us',
-        'ebay-au',
-        'ebay',
-        'amazon',
-    ):
+    if code in ('heb', 'hebus', 'costcoau', 'costco_au', 'costco-au', 'vevor', 'vevorau'):
         return True
     if code.startswith('heb_') or code.startswith('costco_') or code.startswith('vevor_'):
         return True

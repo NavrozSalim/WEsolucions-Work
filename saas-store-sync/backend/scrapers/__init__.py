@@ -5,16 +5,14 @@ Routes vendor URLs to the correct scraper (Amazon US, Amazon AU, eBay) based on
 domain. Each scraper returns {"price": float|None, "stock": int|None} and may
 include "title" (str) when extracted — same shape for Amazon US and eBay.
 
-HEB, Costco AU, Amazon AU/US, eBay AU/US and Vevor AU are **not** scraped
-server-side (Amazon/eBay pricing is pushed by desktop runners via
-``/api/v1/ingest/amazon_au/``, ``…/amazon_us/``, ``…/ebay_au/``, ``…/ebay_us/``,
-same batch shape as HEB/Costco). Vevor AU uses the public S3 XLSX feed
-(``catalog.tasks.run_vevor_au_ingest``). Those flows write directly to both
-``VendorPrice`` **and** ``ProductMapping`` (store_price / store_stock /
-last_scrape_time). The catalog scrape and store-sync tasks detect these
-vendors (``_is_ingest_only_product``) and skip server-side HTTP scraping —
-they never re-apply an older VendorPrice row as a substitute for fresh
-scrape data.
+HEB and Costco AU are **not** scraped server-side. Their PDPs are protected
+by Akamai / Bot Management from datacenter IPs, so pricing is pushed by
+desktop runners via ``/api/v1/ingest/heb/`` and ``/api/v1/ingest/costco/``.
+Vevor AU uses the public S3 XLSX feed (``catalog.tasks.run_vevor_au_ingest``).
+Those flows write directly to both ``VendorPrice`` **and** ``ProductMapping``.
+The catalog scrape and store-sync tasks detect those vendors
+(``_is_ingest_only_product``) and skip server-side HTTP scraping for them.
+Amazon and eBay are scraped server-side via this dispatcher.
 
 Usage in tasks:
     from scrapers import get_price_and_stock, close_amazon_session

@@ -33,33 +33,14 @@ def _is_heb_product(product) -> bool:
 
 def _is_ingest_only_product(product) -> bool:
     """Vendors whose price/stock comes from a desktop runner or S3 feed
-    (HEB, Costco AU, Vevor AU, Amazon AU/US, eBay AU/US). There is no live
-    server-side scraper for these — the ingest endpoint writes
-    ``ProductMapping.store_price`` / ``store_stock`` / ``last_scrape_time``
-    directly on every POST, and server-side scrape/sync loops skip these rows
-    so old VendorPrice data is never silently re-applied."""
+    (HEB, Costco AU, Vevor AU). There is no live server-side scraper for
+    these — the ingest endpoint writes ``ProductMapping.store_price`` /
+    ``store_stock`` / ``last_scrape_time`` directly on every POST, and
+    server-side scrape/sync loops skip these rows so old VendorPrice data
+    is never silently re-applied."""
     vendor = getattr(product, 'vendor', None)
     code = (getattr(vendor, 'code', '') or '').lower()
-    if code in (
-        'heb',
-        'hebus',
-        'costcoau',
-        'costco_au',
-        'costco-au',
-        'vevor',
-        'vevorau',
-        'amazonus',
-        'amazonusa',
-        'amazonau',
-        'amazon_us',
-        'amazon-au',
-        'ebayus',
-        'ebayau',
-        'ebay_us',
-        'ebay-au',
-        'ebay',
-        'amazon',
-    ):
+    if code in ('heb', 'hebus', 'costcoau', 'costco_au', 'costco-au', 'vevor', 'vevorau'):
         return True
     if code.startswith('heb_') or code.startswith('costco_') or code.startswith('vevor_'):
         return True
@@ -79,17 +60,6 @@ def _non_ingest_vendor_q() -> Q:
         | Q(product__vendor__code__iexact='costco-au')
         | Q(product__vendor__code__iexact='vevor')
         | Q(product__vendor__code__iexact='vevorau')
-        | Q(product__vendor__code__iexact='amazonus')
-        | Q(product__vendor__code__iexact='amazonusa')
-        | Q(product__vendor__code__iexact='amazonau')
-        | Q(product__vendor__code__iexact='amazon_us')
-        | Q(product__vendor__code__iexact='amazon-au')
-        | Q(product__vendor__code__iexact='ebayus')
-        | Q(product__vendor__code__iexact='ebayau')
-        | Q(product__vendor__code__iexact='ebay_us')
-        | Q(product__vendor__code__iexact='ebay-au')
-        | Q(product__vendor__code__iexact='ebay')
-        | Q(product__vendor__code__iexact='amazon')
         | Q(product__vendor__code__istartswith='heb_')
         | Q(product__vendor__code__istartswith='costco_')
         | Q(product__vendor__code__istartswith='vevor_')
