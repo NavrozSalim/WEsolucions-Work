@@ -75,23 +75,38 @@ def _run_catalog_zero_pending_cycle():
     from both the clock and the bulk reset (they are not in the server scrape queue).
 
     Clears the timestamp whenever a server-scrapable listing is ``pending`` again.
+
+    **Important:** This used to loop one query batch per store (O(stores) round-trips). On
+    a host with many stores, ``check_scheduled_updates`` (beat: every minute) then held
+    Celery workers for tens of minutes and starved user-initiated ``catalog_scrape`` tasks.
+    The logic below is set-based (a handful of SQL queries).
     """
     from catalog.activity_log import append_catalog_log
 
     now = timezone.now()
     cutoff = now - timedelta(days=1)
+    vq = _non_ingest_vendor_q()
+    # Non-ingest server-scrapable rows only (aligns with original ``ni`` queryset).
+    ni = ProductMapping.objects.filter(
+        is_active=True,
+        product__isnull=False,
+    ).filter(vq)
 
     due_stores = Store.objects.filter(
         catalog_zero_pending_at__isnull=False,
         catalog_zero_pending_at__lte=cutoff,
     )
     for store in due_stores:
-        ni = ProductMapping.objects.filter(
-            store=store,
-            is_active=True,
-            product__isnull=False,
-        ).filter(_non_ingest_vendor_q())
-        n = ni.filter(sync_status__in=('scraped', 'synced')).update(sync_status='pending')
+        n = (
+            ProductMapping.objects.filter(
+                store=store,
+                is_active=True,
+                product__isnull=False,
+            )
+            .filter(vq)
+            .filter(sync_status__in=('scraped', 'synced'))
+            .update(sync_status='pending')
+        )
         Store.objects.filter(id=store.id).update(catalog_zero_pending_at=None)
         append_catalog_log(
             store.id,
@@ -101,39 +116,22 @@ def _run_catalog_zero_pending_cycle():
             metadata={'rows_reset': n},
         )
 
-    store_ids = (
-        ProductMapping.objects.filter(
-            is_active=True,
-            product__isnull=False,
-        )
-        .filter(_non_ingest_vendor_q())
-        .values_list('store_id', flat=True)
-        .distinct()
-    )
-    for sid in store_ids:
-        try:
-            store = Store.objects.get(id=sid)
-        except Store.DoesNotExist:
-            continue
-        ni = ProductMapping.objects.filter(
-            store=store,
-            is_active=True,
-            product__isnull=False,
-        ).filter(_non_ingest_vendor_q())
-        if not ni.exists():
-            continue
-        pending_n = ni.filter(sync_status='pending').count()
-        if pending_n > 0:
-            if store.catalog_zero_pending_at is not None:
-                Store.objects.filter(id=store.id).update(catalog_zero_pending_at=None)
-        else:
-            # No server-scrapable Pending: arm 24h refresh only when there is something
-            # to cycle (scraped/synced). If every row is failed/needs_attention, do not arm.
-            if (
-                store.catalog_zero_pending_at is None
-                and ni.filter(sync_status__in=('scraped', 'synced')).exists()
-            ):
-                Store.objects.filter(id=store.id).update(catalog_zero_pending_at=now)
+    # Per-store “clock” updates as bulk SQL (replaces N+1 over distinct store_ids).
+    pending_stores = ni.filter(sync_status='pending').values('store_id').distinct()
+    Store.objects.filter(
+        id__in=pending_stores,
+        catalog_zero_pending_at__isnull=False,
+    ).update(catalog_zero_pending_at=None)
+
+    scraped_stores = ni.filter(sync_status__in=('scraped', 'synced')).values(
+        'store_id',
+    ).distinct()
+    # Arm the 24h window only for stores with something to cycle (scraped/synced) and
+    # with no non-ingest row still Pending, and the clock not already set.
+    Store.objects.filter(
+        id__in=scraped_stores,
+        catalog_zero_pending_at__isnull=True,
+    ).exclude(id__in=pending_stores).update(catalog_zero_pending_at=now)
 
 
 def _fail_mapping(pm, code: str, message: str = '') -> None:
