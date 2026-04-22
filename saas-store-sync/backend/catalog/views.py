@@ -11,7 +11,17 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db.models import Q
 
-from catalog.models import ProductMapping, CatalogUpload, CatalogUploadRow, CatalogSyncLog, ReverbUpdateLog, CatalogActivityLog, HebScrapeJob
+from catalog.models import (
+    ProductMapping,
+    CatalogUpload,
+    CatalogUploadRow,
+    CatalogSyncLog,
+    ReverbUpdateLog,
+    CatalogActivityLog,
+    HebScrapeJob,
+    StoreCatalogCeleryScrapeState,
+)
+from catalog.celery_scrape_state import set_celery_scrape_state
 from catalog.serializers import ProductMappingSerializer, CatalogActivityLogSerializer
 from catalog.pagination import CatalogProductPagination
 from catalog.services import validate_and_create_upload
@@ -684,6 +694,12 @@ class CatalogScrapeTriggerView(APIView):
                     )
                 return Response(result, status=status.HTTP_200_OK)
             task = catalog_scrape_task.delay(str(upload.id))
+            set_celery_scrape_state(
+                store,
+                task_id=str(task.id),
+                scope=StoreCatalogCeleryScrapeState.Scope.UPLOAD,
+                upload=upload,
+            )
             return Response({
                 "job_id": task.id,
                 "upload_id": str(upload.id),
@@ -714,6 +730,12 @@ class CatalogScrapeTriggerView(APIView):
                     )
                 return Response(result, status=status.HTTP_200_OK)
             task = catalog_scrape_task.delay(str(upload.id))
+            set_celery_scrape_state(
+                store,
+                task_id=str(task.id),
+                scope=StoreCatalogCeleryScrapeState.Scope.UPLOAD,
+                upload=upload,
+            )
             return Response({
                 "job_id": task.id,
                 "upload_id": str(upload.id),
@@ -742,6 +764,12 @@ class CatalogScrapeTriggerView(APIView):
                 )
             return Response(result, status=status.HTTP_200_OK)
         task = catalog_scrape_store_task.delay(str(store.id))
+        set_celery_scrape_state(
+            store,
+            task_id=str(task.id),
+            scope=StoreCatalogCeleryScrapeState.Scope.STORE,
+            upload=None,
+        )
         return Response({
             "job_id": task.id,
             "scope": "store",
@@ -1140,9 +1168,24 @@ class CatalogScrapeProgressView(APIView):
         heb_scraped = heb.get('scraped', 0)
         heb_pending = heb.get('pending', 0)
 
+        server_celery_scrape = {'active': False}
+        try:
+            st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
+            if st:
+                server_celery_scrape = {
+                    'active': True,
+                    'scope': st.scope,
+                    'upload_id': str(st.upload_id) if st.upload_id else None,
+                    'enqueued_at': st.enqueued_at.isoformat(),
+                    'task_id': st.root_task_id or '',
+                }
+        except Exception:
+            pass
+
         return Response({
             'total': total,
             'by_status': by_status,
+            'server_celery_scrape': server_celery_scrape,
             'has_heb': bool(heb_total > 0),
             'heb_total': heb_total,
             'heb_scraped': heb_scraped,

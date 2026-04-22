@@ -814,6 +814,7 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
     from sync.models import ScrapeRun
 
     from catalog.activity_log import append_catalog_log
+    from catalog.celery_scrape_state import clear_celery_scrape_state
 
     try:
         upload = CatalogUpload.objects.select_related('store', 'store__marketplace').get(id=upload_id)
@@ -824,83 +825,87 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
     try:
         run = ScrapeRun.objects.get(id=scrape_run_id, catalog_upload=upload)
     except ScrapeRun.DoesNotExist:
+        clear_celery_scrape_state(str(store.id))
         return {'error': 'ScrapeRun not found', 'upload_id': upload_id}
 
-    succeeded = failed = rows_processed = 0
-    stalled_out = False
-    fatal_parts: list[str] = []
+    try:
+        succeeded = failed = rows_processed = 0
+        stalled_out = False
+        fatal_parts: list[str] = []
 
-    if not isinstance(results, list):
-        results = []
+        if not isinstance(results, list):
+            results = []
 
-    for r in results:
-        if isinstance(r, Exception):
-            fatal_parts.append(str(r))
-            continue
-        if not isinstance(r, dict):
-            continue
-        if r.get('fatal_error'):
-            fatal_parts.append(str(r['fatal_error']))
-        if r.get('error'):
-            fatal_parts.append(str(r['error']))
-        succeeded += int(r.get('succeeded', 0))
-        failed += int(r.get('failed', 0))
-        stalled_out = stalled_out or bool(r.get('stalled_out'))
-        rows_processed += int(r.get('rows_visited', 0))
+        for r in results:
+            if isinstance(r, Exception):
+                fatal_parts.append(str(r))
+                continue
+            if not isinstance(r, dict):
+                continue
+            if r.get('fatal_error'):
+                fatal_parts.append(str(r['fatal_error']))
+            if r.get('error'):
+                fatal_parts.append(str(r['error']))
+            succeeded += int(r.get('succeeded', 0))
+            failed += int(r.get('failed', 0))
+            stalled_out = stalled_out or bool(r.get('stalled_out'))
+            rows_processed += int(r.get('rows_visited', 0))
 
-    fatal_error = '; '.join(fatal_parts) if fatal_parts else None
+        fatal_error = '; '.join(fatal_parts) if fatal_parts else None
 
-    run.finished_at = timezone.now()
-    run.rows_processed = rows_processed
-    run.rows_succeeded = succeeded
-    if fatal_error:
-        run.status = ScrapeRun.Status.FAILED
-        run.error_summary = fatal_error[:2000]
-    elif stalled_out:
-        run.status = (
-            ScrapeRun.Status.PARTIAL
-            if (succeeded > 0 or failed > 0)
-            else ScrapeRun.Status.FAILED
+        run.finished_at = timezone.now()
+        run.rows_processed = rows_processed
+        run.rows_succeeded = succeeded
+        if fatal_error:
+            run.status = ScrapeRun.Status.FAILED
+            run.error_summary = fatal_error[:2000]
+        elif stalled_out:
+            run.status = (
+                ScrapeRun.Status.PARTIAL
+                if (succeeded > 0 or failed > 0)
+                else ScrapeRun.Status.FAILED
+            )
+            run.error_summary = (
+                f'Stalled: no listing left Pending within {int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+            )
+        else:
+            run.status = ScrapeRun.Status.FAILED if succeeded == 0 and rows_processed > 0 else (
+                ScrapeRun.Status.PARTIAL if failed else ScrapeRun.Status.SUCCESS
+            )
+        run.save()
+
+        finish_msg = (
+            f'Vendor scrape finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
+            f'{succeeded} row(s) updated, {failed} failed, {rows_processed} processed (parallel chunks).'
         )
-        run.error_summary = (
-            f'Stalled: no listing left Pending within {int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+        if stalled_out:
+            finish_msg += (
+                f' Stopped early: no progress moving listings off Pending for '
+                f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+            )
+        append_catalog_log(
+            store.id,
+            finish_msg,
+            action_type='scrape_end',
+            metadata={
+                'rows_succeeded': succeeded,
+                'failed': failed,
+                'upload_id': str(upload_id),
+                'stalled': stalled_out,
+                'parallel': True,
+            },
         )
-    else:
-        run.status = ScrapeRun.Status.FAILED if succeeded == 0 and rows_processed > 0 else (
-            ScrapeRun.Status.PARTIAL if failed else ScrapeRun.Status.SUCCESS
-        )
-    run.save()
-
-    finish_msg = (
-        f'Vendor scrape finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
-        f'{succeeded} row(s) updated, {failed} failed, {rows_processed} processed (parallel chunks).'
-    )
-    if stalled_out:
-        finish_msg += (
-            f' Stopped early: no progress moving listings off Pending for '
-            f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
-        )
-    append_catalog_log(
-        store.id,
-        finish_msg,
-        action_type='scrape_end',
-        metadata={
+        return {
+            'upload_id': str(upload_id),
+            'run_id': str(run.id),
+            'status': run.status,
+            'rows_processed': rows_processed,
             'rows_succeeded': succeeded,
             'failed': failed,
-            'upload_id': str(upload_id),
             'stalled': stalled_out,
-            'parallel': True,
-        },
-    )
-    return {
-        'upload_id': str(upload_id),
-        'run_id': str(run.id),
-        'status': run.status,
-        'rows_processed': rows_processed,
-        'rows_succeeded': succeeded,
-        'failed': failed,
-        'stalled': stalled_out,
-    }
+        }
+    finally:
+        clear_celery_scrape_state(str(store.id))
 
 
 def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, emit_stall_log: bool):
@@ -1241,83 +1246,113 @@ def catalog_scrape_store_finalize(results, store_id: str):
     from stores.models import Store
 
     from catalog.activity_log import append_catalog_log
+    from catalog.celery_scrape_state import clear_celery_scrape_state
 
     try:
         store = Store.objects.select_related('marketplace').get(id=store_id)
     except Store.DoesNotExist:
         return {'error': 'store_not_found', 'store_id': str(store_id)}
 
-    processed = succeeded = failed = 0
-    stalled_out = False
-    error_summary = None
-    fatal_parts: list[str] = []
+    try:
+        processed = succeeded = failed = 0
+        stalled_out = False
+        error_summary = None
+        fatal_parts: list[str] = []
 
-    if not isinstance(results, list):
-        results = []
+        if not isinstance(results, list):
+            results = []
 
-    for r in results:
-        if isinstance(r, Exception):
-            fatal_parts.append(str(r))
-            continue
-        if not isinstance(r, dict):
-            continue
-        if r.get('fatal_error'):
-            fatal_parts.append(str(r['fatal_error']))
-        if r.get('error'):
-            fatal_parts.append(str(r['error']))
-        succeeded += int(r.get('rows_succeeded', 0))
-        failed += int(r.get('failed', 0))
-        processed += int(r.get('rows_processed', 0))
-        stalled_out = stalled_out or bool(r.get('stalled'))
-        es = r.get('error_summary')
-        if es and not error_summary:
-            error_summary = str(es)
+        for r in results:
+            if isinstance(r, Exception):
+                fatal_parts.append(str(r))
+                continue
+            if not isinstance(r, dict):
+                continue
+            if r.get('fatal_error'):
+                fatal_parts.append(str(r['fatal_error']))
+            if r.get('error'):
+                fatal_parts.append(str(r['error']))
+            succeeded += int(r.get('rows_succeeded', 0))
+            failed += int(r.get('failed', 0))
+            processed += int(r.get('rows_processed', 0))
+            stalled_out = stalled_out or bool(r.get('stalled'))
+            es = r.get('error_summary')
+            if es and not error_summary:
+                error_summary = str(es)
 
-    end_meta = {
-        'rows_succeeded': succeeded,
-        'failed': failed,
-        'rows_processed': processed,
-        'stalled': stalled_out,
-        'parallel': True,
-    }
-    end_msg = (
-        f'Store-wide vendor scrape finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
-        f'{succeeded} listing(s) updated, {failed} failed, {processed} processed (parallel chunks).'
-    )
-    if fatal_parts:
-        end_msg += ' Errors: ' + '; '.join(fatal_parts[:5])
-    if stalled_out:
-        end_msg += (
-            f' Stopped early: no progress moving listings off Pending for '
-            f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+        end_meta = {
+            'rows_succeeded': succeeded,
+            'failed': failed,
+            'rows_processed': processed,
+            'stalled': stalled_out,
+            'parallel': True,
+        }
+        end_msg = (
+            f'Store-wide vendor scrape finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
+            f'{succeeded} listing(s) updated, {failed} failed, {processed} processed (parallel chunks).'
         )
-    append_catalog_log(
-        store.id,
-        end_msg,
-        action_type='scrape_end',
-        metadata=end_meta,
-    )
-    return {
-        'store_id': str(store_id),
-        'scope': 'store',
-        'rows_processed': processed,
-        'rows_succeeded': succeeded,
-        'failed': failed,
-        'error_summary': error_summary or ('; '.join(fatal_parts) if fatal_parts else None),
-        'stalled': stalled_out,
-    }
+        if fatal_parts:
+            end_msg += ' Errors: ' + '; '.join(fatal_parts[:5])
+        if stalled_out:
+            end_msg += (
+                f' Stopped early: no progress moving listings off Pending for '
+                f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+            )
+        append_catalog_log(
+            store.id,
+            end_msg,
+            action_type='scrape_end',
+            metadata=end_meta,
+        )
+        return {
+            'store_id': str(store_id),
+            'scope': 'store',
+            'rows_processed': processed,
+            'rows_succeeded': succeeded,
+            'failed': failed,
+            'error_summary': error_summary or ('; '.join(fatal_parts) if fatal_parts else None),
+            'stalled': stalled_out,
+        }
+    finally:
+        clear_celery_scrape_state(str(store_id))
 
 
 @shared_task(bind=True, max_retries=3)
 def catalog_scrape_task(self, upload_id: str):
     """Celery wrapper for run_catalog_scrape."""
-    return run_catalog_scrape(upload_id, parallel=True)
+    from catalog.celery_scrape_state import clear_celery_scrape_state
+    from catalog.models import CatalogUpload
+
+    store_id = None
+    try:
+        store_id = str(CatalogUpload.objects.values_list('store_id', flat=True).get(id=upload_id))
+    except Exception:
+        pass
+    try:
+        out = run_catalog_scrape(upload_id, parallel=True)
+    except Exception:
+        clear_celery_scrape_state(store_id)
+        raise
+    if isinstance(out, dict) and out.get('parallel') and out.get('status') == 'running':
+        return out
+    clear_celery_scrape_state(store_id)
+    return out
 
 
 @shared_task(bind=True, max_retries=3)
 def catalog_scrape_store_task(self, store_id: str):
     """Celery: scrape all active listings for a store (no marketplace push)."""
-    return run_store_wide_catalog_scrape(store_id, parallel=True)
+    from catalog.celery_scrape_state import clear_celery_scrape_state
+
+    try:
+        out = run_store_wide_catalog_scrape(store_id, parallel=True)
+    except Exception:
+        clear_celery_scrape_state(store_id)
+        raise
+    if isinstance(out, dict) and out.get('parallel') and out.get('status') == 'running':
+        return out
+    clear_celery_scrape_state(store_id)
+    return out
 
 
 def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = None) -> dict:

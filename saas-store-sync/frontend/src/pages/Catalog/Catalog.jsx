@@ -525,7 +525,9 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
                     <span className={`inline-flex h-2.5 w-2.5 rounded-full ${recent5 > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300 dark:bg-slate-600'}`} />
                     <div>
                         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                            {label} {runnerLabel}
+                            {label}
+                            {' '}
+                            {runnerLabel}
                             {statusPill}
                         </h3>
                         <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -550,6 +552,34 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
                     className={`h-full rounded-full transition-all duration-500 ${barColor}`}
                     style={{ width: `${pct}%` }}
                 />
+            </div>
+        </div>
+    );
+}
+
+/**
+ * Shown when a store-wide or upload-scoped catalog scrape is running on the server
+ * (Celery: Amazon, eBay, etc.) — same UX intent as desktop queue strips for HEB/Costco.
+ */
+function ServerCeleryScrapeStrip({ state }) {
+    if (!state || !state.active) return null;
+    const scope = state.scope === 'upload' ? 'this upload' : 'all active listings for this store';
+    return (
+        <div className="rounded-lg border border-sky-200 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/30 p-4 mb-4 shadow-sm">
+            <div className="flex items-start gap-3">
+                <span className="mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full bg-sky-500 animate-pulse" />
+                <div>
+                    <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                        Live vendor scrape (server)
+                        <span className="ml-2 inline-flex items-center rounded-full bg-sky-200 px-2 py-0.5 text-xs font-medium text-sky-900 dark:bg-sky-800 dark:text-sky-200">
+                            running
+                        </span>
+                    </h3>
+                    <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
+                        Amazon, eBay, and other live-scrape rows for {scope} are being processed in the Celery queue. Safe to
+                        leave this tab; product rows update as each scrape completes.
+                    </p>
+                </div>
             </div>
         </div>
     );
@@ -614,6 +644,9 @@ export default function Catalog() {
     const [trackingScrape, setTrackingScrape] = useState(false);
     const trackingScrapeRef = useRef(false);
     useEffect(() => { trackingScrapeRef.current = trackingScrape; }, [trackingScrape]);
+    const [trackingServerScrape, setTrackingServerScrape] = useState(false);
+    const trackingServerScrapeRef = useRef(false);
+    useEffect(() => { trackingServerScrapeRef.current = trackingServerScrape; }, [trackingServerScrape]);
     const [stoppingScrape, setStoppingScrape] = useState(false);
     // Row IDs whose sync_status just changed — used to flash the row yellow.
     const [flashingRowIds, setFlashingRowIds] = useState(() => new Set());
@@ -887,13 +920,13 @@ export default function Catalog() {
         // Poll stores/uploads/products only during sync/scrape, desktop-runner
         // tracking, or a short post-success grace window — not on every idle
         // Products tab (avoids hammering the API every 5s).
-        const needsLivePolling = activeFlow || inGraceWindow || trackingScrape;
+        const needsLivePolling = activeFlow || inGraceWindow || trackingScrape || trackingServerScrape;
         if (!needsLivePolling) return undefined;
 
         refreshLiveData();
         const intervalId = setInterval(refreshLiveData, 5000);
         let timeoutId = null;
-        if (!activeFlow && !trackingScrape && inGraceWindow) {
+        if (!activeFlow && !trackingScrape && !trackingServerScrape && inGraceWindow) {
             timeoutId = setTimeout(() => clearInterval(intervalId), Math.max(0, liveRefreshUntil - Date.now()));
         }
 
@@ -901,7 +934,7 @@ export default function Catalog() {
             clearInterval(intervalId);
             if (timeoutId) clearTimeout(timeoutId);
         };
-    }, [selectedStore, flowStatus, liveRefreshUntil, trackingScrape, refreshLiveData]);
+    }, [selectedStore, flowStatus, liveRefreshUntil, trackingScrape, trackingServerScrape, refreshLiveData]);
 
     // One scrape-progress fetch when opening Products (no interval while idle).
     useEffect(() => {
@@ -920,7 +953,7 @@ export default function Catalog() {
         if (!selectedStore) return undefined;
         const activeFlow = flowStatus === 'syncing' || flowStatus === 'scraping';
         const inGraceWindow = liveRefreshUntil > Date.now();
-        const shouldPoll = activeFlow || trackingScrape || inGraceWindow;
+        const shouldPoll = activeFlow || trackingScrape || trackingServerScrape || inGraceWindow;
         if (!shouldPoll) return undefined;
 
         let cancelled = false;
@@ -938,7 +971,7 @@ export default function Catalog() {
             cancelled = true;
             clearInterval(intervalId);
         };
-    }, [selectedStore, flowStatus, trackingScrape, liveRefreshUntil]);
+    }, [selectedStore, flowStatus, trackingScrape, trackingServerScrape, liveRefreshUntil]);
 
     // Auto-stop tracking when every desktop-runner vendor the store uses has
     // either completed, failed, been cancelled, or has no pending rows left.
@@ -1237,6 +1270,14 @@ export default function Catalog() {
                         .then((p) => {
                             const progress = p?.data || null;
                             setScrapeProgress(progress);
+                            const serverOn = Boolean(progress?.server_celery_scrape?.active);
+                            if (serverOn) {
+                                trackingServerScrapeRef.current = true;
+                                setTrackingServerScrape(true);
+                            } else {
+                                trackingServerScrapeRef.current = false;
+                                setTrackingServerScrape(false);
+                            }
                             const vendors = getVendorSummaries(progress);
                             const pendingVendors = vendors.filter(
                                 (v) => (v.pending || 0) > 0,
@@ -1249,8 +1290,19 @@ export default function Catalog() {
                                     const lbl = v.label || (v.code || '').toUpperCase();
                                     return `${lbl}: ${v.scraped || 0}/${v.total || 0} populated (${v.pending} remaining)`;
                                 });
+                                if (serverOn) {
+                                    setMessage(
+                                        `${parts.join(' · ')} (desktop) · live vendor scrape (Amazon, eBay, …) is also running on the server. Strips above update in real time.`,
+                                    );
+                                } else {
+                                    setMessage(
+                                        `${parts.join(' · ')} — waiting for the desktop runner to upload the remaining rows. This updates live.`,
+                                    );
+                                }
+                            } else if (serverOn) {
+                                setFlowStatus('scraping');
                                 setMessage(
-                                    `${parts.join(' · ')} — waiting for the desktop runner to upload the remaining rows. This updates live.`,
+                                    'Live vendor scrape (Amazon, eBay, and other server-side sources) is running in Celery. Watch the status strip and product rows — safe to leave this page.',
                                 );
                             } else {
                                 setFlowStatus('success');
@@ -1300,25 +1352,29 @@ export default function Catalog() {
         };
 
         runScrape().finally(() => {
-            // Keep `scraping` true while we're tracking desktop-runner
-            // progress so the button and spinner stay visible; the
-            // trackingScrape effect clears it once every tracked vendor has
-            // pending=0.
-            if (!trackingScrapeRef.current) {
+            // Keep `scraping` true while tracking desktop or server (Celery) scrape; effects clear it.
+            if (!trackingScrapeRef.current && !trackingServerScrapeRef.current) {
                 setScraping(false);
                 setScrapingUploadId(null);
             }
         });
     };
 
-    // When tracking ends (either pending hit 0, or user cancelled), release
-    // the Scrape button.
+    // When tracking ends (desktop or server), release the Scrape button.
     useEffect(() => {
-        if (!trackingScrape) {
+        if (!trackingScrape && !trackingServerScrape) {
             setScraping(false);
             setScrapingUploadId(null);
         }
-    }, [trackingScrape]);
+    }, [trackingScrape, trackingServerScrape]);
+
+    // Sync server Celery tracking from poller when user opens the Products tab (job already running).
+    useEffect(() => {
+        if (!scrapeProgress) return;
+        const active = Boolean(scrapeProgress.server_celery_scrape?.active);
+        setTrackingServerScrape(active);
+        trackingServerScrapeRef.current = active;
+    }, [scrapeProgress]);
 
     const handleStopScrape = () => {
         if (!selectedStore || stoppingScrape) return;
@@ -1740,6 +1796,11 @@ export default function Catalog() {
                 </div>
             )}
 
+            {/* Server-side Celery catalog scrape (Amazon, eBay, …) — when active, poll keeps rows fresh */}
+            {selectedStore && viewMode === 'products' && (
+                <ServerCeleryScrapeStrip state={scrapeProgress?.server_celery_scrape} />
+            )}
+
             {/* Desktop-runner ingest status strips — one per vendor the store
                 uses (HEB, Costco, …). Backend exposes them uniformly under
                 ``scrapeProgress.vendors``. */}
@@ -1823,7 +1884,8 @@ export default function Catalog() {
                                 const activeJobStatus = activeVendor?.job?.status;
                                 const isPending = activeJobStatus === 'pending';
                                 const isClaimed = activeJobStatus === 'claimed';
-                                const isActive = isPending || isClaimed || trackingScrape;
+                                const desktopRunnerBusy = isPending || isClaimed || trackingScrape;
+                                const isActive = desktopRunnerBusy || trackingServerScrape;
                                 const aheadCount = activeVendor?.queue?.ahead_count || 0;
                                 const etaLabel = formatEtaShort(activeVendor?.queue?.eta_seconds);
 
@@ -1836,13 +1898,17 @@ export default function Catalog() {
                                     label = `Scraping ${activeLabel}… ${activeVendor.scraped || 0}/${activeVendor.total || 0} (${activeVendor.pct || 0}%)`;
                                 } else if (isClaimed) {
                                     label = 'Scraping…';
+                                } else if (trackingServerScrape) {
+                                    label = 'Live vendor scrape (server)…';
                                 }
 
                                 let titleText;
                                 if (isPending) {
                                     titleText = 'Another store is currently scraping. This store will start automatically when the runner is free.';
-                                } else if (isActive) {
-                                    titleText = 'Scrape running — use "Stop Scraping" to cancel.';
+                                } else if (desktopRunnerBusy) {
+                                    titleText = 'Scrape running — use "Stop Scraping" to cancel the desktop runner.';
+                                } else if (trackingServerScrape) {
+                                    titleText = 'A server-side catalog scrape (Amazon, eBay, and similar) is running. You can leave this page; the blue strip and product rows update as work completes. There is no stop button for this job from the UI.';
                                 } else if (vendorList.length > 0) {
                                     const labels = vendorList
                                         .map((v) => v.label || (v.code || '').toUpperCase())
@@ -1864,7 +1930,7 @@ export default function Catalog() {
                                             <RefreshCw className={`h-4 w-4 mr-1.5 ${scraping || isActive ? 'animate-spin' : ''}`} />
                                             {label}
                                         </Button>
-                                        {isActive && (
+                                        {desktopRunnerBusy && (
                                             <Button
                                                 variant="secondary"
                                                 size="sm"

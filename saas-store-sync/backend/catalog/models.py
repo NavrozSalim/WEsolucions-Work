@@ -396,6 +396,45 @@ class HebScrapeJob(models.Model):
         return f'HebScrapeJob[{self.status}] {who} @ {self.requested_at:%Y-%m-%d %H:%M}'
 
 
+class StoreCatalogCeleryScrapeState(models.Model):
+    """At most one active Celery-backed catalog scrape per store (server-side Amazon/eBay).
+
+    Rows are created when ``catalog_scrape_store_task`` / ``catalog_scrape_task`` is
+    queued and removed when the scrape finishes (including parallel chord callbacks).
+    """
+
+    class Scope(models.TextChoices):
+        STORE = 'store', 'Store-wide'
+        UPLOAD = 'upload', 'Upload-scoped'
+
+    store = models.OneToOneField(
+        Store,
+        on_delete=models.CASCADE,
+        related_name='catalog_celery_scrape_state',
+        primary_key=True,
+    )
+    scope = models.CharField(max_length=16, choices=Scope.choices, default=Scope.STORE)
+    upload = models.ForeignKey(
+        'CatalogUpload',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='celery_scrape_states',
+    )
+    root_task_id = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text='Celery task id of the enqueued top-level task (for debugging).',
+    )
+    enqueued_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'catalog_storeceleryscrapestate'
+
+    def __str__(self) -> str:
+        return f'CeleryScrape[{self.scope}] {self.store_id}'
+
+
 class ReverbUpdateLog(models.Model):
     """Per-listing push to Reverb API."""
     class Status(models.TextChoices):
