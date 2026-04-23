@@ -1160,17 +1160,24 @@ export default function Catalog() {
         setFlowStatus('');
         setMessage('Uploading catalog…');
         uploadCatalog(file, selectedStore)
-            .then(() => {
+            .then((res) => {
                 setUploadModalOpen(false);
                 setModalFile(null);
                 setModalTemplate('standard');
-                return getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
+                return getCatalogUploads(selectedStore).then((r) => {
+                    setUploads(Array.isArray(r.data) ? r.data : []);
+                    return res;
+                });
             })
-            .then(() => {
+            .then((res) => {
                 setFlowStatus('ready to sync');
+                const isAsync = res?.status === 202 || res?.data?.status === 'ingesting';
                 setMessage(
-                    'Catalog uploaded. Open Upload history and click Ready to Upload to create products. '
-                    + 'Vendor prices update when you click Start Scraping or when your schedule runs.',
+                    isAsync
+                        ? (res?.data?.message
+                            || 'File received. Rows are being processed in the background — wait until upload status is "validated" in Upload history, then use Ready to Upload.')
+                        : 'Catalog uploaded. Open Upload history and click Ready to Upload to create products. '
+                        + 'Vendor prices update when you click Start Scraping or when your schedule runs.',
                 );
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
             })

@@ -70,6 +70,7 @@ class CatalogUpload(models.Model):
     """Bulk catalog upload session. Rows stored in CatalogUploadRow."""
     class Status(models.TextChoices):
         PENDING = 'pending', 'Pending'
+        INGESTING = 'ingesting', 'Ingesting'
         VALIDATED = 'validated', 'Validated'
         PROCESSING = 'processing', 'Processing'
         SYNCED = 'synced', 'Synced'
@@ -90,6 +91,13 @@ class CatalogUpload(models.Model):
         db_index=True,
     )
     original_filename = models.CharField(max_length=255)
+    # Stored file parsed asynchronously (chunked bulk_create of CatalogUploadRow).
+    source_file = models.FileField(
+        upload_to='catalog_uploads/%Y/%m/',
+        max_length=500,
+        null=True,
+        blank=True,
+    )
     total_rows = models.PositiveIntegerField(default=0)
     processed_rows = models.PositiveIntegerField(default=0)
     status = models.CharField(
@@ -104,6 +112,9 @@ class CatalogUpload(models.Model):
     class Meta:
         db_table = 'catalog_catalogupload'
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['store', '-created_at'], name='catalog_upl_store_created'),
+        ]
 
     def __str__(self):
         return f"{self.original_filename} ({self.status})"

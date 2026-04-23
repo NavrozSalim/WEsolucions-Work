@@ -99,6 +99,8 @@ services:
       - PROXY_USER=${PROXY_USER:-}
       - PROXY_PASS=${PROXY_PASS:-}
       - PROXY_SCHEME=${PROXY_SCHEME:-http}
+    volumes:
+      - catalog_media:/app/media
     depends_on:
       db:
         condition: service_healthy
@@ -158,8 +160,12 @@ services:
 
   celery_worker:
     <<: *backend-image
-    # Raise concurrency so parallel catalog scrape chunks (CATALOG_SCRAPE_CHUNK_SIZE) can run together.
-    command: celery -A core worker -l info --concurrency=${CELERY_WORKER_CONCURRENCY:-4} --prefetch-multiplier=1 -O fair
+    # Queues: celery=default; ingest=bulk file parse; light=sync/vevor; heavy=browser scrapes (add a 2nd worker with -Q heavy -c1 if needed).
+    command: >-
+      celery -A core worker -l info
+      -Q celery,ingest,light,heavy
+      --concurrency=${CELERY_WORKER_CONCURRENCY:-4}
+      --prefetch-multiplier=1 -O fair
     init: true
     environment:
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
@@ -191,6 +197,8 @@ services:
       - PROXY_SCHEME=${PROXY_SCHEME:-http}
       - COSTCO_AU_MIN_REQUEST_GAP_SEC=${COSTCO_AU_MIN_REQUEST_GAP_SEC:-20}
       - COSTCO_AU_LOCK_WAIT_SEC=${COSTCO_AU_LOCK_WAIT_SEC:-120}
+    volumes:
+      - catalog_media:/app/media
     depends_on:
       db:
         condition: service_healthy
@@ -248,3 +256,4 @@ services:
 volumes:
   pgdata:
   redisdata:
+  catalog_media:

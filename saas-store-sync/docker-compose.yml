@@ -33,6 +33,7 @@ services:
     command: ["python", "manage.py", "runserver", "0.0.0.0:8000"]
     volumes:
       - ./backend:/app
+      - catalog_media_dev:/app/media
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     environment:
@@ -58,9 +59,22 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     entrypoint: ["python", "scripts/entrypoint.py"]
-    command: ["celery", "-A", "core", "worker", "-l", "info", "--concurrency", "2"]
+    command:
+      [
+        "celery",
+        "-A",
+        "core",
+        "worker",
+        "-l",
+        "info",
+        "-Q",
+        "celery,ingest,light,heavy",
+        "--concurrency",
+        "2",
+      ]
     volumes:
       - ./backend:/app
+      - catalog_media_dev:/app/media
     environment:
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       - REDIS_URL=redis://redis:6379/0
@@ -108,3 +122,4 @@ services:
 volumes:
   pgdata_dev:
   frontend_node_modules:
+  catalog_media_dev:

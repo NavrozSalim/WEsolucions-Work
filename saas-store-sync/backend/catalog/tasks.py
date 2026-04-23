@@ -2,6 +2,7 @@
 Catalog Celery tasks: sync, scrape, update.
 """
 import logging
+import uuid
 from datetime import timedelta
 
 from celery import chord, group, shared_task
@@ -261,17 +262,39 @@ def run_catalog_sync(upload_id: str):
     Sync CatalogUpload rows: Add/Update/Delete Product and ProductMapping.
     Creates CatalogSyncLog per row. Call directly or via catalog_sync_task.
     """
+    sync_log_batch = int(getattr(settings, 'CATALOG_SYNC_LOG_BATCH', 32) or 32)
+    progress_every = int(getattr(settings, 'CATALOG_SYNC_PROGRESS_EVERY', 32) or 32)
+
     try:
         upload = CatalogUpload.objects.select_related('store', 'store__marketplace').get(id=upload_id)
     except CatalogUpload.DoesNotExist:
         return {'error': 'Upload not found', 'upload_id': upload_id}
+
+    if upload.status == CatalogUpload.Status.INGESTING:
+        return {
+            'error': 'upload_still_ingesting',
+            'message': 'Wait for file ingest to finish before syncing.',
+            'upload_id': str(upload_id),
+        }
 
     store = upload.store
     upload.status = CatalogUpload.Status.PROCESSING
     upload.save(update_fields=['status'])
     added, updated, deleted, errors = 0, 0, 0, 0
 
-    for row in upload.rows.all().order_by('row_number'):
+    def _action_for_log(a: str) -> str:
+        return a if a in {x.value for x in CatalogSyncLog.Action} else 'add'
+
+    log_buffer: list[CatalogSyncLog] = []
+
+    def _flush_logs() -> None:
+        if not log_buffer:
+            return
+        CatalogSyncLog.objects.bulk_create(log_buffer, batch_size=100)
+        log_buffer.clear()
+
+    processed = 0
+    for row in upload.rows.all().order_by('row_number').iterator(chunk_size=200):
         action = _normalize_action(row.action_raw)
         log_status = CatalogSyncLog.Status.SUCCESS
         log_message = None
@@ -348,27 +371,46 @@ def run_catalog_sync(upload_id: str):
                             errors += 1
 
                 row.save(update_fields=['sync_status', 'sync_error', 'product', 'product_mapping'])
-                CatalogSyncLog.objects.create(
+            log_buffer.append(
+                CatalogSyncLog(
+                    id=uuid.uuid4(),
                     catalog_upload=upload,
                     catalog_upload_row=row,
-                    action=action,
+                    action=_action_for_log(action),
                     status=log_status,
                     message=log_message,
                 )
-                upload.processed_rows = upload.processed_rows + 1
+            )
+            processed += 1
+            if len(log_buffer) >= sync_log_batch:
+                _flush_logs()
+            if progress_every > 0 and processed % progress_every == 0:
+                upload.processed_rows = processed
                 upload.save(update_fields=['processed_rows'])
         except Exception as e:
             row.sync_status = CatalogUploadRow.SyncStatus.ERROR
             row.sync_error = str(e)
             row.save(update_fields=['sync_status', 'sync_error'])
-            CatalogSyncLog.objects.create(
-                catalog_upload=upload,
-                catalog_upload_row=row,
-                action=action,
-                status=CatalogSyncLog.Status.ERROR,
-                message=str(e),
+            log_buffer.append(
+                CatalogSyncLog(
+                    id=uuid.uuid4(),
+                    catalog_upload=upload,
+                    catalog_upload_row=row,
+                    action=_action_for_log(action),
+                    status=CatalogSyncLog.Status.ERROR,
+                    message=str(e),
+                )
             )
             errors += 1
+            processed += 1
+            if len(log_buffer) >= sync_log_batch:
+                _flush_logs()
+            if progress_every > 0 and processed % progress_every == 0:
+                upload.processed_rows = processed
+                upload.save(update_fields=['processed_rows'])
+
+    _flush_logs()
+    upload.processed_rows = processed
 
     # Final upload status
     if errors and upload.processed_rows < upload.total_rows:
@@ -378,7 +420,7 @@ def run_catalog_sync(upload_id: str):
     else:
         upload.status = CatalogUpload.Status.SYNCED
     upload.error_summary = f"Added: {added}, Updated: {updated}, Deleted: {deleted}, Errors: {errors}" if errors else None
-    upload.save(update_fields=['status', 'error_summary'])
+    upload.save(update_fields=['status', 'error_summary', 'processed_rows'])
 
     # After a successful sync, all active listings need a fresh vendor scrape.
     # Failed rows on the file do not block this — users fix those separately.
@@ -397,6 +439,16 @@ def run_catalog_sync(upload_id: str):
         'deleted': deleted,
         'errors': errors,
     }
+
+
+@shared_task(bind=True, name='catalog.ingest_upload_file', max_retries=2, default_retry_delay=90)
+def catalog_ingest_upload_file_task(self, upload_id: str):
+    """
+    Parse stored CSV/XLSX in chunks (bulk_create rows). Replaces request-time ingest.
+    """
+    from .services import ingest_stored_catalog_file
+
+    return ingest_stored_catalog_file(upload_id)
 
 
 @shared_task(bind=True, max_retries=3)

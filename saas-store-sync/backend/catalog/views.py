@@ -24,7 +24,7 @@ from catalog.models import (
 from catalog.celery_scrape_state import set_celery_scrape_state
 from catalog.serializers import ProductMappingSerializer, CatalogActivityLogSerializer
 from catalog.pagination import CatalogProductPagination
-from catalog.services import validate_and_create_upload
+from catalog.services import create_upload_file_and_queue
 from catalog.marketplace_templates import (
     export_headers_for_store,
     sample_template_filename_for_kind,
@@ -273,21 +273,24 @@ class StoreCatalogUploadView(APIView):
             return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
 
         filename = getattr(file_obj, 'name', 'upload.csv')
-        upload, errors = validate_and_create_upload(
+        upload, err = create_upload_file_and_queue(
             user=request.user,
             store=store,
             file_obj=file_obj,
             filename=filename,
         )
         if upload is None:
-            return Response({"error": errors[0] if errors else "Upload failed"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": err or "Upload failed"}, status=status.HTTP_400_BAD_REQUEST)
+
+        from catalog.tasks import catalog_ingest_upload_file_task
+        catalog_ingest_upload_file_task.delay(str(upload.id))
 
         return Response({
             "upload_id": str(upload.id),
             "total_rows": upload.total_rows,
             "status": upload.status,
-            "errors": errors[:20],
-        }, status=status.HTTP_201_CREATED)
+            "message": "File received; row ingest is running in the background. Use upload detail or list to see progress.",
+        }, status=status.HTTP_202_ACCEPTED)
 
 
 class CatalogUploadListView(APIView):
@@ -483,13 +486,28 @@ class CatalogSyncTriggerView(APIView):
             upload = get_object_or_404(CatalogUpload, id=upload_id, store=store)
         else:
             upload = (
-                CatalogUpload.objects.filter(store=store, status__in=['pending', 'validated'])
+                CatalogUpload.objects.filter(
+                    store=store,
+                    status=CatalogUpload.Status.VALIDATED,
+                )
                 .order_by('-created_at')
                 .first()
             )
         if not upload:
             return Response(
-                {"error": "No pending/validated upload found. Provide upload_id or upload first."},
+                {
+                    "error": (
+                        "No validated upload found. Provide upload_id or wait until file ingest "
+                        "finishes and status is validated."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if upload.status == CatalogUpload.Status.INGESTING:
+            return Response(
+                {
+                    "error": "File ingest is still running. Try again when status is validated.",
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
         run_inline = request.data.get('run_inline') or request.query_params.get('inline') == '1'

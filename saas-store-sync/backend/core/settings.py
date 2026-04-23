@@ -170,7 +170,32 @@ USE_TZ = True
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'static'
 
+# User-uploaded catalog files (async ingest). Mount this path in Docker for multi-container workers.
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Chunk size for catalog file ingest (bulk_create batching). See catalog.services.get_catalog_upload_chunk_size
+try:
+    CATALOG_UPLOAD_CHUNK_SIZE = max(200, int(os.getenv('CATALOG_UPLOAD_CHUNK_SIZE', '1000')))
+except ValueError:
+    CATALOG_UPLOAD_CHUNK_SIZE = 1000
+
+try:
+    CATALOG_SYNC_LOG_BATCH = max(8, int(os.getenv('CATALOG_SYNC_LOG_BATCH', '32')))
+except ValueError:
+    CATALOG_SYNC_LOG_BATCH = 32
+try:
+    CATALOG_SYNC_PROGRESS_EVERY = max(0, int(os.getenv('CATALOG_SYNC_PROGRESS_EVERY', '32')))
+except ValueError:
+    CATALOG_SYNC_PROGRESS_EVERY = 32
+
+# DB: use CONN_MAX_AGE=0 when sitting behind PgBouncer (transaction pool).
+if os.getenv('DATABASE_URL'):
+    DATABASES['default']['CONN_MAX_AGE'] = int(os.getenv('PG_CONN_MAX_AGE', '0'))
+elif not DEBUG:
+    DATABASES['default']['CONN_MAX_AGE'] = int(os.getenv('PG_CONN_MAX_AGE', '0'))
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
@@ -231,3 +256,24 @@ CELERY_TASK_TRACK_STARTED = True
 # Prefork pool causes PermissionError on Windows; use solo for local dev
 if sys.platform == 'win32':
     CELERY_WORKER_POOL = 'solo'
+
+# --- Celery queues (no K8s: run a second worker with -Q heavy -c 1 for browser scrapes) ---
+from kombu import Queue  # noqa: E402
+
+CELERY_TASK_CREATE_MISSING_QUEUES = True
+CELERY_TASK_QUEUES = (
+    Queue('celery'),
+    Queue('ingest'),
+    Queue('light'),
+    Queue('heavy'),
+)
+CELERY_TASK_DEFAULT_QUEUE = 'celery'
+CELERY_TASK_ROUTES = {
+    'catalog.ingest_upload_file': {'queue': 'ingest'},
+    'catalog.tasks.catalog_sync_task': {'queue': 'light'},
+    'catalog.tasks.catalog_scrape_task': {'queue': 'heavy'},
+    'catalog.tasks.catalog_scrape_store_task': {'queue': 'heavy'},
+    'catalog.tasks.catalog_scrape_upload_chunk_task': {'queue': 'heavy'},
+    'catalog.tasks.catalog_scrape_store_chunk_task': {'queue': 'heavy'},
+    'catalog.run_vevor_au_ingest': {'queue': 'light'},
+}
