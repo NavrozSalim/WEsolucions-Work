@@ -147,7 +147,6 @@ def _make_row_ingest_context(store: Store, header: list) -> RowIngestContext:
         vendors_by_code=vendors_by_code,
         is_reverb=store_is_reverb(store),
         requires_fixed_inputs=requires_fixed,
-        is_ebay=None,
     )
 
 
