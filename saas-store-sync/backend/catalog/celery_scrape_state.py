@@ -49,16 +49,22 @@ def mark_celery_scrape_worker_started(store_id: str | None) -> None:
     ).update(first_worker_started_at=timezone.now())
 
 
-def is_celery_scrape_cancel_requested(store_id: str | None) -> bool:
-    """True when the user asked to stop a server-side catalog scrape for this store."""
+def should_abort_celery_scrape(store_id: str | None) -> bool:
+    """True when workers must stop: scrape state was cleared (Stop) or cancel flag set.
+
+    Clearing ``StoreCatalogCeleryScrapeState`` immediately on cancel makes
+    ``/scrape/progress/`` drop the queued/running banner; workers cooperatively
+    exit on the next loop iteration when the row is missing.
+    """
     if not store_id:
         return False
     from catalog.models import StoreCatalogCeleryScrapeState
 
-    return StoreCatalogCeleryScrapeState.objects.filter(
-        store_id=store_id,
-        cancel_requested=True,
-    ).exists()
+    try:
+        st = StoreCatalogCeleryScrapeState.objects.get(store_id=store_id)
+    except StoreCatalogCeleryScrapeState.DoesNotExist:
+        return True
+    return bool(st.cancel_requested)
 
 
 def clear_celery_scrape_state(store_id: str | None) -> None:

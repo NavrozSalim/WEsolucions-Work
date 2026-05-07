@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # count — the timer starts on the first non-ingest pending row.
 SCRAPER_STALL_NO_PENDING_PROGRESS = timedelta(minutes=10)
 
-from .celery_scrape_state import is_celery_scrape_cancel_requested, mark_celery_scrape_worker_started
+from .celery_scrape_state import mark_celery_scrape_worker_started, should_abort_celery_scrape
 from .models import CatalogUpload, CatalogUploadRow, CatalogSyncLog, ProductMapping
 from .reverb_catalog import listing_sku_lookup_order, store_is_reverb, vendor_is_ebay
 from .services import _normalize
@@ -490,7 +490,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
 
     try:
         for row in rows:
-            if is_celery_scrape_cancel_requested(str(store.id)):
+            if should_abort_celery_scrape(str(store.id)):
                 user_cancelled = True
                 break
             pm = row.product_mapping
@@ -1035,7 +1035,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
 
     try:
         for pm in mappings:
-            if is_celery_scrape_cancel_requested(str(store.id)):
+            if should_abort_celery_scrape(str(store.id)):
                 user_cancelled = True
                 break
             processed += 1

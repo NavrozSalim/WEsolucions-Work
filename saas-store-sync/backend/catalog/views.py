@@ -21,7 +21,7 @@ from catalog.models import (
     HebScrapeJob,
     StoreCatalogCeleryScrapeState,
 )
-from catalog.celery_scrape_state import set_celery_scrape_state
+from catalog.celery_scrape_state import clear_celery_scrape_state, set_celery_scrape_state
 from catalog.serializers import ProductMappingSerializer, CatalogActivityLogSerializer
 from catalog.pagination import CatalogProductPagination
 from catalog.services import create_upload_file_and_queue
@@ -855,7 +855,6 @@ class CatalogScrapeCancelView(APIView):
         server_stopped = False
         st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
         if st:
-            StoreCatalogCeleryScrapeState.objects.filter(store=store).update(cancel_requested=True)
             server_stopped = True
             root_tid = (st.root_task_id or '').strip()
             if root_tid:
@@ -865,6 +864,7 @@ class CatalogScrapeCancelView(APIView):
                     app.control.revoke(root_tid, terminate=True, signal='SIGTERM')
                 except Exception:
                     pass
+            clear_celery_scrape_state(str(store.id))
 
         if not cancelled_payload and not server_stopped:
             return Response(

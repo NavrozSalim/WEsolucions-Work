@@ -1432,6 +1432,21 @@ export default function Catalog() {
                 if (hebStopped || serverStopped) {
                     setTrackingServerScrape(false);
                     trackingServerScrapeRef.current = false;
+                    if (serverStopped) {
+                        const sid = selectedStore;
+                        setScrapeProgress((prev) => {
+                            if (!prev || (prev.store_id && prev.store_id !== sid)) return prev;
+                            return {
+                                ...prev,
+                                server_celery_scrape: {
+                                    ...(prev.server_celery_scrape || {}),
+                                    active: false,
+                                    phase: null,
+                                    store_id: sid,
+                                },
+                            };
+                        });
+                    }
                 }
                 setFlowStatus(hebStopped || serverStopped ? 'success' : '');
                 setMessage(
