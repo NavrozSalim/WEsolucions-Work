@@ -437,6 +437,15 @@ class StoreCatalogCeleryScrapeState(models.Model):
         blank=True,
         help_text='Celery task id of the enqueued top-level task (for debugging).',
     )
+    cancel_requested = models.BooleanField(
+        default=False,
+        help_text='User clicked Stop Scraping; worker loops should exit cooperatively.',
+    )
+    first_worker_started_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='First time a worker began processing rows; null means queued only.',
+    )
     enqueued_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

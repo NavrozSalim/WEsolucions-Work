@@ -223,9 +223,8 @@ export const getScrapeProgress = (storeId) =>
     api.get(`/stores/${storeId}/catalog/scrape/progress/`);
 
 /**
- * Cancel the store's currently queued or running HEB scrape job. Server flips
- * the latest pending/claimed HebScrapeJob to ``cancelled``. The desktop runner
- * should detect this via its next job-status probe and stop worker processes.
+ * Stop running price checks: pending jobs from your computer (HEB, etc.) and/or
+ * fetches running on our servers. Safe to call when nothing is running.
  */
 export const cancelCatalogScrape = (storeId) =>
     api.post(`/stores/${storeId}/catalog/scrape/cancel/`, {});

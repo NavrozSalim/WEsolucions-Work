@@ -796,15 +796,7 @@ class CatalogScrapeTriggerView(APIView):
 
 
 class CatalogScrapeCancelView(APIView):
-    """Cancel running or queued desktop-runner scrapes for a store.
-
-    By default cancels every active job (``PENDING`` or ``CLAIMED``) across
-    all supported vendors for this store. Pass ``?vendor=heb`` (or
-    ``?vendor=costco``) to scope the cancellation to a single vendor.
-
-    Safe to call when there is no active job — returns 200 with
-    ``cancelled: []`` so the UI can call this optimistically.
-    """
+    """Stop desktop vendor jobs (HEB, etc.) and/or server-side catalog scrapes for a store."""
 
     permission_classes = [IsAuthenticated]
 
@@ -832,12 +824,6 @@ class CatalogScrapeCancelView(APIView):
             qs = qs.filter(vendor_code=vendor_filter)
 
         jobs = list(qs)
-        if not jobs:
-            return Response(
-                {'cancelled': [], 'detail': 'No active scrape for this store.'},
-                status=status.HTTP_200_OK,
-            )
-
         now = timezone.now()
         cancelled_payload = []
         for job in jobs:
@@ -849,7 +835,7 @@ class CatalogScrapeCancelView(APIView):
 
             append_catalog_log(
                 store.id,
-                f'You cancelled the running {job.vendor_code.upper()} scrape.',
+                f'You stopped the {job.vendor_code.upper()} price check.',
                 action_type=f'{job.vendor_code}_scrape_cancelled',
                 user_id=request.user.id,
                 metadata={
@@ -866,11 +852,34 @@ class CatalogScrapeCancelView(APIView):
                 'completed_at': now.isoformat(),
             })
 
+        server_stopped = False
+        st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
+        if st:
+            StoreCatalogCeleryScrapeState.objects.filter(store=store).update(cancel_requested=True)
+            server_stopped = True
+            root_tid = (st.root_task_id or '').strip()
+            if root_tid:
+                try:
+                    from core.celery import app
+
+                    app.control.revoke(root_tid, terminate=True, signal='SIGTERM')
+                except Exception:
+                    pass
+
+        if not cancelled_payload and not server_stopped:
+            return Response(
+                {
+                    'cancelled': [],
+                    'server_scrape_stopped': False,
+                    'detail': 'Nothing was running, so there was nothing to stop.',
+                },
+                status=status.HTTP_200_OK,
+            )
+
         return Response(
             {
                 'cancelled': cancelled_payload,
-                # Back-compat fields for older frontend builds that only look
-                # at a single cancelled job.
+                'server_scrape_stopped': server_stopped,
                 'job_id': cancelled_payload[0]['job_id'] if cancelled_payload else None,
                 'status': cancelled_payload[0]['status'] if cancelled_payload else None,
             },
@@ -1186,12 +1195,19 @@ class CatalogScrapeProgressView(APIView):
         heb_scraped = heb.get('scraped', 0)
         heb_pending = heb.get('pending', 0)
 
-        server_celery_scrape = {'active': False}
+        server_celery_scrape = {
+            'active': False,
+            'store_id': str(store.id),
+            'phase': None,
+        }
         try:
             st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
             if st:
+                phase = 'queued' if st.first_worker_started_at is None else 'running'
                 server_celery_scrape = {
                     'active': True,
+                    'store_id': str(store.id),
+                    'phase': phase,
                     'scope': st.scope,
                     'upload_id': str(st.upload_id) if st.upload_id else None,
                     'enqueued_at': st.enqueued_at.isoformat(),
@@ -1201,6 +1217,7 @@ class CatalogScrapeProgressView(APIView):
             pass
 
         return Response({
+            'store_id': str(store.id),
             'total': total,
             'by_status': by_status,
             'server_celery_scrape': server_celery_scrape,

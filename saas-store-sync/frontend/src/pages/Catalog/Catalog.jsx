@@ -90,21 +90,21 @@ function formatEtaShort(seconds) {
     return m === 0 ? `~${h} h` : `~${h} h ${m} min`;
 }
 
-/** Prefer server detail for 4xx/5xx so users see useful text instead of only "status code 500". */
+/** Prefer server detail for errors; keep wording plain for non-technical users. */
 function formatCatalogError(err) {
     const status = err.response?.status;
     const d = err.response?.data;
     if (typeof d === 'string' && d.trim()) return d;
     if (d?.detail != null) {
         if (typeof d.detail === 'string') return d.detail;
-        if (Array.isArray(d.detail)) return d.detail.map((x) => x?.msg || x).filter(Boolean).join('; ') || `Request failed (${status}).`;
+        if (Array.isArray(d.detail)) return d.detail.map((x) => x?.msg || x).filter(Boolean).join('; ') || 'Something went wrong. Please try again.';
         return String(d.detail);
     }
     if (d?.error && typeof d.error === 'string') return d.error;
     if (d?.message && typeof d.message === 'string') return d.message;
-    if (status === 500) return 'Something went wrong on the server (500). If this persists, try a smaller page size or contact support.';
-    if (err.code === 'ECONNABORTED') return 'Request timed out. Check your connection and try again.';
-    return err.message || `Request failed${status ? ` (${status})` : ''}.`;
+    if (status === 500) return 'Something went wrong on our side. Please try again in a moment.';
+    if (err.code === 'ECONNABORTED') return 'The request took too long. Check your connection and try again.';
+    return err.message || 'Something went wrong. Please try again.';
 }
 
 function UploadActionsDropdown({ upload, storeId, syncing, scraping, syncingUploadId, scrapingUploadId, deletingUploadId, onSync, onScrape, onDelete, onDownload, onDownloadErrors, onError }) {
@@ -444,10 +444,10 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
     const label = vendor.label || (vendor.code || 'vendor').toUpperCase();
     const runner = vendor.runner || 'live';
     const runnerLabel = runner === 'desktop'
-        ? 'desktop runner'
+        ? 'your computer'
         : runner === 'server'
-            ? 'feed ingest'
-            : 'live scrape';
+            ? 'data feed'
+            : 'live price check';
     const pct = Math.max(0, Math.min(100, Number(vendor.pct || 0)));
     const recent5 = vendor.ingested_last_5m || 0;
     const recent24 = vendor.ingested_last_24h || 0;
@@ -507,13 +507,13 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
         }
         queueLine = (
             <p className="text-xs text-amber-600 dark:text-amber-300 mt-0.5">
-                Pending — {parts.join(' · ')}. Your job will run automatically once the queue clears; no need to retry.
+                Pending — {parts.join(' · ')}. This will start on its own when it is your turn.
             </p>
         );
     } else if (isClaimed) {
         queueLine = (
             <p className="text-xs text-accent-600 dark:text-accent-300 mt-0.5">
-                Running now — prices will populate as the {runnerLabel} uploads them. Safe to close this tab.
+                Running now — prices will appear here as your upload finishes. You can leave this page open or come back later.
             </p>
         );
     }
@@ -558,27 +558,35 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
 }
 
 /**
- * Shown when a store-wide or upload-scoped catalog scrape is running on the server
- * (Celery: Amazon, eBay, etc.) — same UX intent as desktop queue strips for HEB/Costco.
+ * Server-side catalog scrape for the **current store only** (`state.store_id` must match).
  */
-function ServerCeleryScrapeStrip({ state }) {
-    if (!state || !state.active) return null;
-    const scope = state.scope === 'upload' ? 'this upload' : 'all active listings for this store';
+function ServerCeleryScrapeStrip({ state, progressStoreId, selectedStoreId }) {
+    if (!state?.active || !selectedStoreId) return null;
+    if (progressStoreId && progressStoreId !== selectedStoreId) return null;
+    if (state.store_id && state.store_id !== selectedStoreId) return null;
+
+    const isQueued = state.phase === 'queued';
+    const headline = isQueued
+        ? 'Job is in queue, please wait...'
+        : 'Live vendor scrape (server) running';
+    const pillClass = isQueued ? 'bg-amber-200 text-amber-950 dark:bg-amber-900/40 dark:text-amber-100' : 'bg-sky-200 text-sky-900 dark:bg-sky-800 dark:text-sky-200';
+
     return (
         <div className="rounded-lg border border-sky-200 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/30 p-4 mb-4 shadow-sm">
             <div className="flex items-start gap-3">
-                <span className="mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full bg-sky-500 animate-pulse" />
+                <span className={`mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full ${isQueued ? 'bg-amber-500' : 'bg-sky-500 animate-pulse'}`} />
                 <div>
                     <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                        Live vendor scrape (server)
-                        <span className="ml-2 inline-flex items-center rounded-full bg-sky-200 px-2 py-0.5 text-xs font-medium text-sky-900 dark:bg-sky-800 dark:text-sky-200">
-                            running
+                        {headline}
+                        <span className={`ml-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${pillClass}`}>
+                            {isQueued ? 'queued' : 'running'}
                         </span>
                     </h3>
-                    <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
-                        Amazon, eBay, and other live-scrape rows for {scope} are being processed in the Celery queue. Safe to
-                        leave this tab; product rows update as each scrape completes.
-                    </p>
+                    {!isQueued && (
+                        <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
+                            You can leave this page; product rows update as each item finishes. Use “Stop Scraping” to cancel.
+                        </p>
+                    )}
                 </div>
             </div>
         </div>
@@ -936,13 +944,20 @@ export default function Catalog() {
         };
     }, [selectedStore, flowStatus, liveRefreshUntil, trackingScrape, trackingServerScrape, refreshLiveData]);
 
-    // One scrape-progress fetch when opening Products (no interval while idle).
+    // One scrape-progress fetch when opening Products; clear stale payload from other stores first.
     useEffect(() => {
-        if (!selectedStore || viewMode !== 'products') return undefined;
+        if (!selectedStore || viewMode !== 'products') {
+            setScrapeProgress(null);
+            return undefined;
+        }
+        setScrapeProgress(null);
         let cancelled = false;
         getScrapeProgress(selectedStore)
             .then((res) => {
-                if (!cancelled) setScrapeProgress(res.data || null);
+                if (cancelled) return;
+                const data = res.data || null;
+                if (data?.store_id && data.store_id !== selectedStore) return;
+                setScrapeProgress(data);
             })
             .catch(() => { /* ignore */ });
         return () => { cancelled = true; };
@@ -958,10 +973,13 @@ export default function Catalog() {
 
         let cancelled = false;
         const fetchOnce = () => {
-            getScrapeProgress(selectedStore)
+            const storeId = selectedStore;
+            getScrapeProgress(storeId)
                 .then((res) => {
                     if (cancelled) return;
-                    setScrapeProgress(res.data || null);
+                    const data = res.data || null;
+                    if (data?.store_id && data.store_id !== storeId) return;
+                    setScrapeProgress(data);
                 })
                 .catch(() => { /* transient — just ignore and retry */ });
         };
@@ -989,13 +1007,13 @@ export default function Catalog() {
         if (jobStatus === 'cancelled') {
             setTrackingScrape(false);
             setFlowStatus('');
-            setMessage(`${activeLabel} scrape was cancelled.`);
+            setMessage(`${activeLabel} price check was cancelled.`);
             return;
         }
         if (jobStatus === 'failed') {
             setTrackingScrape(false);
             setFlowStatus('failed');
-            setMessage(`${activeLabel} scrape failed on the desktop runner.`);
+            setMessage(`${activeLabel} price check failed on your computer.`);
             return;
         }
         const allDone = vendors.every((v) => (v.pending || 0) === 0 && (v.total || 0) > 0);
@@ -1006,7 +1024,7 @@ export default function Catalog() {
                 (v) => `${v.total} ${v.label || v.code.toUpperCase()}`,
             );
             setMessage(
-                `All ${parts.join(' + ')} product(s) populated from the desktop runner.`,
+                `Done. ${parts.join(' + ')} product(s) now have prices from your computer.`,
             );
         }
     }, [trackingScrape, scrapeProgress]);
@@ -1193,7 +1211,7 @@ export default function Catalog() {
         setSyncing(true);
         setFlowStatus('syncing');
         setSyncingUploadId(uploadId);
-        setMessage('Syncing catalog — creating products (vendor scrape runs only via Start Scraping or schedule)…');
+        setMessage('Updating your catalog and creating products… After this finishes, use Start Scraping to refresh vendor prices (or your schedule will run it).');
         startProgress();
 
         const MAX_RETRIES = 3;
@@ -1226,14 +1244,14 @@ export default function Catalog() {
                 .catch((err) => {
                     const isNetErr = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
                     if (isNetErr && attempt < MAX_RETRIES) {
-                        setMessage(`Network hiccup detected, retrying automatically in a few seconds (attempt ${attempt + 1}/${MAX_RETRIES})… Your sync job is still running in the background.`);
+                        setMessage(`Connection issue — trying again (${attempt + 1} of ${MAX_RETRIES})… Your sync is still running in the background.`);
                         return new Promise((r) => setTimeout(r, 5000)).then(runSync);
                     }
                     finishProgress(false);
                     if (isNetErr) {
                         setFlowStatus('syncing');
                         setMessage(
-                            'The sync job was queued but the browser lost contact with the server. It will keep running in the background — refresh the page in a minute to see the results.',
+                            'Your sync is still running. Refresh this page in a minute to see the latest results.',
                         );
                     } else {
                         setFlowStatus('failed');
@@ -1250,10 +1268,11 @@ export default function Catalog() {
 
     const handleScrape = (uploadId = null) => {
         if (!selectedStore) return;
+        const storeId = selectedStore;
         setScraping(true);
         setScrapingUploadId(uploadId);
         setFlowStatus('scraping');
-        setMessage('Scraping vendor URLs for price and stock…');
+        setMessage('Fetching vendor prices and stock…');
         startProgress();
 
         const MAX_RETRIES = 3;
@@ -1261,7 +1280,7 @@ export default function Catalog() {
 
         const runScrape = () => {
             attempt++;
-            return triggerCatalogScrape(selectedStore, false, uploadId)
+            return triggerCatalogScrape(storeId, false, uploadId)
                 .then((res) => {
                     const ok = res?.data?.rows_succeeded ?? 0;
                     const proc = res?.data?.rows_processed ?? 0;
@@ -1273,9 +1292,10 @@ export default function Catalog() {
                     // far. We shift into "tracking" mode and keep the button
                     // busy until every ingest-only mapping is populated. For
                     // stores with no ingest-only vendors, behave as before.
-                    return getScrapeProgress(selectedStore)
+                    return getScrapeProgress(storeId)
                         .then((p) => {
                             const progress = p?.data || null;
+                            if (progress?.store_id && progress.store_id !== storeId) return;
                             setScrapeProgress(progress);
                             const serverOn = Boolean(progress?.server_celery_scrape?.active);
                             if (serverOn) {
@@ -1299,23 +1319,23 @@ export default function Catalog() {
                                 });
                                 if (serverOn) {
                                     setMessage(
-                                        `${parts.join(' · ')} (desktop) · live vendor scrape (Amazon, eBay, …) is also running on the server. Strips above update in real time.`,
+                                        `${parts.join(' · ')} (your computer) — we are also fetching prices on our servers. Watch the blue bar above.`,
                                     );
                                 } else {
                                     setMessage(
-                                        `${parts.join(' · ')} — waiting for the desktop runner to upload the remaining rows. This updates live.`,
+                                        `${parts.join(' · ')} — waiting for your computer to finish uploading. This updates as it goes.`,
                                     );
                                 }
                             } else if (serverOn) {
                                 setFlowStatus('scraping');
                                 setMessage(
-                                    'Live vendor scrape (Amazon, eBay, and other server-side sources) is running in Celery. Watch the status strip and product rows — safe to leave this page.',
+                                    'We are fetching vendor prices on our servers. You can leave this page; the blue bar and table update as we go.',
                                 );
                             } else {
                                 setFlowStatus('success');
                                 setMessage(
-                                    `Scrape complete: ${ok}/${proc} product(s) updated with vendor price/stock. `
-                                    + 'Marketplace push runs next in the background when the worker picks it up.',
+                                    `Done. ${ok} of ${proc} product(s) now have the latest vendor price and stock. `
+                                    + 'If you use a marketplace, updates there may follow shortly.',
                                 );
                             }
                         })
@@ -1323,8 +1343,8 @@ export default function Catalog() {
                             // Progress endpoint failed — fall back to old behavior.
                             setFlowStatus('success');
                             setMessage(
-                                `Scrape complete: ${ok}/${proc} product(s) updated with vendor price/stock. `
-                                + 'Marketplace push runs next in the background when the worker picks it up.',
+                                `Done. ${ok} of ${proc} product(s) now have the latest vendor price and stock. `
+                                + 'If you use a marketplace, updates there may follow shortly.',
                             );
                         })
                         .finally(() => {
@@ -1342,14 +1362,14 @@ export default function Catalog() {
                 .catch((err) => {
                     const isNetworkError = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
                     if (isNetworkError && attempt < MAX_RETRIES) {
-                        setMessage(`Network hiccup detected, retrying automatically in a few seconds (attempt ${attempt + 1}/${MAX_RETRIES})… Your scrape job is still running in the background.`);
+                        setMessage(`Connection issue — trying again (${attempt + 1} of ${MAX_RETRIES})… Your price check is still running in the background.`);
                         return new Promise((resolve) => setTimeout(resolve, 5000)).then(runScrape);
                     }
                     finishProgress(false);
                     if (isNetworkError) {
                         setFlowStatus('scraping');
                         setMessage(
-                            'The scrape job was queued but the browser lost contact with the server. It will keep running in the background — refresh the page in a minute to see updated prices.',
+                            'Your price check is still running. Refresh this page in a minute to see updated prices.',
                         );
                     } else {
                         setFlowStatus('failed');
@@ -1375,13 +1395,27 @@ export default function Catalog() {
         }
     }, [trackingScrape, trackingServerScrape]);
 
-    // Sync server Celery tracking from poller when user opens the Products tab (job already running).
+    // Sync server scrape tracking only for the selected store’s progress payload.
     useEffect(() => {
-        if (!scrapeProgress) return;
+        if (!selectedStore) {
+            setTrackingServerScrape(false);
+            trackingServerScrapeRef.current = false;
+            return;
+        }
+        if (!scrapeProgress) {
+            setTrackingServerScrape(false);
+            trackingServerScrapeRef.current = false;
+            return;
+        }
+        if (scrapeProgress.store_id && scrapeProgress.store_id !== selectedStore) {
+            setTrackingServerScrape(false);
+            trackingServerScrapeRef.current = false;
+            return;
+        }
         const active = Boolean(scrapeProgress.server_celery_scrape?.active);
         setTrackingServerScrape(active);
         trackingServerScrapeRef.current = active;
-    }, [scrapeProgress]);
+    }, [scrapeProgress, selectedStore]);
 
     const handleStopScrape = () => {
         if (!selectedStore || stoppingScrape) return;
@@ -1389,23 +1423,32 @@ export default function Catalog() {
         const activeVendor = getActiveVendor(getVendorSummaries(scrapeProgress));
         const vendorLabel = activeVendor?.label
             || (activeVendor?.code || 'desktop').toUpperCase();
-        setMessage(`Stopping the ${vendorLabel} scrape…`);
+        setMessage(`Stopping the ${vendorLabel} price check…`);
         cancelCatalogScrape(selectedStore)
             .then((res) => {
-                const cancelledId = res?.data?.cancelled;
+                const hebStopped = Array.isArray(res?.data?.cancelled) && res.data.cancelled.length > 0;
+                const serverStopped = Boolean(res?.data?.server_scrape_stopped);
                 setTrackingScrape(false);
-                setFlowStatus(cancelledId ? 'success' : '');
+                if (hebStopped || serverStopped) {
+                    setTrackingServerScrape(false);
+                    trackingServerScrapeRef.current = false;
+                }
+                setFlowStatus(hebStopped || serverStopped ? 'success' : '');
                 setMessage(
-                    cancelledId
-                        ? `${vendorLabel} scrape cancelled. The desktop runner will stop on its next check.`
-                        : `No active ${vendorLabel} scrape to stop.`,
+                    hebStopped || serverStopped
+                        ? 'Stop was sent. Running price checks should wind down in a few seconds.'
+                        : (res?.data?.detail || 'Nothing was running to stop.'),
                 );
                 getScrapeProgress(selectedStore)
-                    .then((p) => setScrapeProgress(p.data || null))
+                    .then((p) => {
+                        const data = p.data || null;
+                        if (data?.store_id && data.store_id !== selectedStore) return;
+                        setScrapeProgress(data);
+                    })
                     .catch(() => {});
             })
             .catch((err) => {
-                setMessage(formatCatalogError(err) || 'Failed to stop the scrape.');
+                setMessage(formatCatalogError(err) || 'Could not stop the price check.');
             })
             .finally(() => {
                 setStoppingScrape(false);
@@ -1805,7 +1848,11 @@ export default function Catalog() {
 
             {/* Server-side Celery catalog scrape (Amazon, eBay, …) — when active, poll keeps rows fresh */}
             {selectedStore && viewMode === 'products' && (
-                <ServerCeleryScrapeStrip state={scrapeProgress?.server_celery_scrape} />
+                <ServerCeleryScrapeStrip
+                    state={scrapeProgress?.server_celery_scrape}
+                    progressStoreId={scrapeProgress?.store_id}
+                    selectedStoreId={selectedStore}
+                />
             )}
 
             {/* Desktop-runner ingest status strips — one per vendor the store
@@ -1906,23 +1953,23 @@ export default function Catalog() {
                                 } else if (isClaimed) {
                                     label = 'Scraping…';
                                 } else if (trackingServerScrape) {
-                                    label = 'Live vendor scrape (server)…';
+                                    label = 'Fetching prices (website)…';
                                 }
 
                                 let titleText;
                                 if (isPending) {
-                                    titleText = 'Another store is currently scraping. This store will start automatically when the runner is free.';
+                                    titleText = 'Another store is running first. Yours will start on its own when the line is clear.';
                                 } else if (desktopRunnerBusy) {
-                                    titleText = 'Scrape running — use "Stop Scraping" to cancel the desktop runner.';
+                                    titleText = 'Price check in progress — use Stop Scraping to cancel.';
                                 } else if (trackingServerScrape) {
-                                    titleText = 'A server-side catalog scrape (Amazon, eBay, and similar) is running. You can leave this page; the blue strip and product rows update as work completes. There is no stop button for this job from the UI.';
+                                    titleText = 'We are fetching vendor prices on our servers. You can leave this page. Use Stop Scraping to cancel.';
                                 } else if (vendorList.length > 0) {
                                     const labels = vendorList
                                         .map((v) => v.label || (v.code || '').toUpperCase())
                                         .join(' / ');
-                                    titleText = `Re-fetch vendor price/stock for all active listings (${labels} use the desktop runner ingest feed).`;
+                                    titleText = `Refresh vendor price and stock for all active listings (${labels} uses your computer for part of this).`;
                                 } else {
-                                    titleText = 'Re-fetch vendor price/stock for all active listings.';
+                                    titleText = 'Refresh vendor price and stock for all active listings.';
                                 }
 
                                 return (
@@ -1937,14 +1984,14 @@ export default function Catalog() {
                                             <RefreshCw className={`h-4 w-4 mr-1.5 ${scraping || isActive ? 'animate-spin' : ''}`} />
                                             {label}
                                         </Button>
-                                        {desktopRunnerBusy && (
+                                        {isActive && (
                                             <Button
                                                 variant="secondary"
                                                 size="sm"
                                                 onClick={handleStopScrape}
                                                 disabled={stoppingScrape}
                                                 className="border-rose-200 text-rose-700 hover:bg-rose-50 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/40"
-                                                title="Cancel the scrape. The desktop runner stops on its next check."
+                                                title="Stop the price check. Anything running on your computer or our servers should wind down in a few seconds."
                                             >
                                                 {stoppingScrape ? 'Stopping…' : 'Stop Scraping'}
                                             </Button>

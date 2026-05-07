@@ -28,6 +28,11 @@ app.conf.beat_schedule = {
         'task': 'analytics.tasks.aggregate_daily_metrics',
         'schedule': crontab(minute=10, hour=0),
     },
+    # All active catalog listings → Pending once per day (UTC midnight + 30m).
+    'reset-catalog-pending-daily': {
+        'task': 'sync.tasks.reset_all_catalog_listings_pending_daily',
+        'schedule': crontab(minute=30, hour=0),
+    },
 }
 
 

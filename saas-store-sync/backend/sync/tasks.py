@@ -635,36 +635,25 @@ def run_store_sync(self, store_id):
     return {'store_id': str(store_id), 'at': str(now)}
 
 
-def _set_catalog_sync_reset_timer(store_id):
-    """Start 24h window after marketplace push; then listings return to Pending."""
-    from datetime import timedelta
-
-    when = timezone.now() + timedelta(days=1)
-    Store.objects.filter(id=store_id).update(catalog_pending_reset_at=when)
-
-
-def _reset_expired_catalog_pending_statuses():
-    """Clear pending-reset timer and set only synced active mappings back to pending when due."""
+@shared_task
+def reset_all_catalog_listings_pending_daily():
+    """Once per day (Celery beat): every active listing on every active store → Pending."""
     from catalog.activity_log import append_catalog_log
 
-    now = timezone.now()
-    qs = Store.objects.filter(
-        catalog_pending_reset_at__isnull=False,
-        catalog_pending_reset_at__lte=now,
-    )
-    for store in qs:
-        n = ProductMapping.objects.filter(
-            store=store,
-            is_active=True,
-            sync_status='synced',
-        ).update(sync_status='pending')
-        Store.objects.filter(id=store.id).update(catalog_pending_reset_at=None)
-        append_catalog_log(
-            store.id,
-            f'The 24-hour window after your last marketplace sync ended. '
-            f'{n} active listing(s) were set back to Pending.',
-            action_type='catalog_reset',
+    for store in Store.objects.filter(is_active=True).iterator():
+        n = ProductMapping.objects.filter(store=store, is_active=True).update(
+            sync_status='pending',
+            failed_sync_count=0,
+            scrape_error=None,
         )
+        if n:
+            append_catalog_log(
+                store.id,
+                'All active listings were set back to Pending as part of the daily refresh.',
+                action_type='catalog_daily_pending_reset',
+            )
+    # Legacy timer column is unused; keep it cleared.
+    Store.objects.all().update(catalog_pending_reset_at=None)
 
 
 @shared_task(bind=True, max_retries=3)
@@ -989,7 +978,6 @@ def run_store_update(self, store_id):
         pass
 
     if push_ok > 0:
-        _set_catalog_sync_reset_timer(store_id)
         from catalog.activity_log import append_catalog_log
 
         append_catalog_log(
@@ -1036,7 +1024,6 @@ def check_scheduled_updates():
 
     now_utc = timezone.now()
 
-    _reset_expired_catalog_pending_statuses()
     _run_catalog_zero_pending_cycle()
 
     for sched in SyncSchedule.objects.filter(is_active=True).select_related('store'):
@@ -1220,8 +1207,6 @@ def run_store_push_listings_only(store_id, disable_schedule=False):
                 error_message=str(e)[:500],
             )
 
-    if succeeded > 0:
-        _set_catalog_sync_reset_timer(store_id)
     append_catalog_log(
         store.id,
         f'Marketplace sync finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '

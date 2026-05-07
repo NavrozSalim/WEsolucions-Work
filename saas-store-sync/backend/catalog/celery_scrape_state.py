@@ -29,8 +29,36 @@ def set_celery_scrape_state(
             'scope': scope,
             'upload': upload,
             'root_task_id': (task_id or '')[:255],
+            'cancel_requested': False,
+            'first_worker_started_at': None,
         },
     )
+
+
+def mark_celery_scrape_worker_started(store_id: str | None) -> None:
+    """First chunk/sequential pass to touch rows sets this; until then UI shows queued."""
+    if not store_id:
+        return
+    from django.utils import timezone
+
+    from catalog.models import StoreCatalogCeleryScrapeState
+
+    StoreCatalogCeleryScrapeState.objects.filter(
+        store_id=store_id,
+        first_worker_started_at__isnull=True,
+    ).update(first_worker_started_at=timezone.now())
+
+
+def is_celery_scrape_cancel_requested(store_id: str | None) -> bool:
+    """True when the user asked to stop a server-side catalog scrape for this store."""
+    if not store_id:
+        return False
+    from catalog.models import StoreCatalogCeleryScrapeState
+
+    return StoreCatalogCeleryScrapeState.objects.filter(
+        store_id=store_id,
+        cancel_requested=True,
+    ).exists()
 
 
 def clear_celery_scrape_state(store_id: str | None) -> None:

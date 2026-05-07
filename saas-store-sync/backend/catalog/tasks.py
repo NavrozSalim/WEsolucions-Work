@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 # count — the timer starts on the first non-ingest pending row.
 SCRAPER_STALL_NO_PENDING_PROGRESS = timedelta(minutes=10)
 
+from .celery_scrape_state import is_celery_scrape_cancel_requested, mark_celery_scrape_worker_started
 from .models import CatalogUpload, CatalogUploadRow, CatalogSyncLog, ProductMapping
 from .reverb_catalog import listing_sku_lookup_order, store_is_reverb, vendor_is_ebay
 from .services import _normalize
@@ -478,14 +479,20 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
     succeeded = 0
     failed = 0
     stalled_out = False
+    user_cancelled = False
     fatal_error = None
     last_progress_at = None
     now = timezone.now()
     rows_visited = 0
     row_counter = 0
 
+    mark_celery_scrape_worker_started(str(store.id))
+
     try:
         for row in rows:
+            if is_celery_scrape_cancel_requested(str(store.id)):
+                user_cancelled = True
+                break
             pm = row.product_mapping
             product = pm.product
             if not product:
@@ -670,6 +677,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
         'stalled_out': stalled_out,
         'fatal_error': fatal_error,
         'rows_visited': rows_visited,
+        'user_cancelled': user_cancelled,
     }
 
 
@@ -748,6 +756,7 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
     succeeded = failed = 0
     fatal_error = None
     stalled_out = False
+    user_cancelled = False
 
     try:
         stats = _process_catalog_upload_scrape_rows(
@@ -765,6 +774,7 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
         failed = stats['failed']
         stalled_out = stats['stalled_out']
         fatal_error = stats['fatal_error']
+        user_cancelled = stats.get('user_cancelled')
     finally:
         close_amazon_session(session)
 
@@ -773,6 +783,13 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
     if fatal_error:
         run.status = ScrapeRun.Status.FAILED
         run.error_summary = fatal_error[:2000]
+    elif user_cancelled:
+        run.status = (
+            ScrapeRun.Status.PARTIAL
+            if (succeeded > 0 or failed > 0)
+            else ScrapeRun.Status.SUCCESS
+        )
+        run.error_summary = 'Stopped by user.'
     elif stalled_out:
         run.status = (
             ScrapeRun.Status.PARTIAL
@@ -808,6 +825,14 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
             f' Stopped early: no progress moving listings off Pending for '
             f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
         )
+    if user_cancelled:
+        append_catalog_log(
+            store.id,
+            'Price checks stopped because you clicked Stop.',
+            action_type='scrape_cancelled',
+            metadata={'upload_id': str(upload_id), 'scope': 'upload'},
+        )
+        finish_msg += ' Stopped because you clicked Stop.'
     append_catalog_log(
         store.id,
         finish_msg,
@@ -836,6 +861,7 @@ def catalog_scrape_upload_chunk_task(self, upload_id: str, scrape_run_id: str, r
             'failed': 0,
             'stalled_out': False,
             'rows_visited': 0,
+            'user_cancelled': False,
         }
 
     store = upload.store
@@ -883,6 +909,7 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
     try:
         succeeded = failed = rows_processed = 0
         stalled_out = False
+        user_cancelled = False
         fatal_parts: list[str] = []
 
         if not isinstance(results, list):
@@ -902,6 +929,7 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
             failed += int(r.get('failed', 0))
             stalled_out = stalled_out or bool(r.get('stalled_out'))
             rows_processed += int(r.get('rows_visited', 0))
+            user_cancelled = user_cancelled or bool(r.get('user_cancelled'))
 
         fatal_error = '; '.join(fatal_parts) if fatal_parts else None
 
@@ -911,6 +939,13 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
         if fatal_error:
             run.status = ScrapeRun.Status.FAILED
             run.error_summary = fatal_error[:2000]
+        elif user_cancelled:
+            run.status = (
+                ScrapeRun.Status.PARTIAL
+                if (succeeded > 0 or failed > 0)
+                else ScrapeRun.Status.SUCCESS
+            )
+            run.error_summary = 'Stopped by user.'
         elif stalled_out:
             run.status = (
                 ScrapeRun.Status.PARTIAL
@@ -934,6 +969,14 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
             finish_msg += (
                 f' Stopped early: no progress moving listings off Pending for '
                 f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+            )
+        if user_cancelled:
+            finish_msg += ' Stopped because you clicked Stop.'
+            append_catalog_log(
+                store.id,
+                'Price checks stopped because you clicked Stop.',
+                action_type='scrape_cancelled',
+                metadata={'upload_id': str(upload_id), 'scope': 'upload', 'parallel': True},
             )
         append_catalog_log(
             store.id,
@@ -984,11 +1027,17 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
     now = timezone.now()
     error_summary = None
     stalled_out = False
+    user_cancelled = False
     last_progress_at = None
     fatal_error = None
 
+    mark_celery_scrape_worker_started(str(store.id))
+
     try:
         for pm in mappings:
+            if is_celery_scrape_cancel_requested(str(store.id)):
+                user_cancelled = True
+                break
             processed += 1
             product = pm.product
             if not product:
@@ -1155,6 +1204,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
         'error_summary': error_summary,
         'stalled': stalled_out,
         'fatal_error': fatal_error,
+        'user_cancelled': user_cancelled,
     }
 
 
@@ -1224,12 +1274,14 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> d
     processed = stats['rows_processed']
     error_summary = stats['error_summary']
     stalled_out = stats['stalled']
+    user_cancelled = stats.get('user_cancelled')
 
     end_meta = {
         'rows_succeeded': succeeded,
         'failed': failed,
         'rows_processed': processed,
         'stalled': stalled_out,
+        'user_cancelled': bool(user_cancelled),
     }
     end_msg = (
         f'Store-wide vendor scrape finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
@@ -1240,6 +1292,14 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> d
             f' Stopped early: no progress moving listings off Pending for '
             f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
         )
+    if user_cancelled:
+        append_catalog_log(
+            store.id,
+            'Price checks stopped because you clicked Stop.',
+            action_type='scrape_cancelled',
+            metadata={'scope': 'store'},
+        )
+        end_msg += ' Stopped because you clicked Stop.'
     append_catalog_log(
         store.id,
         end_msg,
@@ -1272,6 +1332,7 @@ def catalog_scrape_store_chunk_task(self, store_id: str, mapping_ids: list):
             'failed': 0,
             'error_summary': None,
             'stalled': False,
+            'user_cancelled': False,
         }
 
     session: dict = {}
@@ -1308,6 +1369,7 @@ def catalog_scrape_store_finalize(results, store_id: str):
     try:
         processed = succeeded = failed = 0
         stalled_out = False
+        user_cancelled = False
         error_summary = None
         fatal_parts: list[str] = []
 
@@ -1328,6 +1390,7 @@ def catalog_scrape_store_finalize(results, store_id: str):
             failed += int(r.get('failed', 0))
             processed += int(r.get('rows_processed', 0))
             stalled_out = stalled_out or bool(r.get('stalled'))
+            user_cancelled = user_cancelled or bool(r.get('user_cancelled'))
             es = r.get('error_summary')
             if es and not error_summary:
                 error_summary = str(es)
@@ -1338,6 +1401,7 @@ def catalog_scrape_store_finalize(results, store_id: str):
             'rows_processed': processed,
             'stalled': stalled_out,
             'parallel': True,
+            'user_cancelled': user_cancelled,
         }
         end_msg = (
             f'Store-wide vendor scrape finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
@@ -1349,6 +1413,14 @@ def catalog_scrape_store_finalize(results, store_id: str):
             end_msg += (
                 f' Stopped early: no progress moving listings off Pending for '
                 f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+            )
+        if user_cancelled:
+            end_msg += ' Stopped because you clicked Stop.'
+            append_catalog_log(
+                store.id,
+                'Price checks stopped because you clicked Stop.',
+                action_type='scrape_cancelled',
+                metadata={'scope': 'store', 'parallel': True},
             )
         append_catalog_log(
             store.id,
