@@ -58,12 +58,15 @@ class CatalogScrapeTaskRouter:
     def route_for_task(
         self,
         name: str,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-        options: dict[str, Any],
+        args: tuple[Any, ...] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+        *,
         task=None,
         **kw: Any,
     ) -> dict[str, str] | None:
+        args = args or ()
+        kwargs = kwargs or {}
         if name in _FINALIZE:
             return {"queue": QUEUE_SCRAPE_FINALIZE}
 

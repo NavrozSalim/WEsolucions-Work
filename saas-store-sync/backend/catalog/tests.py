@@ -67,6 +67,14 @@ class CatalogScrapeTaskRouterTests(SimpleTestCase):
             r.route_for_task('analytics.tasks.aggregate_daily_metrics', (), {}, {}),
         )
 
+    def test_route_for_task_accepts_celery_five_signature_three_positionals(self):
+        """Celery 5 calls route_for_task(name, args, kwargs) — no options dict."""
+        r = CatalogScrapeTaskRouter()
+        self.assertEqual(
+            r.route_for_task('catalog.tasks.catalog_scrape_upload_finalize', (), {}),
+            {'queue': QUEUE_SCRAPE_FINALIZE},
+        )
+
     @patch('catalog.models.CatalogUpload.objects')
     def test_scrape_task_routes_upload_by_store_region(self, mock_objects):
         r = CatalogScrapeTaskRouter()
