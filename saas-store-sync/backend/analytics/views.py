@@ -17,7 +17,9 @@ class DashboardSummaryView(APIView):
 
     def get(self, request):
         user = request.user
-        stores = Store.objects.filter(user=user)
+        stores = Store.objects.filter(user=user).defer(
+            'api_token', 'kogan_service_account_json',
+        )
         store_id = request.query_params.get('store_id')
         if store_id:
             stores = stores.filter(id=store_id)

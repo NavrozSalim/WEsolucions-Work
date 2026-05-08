@@ -49,7 +49,16 @@ class EncryptedTextField(models.TextField):
     def from_db_value(self, value, expression, connection):
         if value in (None, ''):
             return value
-        return _get_fernet().decrypt(value.encode()).decode()
+        try:
+            return _get_fernet().decrypt(value.encode()).decode()
+        except Exception as exc:
+            # Wrong ENCRYPTION_KEY, rotated key, legacy plaintext, or corrupted blob.
+            logger.warning(
+                "EncryptedTextField decrypt failed (%s); returning empty value. "
+                "Re-enter affected secrets in Store Settings if the key or DB backup mismatched.",
+                exc.__class__.__name__,
+            )
+            return None if getattr(self, 'null', False) else ''
 
     def to_python(self, value):
         if value in (None, ''):

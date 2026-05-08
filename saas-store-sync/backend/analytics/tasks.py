@@ -18,7 +18,7 @@ def aggregate_daily_metrics(date=None):
     Creates or updates DailyStoreMetrics per store so analytics queries stay fast.
     """
     target_date = date or (timezone.now().date() - timedelta(days=1))
-    for store in Store.objects.all():
+    for store in Store.objects.all().defer('api_token', 'kogan_service_account_json'):
         out_of_stock = ProductMapping.objects.filter(
             store=store
         ).filter(Q(store_stock=0) | Q(store_stock__isnull=True)).count()

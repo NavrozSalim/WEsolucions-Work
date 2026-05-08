@@ -16,8 +16,13 @@ class StoreViewSet(viewsets.ModelViewSet):
         user = self.request.user
         # Admin users need cross-account visibility in Store Settings.
         if getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
-            return Store.objects.all()
-        return Store.objects.filter(user=user)
+            qs = Store.objects.all()
+        else:
+            qs = Store.objects.filter(user=user)
+        # List only needs metadata + nested settings; skip loading ciphertext columns.
+        if getattr(self, 'action', None) == 'list':
+            qs = qs.defer('api_token', 'kogan_service_account_json')
+        return qs
 
     def create(self, request, *args, **kwargs):
         """Override to catch errors and return JSON instead of 500."""

@@ -71,9 +71,15 @@ class CatalogStoresView(APIView):
         from sync.models import SyncSchedule
         from stores.models import StorePriceRangeMargin
 
-        stores = Store.objects.filter(user=request.user).select_related('marketplace').annotate(
-            product_count=Count('products', filter=Q(products__is_active=True)),
-        ).order_by('name')
+        stores = (
+            Store.objects.filter(user=request.user)
+            .defer('api_token', 'kogan_service_account_json')
+            .select_related('marketplace')
+            .annotate(
+                product_count=Count('products', filter=Q(products__is_active=True)),
+            )
+            .order_by('name')
+        )
         marketplace_id = request.query_params.get('marketplace_id')
         if marketplace_id:
             stores = stores.filter(marketplace_id=marketplace_id)
