@@ -1,5 +1,6 @@
 import csv
 import io
+import logging
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.views import APIView
@@ -40,6 +41,8 @@ from audit.utils import log_action
 from django.db.models import Count, Q, Prefetch, OuterRef, Subquery
 from stores.models import StoreVendorPriceSettings
 from vendor.models import VendorPrice
+
+logger = logging.getLogger(__name__)
 
 
 def _upload_action_reason_from_rows(rows):
@@ -273,7 +276,11 @@ class StoreCatalogUploadView(APIView):
     parser_classes = (MultiPartParser, FormParser)
 
     def post(self, request, store_pk):
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_object_or_404(
+            Store.objects.defer('api_token', 'kogan_service_account_json'),
+            id=store_pk,
+            user=request.user,
+        )
         file_obj = request.data.get('file')
         if not file_obj:
             return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
@@ -289,7 +296,24 @@ class StoreCatalogUploadView(APIView):
             return Response({"error": err or "Upload failed"}, status=status.HTTP_400_BAD_REQUEST)
 
         from catalog.tasks import catalog_ingest_upload_file_task
-        catalog_ingest_upload_file_task.delay(str(upload.id))
+
+        try:
+            catalog_ingest_upload_file_task.delay(str(upload.id))
+        except Exception as enqueue_exc:
+            logger.exception('Failed to enqueue catalog ingest for upload %s', upload.id)
+            upload.status = CatalogUpload.Status.FAILED
+            upload.error_summary = (
+                f'Could not queue file processing ({enqueue_exc!s}). '
+                'Confirm Celery workers listen to the ingest queue and Redis is reachable, then retry.'
+            )[:2000]
+            upload.save(update_fields=['status', 'error_summary'])
+            return Response(
+                {
+                    'error': upload.error_summary,
+                    'upload_id': str(upload.id),
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         return Response({
             "upload_id": str(upload.id),
@@ -304,10 +328,15 @@ class CatalogUploadListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk):
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_object_or_404(
+            Store.objects.defer('api_token', 'kogan_service_account_json'),
+            id=store_pk,
+            user=request.user,
+        )
         uploads = (
             CatalogUpload.objects.filter(store=store)
             .select_related('user', 'store', 'store__marketplace')
+            .defer('store__api_token', 'store__kogan_service_account_json')
             .prefetch_related(
                 Prefetch('rows', queryset=CatalogUploadRow.objects.only('action_raw')),
             )

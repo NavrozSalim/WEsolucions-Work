@@ -447,9 +447,28 @@ def catalog_ingest_upload_file_task(self, upload_id: str):
     """
     Parse stored CSV/XLSX in chunks (bulk_create rows). Replaces request-time ingest.
     """
+    from catalog.models import CatalogUpload
+
     from .services import ingest_stored_catalog_file
 
-    return ingest_stored_catalog_file(upload_id)
+    try:
+        return ingest_stored_catalog_file(upload_id)
+    except CatalogUpload.DoesNotExist:
+        logger.warning('catalog ingest: upload id=%s not found', upload_id)
+        return {'error': 'upload_not_found', 'upload_id': str(upload_id)}
+    except Exception as exc:
+        # Worker crash, bug, or exception outside ingest_stored_catalog_file inner handlers —
+        # avoid leaving the upload stuck in INGESTING forever.
+        logger.exception('catalog ingest fatal upload_id=%s', upload_id)
+        try:
+            u = CatalogUpload.objects.get(id=upload_id)
+            if u.status == CatalogUpload.Status.INGESTING:
+                u.status = CatalogUpload.Status.FAILED
+                u.error_summary = (str(exc) or 'Ingest failed unexpectedly.')[:2000]
+                u.save(update_fields=['status', 'error_summary'])
+        except CatalogUpload.DoesNotExist:
+            pass
+        return {'error': str(exc), 'upload_id': str(upload_id)}
 
 
 @shared_task(bind=True, max_retries=3)

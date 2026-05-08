@@ -347,9 +347,13 @@ def ingest_stored_catalog_file(upload_id) -> dict:
     """
     upload = (
         CatalogUpload.objects.select_related('store', 'store__marketplace')
+        .defer('store__api_token', 'store__kogan_service_account_json')
         .get(id=upload_id)
     )
     if not upload.source_file:
+        upload.status = CatalogUpload.Status.FAILED
+        upload.error_summary = 'No file stored for this upload; please try again.'
+        upload.save(update_fields=['status', 'error_summary'])
         return {'error': 'no_source_file', 'upload_id': str(upload_id)}
     store = upload.store
     fn = (upload.original_filename or '').lower()
