@@ -68,7 +68,7 @@ services:
         "-l",
         "info",
         "-Q",
-        "celery,ingest,light,heavy",
+        "celery,ingest,light,heavy-us,heavy-au",
         "--concurrency",
         "2",
       ]

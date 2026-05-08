@@ -130,7 +130,7 @@ Ensure TLS certificate files exist on the host and Nginx points at them before d
 **Catalog bulk uploads and workers**
 
 - Large CSV/XLSX uploads are stored under **`MEDIA_ROOT`** (`/app/media` in Docker). The **backend** and **celery_worker** services share a **`catalog_media`** volume so the ingest task can read the file after the API saves it. Apply migrations after pull (`catalog.0020_*`).
-- Celery **queues** (see `core/settings.py`): **`ingest`** (chunked `bulk_create` of upload rows), **`light`** (catalog DB sync, Vevor feed), **`heavy`** (browser/Selenium scrapes and scrape chunks), **`celery`** (default, e.g. `sync` beat tasks). The compose files run one worker with `-Q celery,ingest,light,heavy` so all queues are drained; on a small VPS you can add a **second** worker with **`-Q heavy -c 1`** so scrapes do not starve ingest/sync.
+- Celery **queues** (see `core/settings.py` and `catalog/celery_routing.py`): **`ingest`** (chunked `bulk_create` of upload rows), **`light`** (catalog DB sync, Vevor feed, scrape chord finalizers), **`heavy-us`** / **`heavy-au`** (browser scrapes for `Store.region` USA vs AU — Amazon/eBay), **`celery`** (default, e.g. `sync` beat tasks). **`docker-compose.prod.yml`** runs the main worker with **`-Q celery,ingest,light,heavy-au`**. Run **`docker-compose.us-scraper.prod.yml`** on a second VPS with **`-Q heavy-us`** (same `REDIS_URL` / `DATABASE_URL` as main) so US scrapes execute there.
 - Tunables: **`CATALOG_UPLOAD_CHUNK_SIZE`** (default 1000), **`CATALOG_SYNC_LOG_BATCH`**, **`CATALOG_SYNC_PROGRESS_EVERY`**, **`PG_CONN_MAX_AGE`** (use `0` with **PgBouncer** transaction pooling).
 
 ---

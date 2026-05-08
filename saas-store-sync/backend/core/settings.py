@@ -257,23 +257,28 @@ CELERY_TASK_TRACK_STARTED = True
 if sys.platform == 'win32':
     CELERY_WORKER_POOL = 'solo'
 
-# --- Celery queues (no K8s: run a second worker with -Q heavy -c 1 for browser scrapes) ---
+# --- Celery queues ---
+# Browser scrapes: heavy-us (USA stores) vs heavy-au (AU stores), routed by Store.region
+# (see catalog.celery_routing.CatalogScrapeTaskRouter). Chord finalizers use ``light``.
+# Main server: -Q celery,ingest,light,heavy-au | US server: -Q heavy-us (same broker/DB).
 from kombu import Queue  # noqa: E402
+
+from catalog.celery_routing import CatalogScrapeTaskRouter  # noqa: E402
 
 CELERY_TASK_CREATE_MISSING_QUEUES = True
 CELERY_TASK_QUEUES = (
     Queue('celery'),
     Queue('ingest'),
     Queue('light'),
-    Queue('heavy'),
+    Queue('heavy-us'),
+    Queue('heavy-au'),
 )
 CELERY_TASK_DEFAULT_QUEUE = 'celery'
-CELERY_TASK_ROUTES = {
-    'catalog.ingest_upload_file': {'queue': 'ingest'},
-    'catalog.tasks.catalog_sync_task': {'queue': 'light'},
-    'catalog.tasks.catalog_scrape_task': {'queue': 'heavy'},
-    'catalog.tasks.catalog_scrape_store_task': {'queue': 'heavy'},
-    'catalog.tasks.catalog_scrape_upload_chunk_task': {'queue': 'heavy'},
-    'catalog.tasks.catalog_scrape_store_chunk_task': {'queue': 'heavy'},
-    'catalog.run_vevor_au_ingest': {'queue': 'light'},
-}
+CELERY_TASK_ROUTES = (
+    CatalogScrapeTaskRouter(),
+    {
+        'catalog.ingest_upload_file': {'queue': 'ingest'},
+        'catalog.tasks.catalog_sync_task': {'queue': 'light'},
+        'catalog.run_vevor_au_ingest': {'queue': 'light'},
+    },
+)

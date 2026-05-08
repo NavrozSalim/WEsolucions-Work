@@ -160,10 +160,11 @@ services:
 
   celery_worker:
     <<: *backend-image
-    # Queues: celery=default; ingest=bulk file parse; light=sync/vevor; heavy=browser scrapes (add a 2nd worker with -Q heavy -c1 if needed).
+    # Main: celery,ingest,light,heavy-au. US browser scrapes run on a second worker (heavy-us).
+    # See docker-compose.us-scraper.prod.yml for a single-service US VPS deployment.
     command: >-
       celery -A core worker -l info
-      -Q celery,ingest,light,heavy
+      -Q celery,ingest,light,heavy-au
       --concurrency=${CELERY_WORKER_CONCURRENCY:-4}
       --prefetch-multiplier=1 -O fair
     init: true

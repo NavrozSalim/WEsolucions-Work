@@ -1,6 +1,13 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase
+
+from catalog.celery_routing import (
+    CatalogScrapeTaskRouter,
+    QUEUE_HEAVY_AU,
+    QUEUE_HEAVY_US,
+    QUEUE_SCRAPE_FINALIZE,
+)
 
 from catalog.marketplace_templates import (
     build_field_indices,
@@ -38,6 +45,55 @@ class AdapterRegistryTests(SimpleTestCase):
         self.assertIs(_resolve_adapter_class('walmart'), WalmartAdapter)
         self.assertIs(_resolve_adapter_class('Walmart'), WalmartAdapter)
         self.assertIs(_resolve_adapter_class('WALMART'), WalmartAdapter)
+
+
+class CatalogScrapeTaskRouterTests(SimpleTestCase):
+    """US vs AU Celery queue routing for catalog browser scrapes."""
+
+    def test_finalize_tasks_go_to_light_queue(self):
+        r = CatalogScrapeTaskRouter()
+        self.assertEqual(
+            r.route_for_task('catalog.tasks.catalog_scrape_upload_finalize', (), {}, {}),
+            {'queue': QUEUE_SCRAPE_FINALIZE},
+        )
+        self.assertEqual(
+            r.route_for_task('catalog.tasks.catalog_scrape_store_finalize', (), {}, {}),
+            {'queue': QUEUE_SCRAPE_FINALIZE},
+        )
+
+    def test_unrelated_task_returns_none(self):
+        r = CatalogScrapeTaskRouter()
+        self.assertIsNone(
+            r.route_for_task('analytics.tasks.aggregate_daily_metrics', (), {}, {}),
+        )
+
+    @patch('catalog.models.CatalogUpload.objects')
+    def test_scrape_task_routes_upload_by_store_region(self, mock_objects):
+        r = CatalogScrapeTaskRouter()
+        mock_objects.values_list.return_value.get.return_value = 'AU'
+        self.assertEqual(
+            r.route_for_task('catalog.tasks.catalog_scrape_task', ('upload-1',), {}, {}),
+            {'queue': QUEUE_HEAVY_AU},
+        )
+        mock_objects.values_list.return_value.get.return_value = 'USA'
+        self.assertEqual(
+            r.route_for_task('catalog.tasks.catalog_scrape_upload_chunk_task', ('upload-1', 'run-1', []), {}, {}),
+            {'queue': QUEUE_HEAVY_US},
+        )
+
+    @patch('stores.models.Store.objects')
+    def test_scrape_task_routes_store_by_region(self, mock_objects):
+        r = CatalogScrapeTaskRouter()
+        mock_objects.values_list.return_value.get.return_value = 'AU'
+        self.assertEqual(
+            r.route_for_task('catalog.tasks.catalog_scrape_store_task', ('store-1',), {}, {}),
+            {'queue': QUEUE_HEAVY_AU},
+        )
+        mock_objects.values_list.return_value.get.return_value = 'USA'
+        self.assertEqual(
+            r.route_for_task('catalog.tasks.catalog_scrape_store_chunk_task', ('store-1', []), {}, {}),
+            {'queue': QUEUE_HEAVY_US},
+        )
 
 
 class MarketplaceTemplateTests(SimpleTestCase):
