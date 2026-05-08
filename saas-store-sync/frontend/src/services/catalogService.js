@@ -219,11 +219,8 @@ export const triggerCatalogScrape = (storeId, runInline = false, uploadId = null
 };
 
 /**
- * Live scrape progress for a store. Used by the Catalog UI to:
- *   1. Keep the Scrape button in a "working" state until HEB rows are all
- *      populated from the desktop runner's ingest feed.
- *   2. Render the status strip above the product table.
- * Cheap: one aggregation query per call.
+ * Live scrape progress for a store. GET {VITE_API_URL}/stores/{storeId}/catalog/scrape/progress/
+ * (storeId must be the store UUID). Used by the Catalog UI for the server scrape strip and HEB tracking.
  */
 export const getScrapeProgress = (storeId) =>
     api.get(`/stores/${storeId}/catalog/scrape/progress/`, { timeout: 90_000 });

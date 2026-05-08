@@ -52,6 +52,7 @@ urlpatterns = [
     path('stores/<uuid:store_pk>/catalog/sync/', CatalogSyncTriggerView.as_view(), name='store-catalog-sync'),
     path('stores/<uuid:store_pk>/catalog/scrape/', CatalogScrapeTriggerView.as_view(), name='store-catalog-scrape'),
     path('stores/<uuid:store_pk>/catalog/scrape/cancel/', CatalogScrapeCancelView.as_view(), name='store-catalog-scrape-cancel'),
+    # store_pk must be a valid UUID path segment — literals like "STORE_UUID" 404 before this view runs.
     path('stores/<uuid:store_pk>/catalog/scrape/progress/', CatalogScrapeProgressView.as_view(), name='store-catalog-scrape-progress'),
     path('stores/<uuid:store_pk>/catalog/scrape/runs/', CatalogScrapeRunsView.as_view(), name='store-catalog-scrape-runs'),
     path('stores/<uuid:store_pk>/catalog/update/', CatalogUpdateTriggerView.as_view(), name='store-catalog-update'),
