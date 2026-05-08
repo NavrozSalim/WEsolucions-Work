@@ -726,14 +726,35 @@ class CatalogScrapeTriggerView(APIView):
             user_id=request.user.id,
         )
 
-        desktop_jobs = self._maybe_enqueue_desktop_jobs(store, request.user)
-        for vendor_code, vendor_job in desktop_jobs:
-            append_catalog_log(
-                store.id,
-                f'Queued {vendor_code.upper()} scrape job {vendor_job.id} for the desktop runner.',
-                action_type=f'{vendor_code}_scrape_queued',
-                user_id=request.user.id,
-                metadata={'job_id': str(vendor_job.id), 'vendor': vendor_code},
+        def log_desktop_vendor_jobs():
+            """HEB/Costco/Vevor desktop runner jobs — can be slow on large stores."""
+            desktop_jobs = self._maybe_enqueue_desktop_jobs(store, request.user)
+            for vendor_code, vendor_job in desktop_jobs:
+                append_catalog_log(
+                    store.id,
+                    f'Queued {vendor_code.upper()} scrape job {vendor_job.id} for the desktop runner.',
+                    action_type=f'{vendor_code}_scrape_queued',
+                    user_id=request.user.id,
+                    metadata={'job_id': str(vendor_job.id), 'vendor': vendor_code},
+                )
+
+        import threading
+        from django.db import close_old_connections
+
+        def schedule_desktop_jobs_after_commit():
+            """Return 202 before desktop work: avoids nginx/proxy timeouts on big stores."""
+
+            def run_desktop():
+                close_old_connections()
+                try:
+                    log_desktop_vendor_jobs()
+                except Exception:
+                    logger.exception('Catalog scrape: enqueue desktop runner jobs failed after commit')
+                finally:
+                    close_old_connections()
+
+            transaction.on_commit(
+                lambda: threading.Thread(target=run_desktop, daemon=True).start()
             )
 
         upload_id = request.data.get('upload_id')
@@ -744,6 +765,7 @@ class CatalogScrapeTriggerView(APIView):
         if upload_id:
             upload = get_object_or_404(CatalogUpload, id=upload_id, store=store)
             if run_inline:
+                log_desktop_vendor_jobs()
                 result = run_catalog_scrape(str(upload.id))
                 if result.get('error'):
                     return Response(
@@ -760,6 +782,7 @@ class CatalogScrapeTriggerView(APIView):
                     upload=upload,
                 )
                 mark_celery_scrape_worker_started(str(store.id))
+                schedule_desktop_jobs_after_commit()
             try:
                 catalog_scrape_task.apply_async(
                     args=[str(upload.id)],
@@ -790,6 +813,7 @@ class CatalogScrapeTriggerView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             if run_inline:
+                log_desktop_vendor_jobs()
                 result = run_catalog_scrape(str(upload.id))
                 if result.get('error'):
                     return Response(
@@ -806,6 +830,7 @@ class CatalogScrapeTriggerView(APIView):
                     upload=upload,
                 )
                 mark_celery_scrape_worker_started(str(store.id))
+                schedule_desktop_jobs_after_commit()
             try:
                 catalog_scrape_task.apply_async(
                     args=[str(upload.id)],
@@ -834,6 +859,7 @@ class CatalogScrapeTriggerView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if run_inline:
+            log_desktop_vendor_jobs()
             result = run_store_wide_catalog_scrape(str(store.id))
             if result.get('error'):
                 return Response(
@@ -850,6 +876,7 @@ class CatalogScrapeTriggerView(APIView):
                 upload=None,
             )
             mark_celery_scrape_worker_started(str(store.id))
+            schedule_desktop_jobs_after_commit()
         try:
             catalog_scrape_store_task.apply_async(
                 args=[str(store.id)],
@@ -1273,11 +1300,12 @@ class CatalogScrapeProgressView(APIView):
         try:
             st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
             if st:
-                phase = 'queued' if st.first_worker_started_at is None else 'running'
                 server_celery_scrape = {
                     'active': True,
                     'store_id': str(store.id),
-                    'phase': phase,
+                    # Any in-flight server scrape shows as running — avoids "queued" when the
+                    # row exists but a client/proxy error prevented started-at from updating.
+                    'phase': 'running',
                     'scope': st.scope,
                     'upload_id': str(st.upload_id) if st.upload_id else None,
                     'enqueued_at': st.enqueued_at.isoformat(),

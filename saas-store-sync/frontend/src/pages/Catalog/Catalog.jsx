@@ -1275,7 +1275,7 @@ export default function Catalog() {
         setMessage('Fetching vendor prices and stock…');
         startProgress();
 
-        const MAX_RETRIES = 3;
+        const MAX_RETRIES = 1;
         let attempt = 0;
 
         const finishKickoffAndSyncProgress = (ok, proc) => {
