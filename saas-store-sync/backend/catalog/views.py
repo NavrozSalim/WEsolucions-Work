@@ -1286,7 +1286,8 @@ class CatalogScrapeProgressView(APIView):
         except Exception:
             pass
 
-        return Response({
+        return Response(
+            {
             'store_id': str(store.id),
             'total': total,
             'by_status': by_status,
@@ -1306,7 +1307,9 @@ class CatalogScrapeProgressView(APIView):
             # from here so adding another vendor doesn't touch this endpoint.
             'vendors': vendors_payload,
             'checked_at': now.isoformat(),
-        })
+            },
+            headers={'Cache-Control': 'no-store, max-age=0, private'},
+        )
 
 
 class CatalogScrapeRunsView(APIView):

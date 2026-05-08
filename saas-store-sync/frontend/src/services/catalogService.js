@@ -155,13 +155,18 @@ function pollCeleryJob(storeId, jobId, { intervalMs = 2000, maxWaitMs = 600000, 
     });
 }
 
-function runWithCeleryFallback(url, body, storeId, { forbidInlineFallback = false } = {}) {
+function runWithCeleryFallback(
+    url,
+    body,
+    storeId,
+    { forbidInlineFallback = false, skipJobPoll = false } = {},
+) {
     return api.post(url, body, { timeout: 600000 })
         .then((res) => {
-            if (res.data?.job_id) {
-                return pollCeleryJob(storeId, res.data.job_id).then((result) => ({ data: result }));
+            if (skipJobPoll || !res.data?.job_id) {
+                return res;
             }
-            return res;
+            return pollCeleryJob(storeId, res.data.job_id).then((result) => ({ data: result }));
         })
         .catch((err) => {
             const transient =
@@ -202,13 +207,14 @@ export const triggerCatalogSync = (storeId, runInline = false, uploadId = null, 
     return runWithCeleryFallback(`/stores/${storeId}/catalog/sync/`, body, storeId);
 };
 
-/** Scrape vendor URLs for price/stock, apply rules. Async (Celery) for store-wide; upload-scoped may fall back to inline. */
+/** Scrape: async via Celery only; UI polls /catalog/scrape/progress/ (never poll /sync/jobs/). */
 export const triggerCatalogScrape = (storeId, runInline = false, uploadId = null) => {
     const body = { run_inline: runInline };
     if (uploadId) body.upload_id = uploadId;
     const storeWide = !uploadId;
     return runWithCeleryFallback(`/stores/${storeId}/catalog/scrape/`, body, storeId, {
         forbidInlineFallback: storeWide,
+        skipJobPoll: true,
     });
 };
 
@@ -220,7 +226,7 @@ export const triggerCatalogScrape = (storeId, runInline = false, uploadId = null
  * Cheap: one aggregation query per call.
  */
 export const getScrapeProgress = (storeId) =>
-    api.get(`/stores/${storeId}/catalog/scrape/progress/`);
+    api.get(`/stores/${storeId}/catalog/scrape/progress/`, { timeout: 90_000 });
 
 /**
  * Stop running price checks: pending jobs from your computer (HEB, etc.) and/or
