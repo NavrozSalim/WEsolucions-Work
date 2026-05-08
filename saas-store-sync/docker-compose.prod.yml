@@ -51,6 +51,9 @@ services:
     command: redis-server --appendonly yes --appendfsync everysec
     volumes:
       - redisdata:/data
+    # Published for remote Celery workers (e.g. US VPS). Restrict 6379 in firewall + Redis auth.
+    ports:
+      - "6379:6379"
     logging: *default-logging
     deploy:
       resources:
