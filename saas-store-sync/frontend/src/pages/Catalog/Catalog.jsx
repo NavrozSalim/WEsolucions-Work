@@ -1278,103 +1278,118 @@ export default function Catalog() {
         const MAX_RETRIES = 3;
         let attempt = 0;
 
+        const finishKickoffAndSyncProgress = (ok, proc) => {
+            finishProgress(true);
+            return getScrapeProgress(storeId)
+                .then((p) => {
+                    const progress = p?.data || null;
+                    if (progress?.store_id && progress.store_id !== storeId) return;
+                    setScrapeProgress(progress);
+                    const serverOn = Boolean(progress?.server_celery_scrape?.active);
+                    if (serverOn) {
+                        trackingServerScrapeRef.current = true;
+                        setTrackingServerScrape(true);
+                    } else {
+                        trackingServerScrapeRef.current = false;
+                        setTrackingServerScrape(false);
+                    }
+                    const vendors = getVendorSummaries(progress);
+                    const pendingVendors = vendors.filter(
+                        (v) => (v.pending || 0) > 0,
+                    );
+                    const shouldTrack = !uploadId && pendingVendors.length > 0;
+                    if (shouldTrack) {
+                        setTrackingScrape(true);
+                        setFlowStatus('scraping');
+                        const parts = pendingVendors.map((v) => {
+                            const lbl = v.label || (v.code || '').toUpperCase();
+                            return `${lbl}: ${v.scraped || 0}/${v.total || 0} populated (${v.pending} remaining)`;
+                        });
+                        if (serverOn) {
+                            setMessage(
+                                `${parts.join(' · ')} (your computer) — we are also fetching prices on our servers. Watch the blue bar above.`,
+                            );
+                        } else {
+                            setMessage(
+                                `${parts.join(' · ')} — waiting for your computer to finish uploading. This updates as it goes.`,
+                            );
+                        }
+                    } else if (serverOn) {
+                        setFlowStatus('scraping');
+                        setMessage(
+                            'We are fetching vendor prices on our servers. You can leave this page; the blue bar and table update as we go.',
+                        );
+                    } else {
+                        setFlowStatus('success');
+                        setMessage(
+                            `Done. ${ok} of ${proc} product(s) now have the latest vendor price and stock. `
+                            + 'If you use a marketplace, updates there may follow shortly.',
+                        );
+                    }
+                })
+                .catch(() => {
+                    setFlowStatus('success');
+                    setMessage(
+                        `Done. ${ok} of ${proc} product(s) now have the latest vendor price and stock. `
+                        + 'If you use a marketplace, updates there may follow shortly.',
+                    );
+                })
+                .finally(() => {
+                    getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
+                    getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
+                    if (viewMode === 'products') {
+                        refreshProducts();
+                    }
+                    if (viewMode === 'logs') {
+                        getCatalogActivityLogs(selectedStore).then((r) =>
+                            setActivityLogs(Array.isArray(r.data) ? r.data : []));
+                    }
+                });
+        };
+
         const runScrape = () => {
             attempt++;
             return triggerCatalogScrape(storeId, false, uploadId)
                 .then((res) => {
                     const ok = res?.data?.rows_succeeded ?? 0;
                     const proc = res?.data?.rows_processed ?? 0;
-                    finishProgress(true);
-
-                    // Desktop-runner vendors (HEB, Costco, …) are ingest-only
-                    // on the server: the scrape task returns instantly after
-                    // promoting whatever the desktop runner has posted so
-                    // far. We shift into "tracking" mode and keep the button
-                    // busy until every ingest-only mapping is populated. For
-                    // stores with no ingest-only vendors, behave as before.
-                    return getScrapeProgress(storeId)
-                        .then((p) => {
-                            const progress = p?.data || null;
-                            if (progress?.store_id && progress.store_id !== storeId) return;
-                            setScrapeProgress(progress);
-                            const serverOn = Boolean(progress?.server_celery_scrape?.active);
-                            if (serverOn) {
-                                trackingServerScrapeRef.current = true;
-                                setTrackingServerScrape(true);
-                            } else {
-                                trackingServerScrapeRef.current = false;
-                                setTrackingServerScrape(false);
-                            }
-                            const vendors = getVendorSummaries(progress);
-                            const pendingVendors = vendors.filter(
-                                (v) => (v.pending || 0) > 0,
-                            );
-                            const shouldTrack = !uploadId && pendingVendors.length > 0;
-                            if (shouldTrack) {
-                                setTrackingScrape(true);
-                                setFlowStatus('scraping');
-                                const parts = pendingVendors.map((v) => {
-                                    const lbl = v.label || (v.code || '').toUpperCase();
-                                    return `${lbl}: ${v.scraped || 0}/${v.total || 0} populated (${v.pending} remaining)`;
-                                });
-                                if (serverOn) {
-                                    setMessage(
-                                        `${parts.join(' · ')} (your computer) — we are also fetching prices on our servers. Watch the blue bar above.`,
-                                    );
-                                } else {
-                                    setMessage(
-                                        `${parts.join(' · ')} — waiting for your computer to finish uploading. This updates as it goes.`,
-                                    );
-                                }
-                            } else if (serverOn) {
-                                setFlowStatus('scraping');
-                                setMessage(
-                                    'We are fetching vendor prices on our servers. You can leave this page; the blue bar and table update as we go.',
-                                );
-                            } else {
-                                setFlowStatus('success');
-                                setMessage(
-                                    `Done. ${ok} of ${proc} product(s) now have the latest vendor price and stock. `
-                                    + 'If you use a marketplace, updates there may follow shortly.',
-                                );
-                            }
-                        })
-                        .catch(() => {
-                            // Progress endpoint failed — fall back to old behavior.
-                            setFlowStatus('success');
-                            setMessage(
-                                `Done. ${ok} of ${proc} product(s) now have the latest vendor price and stock. `
-                                + 'If you use a marketplace, updates there may follow shortly.',
-                            );
-                        })
-                        .finally(() => {
-                            getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
-                            getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
-                            if (viewMode === 'products') {
-                                refreshProducts();
-                            }
-                            if (viewMode === 'logs') {
-                                getCatalogActivityLogs(selectedStore).then((r) =>
-                                    setActivityLogs(Array.isArray(r.data) ? r.data : []));
-                            }
-                        });
+                    return finishKickoffAndSyncProgress(ok, proc);
                 })
                 .catch((err) => {
                     const isNetworkError = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
-                    if (isNetworkError && attempt < MAX_RETRIES) {
+                    const scheduleRetry = () => {
                         setMessage(`Connection issue — trying again (${attempt + 1} of ${MAX_RETRIES})… Your price check is still running in the background.`);
                         return new Promise((resolve) => setTimeout(resolve, 5000)).then(runScrape);
+                    };
+                    if (isNetworkError && attempt < MAX_RETRIES) {
+                        return getScrapeProgress(storeId)
+                            .then((p) => {
+                                const progress = p?.data || null;
+                                if (progress?.store_id && progress.store_id !== storeId) {
+                                    return scheduleRetry();
+                                }
+                                if (progress?.server_celery_scrape?.active) {
+                                    setMessage(
+                                        'Connection dropped after the server accepted your price check. '
+                                        + 'Tracking progress here — avoid clicking Start again to prevent duplicate jobs.',
+                                    );
+                                    return finishKickoffAndSyncProgress(0, 0);
+                                }
+                                return scheduleRetry();
+                            })
+                            .catch(() => scheduleRetry());
                     }
                     finishProgress(false);
                     if (isNetworkError) {
                         setFlowStatus('scraping');
                         setMessage(
-                            'Your price check is still running. Refresh this page in a minute to see updated prices.',
+                            'Your price check may still be running. Refresh this page in a minute to see updated prices.',
                         );
                     } else {
                         setFlowStatus('failed');
                         setMessage(formatCatalogError(err));
                     }
+                    return Promise.resolve();
                 });
         };
 

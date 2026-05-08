@@ -23,15 +23,36 @@ def set_celery_scrape_state(
 ) -> None:
     from catalog.models import StoreCatalogCeleryScrapeState
 
-    StoreCatalogCeleryScrapeState.objects.update_or_create(
+    tid = (task_id or '')[:255]
+    st, created = StoreCatalogCeleryScrapeState.objects.get_or_create(
         store=store,
         defaults={
             'scope': scope,
             'upload': upload,
-            'root_task_id': (task_id or '')[:255],
+            'root_task_id': tid,
             'cancel_requested': False,
             'first_worker_started_at': None,
         },
+    )
+    if created:
+        return
+    prev_tid = (st.root_task_id or '')[:255]
+    st.scope = scope
+    st.upload = upload
+    st.root_task_id = tid
+    st.cancel_requested = False
+    # update_or_create always reapplied None here, so a transient duplicate POST or
+    # client retry cleared first_worker_started_at and the UI stuck on "queued".
+    if prev_tid != tid:
+        st.first_worker_started_at = None
+    st.save(
+        update_fields=[
+            'scope',
+            'upload',
+            'root_task_id',
+            'cancel_requested',
+            'first_worker_started_at',
+        ]
     )
 
 
