@@ -565,7 +565,9 @@ function ServerCeleryScrapeStrip({ state, progressStoreId, selectedStoreId }) {
     if (progressStoreId && progressStoreId !== selectedStoreId) return null;
     if (state.store_id && state.store_id !== selectedStoreId) return null;
 
-    const isQueued = state.phase === 'queued';
+    // Don't treat phase "queued" as a separate UX: older APIs used it while the job was still
+    // in flight (before worker started), which looked stuck. New API uses "running" when active.
+    const isQueued = false;
     const headline = isQueued
         ? 'Job is in queue, please wait...'
         : 'Live vendor scrape (server) running';
