@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 !.env.prod.example
+.env for us
 *.pem
 *.key
 *.crt
