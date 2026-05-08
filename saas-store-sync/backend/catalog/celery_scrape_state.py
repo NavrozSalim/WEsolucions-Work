@@ -57,7 +57,11 @@ def set_celery_scrape_state(
 
 
 def mark_celery_scrape_worker_started(store_id: str | None) -> None:
-    """First chunk/sequential pass to touch rows sets this; until then UI shows queued."""
+    """Set first_worker_started_at so /scrape/progress/ shows running (vs queued).
+
+    Called from the Catalog scrape API immediately after persisting scrape state, and
+    from Celery workers once they begin processing — safe to call multiple times.
+    """
     if not store_id:
         return
     from django.utils import timezone

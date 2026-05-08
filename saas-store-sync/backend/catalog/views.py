@@ -1,6 +1,7 @@
 import csv
 import io
 import logging
+import uuid
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.views import APIView
@@ -10,7 +11,7 @@ from django.conf import settings
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.db.models import Q
+from django.db import transaction
 
 from catalog.models import (
     ProductMapping,
@@ -22,7 +23,11 @@ from catalog.models import (
     HebScrapeJob,
     StoreCatalogCeleryScrapeState,
 )
-from catalog.celery_scrape_state import clear_celery_scrape_state, set_celery_scrape_state
+from catalog.celery_scrape_state import (
+    clear_celery_scrape_state,
+    mark_celery_scrape_worker_started,
+    set_celery_scrape_state,
+)
 from catalog.serializers import ProductMappingSerializer, CatalogActivityLogSerializer
 from catalog.pagination import CatalogProductPagination
 from catalog.services import create_upload_file_and_queue
@@ -746,18 +751,28 @@ class CatalogScrapeTriggerView(APIView):
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     )
                 return Response(result, status=status.HTTP_200_OK)
-            task = catalog_scrape_task.delay(str(upload.id))
-            set_celery_scrape_state(
-                store,
-                task_id=str(task.id),
-                scope=StoreCatalogCeleryScrapeState.Scope.UPLOAD,
-                upload=upload,
-            )
+            celery_task_id = str(uuid.uuid4())
+            with transaction.atomic():
+                set_celery_scrape_state(
+                    store,
+                    task_id=celery_task_id,
+                    scope=StoreCatalogCeleryScrapeState.Scope.UPLOAD,
+                    upload=upload,
+                )
+                mark_celery_scrape_worker_started(str(store.id))
+            try:
+                catalog_scrape_task.apply_async(
+                    args=[str(upload.id)],
+                    task_id=celery_task_id,
+                )
+            except Exception:
+                clear_celery_scrape_state(str(store.id))
+                raise
             return Response({
-                "job_id": task.id,
+                "job_id": celery_task_id,
                 "upload_id": str(upload.id),
                 "scope": "upload",
-                "status": "queued",
+                "status": "accepted",
             }, status=status.HTTP_202_ACCEPTED)
 
         if scope_upload:
@@ -782,18 +797,28 @@ class CatalogScrapeTriggerView(APIView):
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     )
                 return Response(result, status=status.HTTP_200_OK)
-            task = catalog_scrape_task.delay(str(upload.id))
-            set_celery_scrape_state(
-                store,
-                task_id=str(task.id),
-                scope=StoreCatalogCeleryScrapeState.Scope.UPLOAD,
-                upload=upload,
-            )
+            celery_task_id = str(uuid.uuid4())
+            with transaction.atomic():
+                set_celery_scrape_state(
+                    store,
+                    task_id=celery_task_id,
+                    scope=StoreCatalogCeleryScrapeState.Scope.UPLOAD,
+                    upload=upload,
+                )
+                mark_celery_scrape_worker_started(str(store.id))
+            try:
+                catalog_scrape_task.apply_async(
+                    args=[str(upload.id)],
+                    task_id=celery_task_id,
+                )
+            except Exception:
+                clear_celery_scrape_state(str(store.id))
+                raise
             return Response({
-                "job_id": task.id,
+                "job_id": celery_task_id,
                 "upload_id": str(upload.id),
                 "scope": "upload",
-                "status": "queued",
+                "status": "accepted",
             }, status=status.HTTP_202_ACCEPTED)
 
         # Default: all active ProductMappings (same scrape path as scheduled store update)
@@ -816,17 +841,27 @@ class CatalogScrapeTriggerView(APIView):
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
             return Response(result, status=status.HTTP_200_OK)
-        task = catalog_scrape_store_task.delay(str(store.id))
-        set_celery_scrape_state(
-            store,
-            task_id=str(task.id),
-            scope=StoreCatalogCeleryScrapeState.Scope.STORE,
-            upload=None,
-        )
+        celery_task_id = str(uuid.uuid4())
+        with transaction.atomic():
+            set_celery_scrape_state(
+                store,
+                task_id=celery_task_id,
+                scope=StoreCatalogCeleryScrapeState.Scope.STORE,
+                upload=None,
+            )
+            mark_celery_scrape_worker_started(str(store.id))
+        try:
+            catalog_scrape_store_task.apply_async(
+                args=[str(store.id)],
+                task_id=celery_task_id,
+            )
+        except Exception:
+            clear_celery_scrape_state(str(store.id))
+            raise
         return Response({
-            "job_id": task.id,
+            "job_id": celery_task_id,
             "scope": "store",
-            "status": "queued",
+            "status": "accepted",
         }, status=status.HTTP_202_ACCEPTED)
 
 
