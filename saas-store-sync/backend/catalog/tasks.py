@@ -757,9 +757,6 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
             for ch in chunks
         ]
         chord(group(chunk_sigs))(catalog_scrape_upload_finalize.s(str(upload_id), str(run.id)))
-        # Chunk workers also call this; set here so /scrape/progress/ shows running as soon
-        # as chord tasks are queued (root task returns before chunks start).
-        mark_celery_scrape_worker_started(str(store.id))
         return {
             'upload_id': str(upload_id),
             'run_id': str(run.id),
@@ -1270,9 +1267,6 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> d
             for ch in chunks
         ]
         chord(group(sigs))(catalog_scrape_store_finalize.s(str(store_id)))
-        # Chunk workers also call this; set here so /scrape/progress/ shows running once
-        # chord tasks are queued (root task returns before chunks start).
-        mark_celery_scrape_worker_started(str(store_id))
         return {
             'store_id': str(store_id),
             'scope': 'store',
@@ -1477,6 +1471,8 @@ def catalog_scrape_task(self, upload_id: str):
         store_id = str(CatalogUpload.objects.values_list('store_id', flat=True).get(id=upload_id))
     except Exception:
         pass
+    # Progress UI: flip to "running" as soon as a worker executes this task (before chord/chunks).
+    mark_celery_scrape_worker_started(store_id)
     try:
         out = run_catalog_scrape(upload_id, parallel=True)
     except Exception:
@@ -1493,6 +1489,7 @@ def catalog_scrape_store_task(self, store_id: str):
     """Celery: scrape all active listings for a store (no marketplace push)."""
     from catalog.celery_scrape_state import clear_celery_scrape_state
 
+    mark_celery_scrape_worker_started(str(store_id))
     try:
         out = run_store_wide_catalog_scrape(store_id, parallel=True)
     except Exception:
