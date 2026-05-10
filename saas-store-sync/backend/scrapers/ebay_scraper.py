@@ -2,7 +2,8 @@
 Hardened eBay product scraper.
 
 Strategy:
-1) HTTP-first using curl_cffi (browser TLS) if EBAY_HTTP_FIRST=1 (default 0 skips straight to browser warm).
+1) HTTP-first using curl_cffi (browser TLS). Non-AU: EBAY_HTTP_FIRST=1 (default 0 = Selenium warm first).
+   AU (ebay.com.au): HTTP-first by default (EBAY_AU_HTTP_FIRST=1 or unset and EBAY_HTTP_FIRST defaults on); set EBAY_AU_HTTP_FIRST=0 to disable.
 2) If blocked/challenged, use Selenium once to warm a real browser session.
 3) Export Selenium cookies + user-agent back into HTTP client.
 4) Retry HTTP using warmed cookies.
@@ -161,8 +162,15 @@ def _ebay_region_referer(region: str) -> str:
     return "https://www.ebay.com.au/" if region == "AU" else "https://www.ebay.com/"
 
 
-def _ebay_http_first_enabled() -> bool:
-    return os.environ.get("EBAY_HTTP_FIRST", "0").lower() in ("1", "true", "yes")
+def _ebay_http_first_enabled(region: Optional[str]) -> bool:
+    r = (region or "").strip().upper()
+    trueish = ("1", "true", "yes")
+    if r == "AU":
+        au = os.environ.get("EBAY_AU_HTTP_FIRST")
+        if au is not None:
+            return au.lower() in trueish
+        return os.environ.get("EBAY_HTTP_FIRST", "1").lower() in trueish
+    return os.environ.get("EBAY_HTTP_FIRST", "0").lower() in trueish
 
 
 def _random_user_agent() -> str:
@@ -805,7 +813,10 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
     if ca_url != url:
         candidate_urls.append(ca_url)
 
-    random_delay(0.4, 1.2)
+    if (region or "").strip().upper() == "AU":
+        random_delay(0.25, 0.7)
+    else:
+        random_delay(0.4, 1.2)
     last_error = None
     last_browser_html = None
 
@@ -818,7 +829,7 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
         for candidate in try_urls:
             logger.info("eBay scrape attempt=%s url=%s", attempt + 1, candidate)
 
-            if _ebay_http_first_enabled():
+            if _ebay_http_first_enabled(region):
                 html, status, err = EbayHTTP.fetch(candidate, region, session)
             else:
                 html, status, err = None, None, "http_skipped"
