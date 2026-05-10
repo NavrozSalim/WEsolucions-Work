@@ -27,7 +27,7 @@ services:
     command: >-
       celery -A core worker -l info
       -Q heavy-us
-      --concurrency=${CELERY_US_SCRAPER_CONCURRENCY:-1}
+      --concurrency=${CELERY_US_SCRAPER_CONCURRENCY:-2}
       --prefetch-multiplier=1 -O fair
     init: true
     environment:

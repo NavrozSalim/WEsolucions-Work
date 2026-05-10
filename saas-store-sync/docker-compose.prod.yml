@@ -28,6 +28,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # Remote workers (e.g. US heavy-us) connect via DATABASE_URL on the main host.
+    # Restrict this host port to trusted scraper IPs in firewall/security groups.
+    ports:
+      - "${POSTGRES_PUBLISH_PORT:-5432}:5432"
     restart: always
     stop_grace_period: 60s
     logging: *default-logging
