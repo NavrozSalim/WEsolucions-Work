@@ -428,6 +428,17 @@ function getActiveVendor(vendors) {
     return vendors.find((v) => (v.pending || 0) > 0) || vendors[0];
 }
 
+/** HebScrapeJob desktop queue — not used for ``runner: live`` (Amazon/eBay server scrapes). */
+function vendorIngestJob(vendor) {
+    if (!vendor || vendor.runner === 'live') return null;
+    return vendor.job || null;
+}
+
+function vendorIngestQueue(vendor) {
+    if (!vendor || vendor.runner === 'live') return null;
+    return vendor.queue || null;
+}
+
 /**
  * Status strip rendered above the product table for stores with products
  * from a desktop-runner vendor (HEB, Costco, …).
@@ -458,8 +469,8 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
             ? 'bg-accent-500'
             : 'bg-amber-500';
 
-    const job = vendor.job;
-    const queue = vendor.queue;
+    const job = vendorIngestJob(vendor);
+    const queue = vendorIngestQueue(vendor);
     const jobStatus = job?.status;
     const isPending = jobStatus === 'pending';
     const isClaimed = jobStatus === 'claimed';
@@ -1005,7 +1016,7 @@ export default function Catalog() {
         }
         const active = getActiveVendor(vendors);
         const activeLabel = active?.label || (active?.code || 'vendor').toUpperCase();
-        const jobStatus = active?.job?.status;
+        const jobStatus = vendorIngestJob(active)?.status;
         if (jobStatus === 'cancelled') {
             setTrackingScrape(false);
             setFlowStatus('');
@@ -1967,13 +1978,13 @@ export default function Catalog() {
                                 const activeVendor = getActiveVendor(vendorList);
                                 const activeLabel = activeVendor?.label
                                     || (activeVendor?.code || '').toUpperCase();
-                                const activeJobStatus = activeVendor?.job?.status;
+                                const activeJobStatus = vendorIngestJob(activeVendor)?.status;
                                 const isPending = activeJobStatus === 'pending';
                                 const isClaimed = activeJobStatus === 'claimed';
                                 const desktopRunnerBusy = isPending || isClaimed || trackingScrape;
                                 const isActive = desktopRunnerBusy || trackingServerScrape;
-                                const aheadCount = activeVendor?.queue?.ahead_count || 0;
-                                const etaLabel = formatEtaShort(activeVendor?.queue?.eta_seconds);
+                                const aheadCount = vendorIngestQueue(activeVendor)?.ahead_count || 0;
+                                const etaLabel = formatEtaShort(vendorIngestQueue(activeVendor)?.eta_seconds);
 
                                 let label = 'Start Scraping';
                                 if (isPending) {

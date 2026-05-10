@@ -1265,6 +1265,15 @@ class CatalogScrapeProgressView(APIView):
                 else default_label
             )
 
+            runner_kind = (
+                SUPPORTED_VENDORS.get(vendor_code, {}).get('runner', 'desktop')
+                if is_runner else 'live'
+            )
+            # Amazon / eBay / … use server-side Celery, not the HebScrapeJob desktop queue.
+            if runner_kind == 'live':
+                v_job_payload = None
+                v_queue_payload = None
+
             vendors_payload[vendor_code] = {
                 'vendor': vendor_code,
                 'label': label,
@@ -1279,10 +1288,7 @@ class CatalogScrapeProgressView(APIView):
                 'ingested_last_24h': v_ingested_last_24h,
                 'job': v_job_payload,
                 'queue': v_queue_payload,
-                'runner': (
-                    SUPPORTED_VENDORS.get(vendor_code, {}).get('runner', 'desktop')
-                    if is_runner else 'live'
-                ),
+                'runner': runner_kind,
             }
 
         # Backward-compat: flatten the HEB payload into the top-level `heb_*`
