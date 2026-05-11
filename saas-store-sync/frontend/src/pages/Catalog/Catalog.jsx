@@ -940,12 +940,12 @@ export default function Catalog() {
         const inGraceWindow = liveRefreshUntil > Date.now();
         // Poll stores/uploads/products only during sync/scrape, desktop-runner
         // tracking, or a short post-success grace window — not on every idle
-        // Products tab (avoids hammering the API every 5s).
+        // Products tab (avoids hammering the API every few seconds).
         const needsLivePolling = activeFlow || inGraceWindow || trackingScrape || trackingServerScrape;
         if (!needsLivePolling) return undefined;
 
         refreshLiveData();
-        const intervalId = setInterval(refreshLiveData, 5000);
+        const intervalId = setInterval(refreshLiveData, 12000);
         let timeoutId = null;
         if (!activeFlow && !trackingScrape && !trackingServerScrape && inGraceWindow) {
             timeoutId = setTimeout(() => clearInterval(intervalId), Math.max(0, liveRefreshUntil - Date.now()));
@@ -976,7 +976,7 @@ export default function Catalog() {
         return () => { cancelled = true; };
     }, [selectedStore, viewMode]);
 
-    // Poll scrape-progress every 5s only while sync/scrape, tracking, or grace window.
+    // Poll scrape-progress on a slower cadence only while sync/scrape, tracking, or grace window.
     useEffect(() => {
         if (!selectedStore) return undefined;
         const activeFlow = flowStatus === 'syncing' || flowStatus === 'scraping';
@@ -997,7 +997,7 @@ export default function Catalog() {
                 .catch(() => { /* transient — just ignore and retry */ });
         };
         fetchOnce();
-        const intervalId = setInterval(fetchOnce, 5000);
+        const intervalId = setInterval(fetchOnce, 12000);
         return () => {
             cancelled = true;
             clearInterval(intervalId);

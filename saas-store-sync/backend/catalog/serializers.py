@@ -85,6 +85,8 @@ class ProductMappingSerializer(serializers.ModelSerializer):
             price = getattr(obj, 'latest_vendor_price', None)
             if price is not None:
                 return float(price)
+            if not obj.product_id:
+                return None
             vp = obj.product.vendor_prices.order_by('-scraped_at').first()
             return float(vp.price) if vp and vp.price else None
         except Exception:
@@ -101,6 +103,8 @@ class ProductMappingSerializer(serializers.ModelSerializer):
         try:
             price = getattr(obj, 'latest_vendor_price', None)
             if price is None:
+                if not obj.product_id:
+                    return None
                 vp = obj.product.vendor_prices.order_by('-scraped_at').first()
                 if not vp or vp.price is None:
                     return None

@@ -1,5 +1,6 @@
 from django.utils import timezone
-from django.db.models import Sum, Q
+from django.db.models import Sum, Q, Count
+from django.core.cache import cache
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -17,10 +18,15 @@ class DashboardSummaryView(APIView):
 
     def get(self, request):
         user = request.user
+        store_id = request.query_params.get('store_id')
+        cache_key = f'analytics:dashboard:v1:user={user.id}:store={store_id or "all"}'
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
         stores = Store.objects.filter(user=user).defer(
             'api_token', 'kogan_service_account_json',
         )
-        store_id = request.query_params.get('store_id')
         if store_id:
             stores = stores.filter(id=store_id)
         store_ids = list(stores.values_list('id', flat=True))
@@ -31,17 +37,26 @@ class DashboardSummaryView(APIView):
             store_id__in=store_ids
         ).filter(Q(store_stock=0) | Q(store_stock__isnull=True)).count()
 
+        bd_rows = (
+            ProductMapping.objects.filter(store_id__in=store_ids)
+            .values('store_id')
+            .annotate(
+                product_count=Count('id'),
+                synced_count=Count('id', filter=Q(sync_status='synced')),
+                needs_attention_count=Count('id', filter=Q(sync_status='needs_attention')),
+            )
+        )
+        bd_map = {row['store_id']: row for row in bd_rows}
+
         store_breakdown = []
         for store in stores:
-            count = ProductMapping.objects.filter(store=store).count()
-            synced = ProductMapping.objects.filter(store=store, sync_status='synced').count()
-            needs_attention = ProductMapping.objects.filter(store=store, sync_status='needs_attention').count()
+            row = bd_map.get(store.id, {})
             store_breakdown.append({
                 'store_id': str(store.id),
                 'store_name': store.name,
-                'product_count': count,
-                'synced_count': synced,
-                'needs_attention_count': needs_attention,
+                'product_count': row.get('product_count', 0),
+                'synced_count': row.get('synced_count', 0),
+                'needs_attention_count': row.get('needs_attention_count', 0),
             })
 
         data = {
@@ -53,6 +68,7 @@ class DashboardSummaryView(APIView):
         }
         serializer = DashboardSummarySerializer(data=data)
         serializer.is_valid(raise_exception=True)
+        cache.set(cache_key, serializer.data, 45)
         return Response(serializer.data)
 
 

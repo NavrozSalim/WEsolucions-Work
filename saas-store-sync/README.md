@@ -133,8 +133,8 @@ Ensure TLS certificate files exist on the host and Nginx points at them before d
 
 **Catalog bulk uploads and workers**
 
-- Large CSV/XLSX uploads are stored under **`MEDIA_ROOT`** (`/app/media` in Docker). The **backend** and **celery_worker** services share a **`catalog_media`** volume so the ingest task can read the file after the API saves it. Apply migrations after pull (`catalog.0020_*`).
-- Celery **queues** (see `core/settings.py` and `catalog/celery_routing.py`): **`ingest`** (chunked `bulk_create` of upload rows), **`light`** (catalog DB sync, scrape chord finalizers), **`heavy-us`** / **`heavy-au`** (US vs AU browser scrapes — Amazon/eBay — plus **`heavy-au`** for **`catalog.run_vevor_au_ingest`** / Vevor AU feed), **`celery`** (default, e.g. `sync` beat tasks). **`docker-compose.prod.yml`** runs the main worker with **`-Q celery,ingest,light`** (no `heavy-au` / `heavy-us`). Run **`docker-compose.us-scraper.prod.yml`** on a US VPS with **`-Q heavy-us`** and **`docker-compose.au-scraper.prod.yml`** on an AU VPS with **`-Q heavy-au`**. Each regional worker uses the same **`REDIS_URL`** (broker on the main host) and **`DATABASE_URL`** as the app. **Costco AU** remains desktop ingest → API, not a Celery scrape queue.
+- Large CSV/XLSX uploads are stored under **`MEDIA_ROOT`** (`/app/media` in Docker). The **backend** and the three main Celery worker services share a **`catalog_media`** volume so the ingest task can read the file after the API saves it. Apply migrations after pull (`catalog.0023_*` for hot-path indexes).
+- Celery **queues** (see `core/settings.py` and `catalog/celery_routing.py`): **`ingest`** (chunked `bulk_create` of upload rows), **`light`** (catalog DB sync, scrape chord finalizers), **`heavy-us`** / **`heavy-au`** (US vs AU browser scrapes — Amazon/eBay — plus **`heavy-au`** for **`catalog.run_vevor_au_ingest`** / Vevor AU feed), **`celery`** (default, e.g. `sync` beat tasks). **`docker-compose.prod.yml`** runs **three** workers: **`celery_worker_celery`** (**`-Q celery`**), **`celery_worker_ingest`** (**`-Q ingest`**), **`celery_worker_light`** (**`-Q light`**), each with **`--prefetch-multiplier=1 -O fair`** (no `heavy-au` / `heavy-us` on the main host). Run **`docker-compose.us-scraper.prod.yml`** on a US VPS with **`-Q heavy-us`** and **`docker-compose.au-scraper.prod.yml`** on an AU VPS with **`-Q heavy-au`**. Each regional worker uses the same **`REDIS_URL`** (broker on the main host) and **`DATABASE_URL`** as the app. **Costco AU** remains desktop ingest → API, not a Celery scrape queue.
 - **Dedicated Postgres:** set **`DATABASE_URL`** in `.env.prod` to your DB host URL; if unset, production compose defaults to the bundled `db` service. Remote workers (US/AU) must use that same database URL (often a dedicated EU host, not `db` as hostname). The bundled **`db`** service still starts when `DATABASE_URL` points elsewhere (so `depends_on` health checks keep working); it is redundant until you edit compose to drop `db` and those dependencies (advanced).
 - Tunables: **`CATALOG_UPLOAD_CHUNK_SIZE`** (default 1000), **`CATALOG_SYNC_LOG_BATCH`**, **`CATALOG_SYNC_PROGRESS_EVERY`**, **`PG_CONN_MAX_AGE`** (use `0` with **PgBouncer** transaction pooling).
 
@@ -316,6 +316,7 @@ docker system df
 docker compose -f docker-compose.prod.yml --env-file .env.prod ps
 docker compose -f docker-compose.prod.yml --env-file .env.prod logs --tail=200 backend
 docker compose -f docker-compose.prod.yml --env-file .env.prod logs --tail=200 nginx
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs --tail=200 celery_worker_celery celery_worker_ingest celery_worker_light celery_beat
 curl -H "Host: backend" http://127.0.0.1:8000/health/
 ```
 

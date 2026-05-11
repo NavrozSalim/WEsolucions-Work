@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
@@ -8,7 +9,8 @@ import Register from './pages/Register/Register';
 import AuthCallback from './pages/AuthCallback/AuthCallback';
 import Dashboard from './pages/Dashboard/Dashboard';
 import StoreSettings from './pages/StoreSettings/StoreSettings';
-import Catalog from './pages/Catalog/Catalog';
+
+const Catalog = lazy(() => import('./pages/Catalog/Catalog'));
 
 function App() {
     return (
@@ -25,7 +27,14 @@ function App() {
                                 <Route path="/" element={<Dashboard />} />
                                 <Route path="/dashboard" element={<Dashboard />} />
                                 <Route path="/store-settings" element={<StoreSettings />} />
-                                <Route path="/catalog" element={<Catalog />} />
+                                <Route
+                                    path="/catalog"
+                                    element={
+                                        <Suspense fallback={<div className="p-8 text-slate-600 dark:text-slate-400">Loading catalog…</div>}>
+                                            <Catalog />
+                                        </Suspense>
+                                    }
+                                />
                             </Route>
                         </Route>
 

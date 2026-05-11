@@ -56,10 +56,20 @@ services:
   redis:
     image: redis:7-alpine
     restart: always
-    command: redis-server --appendonly yes --appendfsync everysec
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec redis-server --appendonly yes --appendfsync everysec --maxmemory 512mb --maxmemory-policy allkeys-lru --tcp-keepalive 60 --requirepass "$$REDIS_PASSWORD"
+        else
+          exec redis-server --appendonly yes --appendfsync everysec --maxmemory 512mb --maxmemory-policy allkeys-lru --tcp-keepalive 60
+        fi
     volumes:
       - redisdata:/data
-    # Published for remote Celery workers (e.g. US VPS). Restrict 6379 in firewall + Redis auth.
+    # When REDIS_PASSWORD is set, set REDIS_URL=redis://:PASSWORD@redis:6379/0 (URL-encode special chars in PASSWORD).
+    # Remote workers: same URL with main host instead of `redis`.
     ports:
       - "6379:6379"
     logging: *default-logging
@@ -71,7 +81,11 @@ services:
         reservations:
           memory: 64M
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        [
+          "CMD-SHELL",
+          'if [ -n "$$REDIS_PASSWORD" ]; then redis-cli -a "$$REDIS_PASSWORD" ping | grep -q PONG; else redis-cli ping | grep -q PONG; fi',
+        ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -85,7 +99,8 @@ services:
       - "8000"
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - USE_REDIS_CACHE=${USE_REDIS_CACHE:-0}
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS}
@@ -171,24 +186,22 @@ services:
       retries: 3
       start_period: 15s
 
-  celery_worker:
+  # Split workers so ingest/light cannot starve default `celery` queue (no heavy-* here).
+  # US: docker-compose.us-scraper.prod.yml (-Q heavy-us). AU: docker-compose.au-scraper.prod.yml (-Q heavy-au).
+  celery_worker_celery:
     <<: *backend-image
-    # Main: celery,ingest,light (no heavy-au — AU browser + Vevor feed run on AU VPS).
-    # US: docker-compose.us-scraper.prod.yml (-Q heavy-us).
-    # AU: docker-compose.au-scraper.prod.yml (-Q heavy-au).
     command: >-
       celery -A core worker -l info
-      -Q celery,ingest,light
-      --concurrency=${CELERY_WORKER_CONCURRENCY:-4}
+      -Q celery
+      --concurrency=${CELERY_CELERY_CONCURRENCY:-4}
       --prefetch-multiplier=1 -O fair
     init: true
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - PG_CONN_MAX_AGE=${PG_CONN_MAX_AGE:-60}
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-      # Django settings (same as backend — Celery imports core.settings on startup)
       - ALLOWED_HOSTS=${ALLOWED_HOSTS}
       - DEBUG=False
       - SECURE_SSL_REDIRECT=${SECURE_SSL_REDIRECT:-0}
@@ -198,9 +211,7 @@ services:
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
       - CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE=${CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE:-}
-      # eBay: Selenium-first on VPS; set EBAY_HTTP_FIRST=1 only on clean/residential IPs
       - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-0}
-      # Scraper proxies (Costco AU + generic; HEB is ingest-only via /api/v1/ingest/heb/)
       - PROXY_URL=${PROXY_URL:-}
       - PROXY_URLS=${PROXY_URLS:-}
       - COSTCO_AU_PROXY_URL=${COSTCO_AU_PROXY_URL:-}
@@ -228,10 +239,122 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 2G
+          cpus: "1.5"
+          memory: 1536M
         reservations:
-          memory: 512M
+          memory: 384M
+
+  celery_worker_ingest:
+    <<: *backend-image
+    command: >-
+      celery -A core worker -l info
+      -Q ingest
+      --concurrency=${CELERY_INGEST_CONCURRENCY:-2}
+      --prefetch-multiplier=1 -O fair
+    init: true
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - PG_CONN_MAX_AGE=${PG_CONN_MAX_AGE:-60}
+      - JWT_SECRET=${JWT_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS}
+      - DEBUG=False
+      - SECURE_SSL_REDIRECT=${SECURE_SSL_REDIRECT:-0}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-https://${DOMAIN_NAME}}
+      - FRONTEND_URL=${FRONTEND_URL:-https://${DOMAIN_NAME}}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
+      - CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE=${CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE:-}
+      - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-0}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_URLS=${PROXY_URLS:-}
+      - COSTCO_AU_PROXY_URL=${COSTCO_AU_PROXY_URL:-}
+      - COSTCO_AU_PROXY_URLS=${COSTCO_AU_PROXY_URLS:-}
+      - PROXY_ENDPOINTS=${PROXY_ENDPOINTS:-}
+      - PROXY_HOST=${PROXY_HOST:-}
+      - PROXY_PORT=${PROXY_PORT:-}
+      - PROXY_USER=${PROXY_USER:-}
+      - PROXY_PASS=${PROXY_PASS:-}
+      - PROXY_SCHEME=${PROXY_SCHEME:-http}
+      - COSTCO_AU_MIN_REQUEST_GAP_SEC=${COSTCO_AU_MIN_REQUEST_GAP_SEC:-20}
+      - COSTCO_AU_LOCK_WAIT_SEC=${COSTCO_AU_LOCK_WAIT_SEC:-120}
+    volumes:
+      - catalog_media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    restart: always
+    stop_grace_period: 60s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1536M
+        reservations:
+          memory: 384M
+
+  celery_worker_light:
+    <<: *backend-image
+    command: >-
+      celery -A core worker -l info
+      -Q light
+      --concurrency=${CELERY_LIGHT_CONCURRENCY:-2}
+      --prefetch-multiplier=1 -O fair
+    init: true
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - PG_CONN_MAX_AGE=${PG_CONN_MAX_AGE:-60}
+      - JWT_SECRET=${JWT_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS}
+      - DEBUG=False
+      - SECURE_SSL_REDIRECT=${SECURE_SSL_REDIRECT:-0}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-https://${DOMAIN_NAME}}
+      - FRONTEND_URL=${FRONTEND_URL:-https://${DOMAIN_NAME}}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
+      - CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE=${CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE:-}
+      - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-0}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_URLS=${PROXY_URLS:-}
+      - COSTCO_AU_PROXY_URL=${COSTCO_AU_PROXY_URL:-}
+      - COSTCO_AU_PROXY_URLS=${COSTCO_AU_PROXY_URLS:-}
+      - PROXY_ENDPOINTS=${PROXY_ENDPOINTS:-}
+      - PROXY_HOST=${PROXY_HOST:-}
+      - PROXY_PORT=${PROXY_PORT:-}
+      - PROXY_USER=${PROXY_USER:-}
+      - PROXY_PASS=${PROXY_PASS:-}
+      - PROXY_SCHEME=${PROXY_SCHEME:-http}
+      - COSTCO_AU_MIN_REQUEST_GAP_SEC=${COSTCO_AU_MIN_REQUEST_GAP_SEC:-20}
+      - COSTCO_AU_LOCK_WAIT_SEC=${COSTCO_AU_LOCK_WAIT_SEC:-120}
+    volumes:
+      - catalog_media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    restart: always
+    stop_grace_period: 60s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
+        reservations:
+          memory: 256M
 
   celery_beat:
     <<: *backend-image
@@ -239,7 +362,7 @@ services:
     init: true
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - PG_CONN_MAX_AGE=${PG_CONN_MAX_AGE:-60}
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}

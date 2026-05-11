@@ -116,7 +116,7 @@ export const uploadCatalog = (file, storeId) => {
  *  wait exceeds maxWaitMs.
  *  Rejects with code='NO_WORKER' if the task stays pending longer than
  *  workerGraceMs (Celery not running). */
-function pollCeleryJob(storeId, jobId, { intervalMs = 2000, maxWaitMs = 600000, workerGraceMs = 10000 } = {}) {
+function pollCeleryJob(storeId, jobId, { intervalMs = 3500, maxWaitMs = 600000, workerGraceMs = 10000 } = {}) {
     const start = Date.now();
     const MAX_POLL_FAILS = 6;
     let sawStarted = false;
@@ -287,7 +287,7 @@ export const exportCatalogProducts = (storeId, { syncStatus } = {}) => {
     });
 };
 
-function pollCatalogCeleryJob(storeId, jobId, { intervalMs = 2000, maxWaitMs = 600000, workerGraceMs = 10000 } = {}) {
+function pollCatalogCeleryJob(storeId, jobId, { intervalMs = 3500, maxWaitMs = 600000, workerGraceMs = 10000 } = {}) {
     const start = Date.now();
     const MAX_POLL_FAILS = 6;
     let sawStarted = false;

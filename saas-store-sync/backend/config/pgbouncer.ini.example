@@ -1,0 +1,22 @@
+; PgBouncer in front of Postgres (transaction pool) — place on the DB host or a small sidecar.
+; Point DATABASE_URL at PgBouncer (e.g. postgres://user:pass@pgbouncer:6432/dbname).
+; Set PG_CONN_MAX_AGE=0 in Django when using transaction pooling so the app does not hold
+; server sessions across HTTP requests.
+;
+; Example pgbouncer.ini (adjust listen_addr, auth, pool sizes):
+
+[databases]
+your_db = host=127.0.0.1 port=5432 dbname=your_db
+
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = 6432
+auth_type = scram-sha-256
+auth_file = /etc/pgbouncer/userlist.txt
+pool_mode = transaction
+default_pool_size = 20
+min_pool_size = 5
+reserve_pool_size = 5
+max_client_conn = 200
+server_idle_timeout = 60
+ignore_startup_parameters = extra_float_digits

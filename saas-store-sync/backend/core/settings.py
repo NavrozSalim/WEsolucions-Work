@@ -197,6 +197,34 @@ except ValueError:
 if 'postgresql' in DATABASES['default'].get('ENGINE', ''):
     DATABASES['default']['CONN_MAX_AGE'] = int(os.getenv('PG_CONN_MAX_AGE', '60'))
 
+# Cache: Celery uses REDIS_URL (typically …/0). Optional app cache on logical DB 1 when enabled.
+_redis_url = os.getenv('REDIS_URL', '').strip()
+if (
+    (not DEBUG)
+    and _env_bool('USE_REDIS_CACHE', False)
+    and _redis_url.startswith('redis://')
+    and 'postgresql' in DATABASES['default'].get('ENGINE', '')
+):
+    def _redis_logical_db_url(url: str, db_index: int) -> str:
+        p = urllib.parse.urlparse(url)
+        return urllib.parse.urlunparse((p.scheme, p.netloc, f'/{db_index}', p.params, p.query, p.fragment))
+
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': _redis_logical_db_url(_redis_url, 1),
+            'KEY_PREFIX': 'ss',
+            'TIMEOUT': 60,
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'ss-local',
+        }
+    }
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
@@ -260,7 +288,7 @@ if sys.platform == 'win32':
 # --- Celery queues ---
 # Browser scrapes: heavy-us (USA stores) vs heavy-au (AU stores), routed by Store.region
 # (see catalog.celery_routing.CatalogScrapeTaskRouter). Chord finalizers use ``light``.
-# Main server: -Q celery,ingest,light | US server: -Q heavy-us | AU server: -Q heavy-au
+# Main server: three workers (-Q celery | -Q ingest | -Q light). US: -Q heavy-us. AU: -Q heavy-au.
 # (same broker + DB). Vevor AU feed task is routed to ``heavy-au`` with Amazon/eBay AU scrapes.
 from kombu import Queue  # noqa: E402
 
