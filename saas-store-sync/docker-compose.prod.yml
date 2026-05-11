@@ -98,6 +98,8 @@ services:
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
       - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-3}
+      - PG_CONN_MAX_AGE=${PG_CONN_MAX_AGE:-60}
       - CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE=${CATALOG_ALLOW_INLINE_STORE_WIDE_SCRAPE:-}
       # Scraper proxies (Costco AU + generic; HEB is ingest-only via /api/v1/ingest/heb/)
       - PROXY_URL=${PROXY_URL:-}
@@ -183,6 +185,7 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
       - REDIS_URL=redis://redis:6379/0
+      - PG_CONN_MAX_AGE=${PG_CONN_MAX_AGE:-60}
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       # Django settings (same as backend — Celery imports core.settings on startup)
@@ -237,6 +240,7 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
       - REDIS_URL=redis://redis:6379/0
+      - PG_CONN_MAX_AGE=${PG_CONN_MAX_AGE:-60}
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS}

@@ -191,11 +191,11 @@ try:
 except ValueError:
     CATALOG_SYNC_PROGRESS_EVERY = 32
 
-# DB: use CONN_MAX_AGE=0 when sitting behind PgBouncer (transaction pool).
-if os.getenv('DATABASE_URL'):
-    DATABASES['default']['CONN_MAX_AGE'] = int(os.getenv('PG_CONN_MAX_AGE', '0'))
-elif not DEBUG:
-    DATABASES['default']['CONN_MAX_AGE'] = int(os.getenv('PG_CONN_MAX_AGE', '0'))
+# DB persistent connections (seconds). Default 60 reduces new TCP/TLS handshakes to remote Postgres.
+# Use PG_CONN_MAX_AGE=0 when sitting behind PgBouncer (transaction pool) or if you see connection exhaustion.
+# Only apply for PostgreSQL (CI uses sqlite DATABASE_URL without touching CONN_MAX_AGE here).
+if 'postgresql' in DATABASES['default'].get('ENGINE', ''):
+    DATABASES['default']['CONN_MAX_AGE'] = int(os.getenv('PG_CONN_MAX_AGE', '60'))
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (

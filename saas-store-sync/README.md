@@ -172,6 +172,8 @@ Run these from the **`saas-store-sync`** directory (where `docker-compose.prod.y
 |----------|---------|
 | `POSTGRES_*` | Database connection (bundled Postgres in prod compose) |
 | `DATABASE_URL` | Optional full Postgres URL for app + workers; overrides default `@db` when set in prod compose |
+| `GUNICORN_WORKERS` | Prod API worker count (default **3** in `config/gunicorn.conf.py` / compose); raise only if CPU/RAM allow |
+| `PG_CONN_MAX_AGE` | Postgres persistent connections in seconds (default **60**); set **0** with PgBouncer transaction pooling |
 | `POSTGRES_PORT` / `REDIS_PORT` / `BACKEND_PORT` / `FRONTEND_PORT` | Host port mappings (dev compose) |
 | `HTTP_PORT` / `HTTPS_PORT` | Nginx published ports in prod (default 80 / 443) |
 | `BACKEND_IMAGE` | Optional registry image for backend + Celery in prod (skip local build) |
