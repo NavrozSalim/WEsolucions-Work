@@ -4,6 +4,10 @@
 #
 # Optional registry deploy: set BACKEND_IMAGE=youruser/saas-store-sync-backend:tag
 # then: docker compose ... pull && up -d (skip --build)
+#
+# Optional dedicated Postgres: set DATABASE_URL in `.env.prod` to
+# postgres://USER:PASSWORD@HOST:5432/DBNAME (URL-encode special chars in USER/PASSWORD).
+# When unset, compose defaults to the bundled `db` service (same as before).
 
 
 
@@ -80,7 +84,7 @@ services:
     expose:
       - "8000"
     environment:
-      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
       - REDIS_URL=redis://redis:6379/0
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
@@ -167,16 +171,17 @@ services:
 
   celery_worker:
     <<: *backend-image
-    # Main: celery,ingest,light,heavy-au. US browser scrapes run on a second worker (heavy-us).
-    # See docker-compose.us-scraper.prod.yml for a single-service US VPS deployment.
+    # Main: celery,ingest,light (no heavy-au — AU browser + Vevor feed run on AU VPS).
+    # US: docker-compose.us-scraper.prod.yml (-Q heavy-us).
+    # AU: docker-compose.au-scraper.prod.yml (-Q heavy-au).
     command: >-
       celery -A core worker -l info
-      -Q celery,ingest,light,heavy-au
+      -Q celery,ingest,light
       --concurrency=${CELERY_WORKER_CONCURRENCY:-4}
       --prefetch-multiplier=1 -O fair
     init: true
     environment:
-      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
       - REDIS_URL=redis://redis:6379/0
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
@@ -230,7 +235,7 @@ services:
     command: celery -A core beat -l info
     init: true
     environment:
-      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
       - REDIS_URL=redis://redis:6379/0
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}

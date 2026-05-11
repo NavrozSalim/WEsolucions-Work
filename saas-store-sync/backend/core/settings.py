@@ -260,7 +260,8 @@ if sys.platform == 'win32':
 # --- Celery queues ---
 # Browser scrapes: heavy-us (USA stores) vs heavy-au (AU stores), routed by Store.region
 # (see catalog.celery_routing.CatalogScrapeTaskRouter). Chord finalizers use ``light``.
-# Main server: -Q celery,ingest,light,heavy-au | US server: -Q heavy-us (same broker/DB).
+# Main server: -Q celery,ingest,light | US server: -Q heavy-us | AU server: -Q heavy-au
+# (same broker + DB). Vevor AU feed task is routed to ``heavy-au`` with Amazon/eBay AU scrapes.
 from kombu import Queue  # noqa: E402
 
 from catalog.celery_routing import CatalogScrapeTaskRouter  # noqa: E402
@@ -279,6 +280,6 @@ CELERY_TASK_ROUTES = (
     {
         'catalog.ingest_upload_file': {'queue': 'ingest'},
         'catalog.tasks.catalog_sync_task': {'queue': 'light'},
-        'catalog.run_vevor_au_ingest': {'queue': 'light'},
+        'catalog.run_vevor_au_ingest': {'queue': 'heavy-au'},
     },
 )

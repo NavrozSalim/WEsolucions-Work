@@ -1,14 +1,18 @@
-# US browser-scrape worker only — run on a US-region VPS (e.g. Contabo US).
-# AU counterpart: docker-compose.au-scraper.prod.yml (-Q heavy-au).
+# Australia browser + AU feed worker — run on an AU-region VPS (e.g. Contabo AU).
+#
+# Consumes Celery queue ``heavy-au``: Amazon AU, eBay AU, and ``catalog.run_vevor_au_ingest``
+# (Vevor AU XLSX feed). Same broker/DB as the main stack.
 #
 # Requirements:
-# - Same codebase image as main (build or pull BACKEND_IMAGE).
-# - DATABASE_URL and REDIS_URL must reach the main stack (private network or TLS tunnel).
+# - Same backend image as main (build or pull BACKEND_IMAGE).
+# - DATABASE_URL → your Postgres host (dedicated EU DB or main-published Postgres).
+# - REDIS_URL → main application host Redis (Celery broker), e.g. redis://MAIN_IP:6379/0
 #
 # From saas-store-sync/:
-#   docker compose -f docker-compose.us-scraper.prod.yml --env-file .env.prod up -d
+#   docker compose -f docker-compose.au-scraper.prod.yml --env-file .env.prod up -d
 #
-# Env: copy secrets from .env.prod on the main server; point DATABASE_URL / REDIS_URL at that stack.
+# Env: copy secrets from `.env.prod` on the main server; set DATABASE_URL / REDIS_URL for
+# reachability from this host. Match JWT_SECRET, ENCRYPTION_KEY, GOOGLE_*, proxies, etc.
 
 x-backend-image: &backend-image
   image: ${BACKEND_IMAGE:-saas-store-sync-backend}
@@ -23,12 +27,12 @@ x-logging: &default-logging
     max-file: "4"
 
 services:
-  celery_worker_us:
+  celery_worker_au:
     <<: *backend-image
     command: >-
       celery -A core worker -l info
-      -Q heavy-us
-      --concurrency=${CELERY_US_SCRAPER_CONCURRENCY:-2}
+      -Q heavy-au
+      --concurrency=${CELERY_AU_SCRAPER_CONCURRENCY:-2}
       --prefetch-multiplier=1 -O fair
     init: true
     environment:
@@ -45,19 +49,26 @@ services:
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
       - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-0}
+      - EBAY_AU_HTTP_FIRST=${EBAY_AU_HTTP_FIRST:-}
+      - CATALOG_SCRAPE_CHUNK_SIZE=${CATALOG_SCRAPE_CHUNK_SIZE:-}
+      - VEVOR_AU_FEED_URL=${VEVOR_AU_FEED_URL:-}
       - PROXY_URL=${PROXY_URL:-}
       - PROXY_URLS=${PROXY_URLS:-}
+      - COSTCO_AU_PROXY_URL=${COSTCO_AU_PROXY_URL:-}
+      - COSTCO_AU_PROXY_URLS=${COSTCO_AU_PROXY_URLS:-}
       - PROXY_ENDPOINTS=${PROXY_ENDPOINTS:-}
       - PROXY_HOST=${PROXY_HOST:-}
       - PROXY_PORT=${PROXY_PORT:-}
       - PROXY_USER=${PROXY_USER:-}
       - PROXY_PASS=${PROXY_PASS:-}
       - PROXY_SCHEME=${PROXY_SCHEME:-http}
+      - COSTCO_AU_MIN_REQUEST_GAP_SEC=${COSTCO_AU_MIN_REQUEST_GAP_SEC:-20}
+      - COSTCO_AU_LOCK_WAIT_SEC=${COSTCO_AU_LOCK_WAIT_SEC:-120}
     volumes:
-      - catalog_media_us_worker:/app/media
+      - catalog_media_au_worker:/app/media
     restart: always
     stop_grace_period: 60s
     logging: *default-logging
 
 volumes:
-  catalog_media_us_worker:
+  catalog_media_au_worker:

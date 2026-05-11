@@ -42,6 +42,8 @@ Multi-tenant SaaS for **e‑commerce store connectivity**, **vendor price and st
 saas-store-sync/
 ├── docker-compose.yml           # Local development
 ├── docker-compose.prod.yml     # Production (Gunicorn, Nginx, etc.)
+├── docker-compose.us-scraper.prod.yml   # US-only Celery worker (queue heavy-us)
+├── docker-compose.au-scraper.prod.yml   # AU-only Celery worker (queue heavy-au)
 ├── .env.example                # Dev template (commit or copy)
 ├── .env.prod.example           # Production template
 ├── backend/                    # Django project (API, Celery, scrapers, store_adapters)
@@ -62,7 +64,9 @@ saas-store-sync/
 | Environment | Compose file | Env file | Command |
 |-------------|--------------|----------|---------|
 | **Development** (your machine) | `docker-compose.yml` | `.env` | `docker compose up -d` |
-| **Production** (server) | `docker-compose.prod.yml` | `.env.prod` | `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d` |
+| **Production** (main server) | `docker-compose.prod.yml` | `.env.prod` | `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d` |
+| **Production** (US Celery only) | `docker-compose.us-scraper.prod.yml` | `.env.prod` | `docker compose -f docker-compose.us-scraper.prod.yml --env-file .env.prod up -d` |
+| **Production** (AU Celery only) | `docker-compose.au-scraper.prod.yml` | `.env.prod` | `docker compose -f docker-compose.au-scraper.prod.yml --env-file .env.prod up -d` |
 
 Copy **`.env.example` → `.env`** (dev) and **`.env.prod.example` → `.env.prod`** (prod). Real `.env` / `.env.prod` files are not committed.
 
@@ -130,7 +134,8 @@ Ensure TLS certificate files exist on the host and Nginx points at them before d
 **Catalog bulk uploads and workers**
 
 - Large CSV/XLSX uploads are stored under **`MEDIA_ROOT`** (`/app/media` in Docker). The **backend** and **celery_worker** services share a **`catalog_media`** volume so the ingest task can read the file after the API saves it. Apply migrations after pull (`catalog.0020_*`).
-- Celery **queues** (see `core/settings.py` and `catalog/celery_routing.py`): **`ingest`** (chunked `bulk_create` of upload rows), **`light`** (catalog DB sync, Vevor feed, scrape chord finalizers), **`heavy-us`** / **`heavy-au`** (browser scrapes for `Store.region` USA vs AU — Amazon/eBay), **`celery`** (default, e.g. `sync` beat tasks). **`docker-compose.prod.yml`** runs the main worker with **`-Q celery,ingest,light,heavy-au`**. Run **`docker-compose.us-scraper.prod.yml`** on a second VPS with **`-Q heavy-us`** (same `REDIS_URL` / `DATABASE_URL` as main) so US scrapes execute there.
+- Celery **queues** (see `core/settings.py` and `catalog/celery_routing.py`): **`ingest`** (chunked `bulk_create` of upload rows), **`light`** (catalog DB sync, scrape chord finalizers), **`heavy-us`** / **`heavy-au`** (US vs AU browser scrapes — Amazon/eBay — plus **`heavy-au`** for **`catalog.run_vevor_au_ingest`** / Vevor AU feed), **`celery`** (default, e.g. `sync` beat tasks). **`docker-compose.prod.yml`** runs the main worker with **`-Q celery,ingest,light`** (no `heavy-au` / `heavy-us`). Run **`docker-compose.us-scraper.prod.yml`** on a US VPS with **`-Q heavy-us`** and **`docker-compose.au-scraper.prod.yml`** on an AU VPS with **`-Q heavy-au`**. Each regional worker uses the same **`REDIS_URL`** (broker on the main host) and **`DATABASE_URL`** as the app. **Costco AU** remains desktop ingest → API, not a Celery scrape queue.
+- **Dedicated Postgres:** set **`DATABASE_URL`** in `.env.prod` to your DB host URL; if unset, production compose defaults to the bundled `db` service. Remote workers (US/AU) must use that same database URL (often a dedicated EU host, not `db` as hostname). The bundled **`db`** service still starts when `DATABASE_URL` points elsewhere (so `depends_on` health checks keep working); it is redundant until you edit compose to drop `db` and those dependencies (advanced).
 - Tunables: **`CATALOG_UPLOAD_CHUNK_SIZE`** (default 1000), **`CATALOG_SYNC_LOG_BATCH`**, **`CATALOG_SYNC_PROGRESS_EVERY`**, **`PG_CONN_MAX_AGE`** (use `0` with **PgBouncer** transaction pooling).
 
 ---
@@ -165,7 +170,8 @@ Run these from the **`saas-store-sync`** directory (where `docker-compose.prod.y
 
 | Variable | Purpose |
 |----------|---------|
-| `POSTGRES_*` | Database connection |
+| `POSTGRES_*` | Database connection (bundled Postgres in prod compose) |
+| `DATABASE_URL` | Optional full Postgres URL for app + workers; overrides default `@db` when set in prod compose |
 | `POSTGRES_PORT` / `REDIS_PORT` / `BACKEND_PORT` / `FRONTEND_PORT` | Host port mappings (dev compose) |
 | `HTTP_PORT` / `HTTPS_PORT` | Nginx published ports in prod (default 80 / 443) |
 | `BACKEND_IMAGE` | Optional registry image for backend + Celery in prod (skip local build) |
