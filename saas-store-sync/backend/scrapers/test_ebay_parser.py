@@ -140,6 +140,37 @@ class TestEbayBuyNowDisplayPrice(unittest.TestCase):
         self.assertEqual(EbayParser.extract_price(soup, html), 7.0)
 
 
+    def test_primary_reference_plus_bin_sale_uses_lower(self):
+        """MSRP-style amount in primary; discounted headline in x-bin-price."""
+        html = """<html><body>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">AU $8.40</span>
+          </div>
+          <div data-testid="x-bin-price">
+            <span class="ux-textspans">AU $7.00</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 7.0)
+
+    def test_primary_reference_plus_bin_sale_uses_lower(self):
+        """MSRP-style amount in primary; discounted headline in x-bin-price."""
+        html = """<html><body>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">AU $8.40</span>
+          </div>
+          <div data-testid="x-bin-price">
+            <span class="ux-textspans">AU $7.00</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 7.0)
+
+
 class TestEbayPriceSuffix(unittest.TestCase):
     def test_strip_buy_it_now(self):
         raw = "US $19.99Buy It Now"

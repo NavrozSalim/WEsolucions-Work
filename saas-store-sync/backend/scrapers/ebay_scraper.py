@@ -566,7 +566,7 @@ class EbayParser:
 
     @classmethod
     def _buy_now_display_price(cls, soup: BeautifulSoup) -> Optional[float]:
-        """Headline BIN: prefer main ``x-price-primary`` subtree, then BIN box, then item-price region."""
+        """Headline BIN: min of prices in ``x-price-primary`` and BIN box (sale often only in BIN row)."""
         seen_primary: set[int] = set()
         primary_cands: list[float] = []
         for sel in (
@@ -582,9 +582,6 @@ class EbayParser:
                 if cls._under_price_noise(node):
                     continue
                 primary_cands.extend(cls._ux_textspan_prices_in_subtree(node))
-        if primary_cands:
-            return min(primary_cands)
-
         seen_bin: set[int] = set()
         bin_cands: list[float] = []
         for sel in (
@@ -600,8 +597,11 @@ class EbayParser:
                 if cls._under_price_noise(node):
                     continue
                 bin_cands.extend(cls._ux_textspan_prices_in_subtree(node))
-        if bin_cands:
-            return min(bin_cands)
+
+        # Promo / sale headline is often only under x-bin-price while x-price-primary still shows MSRP.
+        headline = primary_cands + bin_cands
+        if headline:
+            return min(headline)
 
         merged: list[float] = []
         seen: set[int] = set()
