@@ -70,6 +70,31 @@ class TestEbayBuyNowDisplayPrice(unittest.TestCase):
         soup = BeautifulSoup(html, "lxml")
         self.assertEqual(EbayParser.extract_price(soup, html), 35.0)
 
+    def test_itemprop_price_does_not_force_auction_skipping_headline(self):
+        """Schema.org price exists on many BIN PDPs; listing must stay buy_now."""
+        html = """<html><body>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">AU $35.00</span>
+          </div>
+        </section>
+        <meta itemprop="price" content="21.60"/>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.detect_listing_type(soup, html), "buy_now")
+        self.assertEqual(EbayParser.extract_price(soup, html), 35.0)
+
+    def test_loose_ux_textspans_without_x_price_primary_wrapper(self):
+        html = """<html><body>
+        <section data-testid="x-item-price">
+          <div class="some-price-row">
+            <span class="ux-textspans">AU $35.00</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 35.0)
+
 
 class TestEbayPriceSuffix(unittest.TestCase):
     def test_strip_buy_it_now(self):

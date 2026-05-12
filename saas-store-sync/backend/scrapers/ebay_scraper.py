@@ -380,7 +380,9 @@ class EbayParser:
         if sold_elem and "sold" in sold_elem.get_text(strip=True).lower():
             return "ended"
 
-        bid_elem = soup.select_one("#prcIsum_bidPrice, .vi-VR-cvipPrice, [itemprop='price']")
+        # Do not use [itemprop='price'] — schema.org offers include BIN pages and would skip
+        # the ux-textspans headline path in extract_price.
+        bid_elem = soup.select_one("#prcIsum_bidPrice, .vi-VR-cvipPrice")
         place_bid = soup.select_one("#bidBtn_btn, .vi-bidding-area")
         if bid_elem or place_bid:
             return "auction"
@@ -411,19 +413,35 @@ class EbayParser:
             cur = getattr(cur, "parent", None)
         return False
 
+    @staticmethod
+    def _ux_span_outside_noise_regions(span) -> bool:
+        """Skip title / shipping subtrees when scanning loose ``span.ux-textspans``."""
+        p = span
+        while p is not None:
+            tid = (p.get("data-testid") or "").lower()
+            if tid in ("x-item-title", "x-shipping"):
+                return False
+            cls = " ".join(p.get("class") or "").lower()
+            if "x-item-title" in cls:
+                return False
+            p = getattr(p, "parent", None)
+        return True
+
     @classmethod
     def _collect_bin_price_candidates(cls, root) -> list:
-        """Headline BIN amounts: only ``span.ux-textspans`` inside primary blocks (eBay AU layout).
+        """Headline BIN amounts: ``span.ux-textspans`` in primary BIN blocks (eBay AU layout).
 
         eBay shows the live price in ``<span class="ux-textspans">AU $35.00</span>``; skip struck rows.
+        If those wrappers are absent, fall back to ``span.ux-textspans`` under ``root`` (item price).
         """
         found: list[float] = []
         if root is None:
             return found
-        for bloc in root.select(
+        bloc_selectors = (
             "[data-testid='x-price-primary'], [data-testid='x-bin-price'], "
-            ".x-price-primary, .x-bin-price"
-        ):
+            ".x-price-primary, .x-bin-price, .x-bin-price__content"
+        )
+        for bloc in root.select(bloc_selectors):
             bloc_prices: list[float] = []
             for span in bloc.select("span.ux-textspans"):
                 if cls._is_strikethrough_element(span):
@@ -440,16 +458,29 @@ class EbayParser:
                 p_whole = cls._price_from_element(bloc)
                 if p_whole and 0.01 <= p_whole < 999_999:
                     found.append(p_whole)
+        if not found:
+            for span in root.select("span.ux-textspans"):
+                if not cls._ux_span_outside_noise_regions(span):
+                    continue
+                if cls._is_strikethrough_element(span):
+                    continue
+                t = span.get_text(strip=True)
+                if not t or len(t) > 120:
+                    continue
+                p = parse_price_text(_strip_price_suffix(t))
+                if p and 0.01 <= p < 999_999:
+                    found.append(p)
         return found
 
     @classmethod
     def _buy_now_display_price(cls, soup: BeautifulSoup) -> Optional[float]:
         """Headline BIN: lowest non-struck candidate (was/now, promos showing two numbers)."""
+        merged: list[float] = []
         for sec_sel in cls._ITEM_PRICE_SECTION_SELECTORS:
             section = soup.select_one(sec_sel)
-            cands = cls._collect_bin_price_candidates(section)
-            if cands:
-                return min(cands)
+            merged.extend(cls._collect_bin_price_candidates(section))
+        if merged:
+            return min(merged)
         for sel in (
             "[data-testid='x-price-primary']",
             "[data-testid='x-bin-price']",
