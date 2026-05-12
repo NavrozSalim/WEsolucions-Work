@@ -185,6 +185,15 @@ def _ebay_region_referer(region: str) -> str:
     return "https://www.ebay.com.au/" if region == "AU" else "https://www.ebay.com/"
 
 
+def _ebay_bin_hydrate_max_seconds(eff_region: str, item_url: str) -> float:
+    """Extra post-load polling so seller-discount rows can paint (AU PDPs often hydrate late)."""
+    auish = eff_region == "AU" or "ebay.com.au" in (item_url or "").lower()
+    raw = (os.environ.get("EBAY_BIN_HYDRATE_MAX_SEC") or "").strip()
+    if raw:
+        return max(0.0, float(raw))
+    return 12.0 if auish else 0.0
+
+
 def _ebay_debug_write_html(session: Optional[dict], html: Optional[str], tag: str, candidate: str) -> None:
     """If ``session[SESSION_DEBUG_HTML_KEY]`` is set, write raw HTML used for parsing (debug)."""
     if not session or not html:
@@ -318,6 +327,12 @@ class EbayParser:
         r'"currentPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)\s*[,}]',
         r'"discountedPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
         r'"discountedPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)\s*[,}]',
+        r'"salePrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        r'"salePrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)\s*[,}]',
+        r'"displayPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        r'"displayPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)\s*[,}]',
+        r'"marketingPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        r'"marketingPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)\s*[,}]',
         r'"finalPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)',
     )
 
@@ -1197,6 +1212,135 @@ class EbayDriver:
 
 class EbayBrowserSession:
     @staticmethod
+    def _apply_region_browser_profile(driver, region: str, item_url: str) -> None:
+        """AU PDPs often depend on locale headers/timezone for seller discount / marketing price."""
+        au = _effective_ebay_region(region, item_url) == "AU"
+        try:
+            driver.execute_cdp_cmd("Network.enable", {})
+        except Exception:
+            pass
+        try:
+            if au:
+                driver.execute_cdp_cmd(
+                    "Network.setExtraHTTPHeaders",
+                    {"headers": {"Accept-Language": "en-AU,en;q=0.9"}},
+                )
+                driver.execute_cdp_cmd(
+                    "Emulation.setTimezoneOverride",
+                    {"timezoneId": "Australia/Sydney"},
+                )
+                driver.execute_cdp_cmd("Emulation.setLocaleOverride", {"locale": "en-AU"})
+            else:
+                driver.execute_cdp_cmd(
+                    "Network.setExtraHTTPHeaders",
+                    {"headers": {"Accept-Language": "en-US,en;q=0.9"}},
+                )
+                driver.execute_cdp_cmd(
+                    "Emulation.setTimezoneOverride",
+                    {"timezoneId": "America/New_York"},
+                )
+                driver.execute_cdp_cmd("Emulation.setLocaleOverride", {"locale": "en-US"})
+        except Exception:
+            pass
+
+    @staticmethod
+    def _nudge_buy_box(driver) -> None:
+        """Light scroll to the price module (no long sleeps) — used while polling for late hydration."""
+        from selenium.webdriver.common.by import By
+
+        for css in (
+            "[data-testid='x-item-price']",
+            "[data-testid='x-price-view']",
+            "[data-testid='x-bin-price']",
+        ):
+            try:
+                elems = driver.find_elements(By.CSS_SELECTOR, css)
+                if elems:
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block: 'center'});",
+                        elems[0],
+                    )
+                    break
+            except Exception:
+                continue
+        time.sleep(0.18 + random.uniform(0, 0.14))
+
+    @staticmethod
+    def _finalize_bin_price_hydration(
+        driver,
+        seed_html: str,
+        region: str,
+        item_url: str,
+    ) -> str:
+        """Poll ``page_source`` until extracted BIN stops dropping (captures post-SSR seller discounts)."""
+        eff = _effective_ebay_region(region, item_url)
+        max_wait = _ebay_bin_hydrate_max_seconds(eff, item_url)
+        if max_wait <= 0:
+            return seed_html or (driver.page_source or "")
+
+        interval = float(os.environ.get("EBAY_BIN_HYDRATE_POLL_SEC", "0.55"))
+        stable_needed = int(os.environ.get("EBAY_BIN_HYDRATE_STABLE_POLLS", "4"))
+        min_elapsed = float(os.environ.get("EBAY_BIN_HYDRATE_MIN_SEC", "2.0"))
+
+        def parse_price(html_blob: str) -> Optional[float]:
+            if not html_blob:
+                return None
+            try:
+                soup = BeautifulSoup(html_blob, "lxml")
+            except Exception:
+                soup = BeautifulSoup(html_blob, "html.parser")
+            return EbayParser.extract_price(soup, html_blob)
+
+        start = time.time()
+        best_html = seed_html or (driver.page_source or "")
+        best_price = parse_price(best_html)
+        stable = 0
+        nudge = 0
+
+        while time.time() - start < max_wait:
+            elapsed = time.time() - start
+            EbayBrowserSession._nudge_buy_box(driver)
+            nudge += 1
+            if nudge % 4 == 0:
+                try:
+                    driver.execute_script(
+                        "window.scrollBy(0, Math.min(700, 220 + Math.random()*480));"
+                    )
+                    time.sleep(0.22)
+                    driver.execute_script("window.scrollTo(0, 0);")
+                    time.sleep(0.12)
+                except Exception:
+                    pass
+
+            html = driver.page_source or ""
+            price = parse_price(html)
+
+            if price is not None:
+                if best_price is None or price < best_price - 0.005:
+                    best_price = price
+                    best_html = html
+                    stable = 0
+                else:
+                    stable += 1
+            else:
+                stable += 1
+
+            if best_price is not None and elapsed >= min_elapsed and stable >= stable_needed:
+                break
+
+            time.sleep(interval)
+
+        try:
+            EbayBrowserSession._settle_buy_box(driver)
+        except Exception:
+            pass
+        final_html = driver.page_source or best_html
+        final_p = parse_price(final_html)
+        if best_price is not None and final_p is not None and final_p > best_price + 0.01:
+            return best_html
+        return final_html
+
+    @staticmethod
     def _settle_buy_box(driver) -> None:
         """Scroll buy box into view and wait so promo / discounted rows can hydrate."""
         from selenium.webdriver.common.by import By
@@ -1308,6 +1452,8 @@ class EbayBrowserSession:
             return None, f"selenium_init: {exc}"
 
         try:
+            cls._apply_region_browser_profile(driver, region, url)
+
             home = _ebay_home_origin_for_item_url(url)
             driver.get(home)
             time.sleep(1.5 + random.uniform(0.5, 1.5))
@@ -1319,6 +1465,8 @@ class EbayBrowserSession:
                 html = driver.page_source or html
             except Exception:
                 pass
+
+            html = cls._finalize_bin_price_hydration(driver, html, region, url)
 
             current_url = ""
             try:

@@ -1,12 +1,15 @@
 """Unit tests for eBay parser helpers (run: python -m unittest scrapers.test_ebay_parser -v)."""
+import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from bs4 import BeautifulSoup
 
 from scrapers.core import parse_price_text
 from scrapers.ebay_scraper import (
     EbayParser,
+    _ebay_bin_hydrate_max_seconds,
     _effective_ebay_region,
     _normalize_url,
     _strip_price_suffix,
@@ -42,6 +45,26 @@ class TestEffectiveEbayRegion(unittest.TestCase):
             _effective_ebay_region("USA", "https://www.ebay.com.au/itm/1"),
             "AU",
         )
+
+
+class TestBinHydrateDefaults(unittest.TestCase):
+    def test_au_default_poll_budget(self):
+        with patch.dict(os.environ, {"EBAY_BIN_HYDRATE_MAX_SEC": ""}):
+            self.assertEqual(_ebay_bin_hydrate_max_seconds("AU", "https://www.ebay.com/itm/1"), 12.0)
+
+    def test_au_hostname_poll_budget_even_if_region_usa(self):
+        with patch.dict(os.environ, {"EBAY_BIN_HYDRATE_MAX_SEC": ""}):
+            self.assertEqual(
+                _ebay_bin_hydrate_max_seconds("USA", "https://www.ebay.com.au/itm/1"),
+                12.0,
+            )
+
+    def test_non_au_default_no_extra_poll(self):
+        with patch.dict(os.environ, {"EBAY_BIN_HYDRATE_MAX_SEC": ""}):
+            self.assertEqual(
+                _ebay_bin_hydrate_max_seconds("USA", "https://www.ebay.com/itm/1"),
+                0.0,
+            )
 
 
 class TestEbayBuyNowDisplayPrice(unittest.TestCase):
