@@ -169,6 +169,40 @@ class TestEbayBuyNowDisplayPrice(unittest.TestCase):
         soup = BeautifulSoup(html, "lxml")
         self.assertEqual(EbayParser.extract_price(soup, html), 7.0)
 
+    def test_item_model_json_supplements_dom_when_discount_only_in_preload(self):
+        """Seller promo BIN is often only in the item model JSON while primary still shows pre-discount."""
+        html = """<html><head>
+        <link rel="canonical" href="https://www.ebay.com.au/itm/121819241814"/>
+        </head><body>
+        <script>
+        window.__preload = {"itemId":"121819241814","x":{"buyItNowPrice":{"value":"7.00"}}};
+        </script>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">AU $8.40</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 7.0)
+
+    def test_afterpay_installment_amount_skipped(self):
+        """BNPL per-payment amounts must not become the headline BIN."""
+        html = """<html><head>
+        <link rel="canonical" href="https://www.ebay.com.au/itm/999888777666"/>
+        </head><body>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">AU $19.00</span>
+          </div>
+          <div data-testid="x-afterpay-message">
+            <span class="ux-textspans">AU $4.75</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 19.0)
+
 
 class TestEbayPriceSuffix(unittest.TestCase):
     def test_strip_buy_it_now(self):

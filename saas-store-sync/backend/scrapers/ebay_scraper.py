@@ -21,7 +21,7 @@ import time
 import random
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Any, Iterator
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
@@ -300,12 +300,22 @@ class EbayParser:
         r'"buyItNowPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
         r'"binPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
         r'"currentPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        r'"discountedPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
         r'"price"\s*:\s*\[\s*"([\d.]+)"\s*\]',
         r'"priceValue"\s*:\s*"([\d.]+)"',
         r'"value"\s*:\s*"([\d.]+)"\s*,\s*"currency"',
         r'"finalPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)',
         r'"transactionAmount"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)',
     ]
+
+    # Tighter patterns for the item model chunk only (avoid unrelated "price" keys sitewide).
+    ITEM_MODEL_PRICE_JSON_PATTERNS = (
+        r'"buyItNowPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        r'"binPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        r'"currentPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        r'"discountedPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        r'"finalPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)',
+    )
 
     PRICE_JSON_PATTERNS_FALLBACK = [
         r'"price"\s*:\s*"([\d.]+)"',
@@ -501,6 +511,139 @@ class EbayParser:
             return False
         return True
 
+    @staticmethod
+    def _ux_span_installment_payment_row(span) -> bool:
+        """BNPL / split-pay rows (e.g. Afterpay) carry small dollar amounts; not the BIN headline."""
+        cur = span
+        for _ in range(18):
+            if cur is None:
+                break
+            tid = (cur.get("data-testid") or "").lower()
+            if any(
+                x in tid
+                for x in (
+                    "afterpay",
+                    "zip-pay",
+                    "zipmoney",
+                    "klarna",
+                    "laybuy",
+                    "splitpay",
+                    "installment",
+                    "pay-in-4",
+                    "payin4",
+                )
+            ):
+                return True
+            cls = " ".join(cur.get("class") or []).lower()
+            if any(
+                x in cls
+                for x in (
+                    "x-payment-message",
+                    "payment-unfold",
+                    "installment",
+                    "afterpay",
+                    "zip-pay",
+                )
+            ):
+                return True
+            cur = getattr(cur, "parent", None)
+        return False
+
+    @staticmethod
+    def _walk_json_values(obj: Any) -> Iterator[Dict[str, Any]]:
+        if isinstance(obj, dict):
+            yield obj
+            for v in obj.values():
+                yield from EbayParser._walk_json_values(v)
+        elif isinstance(obj, list):
+            for x in obj:
+                yield from EbayParser._walk_json_values(x)
+
+    @classmethod
+    def _listing_item_id(cls, soup: BeautifulSoup, html: str) -> Optional[str]:
+        """Numeric listing id from canonical / og:url / raw HTML (for scoped JSON extraction)."""
+        for link in soup.find_all("link", rel=True):
+            rel = link.get("rel")
+            if isinstance(rel, (list, tuple)):
+                rel_l = " ".join(str(x) for x in rel).lower()
+            else:
+                rel_l = (str(rel) if rel else "").lower()
+            if "canonical" in rel_l and link.get("href"):
+                m = re.search(r"/itm/(\d{10,})", str(link["href"]))
+                if m:
+                    return m.group(1)
+        og = soup.find("meta", attrs={"property": "og:url"})
+        if og and og.get("content"):
+            m = re.search(r"/itm/(\d{10,})", str(og["content"]))
+            if m:
+                return m.group(1)
+        m = re.search(r"/itm/(\d{10,})", html or "")
+        if m:
+            return m.group(1)
+        return None
+
+    @classmethod
+    def _item_model_json_price_candidates(cls, html: str, item_id: Optional[str]) -> list[float]:
+        """BIN-related amounts from the preloaded item model near ``itemId`` (seller discounts often only here)."""
+        if not html or not item_id:
+            return []
+        for needle in (f'"itemId":"{item_id}"', f'"itemId":{item_id}'):
+            idx = html.find(needle)
+            if idx >= 0:
+                break
+        else:
+            return []
+        chunk = html[max(0, idx - 8000) : idx + 240_000]
+        found: list[float] = []
+        for pat in cls.ITEM_MODEL_PRICE_JSON_PATTERNS:
+            for m in re.finditer(pat, chunk):
+                p = parse_price_text(m.group(1))
+                if p and 0.01 <= p < 999_999:
+                    found.append(p)
+        return found
+
+    @classmethod
+    def _ld_json_product_offer_prices(cls, soup: BeautifulSoup, item_id: Optional[str]) -> list[float]:
+        """Schema.org Product / offers price when tied to this listing (supplements thin SSR DOM)."""
+        found: list[float] = []
+        for script in soup.find_all("script", type="application/ld+json"):
+            raw = (script.string or script.get_text() or "").strip()
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            for node in cls._walk_json_values(data):
+                types = node.get("@type")
+                if types is None:
+                    continue
+                if isinstance(types, str):
+                    type_names = {types.lower()}
+                elif isinstance(types, list):
+                    type_names = {str(t).lower() for t in types}
+                else:
+                    continue
+                if "product" not in type_names:
+                    continue
+                if item_id:
+                    blob = json.dumps(node, default=str, ensure_ascii=False)
+                    if item_id not in blob:
+                        continue
+                offers = node.get("offers")
+                if isinstance(offers, list):
+                    offers = offers[0] if offers else {}
+                if not isinstance(offers, dict):
+                    continue
+                for key in ("price", "lowPrice", "highPrice"):
+                    val = offers.get(key)
+                    if not val:
+                        continue
+                    p = parse_price_text(str(val))
+                    if p and 0.01 <= p < 999_999:
+                        found.append(p)
+        return found
+
     @classmethod
     def _ux_textspan_prices_in_subtree(cls, root) -> list[float]:
         """Prices from ``.ux-textspans`` and ``[itemprop=price]`` under ``root`` (non-struck, not noise)."""
@@ -509,6 +652,8 @@ class EbayParser:
             return found
         for el in root.select(".ux-textspans"):
             if el.name not in ("span", "div", "p"):
+                continue
+            if cls._ux_span_installment_payment_row(el):
                 continue
             if cls._under_price_noise(el):
                 continue
@@ -556,6 +701,8 @@ class EbayParser:
             for span in spans:
                 if span.name not in ("span", "div", "p"):
                     continue
+                if cls._ux_span_installment_payment_row(span):
+                    continue
                 if cls._is_strikethrough_element(span):
                     continue
                 t = span.get_text(strip=True)
@@ -576,6 +723,8 @@ class EbayParser:
                 continue
             if not cls._ux_span_outside_noise_regions(span):
                 continue
+            if cls._ux_span_installment_payment_row(span):
+                continue
             if cls._is_strikethrough_element(span):
                 continue
             t = span.get_text(strip=True)
@@ -587,8 +736,8 @@ class EbayParser:
         return found
 
     @classmethod
-    def _buy_now_display_price(cls, soup: BeautifulSoup) -> Optional[float]:
-        """Headline BIN: min of primary, BIN row, and full item-price region (promo lines)."""
+    def _buy_now_display_price(cls, soup: BeautifulSoup, html: str = "") -> Optional[float]:
+        """Headline BIN: min of primary, BIN row, item-price region, and item-scoped embedded JSON."""
         seen_primary: set[int] = set()
         primary_cands: list[float] = []
         for sel in (
@@ -632,6 +781,9 @@ class EbayParser:
                 continue
             seen_sec.add(sid)
             headline.extend(cls._collect_bin_price_candidates(section))
+        item_id = cls._listing_item_id(soup, html or "")
+        headline.extend(cls._item_model_json_price_candidates(html or "", item_id))
+        headline.extend(cls._ld_json_product_offer_prices(soup, item_id))
         if headline:
             return min(headline)
         return None
@@ -653,7 +805,7 @@ class EbayParser:
         listing_type = cls.detect_listing_type(soup, html)
 
         if listing_type == "buy_now":
-            display = cls._buy_now_display_price(soup)
+            display = cls._buy_now_display_price(soup, html)
             if display is not None:
                 return display
 
@@ -1013,7 +1165,7 @@ class EbayBrowserSession:
                     break
         except Exception:
             pass
-        time.sleep(2.0 + random.uniform(0.15, 0.55))
+        time.sleep(2.5 + random.uniform(0.2, 0.75))
 
     @staticmethod
     def _wait_until_product_or_stable_challenge(driver, timeout: int = PAGE_WAIT_TIMEOUT) -> str:
