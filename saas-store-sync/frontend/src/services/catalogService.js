@@ -56,6 +56,10 @@ export const updateProductMapping = (storeId, productId, patch) =>
 
 export const clearCatalog = (storeId) => api.delete(`/stores/${storeId}/catalog/clear/`);
 
+/** Set every active listing to Pending (requires confirm on backend). Does not start scraping. */
+export const resetAllCatalogListingsPending = (storeId) =>
+    api.post(`/stores/${storeId}/catalog/reset-pending/`, { confirm: true });
+
 /** List upload history for a store */
 export const getCatalogUploads = (storeId, config = {}) =>
     api.get(`/stores/${storeId}/catalog/uploads/`, {

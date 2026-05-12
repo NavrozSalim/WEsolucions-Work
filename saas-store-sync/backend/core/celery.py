@@ -1,8 +1,7 @@
 import os
-from datetime import timedelta
 
 from celery import Celery
-from celery.schedules import crontab, schedule as interval_schedule
+from celery.schedules import crontab
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'core.settings')
 
@@ -29,11 +28,6 @@ app.conf.beat_schedule = {
     'aggregate-daily-analytics-metrics': {
         'task': 'analytics.tasks.aggregate_daily_metrics',
         'schedule': crontab(minute=10, hour=0),
-    },
-    # All active catalog listings → Pending on a rolling 24h interval (beat process).
-    'reset-catalog-pending-daily': {
-        'task': 'sync.tasks.reset_all_catalog_listings_pending_daily',
-        'schedule': interval_schedule(run_every=timedelta(hours=24)),
     },
 }
 

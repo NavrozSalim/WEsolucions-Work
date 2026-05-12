@@ -36,6 +36,7 @@ import {
     exportCatalogProducts,
     triggerCatalogPushListings,
     triggerCatalogCriticalZero,
+    resetAllCatalogListingsPending,
     getCatalogActivityLogs,
     getScrapeProgress,
     cancelCatalogScrape,
@@ -652,6 +653,8 @@ export default function Catalog() {
     const [manualPushLoading, setManualPushLoading] = useState(false);
     const [criticalModalOpen, setCriticalModalOpen] = useState(false);
     const [criticalLoading, setCriticalLoading] = useState(false);
+    const [resetPendingModalOpen, setResetPendingModalOpen] = useState(false);
+    const [resetPendingLoading, setResetPendingLoading] = useState(false);
     const [activityLogs, setActivityLogs] = useState([]);
     const [logsLoading, setLogsLoading] = useState(false);
     const [liveRefreshUntil, setLiveRefreshUntil] = useState(0);
@@ -1551,6 +1554,35 @@ export default function Catalog() {
             .finally(() => setManualPushLoading(false));
     };
 
+    const handleResetAllPendingConfirm = () => {
+        if (!selectedStore) return;
+        setResetPendingLoading(true);
+        resetAllCatalogListingsPending(selectedStore)
+            .then((res) => {
+                const n = res.data?.listings_reset ?? 0;
+                setResetPendingModalOpen(false);
+                setFlowStatus('success');
+                setMessage(`${n.toLocaleString()} listing${n === 1 ? '' : 's'} set to Pending. Run Start Scraping when you want fresh vendor prices.`);
+                if (viewMode === 'products') {
+                    refreshProducts();
+                }
+                getScrapeProgress(selectedStore)
+                    .then((p) => {
+                        const data = p.data || null;
+                        if (data?.store_id && data.store_id !== selectedStore) return;
+                        setScrapeProgress(data);
+                    })
+                    .catch(() => {});
+                getCatalogActivityLogs(selectedStore).then((r) =>
+                    setActivityLogs(Array.isArray(r.data) ? r.data : [])).catch(() => {});
+            })
+            .catch((err) => {
+                setFlowStatus('failed');
+                setMessage(formatCatalogError(err) || 'Could not reset listings.');
+            })
+            .finally(() => setResetPendingLoading(false));
+    };
+
     const handleCriticalZeroConfirm = () => {
         if (!selectedStore) return;
         setCriticalLoading(true);
@@ -1950,6 +1982,21 @@ export default function Catalog() {
                                 >
                                     <AlertTriangle className="h-4 w-4 mr-1.5" />
                                     Critical action
+                                </Button>
+                                <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={() => setResetPendingModalOpen(true)}
+                                    disabled={
+                                        resetPendingLoading
+                                        || manualPushLoading
+                                        || scraping
+                                        || !selectedStore
+                                    }
+                                    title="Mark every active listing as Pending so the next scrape refreshes vendor data"
+                                >
+                                    <RotateCcw className={`h-4 w-4 mr-1.5 ${resetPendingLoading ? 'animate-spin' : ''}`} />
+                                    Reset to pending
                                 </Button>
                                 <div className="flex items-center gap-1.5">
                                     <select
@@ -2460,6 +2507,17 @@ export default function Catalog() {
                 loading={criticalLoading}
                 onConfirm={handleCriticalZeroConfirm}
                 onCancel={() => !criticalLoading && setCriticalModalOpen(false)}
+            />
+            <ConfirmModal
+                open={resetPendingModalOpen}
+                title="Reset all to Pending"
+                message="Every active product listing for this store will be marked Pending (scraped/synced rows included). This clears scrape errors so you can run Start Scraping again. It does not fetch prices by itself."
+                confirmLabel="Reset to Pending"
+                cancelLabel="Cancel"
+                variant="primary"
+                loading={resetPendingLoading}
+                onConfirm={handleResetAllPendingConfirm}
+                onCancel={() => !resetPendingLoading && setResetPendingModalOpen(false)}
             />
         </div>
     );

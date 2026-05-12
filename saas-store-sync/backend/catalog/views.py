@@ -1477,6 +1477,43 @@ class CatalogPushListingsView(APIView):
         )
 
 
+class CatalogResetListingsPendingView(APIView):
+    """Set every active listing for this store to Pending (clears scrape retry state).
+
+    Does not start a scrape — use Start Scraping afterward. Requires JSON body {"confirm": true}.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        if request.data.get('confirm') is not True:
+            return Response(
+                {'error': 'You must send {"confirm": true}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        log_action(
+            request.user, 'catalog_reset_all_pending', 'store', str(store.id),
+            metadata={'store_name': store.name}, request=request,
+        )
+        n = ProductMapping.objects.filter(store=store, is_active=True).update(
+            sync_status='pending',
+            failed_sync_count=0,
+            scrape_error=None,
+        )
+        Store.objects.filter(id=store.id).update(
+            catalog_pending_reset_at=None,
+            catalog_zero_pending_at=None,
+        )
+        from catalog.activity_log import append_catalog_log
+        append_catalog_log(
+            store.id,
+            f'All active listings ({n}) were set to Pending for a fresh vendor check.',
+            action_type='catalog_manual_pending_reset',
+            metadata={'rows_reset': n},
+        )
+        return Response({'status': 'ok', 'listings_reset': n})
+
+
 class StoreCriticalZeroView(APIView):
     """
     Emergency: set all listing stock to 0 (local + marketplace), deactivate store and sync schedule.

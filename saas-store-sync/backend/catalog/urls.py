@@ -22,6 +22,7 @@ from .views import (
     CatalogStoresView,
     CatalogPushListingsView,
     StoreCriticalZeroView,
+    CatalogResetListingsPendingView,
     CatalogActivityLogListView,
 )
 from .ingest_views import (
@@ -63,6 +64,7 @@ urlpatterns = [
     path('stores/<uuid:store_pk>/catalog/activity-logs/', CatalogActivityLogListView.as_view(), name='catalog-activity-logs'),
     path('stores/<uuid:store_pk>/catalog/push-listings/', CatalogPushListingsView.as_view(), name='catalog-push-listings'),
     path('stores/<uuid:store_pk>/catalog/critical-zero/', StoreCriticalZeroView.as_view(), name='catalog-critical-zero'),
+    path('stores/<uuid:store_pk>/catalog/reset-pending/', CatalogResetListingsPendingView.as_view(), name='catalog-reset-pending'),
     path('ingest/heb/', HebIngestView.as_view(), name='ingest-heb'),
     path('ingest/heb/urls/', HebIngestUrlsView.as_view(), name='ingest-heb-urls'),
     path('ingest/heb/next-job/', HebIngestNextJobView.as_view(), name='ingest-heb-next-job'),

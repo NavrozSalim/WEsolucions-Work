@@ -1,7 +1,6 @@
 from datetime import timedelta
 
 from celery import shared_task
-from django.db.models import Q
 from django.utils import timezone
 from decimal import Decimal
 import logging
@@ -45,93 +44,6 @@ def _is_ingest_only_product(product) -> bool:
     if code.startswith('heb_') or code.startswith('costco_') or code.startswith('vevor_'):
         return True
     return False
-
-
-def _non_ingest_vendor_q() -> Q:
-    """Match ProductMapping rows whose vendor is scraped server-side (not desktop ingest).
-
-    Must stay aligned with ``_is_ingest_only_product`` vendor-code rules.
-    """
-    ingest = (
-        Q(product__vendor__code__iexact='heb')
-        | Q(product__vendor__code__iexact='hebus')
-        | Q(product__vendor__code__iexact='costcoau')
-        | Q(product__vendor__code__iexact='costco_au')
-        | Q(product__vendor__code__iexact='costco-au')
-        | Q(product__vendor__code__iexact='vevor')
-        | Q(product__vendor__code__iexact='vevorau')
-        | Q(product__vendor__code__istartswith='heb_')
-        | Q(product__vendor__code__istartswith='costco_')
-        | Q(product__vendor__code__istartswith='vevor_')
-    )
-    return ~ingest
-
-
-def _run_catalog_zero_pending_cycle():
-    """Arm ``Store.catalog_zero_pending_at`` when no server-scrapable row is Pending.
-
-    After 24 hours from that moment, set active non–ingest-only ``scraped`` / ``synced``
-    listings back to ``pending`` so prices can be refreshed. Ingest-only rows are excluded
-    from both the clock and the bulk reset (they are not in the server scrape queue).
-
-    Clears the timestamp whenever a server-scrapable listing is ``pending`` again.
-
-    **Important:** This used to loop one query batch per store (O(stores) round-trips). On
-    a host with many stores, ``check_scheduled_updates`` (beat: every minute) then held
-    Celery workers for tens of minutes and starved user-initiated ``catalog_scrape`` tasks.
-    The logic below is set-based (a handful of SQL queries).
-    """
-    from catalog.activity_log import append_catalog_log
-
-    now = timezone.now()
-    cutoff = now - timedelta(days=1)
-    vq = _non_ingest_vendor_q()
-    # Non-ingest server-scrapable rows only (aligns with original ``ni`` queryset).
-    ni = ProductMapping.objects.filter(
-        is_active=True,
-        product__isnull=False,
-    ).filter(vq)
-
-    due_stores = Store.objects.filter(
-        catalog_zero_pending_at__isnull=False,
-        catalog_zero_pending_at__lte=cutoff,
-    )
-    for store in due_stores:
-        n = (
-            ProductMapping.objects.filter(
-                store=store,
-                is_active=True,
-                product__isnull=False,
-            )
-            .filter(vq)
-            .filter(sync_status__in=('scraped', 'synced'))
-            .update(sync_status='pending')
-        )
-        Store.objects.filter(id=store.id).update(catalog_zero_pending_at=None)
-        append_catalog_log(
-            store.id,
-            f'24 hours passed with no server-scrapable listings in Pending. '
-            f'{n} active listing(s) (scraped/synced) were set back to Pending for a fresh vendor check.',
-            action_type='catalog_zero_pending_reset',
-            metadata={'rows_reset': n},
-        )
-
-    # Per-store “clock” updates as bulk SQL (replaces N+1 over distinct store_ids).
-    pending_stores = ni.filter(sync_status='pending').values('store_id').distinct()
-    Store.objects.filter(
-        id__in=pending_stores,
-        catalog_zero_pending_at__isnull=False,
-    ).update(catalog_zero_pending_at=None)
-
-    scraped_stores = ni.filter(sync_status__in=('scraped', 'synced')).values(
-        'store_id',
-    ).distinct()
-    # Arm the 24h window only for stores with something to cycle (scraped/synced) and
-    # with no non-ingest row still Pending, and the clock not already set.
-    Store.objects.filter(
-        id__in=scraped_stores,
-        catalog_zero_pending_at__isnull=True,
-    ).exclude(id__in=pending_stores).update(catalog_zero_pending_at=now)
 
 
 def _fail_mapping(pm, code: str, message: str = '') -> None:
@@ -635,27 +547,6 @@ def run_store_sync(self, store_id):
     return {'store_id': str(store_id), 'at': str(now)}
 
 
-@shared_task
-def reset_all_catalog_listings_pending_daily():
-    """Once per day (Celery beat): every active listing on every active store → Pending."""
-    from catalog.activity_log import append_catalog_log
-
-    for store in Store.objects.filter(is_active=True).iterator():
-        n = ProductMapping.objects.filter(store=store, is_active=True).update(
-            sync_status='pending',
-            failed_sync_count=0,
-            scrape_error=None,
-        )
-        if n:
-            append_catalog_log(
-                store.id,
-                'All active listings were set back to Pending as part of the daily refresh.',
-                action_type='catalog_daily_pending_reset',
-            )
-    # Legacy timer column is unused; keep it cleared.
-    Store.objects.all().update(catalog_pending_reset_at=None)
-
-
 @shared_task(bind=True, max_retries=3)
 def run_store_update(self, store_id):
     """
@@ -1023,8 +914,6 @@ def check_scheduled_updates():
     from sync.models import SyncSchedule
 
     now_utc = timezone.now()
-
-    _run_catalog_zero_pending_cycle()
 
     for sched in SyncSchedule.objects.filter(is_active=True).select_related('store'):
         if not sched.store.is_active or sched.store.connection_status != 'connected':
