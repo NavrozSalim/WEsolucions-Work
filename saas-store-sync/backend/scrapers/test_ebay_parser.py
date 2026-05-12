@@ -28,6 +28,13 @@ class TestNormalizeUrl(unittest.TestCase):
             "https://www.ebay.com.au/itm/123456789012",
         )
 
+    def test_au_preserves_query_for_variation(self):
+        u = "https://www.ebay.com.au/itm/Some-Title/123456789012?var=440888889999"
+        self.assertEqual(
+            _normalize_url(u, "USA"),
+            "https://www.ebay.com.au/itm/123456789012?var=440888889999",
+        )
+
 
 class TestEffectiveEbayRegion(unittest.TestCase):
     def test_normalized_au_url_forces_au(self):

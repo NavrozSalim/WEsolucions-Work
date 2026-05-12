@@ -115,12 +115,22 @@ def _normalize_url(original_url: str, region: str) -> str:
     if not item_id:
         return original_url
 
+    query = (parsed.query or "").strip()
+    fragment = (parsed.fragment or "").strip()
+
     orig_lower = (original_url or "").lower()
     if "ebay.com.au" in orig_lower:
-        return f"https://www.ebay.com.au/itm/{item_id}"
-    if (region or "").strip().upper() == "AU":
-        return f"https://www.ebay.com.au/itm/{item_id}"
-    return f"https://www.ebay.com/itm/{item_id}"
+        base = f"https://www.ebay.com.au/itm/{item_id}"
+    elif (region or "").strip().upper() == "AU":
+        base = f"https://www.ebay.com.au/itm/{item_id}"
+    else:
+        base = f"https://www.ebay.com/itm/{item_id}"
+
+    if query:
+        base = f"{base}?{query}"
+    if fragment:
+        base = f"{base}#{fragment}"
+    return base
 
 
 def _to_ebay_ca_url(url: str) -> str:
@@ -221,9 +231,16 @@ def _is_challenge_or_blocked(content: str) -> Tuple[bool, str]:
 
 
 class EbayParser:
-    PRICE_SELECTORS = [
-        ".x-price-primary",
+    # Prefer BIN / primary display inside the main item price region only (avoids ads, bundles, sidebar).
+    _ITEM_PRICE_SECTION_SELECTORS = (
+        "[data-testid='x-item-price']",
+        "section.x-item-price",
+        "[data-testid='x-price-view']",
+    )
+
+    PRIMARY_PRICE_SELECTORS = [
         "[data-testid='x-price-primary'] .ux-textspans--BOLD",
+        "[data-testid='x-price-primary'] .ux-textspans",
         "[data-testid='x-price-primary'] span",
         "[data-test-id='x-price-primary'] .ux-textspans--BOLD",
         "[data-test-id='x-price-primary'] span",
@@ -231,17 +248,22 @@ class EbayParser:
         ".x-price-primary span.ux-textspans",
         ".x-price-primary span",
         "div.x-price-primary",
+        ".x-price-primary",
+        "[data-testid='x-bin-price'] .ux-textspans--BOLD",
+        "[data-testid='x-bin-price'] span",
         ".x-bin-price__content .ux-textspans--BOLD",
         ".x-bin-price__content span",
         ".x-bin-price span",
-        "[data-testid='x-bin-price'] span",
-        "[data-testid='x-bin-price'] .ux-textspans--BOLD",
+    ]
+
+    # Legacy / wider layout — avoid bare span.ux-textspans--BOLD until late (matches unrelated bold prices).
+    FALLBACK_PRICE_SELECTORS = [
+        ".x-price-primary",
         "section.x-item-price span.ux-textspans--BOLD",
         "div.ux-section-module span.ux-textspans--BOLD",
         ".x-auction-price .ux-textspans--BOLD",
         ".x-auction-price span",
         ".ux-labels-values__values-content .ux-textspans--BOLD",
-        "span.ux-textspans--BOLD",
         ".ux-price",
         "span[itemprop='price']",
         "#prcIsum",
@@ -249,19 +271,24 @@ class EbayParser:
         ".display-price",
         "[data-testid='price-value']",
         ".price-current",
+        "span.ux-textspans--BOLD",
     ]
 
-    PRICE_JSON_PATTERNS = [
-        r'"currentPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+    # Prefer listing BIN / local display keys; generic "price" + convertedPrice often pick wrong figures.
+    PRICE_JSON_PATTERNS_PRIMARY = [
         r'"buyItNowPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
-        r'"convertedPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
         r'"binPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        r'"currentPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
         r'"price"\s*:\s*\[\s*"([\d.]+)"\s*\]',
-        r'"price"\s*:\s*"([\d.]+)"',
-        r'"value"\s*:\s*"([\d.]+)"\s*,\s*"currency"',
         r'"priceValue"\s*:\s*"([\d.]+)"',
+        r'"value"\s*:\s*"([\d.]+)"\s*,\s*"currency"',
         r'"finalPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)',
         r'"transactionAmount"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)',
+    ]
+
+    PRICE_JSON_PATTERNS_FALLBACK = [
+        r'"price"\s*:\s*"([\d.]+)"',
+        r'"convertedPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
     ]
 
     QUANTITY_PATTERN = re.compile(r'"NumberValidation","minValue":"(\d+)","maxValue":"(\d+)"')
@@ -360,8 +387,43 @@ class EbayParser:
 
         return "buy_now"
 
+    @staticmethod
+    def _price_from_element(elem) -> Optional[float]:
+        if elem is None:
+            return None
+        text = _strip_price_suffix(elem.get_text(strip=True))
+        if not text:
+            return None
+        if " to " in text.lower():
+            parts = re.split(r"\s+to\s+", text, flags=re.IGNORECASE)
+            return parse_price_text(_strip_price_suffix(parts[0]))
+        return parse_price_text(text)
+
     @classmethod
     def extract_price(cls, soup: BeautifulSoup, html: str) -> Optional[float]:
+        # 1) BIN / primary price inside the main item price block only (best match for PDP).
+        for sec_sel in cls._ITEM_PRICE_SECTION_SELECTORS:
+            section = soup.select_one(sec_sel)
+            if not section:
+                continue
+            for sel in cls.PRIMARY_PRICE_SELECTORS:
+                p = cls._price_from_element(section.select_one(sel))
+                if p:
+                    return p
+
+        # 2) Primary selectors document-wide (modern view).
+        for sel in cls.PRIMARY_PRICE_SELECTORS:
+            p = cls._price_from_element(soup.select_one(sel))
+            if p:
+                return p
+
+        # 3) Broader legacy selectors (last resort before meta / embedded JSON).
+        for sel in cls.FALLBACK_PRICE_SELECTORS:
+            p = cls._price_from_element(soup.select_one(sel))
+            if p:
+                return p
+
+        # 4) Meta — after DOM so visible BIN wins when tags disagree with og:price.
         for mtag in soup.find_all("meta"):
             prop = (mtag.get("property") or "").lower()
             if prop == "og:price:amount" and mtag.get("content"):
@@ -373,24 +435,14 @@ class EbayParser:
                 if p:
                     return p
 
-        for sel in cls.PRICE_SELECTORS:
-            elem = soup.select_one(sel)
-            if elem:
-                text = _strip_price_suffix(elem.get_text(strip=True))
-                if not text:
-                    continue
-
-                if " to " in text.lower():
-                    parts = re.split(r"\s+to\s+", text, flags=re.IGNORECASE)
-                    p = parse_price_text(_strip_price_suffix(parts[0]))
-                    if p:
-                        return p
-
-                p = parse_price_text(text)
+        for pat in cls.PRICE_JSON_PATTERNS_PRIMARY:
+            m = re.search(pat, html)
+            if m:
+                p = parse_price_text(m.group(1))
                 if p:
                     return p
 
-        for pat in cls.PRICE_JSON_PATTERNS:
+        for pat in cls.PRICE_JSON_PATTERNS_FALLBACK:
             m = re.search(pat, html)
             if m:
                 p = parse_price_text(m.group(1))
