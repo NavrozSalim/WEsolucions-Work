@@ -950,9 +950,13 @@ class CatalogScrapeCancelView(APIView):
             })
 
         server_stopped = False
+        resume_scope = StoreCatalogCeleryScrapeState.Scope.STORE
+        resume_upload_id = None
         st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
         if st:
             server_stopped = True
+            resume_scope = st.scope
+            resume_upload_id = str(st.upload_id) if st.upload_id else None
             root_tid = (st.root_task_id or '').strip()
             if root_tid:
                 try:
@@ -962,6 +966,35 @@ class CatalogScrapeCancelView(APIView):
                 except Exception:
                     pass
             clear_celery_scrape_state(str(store.id))
+
+        resume_scheduled = False
+        resume_after_sec = None
+        resume_eta_iso = None
+        if server_stopped:
+            try:
+                resume_after_sec = max(
+                    0, int(getattr(settings, 'CATALOG_SCRAPE_RESUME_AFTER_STOP_SECONDS', 0) or 0),
+                )
+            except ValueError:
+                resume_after_sec = 0
+            if resume_after_sec > 0:
+                try:
+                    from datetime import timedelta as _td
+
+                    from catalog.tasks import resume_catalog_scrape_after_stop
+
+                    resume_catalog_scrape_after_stop.apply_async(
+                        kwargs={
+                            'store_id': str(store.id),
+                            'scope': resume_scope,
+                            'upload_id': resume_upload_id,
+                        },
+                        countdown=resume_after_sec,
+                    )
+                    resume_scheduled = True
+                    resume_eta_iso = (timezone.now() + _td(seconds=resume_after_sec)).isoformat()
+                except Exception:
+                    logger.exception('Failed to schedule auto-resume catalog scrape')
 
         if not cancelled_payload and not server_stopped:
             return Response(
@@ -973,15 +1006,20 @@ class CatalogScrapeCancelView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        return Response(
-            {
-                'cancelled': cancelled_payload,
-                'server_scrape_stopped': server_stopped,
-                'job_id': cancelled_payload[0]['job_id'] if cancelled_payload else None,
-                'status': cancelled_payload[0]['status'] if cancelled_payload else None,
-            },
-            status=status.HTTP_200_OK,
-        )
+        payload = {
+            'cancelled': cancelled_payload,
+            'server_scrape_stopped': server_stopped,
+            'job_id': cancelled_payload[0]['job_id'] if cancelled_payload else None,
+            'status': cancelled_payload[0]['status'] if cancelled_payload else None,
+        }
+        if resume_scheduled and resume_after_sec is not None:
+            payload['server_resume_scheduled'] = True
+            payload['server_resume_after_seconds'] = resume_after_sec
+            payload['server_resume_eta'] = resume_eta_iso
+        elif server_stopped:
+            payload['server_resume_scheduled'] = False
+
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class CatalogUpdateTriggerView(APIView):

@@ -58,6 +58,15 @@ try:
 except ValueError:
     CATALOG_SCRAPE_CHUNK_SIZE = 400
 
+# After user clicks Stop on a server-side catalog scrape, re-queue the same scrape after
+# this many seconds if listings are still Pending (0 = disabled).
+try:
+    CATALOG_SCRAPE_RESUME_AFTER_STOP_SECONDS = max(
+        0, int(os.getenv('CATALOG_SCRAPE_RESUME_AFTER_STOP_SECONDS', '600')),
+    )
+except ValueError:
+    CATALOG_SCRAPE_RESUME_AFTER_STOP_SECONDS = 600
+
 if DEBUG:
     ALLOWED_HOSTS = _env_list('ALLOWED_HOSTS', 'localhost,127.0.0.1,backend')
 else:

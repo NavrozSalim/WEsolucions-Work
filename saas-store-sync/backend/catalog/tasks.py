@@ -19,7 +19,13 @@ logger = logging.getLogger(__name__)
 SCRAPER_STALL_NO_PENDING_PROGRESS = timedelta(minutes=10)
 
 from .celery_scrape_state import mark_celery_scrape_worker_started, should_abort_celery_scrape
-from .models import CatalogUpload, CatalogUploadRow, CatalogSyncLog, ProductMapping
+from .models import (
+    CatalogUpload,
+    CatalogUploadRow,
+    CatalogSyncLog,
+    ProductMapping,
+    StoreCatalogCeleryScrapeState,
+)
 from .reverb_catalog import listing_sku_lookup_order, store_is_reverb, vendor_is_ebay
 from .services import _normalize
 from products.models import Product
@@ -1779,3 +1785,102 @@ def catalog_update_task(self, upload_id: str):
         'succeeded': succeeded,
         'failed': failed,
     }
+
+
+@shared_task(ignore_result=True)
+def resume_catalog_scrape_after_stop(
+    store_id: str,
+    scope: str | None = None,
+    upload_id: str | None = None,
+):
+    """Re-queue server-side catalog scrape (Amazon/eBay) after Stop if Pending rows remain.
+
+    Scheduled by ``CatalogScrapeCancelView`` with ``countdown=CATALOG_SCRAPE_RESUME_AFTER_STOP_SECONDS``.
+    Does not enqueue desktop-runner jobs (HEB/Costco). Disabled when setting is 0.
+    """
+    try:
+        sec = int(getattr(settings, 'CATALOG_SCRAPE_RESUME_AFTER_STOP_SECONDS', 0) or 0)
+    except ValueError:
+        sec = 0
+    if sec <= 0:
+        return {'skipped': True, 'reason': 'disabled'}
+
+    from catalog.activity_log import append_catalog_log
+    from catalog.celery_scrape_state import clear_celery_scrape_state, set_celery_scrape_state
+    from stores.models import Store
+
+    if StoreCatalogCeleryScrapeState.objects.filter(store_id=store_id).exists():
+        return {'skipped': True, 'reason': 'scrape_already_active'}
+
+    try:
+        store = Store.objects.get(id=store_id)
+    except Store.DoesNotExist:
+        return {'skipped': True, 'reason': 'no_store'}
+
+    scope_norm = (scope or StoreCatalogCeleryScrapeState.Scope.STORE).strip().lower()
+
+    if scope_norm == StoreCatalogCeleryScrapeState.Scope.UPLOAD and upload_id:
+        upload = CatalogUpload.objects.filter(id=upload_id, store_id=store_id).first()
+        if not upload:
+            return {'skipped': True, 'reason': 'upload_missing'}
+        has_pending = upload.rows.filter(
+            product_mapping__isnull=False,
+            product_mapping__is_active=True,
+            product_mapping__sync_status='pending',
+        ).exists()
+        if not has_pending:
+            return {'skipped': True, 'reason': 'no_pending_rows'}
+
+        celery_task_id = str(uuid.uuid4())
+        with transaction.atomic():
+            set_celery_scrape_state(
+                store,
+                task_id=celery_task_id,
+                scope=StoreCatalogCeleryScrapeState.Scope.UPLOAD,
+                upload=upload,
+            )
+            mark_celery_scrape_worker_started(str(store_id))
+        try:
+            catalog_scrape_task.apply_async(args=[str(upload_id)], task_id=celery_task_id)
+        except Exception:
+            clear_celery_scrape_state(str(store_id))
+            raise
+
+        append_catalog_log(
+            store.id,
+            'Vendor scrape re-started automatically after a stop (remaining Pending rows).',
+            action_type='scrape_auto_resume',
+            metadata={'upload_id': str(upload_id), 'scope': 'upload'},
+        )
+        return {'queued': True, 'scope': 'upload', 'upload_id': str(upload_id)}
+
+    has_pending = ProductMapping.objects.filter(
+        store_id=store_id,
+        is_active=True,
+        sync_status='pending',
+    ).exists()
+    if not has_pending:
+        return {'skipped': True, 'reason': 'no_pending_rows'}
+
+    celery_task_id = str(uuid.uuid4())
+    with transaction.atomic():
+        set_celery_scrape_state(
+            store,
+            task_id=celery_task_id,
+            scope=StoreCatalogCeleryScrapeState.Scope.STORE,
+            upload=None,
+        )
+        mark_celery_scrape_worker_started(str(store_id))
+    try:
+        catalog_scrape_store_task.apply_async(args=[str(store_id)], task_id=celery_task_id)
+    except Exception:
+        clear_celery_scrape_state(str(store_id))
+        raise
+
+    append_catalog_log(
+        store.id,
+        'Vendor scrape re-started automatically after a stop (remaining Pending rows).',
+        action_type='scrape_auto_resume',
+        metadata={'scope': 'store'},
+    )
+    return {'queued': True, 'scope': 'store'}
