@@ -44,6 +44,22 @@ class TestEffectiveEbayRegion(unittest.TestCase):
         )
 
 
+class TestEbayBuyNowDisplayPrice(unittest.TestCase):
+    """Prefer visible sale price over struck 'was' amount in primary BIN block."""
+
+    def test_was_now_picks_lower_non_strike(self):
+        html = """<html><body>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans ux-textspans--STRIKETHROUGH">AU $21.60</span>
+            <span class="ux-textspans ux-textspans--BOLD">AU $18.00</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 18.0)
+
+
 class TestEbayPriceSuffix(unittest.TestCase):
     def test_strip_buy_it_now(self):
         raw = "US $19.99Buy It Now"

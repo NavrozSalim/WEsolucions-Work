@@ -388,6 +388,81 @@ class EbayParser:
         return "buy_now"
 
     @staticmethod
+    def _is_strikethrough_element(elem) -> bool:
+        """True if eBay marks this node (or a short ancestor chain) as struck / old price."""
+        if elem is None:
+            return False
+        cur = elem
+        for _ in range(8):
+            if cur is None:
+                break
+            cls = " ".join(cur.get("class") or "").lower()
+            if any(
+                x in cls
+                for x in (
+                    "strikethrough",
+                    "strike-through",
+                    "linethrough",
+                    "line-through",
+                    "text-strike",
+                )
+            ):
+                return True
+            cur = getattr(cur, "parent", None)
+        return False
+
+    @classmethod
+    def _collect_bin_price_candidates(cls, root) -> list:
+        """Plausible BIN amounts in primary blocks; skip struck-through snippets."""
+        found: list[float] = []
+        if root is None:
+            return found
+        for bloc in root.select(
+            "[data-testid='x-price-primary'], [data-testid='x-bin-price'], "
+            ".x-price-primary, .x-bin-price"
+        ):
+            bloc_prices: list[float] = []
+            for node in bloc.find_all(["span", "div"]):
+                node_cls = " ".join(node.get("class") or "").lower()
+                if "ux-textspans" not in node_cls and "notranslate" not in node_cls:
+                    continue
+                if cls._is_strikethrough_element(node):
+                    continue
+                t = node.get_text(strip=True)
+                if not t or len(t) > 120:
+                    continue
+                p = parse_price_text(_strip_price_suffix(t))
+                if p and 0.01 <= p < 999_999:
+                    bloc_prices.append(p)
+            if bloc_prices:
+                found.extend(bloc_prices)
+            else:
+                p_whole = cls._price_from_element(bloc)
+                if p_whole and 0.01 <= p_whole < 999_999:
+                    found.append(p_whole)
+        return found
+
+    @classmethod
+    def _buy_now_display_price(cls, soup: BeautifulSoup) -> Optional[float]:
+        """Headline BIN: lowest non-struck candidate (was/now, promos showing two numbers)."""
+        for sec_sel in cls._ITEM_PRICE_SECTION_SELECTORS:
+            section = soup.select_one(sec_sel)
+            cands = cls._collect_bin_price_candidates(section)
+            if cands:
+                return min(cands)
+        for sel in (
+            "[data-testid='x-price-primary']",
+            "[data-testid='x-bin-price']",
+            ".x-price-primary",
+            ".x-bin-price",
+        ):
+            root = soup.select_one(sel)
+            cands = cls._collect_bin_price_candidates(root)
+            if cands:
+                return min(cands)
+        return None
+
+    @staticmethod
     def _price_from_element(elem) -> Optional[float]:
         if elem is None:
             return None
@@ -401,7 +476,13 @@ class EbayParser:
 
     @classmethod
     def extract_price(cls, soup: BeautifulSoup, html: str) -> Optional[float]:
-        # 1) BIN / primary price inside the main item price block only (best match for PDP).
+        listing_type = cls.detect_listing_type(soup, html)
+
+        if listing_type == "buy_now":
+            display = cls._buy_now_display_price(soup)
+            if display is not None:
+                return display
+
         for sec_sel in cls._ITEM_PRICE_SECTION_SELECTORS:
             section = soup.select_one(sec_sel)
             if not section:
@@ -411,19 +492,16 @@ class EbayParser:
                 if p:
                     return p
 
-        # 2) Primary selectors document-wide (modern view).
         for sel in cls.PRIMARY_PRICE_SELECTORS:
             p = cls._price_from_element(soup.select_one(sel))
             if p:
                 return p
 
-        # 3) Broader legacy selectors (last resort before meta / embedded JSON).
         for sel in cls.FALLBACK_PRICE_SELECTORS:
             p = cls._price_from_element(soup.select_one(sel))
             if p:
                 return p
 
-        # 4) Meta — after DOM so visible BIN wins when tags disagree with og:price.
         for mtag in soup.find_all("meta"):
             prop = (mtag.get("property") or "").lower()
             if prop == "og:price:amount" and mtag.get("content"):
