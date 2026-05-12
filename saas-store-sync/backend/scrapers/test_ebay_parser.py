@@ -59,6 +59,17 @@ class TestEbayBuyNowDisplayPrice(unittest.TestCase):
         soup = BeautifulSoup(html, "lxml")
         self.assertEqual(EbayParser.extract_price(soup, html), 18.0)
 
+    def test_plain_ux_textspans_au_headline(self):
+        html = """<html><body>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">AU $35.00</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 35.0)
+
 
 class TestEbayPriceSuffix(unittest.TestCase):
     def test_strip_buy_it_now(self):

@@ -413,7 +413,10 @@ class EbayParser:
 
     @classmethod
     def _collect_bin_price_candidates(cls, root) -> list:
-        """Plausible BIN amounts in primary blocks; skip struck-through snippets."""
+        """Headline BIN amounts: only ``span.ux-textspans`` inside primary blocks (eBay AU layout).
+
+        eBay shows the live price in ``<span class="ux-textspans">AU $35.00</span>``; skip struck rows.
+        """
         found: list[float] = []
         if root is None:
             return found
@@ -422,13 +425,10 @@ class EbayParser:
             ".x-price-primary, .x-bin-price"
         ):
             bloc_prices: list[float] = []
-            for node in bloc.find_all(["span", "div"]):
-                node_cls = " ".join(node.get("class") or "").lower()
-                if "ux-textspans" not in node_cls and "notranslate" not in node_cls:
+            for span in bloc.select("span.ux-textspans"):
+                if cls._is_strikethrough_element(span):
                     continue
-                if cls._is_strikethrough_element(node):
-                    continue
-                t = node.get_text(strip=True)
+                t = span.get_text(strip=True)
                 if not t or len(t) > 120:
                     continue
                 p = parse_price_text(_strip_price_suffix(t))
