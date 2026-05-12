@@ -410,12 +410,63 @@ class EbayParser:
                 )
             ):
                 return True
+            style = (cur.get("style") or "").lower().replace(" ", "")
+            if "line-through" in style or "linethrough" in style:
+                return True
+            cur = getattr(cur, "parent", None)
+        return False
+
+    @staticmethod
+    def _under_price_noise(elem) -> bool:
+        """True if ``elem`` is under sponsored / merch / similar-items (not main BIN headline)."""
+        if elem is None:
+            return True
+        cur = elem
+        for _ in range(22):
+            if cur is None:
+                break
+            tid = (cur.get("data-testid") or "").lower()
+            if any(
+                x in tid
+                for x in (
+                    "spon",
+                    "merch",
+                    "recs",
+                    "related-",
+                    "left-nav",
+                    "hub-",
+                    "d-sisr",
+                    "x-sisr",
+                )
+            ):
+                return True
+            cid = (cur.get("id") or "").lower()
+            if any(x in cid for x in ("srp-", "relatedads", "rtm_html")):
+                return True
+            cls = " ".join(cur.get("class") or []).lower()
+            if any(
+                x in cls
+                for x in (
+                    "sponsored",
+                    "merchandising",
+                    "similar-items",
+                    "vi-carousel",
+                    "str-item-card",
+                    "str-sponsored",
+                    "ad-banner",
+                    "ads-",
+                    "ad--",
+                    "vim-",
+                    "x-merch",
+                )
+            ):
+                return True
             cur = getattr(cur, "parent", None)
         return False
 
     @staticmethod
     def _ux_span_outside_noise_regions(span) -> bool:
-        """Skip title / shipping subtrees when scanning loose ``span.ux-textspans``."""
+        """Skip title / shipping / merch when scanning loose ``span.ux-textspans``."""
         p = span
         while p is not None:
             tid = (p.get("data-testid") or "").lower()
@@ -425,7 +476,28 @@ class EbayParser:
             if "x-item-title" in cls:
                 return False
             p = getattr(p, "parent", None)
+        if EbayParser._under_price_noise(span):
+            return False
         return True
+
+    @classmethod
+    def _ux_textspan_prices_in_subtree(cls, root) -> list[float]:
+        """Prices from ``span.ux-textspans`` under ``root`` (non-struck, not sponsored/merch)."""
+        found: list[float] = []
+        if root is None:
+            return found
+        for span in root.select("span.ux-textspans"):
+            if cls._under_price_noise(span):
+                continue
+            if cls._is_strikethrough_element(span):
+                continue
+            t = span.get_text(strip=True)
+            if not t or len(t) > 120:
+                continue
+            p = parse_price_text(_strip_price_suffix(t))
+            if p and 0.01 <= p < 999_999:
+                found.append(p)
+        return found
 
     @classmethod
     def _collect_bin_price_candidates(cls, root) -> list:
@@ -442,8 +514,11 @@ class EbayParser:
             ".x-price-primary, .x-bin-price, .x-bin-price__content"
         )
         for bloc in root.select(bloc_selectors):
+            if cls._under_price_noise(bloc):
+                continue
             bloc_prices: list[float] = []
-            for span in bloc.select("span.ux-textspans"):
+            spans = bloc.select("span.ux-textspans")
+            for span in spans:
                 if cls._is_strikethrough_element(span):
                     continue
                 t = span.get_text(strip=True)
@@ -454,7 +529,7 @@ class EbayParser:
                     bloc_prices.append(p)
             if bloc_prices:
                 found.extend(bloc_prices)
-            else:
+            elif not spans:
                 p_whole = cls._price_from_element(bloc)
                 if p_whole and 0.01 <= p_whole < 999_999:
                     found.append(p_whole)
@@ -474,23 +549,43 @@ class EbayParser:
 
     @classmethod
     def _buy_now_display_price(cls, soup: BeautifulSoup) -> Optional[float]:
-        """Headline BIN: lowest non-struck candidate (was/now, promos showing two numbers)."""
+        """Headline BIN: prefer main ``x-price-primary`` subtree, then BIN box, then item-price region."""
+        for sel in (
+            "[data-testid='x-price-primary']",
+            "[data-test-id='x-price-primary']",
+            ".x-price-primary",
+        ):
+            for node in soup.select(sel):
+                if cls._under_price_noise(node):
+                    continue
+                cands = cls._ux_textspan_prices_in_subtree(node)
+                if cands:
+                    return min(cands)
+        for sel in (
+            "[data-testid='x-bin-price']",
+            ".x-bin-price__content",
+            ".x-bin-price",
+        ):
+            for node in soup.select(sel):
+                if cls._under_price_noise(node):
+                    continue
+                cands = cls._ux_textspan_prices_in_subtree(node)
+                if cands:
+                    return min(cands)
+
         merged: list[float] = []
+        seen: set[int] = set()
         for sec_sel in cls._ITEM_PRICE_SECTION_SELECTORS:
             section = soup.select_one(sec_sel)
+            if section is None:
+                continue
+            sid = id(section)
+            if sid in seen:
+                continue
+            seen.add(sid)
             merged.extend(cls._collect_bin_price_candidates(section))
         if merged:
             return min(merged)
-        for sel in (
-            "[data-testid='x-price-primary']",
-            "[data-testid='x-bin-price']",
-            ".x-price-primary",
-            ".x-bin-price",
-        ):
-            root = soup.select_one(sel)
-            cands = cls._collect_bin_price_candidates(root)
-            if cands:
-                return min(cands)
         return None
 
     @staticmethod

@@ -95,6 +95,35 @@ class TestEbayBuyNowDisplayPrice(unittest.TestCase):
         soup = BeautifulSoup(html, "lxml")
         self.assertEqual(EbayParser.extract_price(soup, html), 35.0)
 
+    def test_skips_sponsored_primary_uses_main_buy_box(self):
+        """Sponsored lane can mirror price widgets; prefer main item price."""
+        html = """<html><body>
+        <div class="str-sponsored">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">AU $56.40</span>
+          </div>
+        </div>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">AU $47.00</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 47.0)
+
+    def test_inline_style_strikethrough_skipped(self):
+        html = """<html><body>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans" style="text-decoration: line-through">AU $56.40</span>
+            <span class="ux-textspans">AU $47.00</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 47.0)
+
 
 class TestEbayPriceSuffix(unittest.TestCase):
     def test_strip_buy_it_now(self):
