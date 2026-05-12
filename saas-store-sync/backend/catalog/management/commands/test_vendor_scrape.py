@@ -3,11 +3,13 @@ Smoke-test vendor scrapers from the shell (no Celery).
 
 Usage:
   python manage.py test_vendor_scrape --url "https://www.ebay.com/itm/1234567890"
-  python manage.py test_vendor_scrape --url "https://www.amazon.com/dp/B0XXXXXX" --region USA
+  python manage.py test_vendor_scrape --url "https://www.ebay.com.au/itm/123" --region AU \\
+    --save-html /tmp/ebay_item.html
 """
 from django.core.management.base import BaseCommand
 
 from scrapers import get_price_and_stock, close_amazon_session
+from scrapers.ebay_scraper import SESSION_DEBUG_HTML_KEY
 
 
 class Command(BaseCommand):
@@ -21,6 +23,13 @@ class Command(BaseCommand):
             default="USA",
             help="Store region: USA or AU (default USA)",
         )
+        parser.add_argument(
+            "--save-html",
+            type=str,
+            default="",
+            metavar="PATH",
+            help="eBay only: write last HTML used for parsing to this path (debug/discount timing)",
+        )
 
     def handle(self, *args, **options):
         url = (options["url"] or "").strip()
@@ -30,6 +39,10 @@ class Command(BaseCommand):
             region = "USA"
 
         session = {}
+        save_html = (options.get("save_html") or "").strip()
+        if save_html:
+            session[SESSION_DEBUG_HTML_KEY] = save_html
+
         self.stdout.write(f"URL: {url}\nRegion: {region}\n")
         try:
             result = get_price_and_stock(url, region, session)
@@ -37,6 +50,8 @@ class Command(BaseCommand):
             close_amazon_session(session)
 
         self.stdout.write(self.style.SUCCESS(f"Result: {result}"))
+        if save_html:
+            self.stdout.write(f"eBay debug HTML path (if written): {save_html}")
         price = result.get("price")
         if price is None:
             self.stdout.write(

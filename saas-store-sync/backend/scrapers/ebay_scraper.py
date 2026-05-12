@@ -20,6 +20,7 @@ import json
 import time
 import random
 import logging
+from pathlib import Path
 from typing import Optional, Tuple, Dict
 from urllib.parse import urlparse
 
@@ -35,6 +36,8 @@ from .core import (
 )
 
 logger = logging.getLogger("scrapers.ebay")
+
+SESSION_DEBUG_HTML_KEY = "_debug_save_html_path"
 
 TIMEOUT_SEC = 45
 EBAY_HTTP_TIMEOUT_SEC = 25
@@ -180,6 +183,24 @@ def _ebay_home_origin_for_item_url(item_url: str) -> str:
 
 def _ebay_region_referer(region: str) -> str:
     return "https://www.ebay.com.au/" if region == "AU" else "https://www.ebay.com/"
+
+
+def _ebay_debug_write_html(session: Optional[dict], html: Optional[str], tag: str, candidate: str) -> None:
+    """If ``session[SESSION_DEBUG_HTML_KEY]`` is set, write raw HTML used for parsing (debug)."""
+    if not session or not html:
+        return
+    path = (session.get(SESSION_DEBUG_HTML_KEY) or "").strip()
+    if not path:
+        return
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        safe_url = (candidate or "")[:400].replace("--", "-")
+        header = f"<!-- ebay-debug tag={tag} url={safe_url} -->\n"
+        p.write_text(header + html, encoding="utf-8", errors="replace")
+        logger.info("eBay debug HTML (%s) wrote %s bytes to %s", tag, len(html), path)
+    except OSError as exc:
+        logger.warning("eBay debug HTML write failed: %s", exc)
 
 
 def _ebay_http_first_enabled(region: Optional[str]) -> bool:
@@ -974,6 +995,27 @@ class EbayDriver:
 
 class EbayBrowserSession:
     @staticmethod
+    def _settle_buy_box(driver) -> None:
+        """Scroll buy box into view and wait so promo / discounted rows can hydrate."""
+        from selenium.webdriver.common.by import By
+
+        selectors = (
+            "[data-testid='x-item-price']",
+            "[data-testid='x-price-primary']",
+            "[data-testid='x-bin-price']",
+            ".x-price-primary",
+        )
+        try:
+            for sel in selectors:
+                elems = driver.find_elements(By.CSS_SELECTOR, sel)
+                if elems:
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", elems[0])
+                    break
+        except Exception:
+            pass
+        time.sleep(2.0 + random.uniform(0.15, 0.55))
+
+    @staticmethod
     def _wait_until_product_or_stable_challenge(driver, timeout: int = PAGE_WAIT_TIMEOUT) -> str:
         from selenium.webdriver.common.by import By
         start = time.time()
@@ -995,6 +1037,7 @@ class EbayBrowserSession:
                 for locator in product_locators:
                     elems = driver.find_elements(*locator)
                     if elems:
+                        EbayBrowserSession._settle_buy_box(driver)
                         html = driver.page_source
                         if _looks_like_product_html(html):
                             return html
@@ -1006,7 +1049,8 @@ class EbayBrowserSession:
                 last_html = html
                 blocked, _ = _is_challenge_or_blocked(html)
                 if not blocked and _looks_like_product_html(html):
-                    return html
+                    EbayBrowserSession._settle_buy_box(driver)
+                    return driver.page_source
             except Exception:
                 pass
 
@@ -1028,6 +1072,11 @@ class EbayBrowserSession:
 
             driver.get(url)
             html = cls._wait_until_product_or_stable_challenge(driver, timeout=PAGE_WAIT_TIMEOUT)
+            try:
+                cls._settle_buy_box(driver)
+                html = driver.page_source or html
+            except Exception:
+                pass
 
             current_url = ""
             try:
@@ -1134,6 +1183,7 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
                 parsed = _parse_html_to_result(html, candidate)
                 if parsed is not None:
                     logger.info("eBay HTTP success for %s", candidate)
+                    _ebay_debug_write_html(session, html, "http_cold", candidate)
                     return parsed
 
             browser_html, browser_err = EbayBrowserSession.warm_and_fetch(candidate, eff_region, session)
@@ -1148,12 +1198,14 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
                 parsed = _parse_html_to_result(browser_html, candidate)
                 if parsed is not None:
                     logger.info("eBay Selenium HTML success for %s", candidate)
+                    _ebay_debug_write_html(session, browser_html, "selenium", candidate)
                     return parsed
 
             if html2 and not err2:
                 parsed = _parse_html_to_result(html2, candidate)
                 if parsed is not None:
                     logger.info("eBay cookie-handoff HTTP success for %s", candidate)
+                    _ebay_debug_write_html(session, html2, "http_cookie", candidate)
                     return parsed
 
             parts = [err2, browser_err, err]
