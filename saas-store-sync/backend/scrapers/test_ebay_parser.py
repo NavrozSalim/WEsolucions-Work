@@ -124,6 +124,21 @@ class TestEbayBuyNowDisplayPrice(unittest.TestCase):
         soup = BeautifulSoup(html, "lxml")
         self.assertEqual(EbayParser.extract_price(soup, html), 47.0)
 
+    def test_multiple_x_price_primary_min_wins(self):
+        """eBay can emit more than one x-price-primary; first may show reference, second headline."""
+        html = """<html><body>
+        <div data-testid="x-price-primary">
+          <span class="ux-textspans">AU $8.40</span>
+        </div>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">AU $7.00</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 7.0)
+
 
 class TestEbayPriceSuffix(unittest.TestCase):
     def test_strip_buy_it_now(self):

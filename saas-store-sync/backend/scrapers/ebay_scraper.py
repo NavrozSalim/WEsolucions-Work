@@ -482,19 +482,32 @@ class EbayParser:
 
     @classmethod
     def _ux_textspan_prices_in_subtree(cls, root) -> list[float]:
-        """Prices from ``span.ux-textspans`` under ``root`` (non-struck, not sponsored/merch)."""
+        """Prices from ``.ux-textspans`` and ``[itemprop=price]`` under ``root`` (non-struck, not noise)."""
         found: list[float] = []
         if root is None:
             return found
-        for span in root.select("span.ux-textspans"):
-            if cls._under_price_noise(span):
+        for el in root.select(".ux-textspans"):
+            if el.name not in ("span", "div", "p"):
                 continue
-            if cls._is_strikethrough_element(span):
+            if cls._under_price_noise(el):
                 continue
-            t = span.get_text(strip=True)
+            if cls._is_strikethrough_element(el):
+                continue
+            t = el.get_text(strip=True)
             if not t or len(t) > 120:
                 continue
             p = parse_price_text(_strip_price_suffix(t))
+            if p and 0.01 <= p < 999_999:
+                found.append(p)
+        for mp in root.select("[itemprop='price']"):
+            raw = (mp.get("content") or mp.get_text(strip=True) or "").strip()
+            if not raw:
+                continue
+            if cls._under_price_noise(mp):
+                continue
+            if cls._is_strikethrough_element(mp):
+                continue
+            p = parse_price_text(_strip_price_suffix(raw))
             if p and 0.01 <= p < 999_999:
                 found.append(p)
         return found
@@ -504,7 +517,7 @@ class EbayParser:
         """Headline BIN amounts: ``span.ux-textspans`` in primary BIN blocks (eBay AU layout).
 
         eBay shows the live price in ``<span class="ux-textspans">AU $35.00</span>``; skip struck rows.
-        If those wrappers are absent, fall back to ``span.ux-textspans`` under ``root`` (item price).
+        If those wrappers are absent, fall back to ``.ux-textspans`` under ``root`` (item price).
         """
         found: list[float] = []
         if root is None:
@@ -517,8 +530,10 @@ class EbayParser:
             if cls._under_price_noise(bloc):
                 continue
             bloc_prices: list[float] = []
-            spans = bloc.select("span.ux-textspans")
+            spans = bloc.select(".ux-textspans")
             for span in spans:
+                if span.name not in ("span", "div", "p"):
+                    continue
                 if cls._is_strikethrough_element(span):
                     continue
                 t = span.get_text(strip=True)
@@ -534,7 +549,9 @@ class EbayParser:
                 if p_whole and 0.01 <= p_whole < 999_999:
                     found.append(p_whole)
         if not found:
-            for span in root.select("span.ux-textspans"):
+            for span in root.select(".ux-textspans"):
+                if span.name not in ("span", "div", "p"):
+                    continue
                 if not cls._ux_span_outside_noise_regions(span):
                     continue
                 if cls._is_strikethrough_element(span):
@@ -550,28 +567,41 @@ class EbayParser:
     @classmethod
     def _buy_now_display_price(cls, soup: BeautifulSoup) -> Optional[float]:
         """Headline BIN: prefer main ``x-price-primary`` subtree, then BIN box, then item-price region."""
+        seen_primary: set[int] = set()
+        primary_cands: list[float] = []
         for sel in (
             "[data-testid='x-price-primary']",
             "[data-test-id='x-price-primary']",
             ".x-price-primary",
         ):
             for node in soup.select(sel):
+                nid = id(node)
+                if nid in seen_primary:
+                    continue
+                seen_primary.add(nid)
                 if cls._under_price_noise(node):
                     continue
-                cands = cls._ux_textspan_prices_in_subtree(node)
-                if cands:
-                    return min(cands)
+                primary_cands.extend(cls._ux_textspan_prices_in_subtree(node))
+        if primary_cands:
+            return min(primary_cands)
+
+        seen_bin: set[int] = set()
+        bin_cands: list[float] = []
         for sel in (
             "[data-testid='x-bin-price']",
             ".x-bin-price__content",
             ".x-bin-price",
         ):
             for node in soup.select(sel):
+                nid = id(node)
+                if nid in seen_bin:
+                    continue
+                seen_bin.add(nid)
                 if cls._under_price_noise(node):
                     continue
-                cands = cls._ux_textspan_prices_in_subtree(node)
-                if cands:
-                    return min(cands)
+                bin_cands.extend(cls._ux_textspan_prices_in_subtree(node))
+        if bin_cands:
+            return min(bin_cands)
 
         merged: list[float] = []
         seen: set[int] = set()
