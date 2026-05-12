@@ -518,6 +518,7 @@ class EbayParser:
 
         eBay shows the live price in ``<span class="ux-textspans">AU $35.00</span>``; skip struck rows.
         If those wrappers are absent, fall back to ``.ux-textspans`` under ``root`` (item price).
+        Bloc hits do not skip a full-root scan: promo amounts often live outside primary/BIN wrappers.
         """
         found: list[float] = []
         if root is None:
@@ -548,25 +549,25 @@ class EbayParser:
                 p_whole = cls._price_from_element(bloc)
                 if p_whole and 0.01 <= p_whole < 999_999:
                     found.append(p_whole)
-        if not found:
-            for span in root.select(".ux-textspans"):
-                if span.name not in ("span", "div", "p"):
-                    continue
-                if not cls._ux_span_outside_noise_regions(span):
-                    continue
-                if cls._is_strikethrough_element(span):
-                    continue
-                t = span.get_text(strip=True)
-                if not t or len(t) > 120:
-                    continue
-                p = parse_price_text(_strip_price_suffix(t))
-                if p and 0.01 <= p < 999_999:
-                    found.append(p)
+        # Always scan the full item-price root: sale lines often sit outside x-price-primary / x-bin-price.
+        for span in root.select(".ux-textspans"):
+            if span.name not in ("span", "div", "p"):
+                continue
+            if not cls._ux_span_outside_noise_regions(span):
+                continue
+            if cls._is_strikethrough_element(span):
+                continue
+            t = span.get_text(strip=True)
+            if not t or len(t) > 120:
+                continue
+            p = parse_price_text(_strip_price_suffix(t))
+            if p and 0.01 <= p < 999_999:
+                found.append(p)
         return found
 
     @classmethod
     def _buy_now_display_price(cls, soup: BeautifulSoup) -> Optional[float]:
-        """Headline BIN: min of prices in ``x-price-primary`` and BIN box (sale often only in BIN row)."""
+        """Headline BIN: min of primary, BIN row, and full item-price region (promo lines)."""
         seen_primary: set[int] = set()
         primary_cands: list[float] = []
         for sel in (
@@ -600,22 +601,18 @@ class EbayParser:
 
         # Promo / sale headline is often only under x-bin-price while x-price-primary still shows MSRP.
         headline = primary_cands + bin_cands
-        if headline:
-            return min(headline)
-
-        merged: list[float] = []
-        seen: set[int] = set()
+        seen_sec: set[int] = set()
         for sec_sel in cls._ITEM_PRICE_SECTION_SELECTORS:
             section = soup.select_one(sec_sel)
             if section is None:
                 continue
             sid = id(section)
-            if sid in seen:
+            if sid in seen_sec:
                 continue
-            seen.add(sid)
-            merged.extend(cls._collect_bin_price_candidates(section))
-        if merged:
-            return min(merged)
+            seen_sec.add(sid)
+            headline.extend(cls._collect_bin_price_candidates(section))
+        if headline:
+            return min(headline)
         return None
 
     @staticmethod
