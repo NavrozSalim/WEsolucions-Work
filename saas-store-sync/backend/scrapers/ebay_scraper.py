@@ -2,12 +2,12 @@
 Hardened eBay product scraper.
 
 Strategy:
-1) HTTP-first using curl_cffi (browser TLS). Non-AU: EBAY_HTTP_FIRST=1 (default 0 = Selenium warm first).
-   AU (ebay.com.au): HTTP-first by default (EBAY_AU_HTTP_FIRST=1 or unset and EBAY_HTTP_FIRST defaults on); set EBAY_AU_HTTP_FIRST=0 to disable.
-2) If blocked/challenged, use Selenium once to warm a real browser session.
+1) HTTP-first using curl_cffi (browser TLS) when enabled for the region.
+2) If blocked/challenged or HTTP-first off, use Selenium once to warm a real browser session.
 3) Export Selenium cookies + user-agent back into HTTP client.
 4) Retry HTTP using warmed cookies.
-5) Use Selenium DOM parse only as final fallback.
+5) **Parse listing from Selenium HTML before cookie-handoff HTTP** — HTTP often returns a thinner
+   shell (e.g. undiscounted BIN) while the browser DOM has the headline sale price.
 
 Public API:
     scrape_ebay(vendor_url, region, session=None) -> {"price": float|None, "stock": int|None, "title": str|None}
@@ -1141,16 +1141,19 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
                 last_browser_html = browser_html
 
             html2, status2, err2 = EbayHTTP.fetch(candidate, eff_region, session)
-            if html2 and not err2:
-                parsed = _parse_html_to_result(html2, candidate)
-                if parsed is not None:
-                    logger.info("eBay cookie-handoff HTTP success for %s", candidate)
-                    return parsed
 
+            # Prefer Selenium DOM over cookie-handoff HTTP: the HTTP response is often a thinner
+            # SSR shell (list / undiscounted BIN) while Chromium has the full buy box (sale price).
             if browser_html:
                 parsed = _parse_html_to_result(browser_html, candidate)
                 if parsed is not None:
                     logger.info("eBay Selenium HTML success for %s", candidate)
+                    return parsed
+
+            if html2 and not err2:
+                parsed = _parse_html_to_result(html2, candidate)
+                if parsed is not None:
+                    logger.info("eBay cookie-handoff HTTP success for %s", candidate)
                     return parsed
 
             parts = [err2, browser_err, err]
