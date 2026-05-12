@@ -186,6 +186,37 @@ class TestEbayBuyNowDisplayPrice(unittest.TestCase):
         soup = BeautifulSoup(html, "lxml")
         self.assertEqual(EbayParser.extract_price(soup, html), 7.0)
 
+    def test_item_model_json_numeric_buy_it_now_without_quotes(self):
+        """Preload may serialize ``value`` as a JSON number instead of a string."""
+        html = """<html><head>
+        <link rel="canonical" href="https://www.ebay.com.au/itm/Slug-Here/121819241814"/>
+        </head><body>
+        <script>{"itemId":"121819241814","buyItNowPrice":{"value":7}}</script>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">AU $8.40</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 7.0)
+
+    def test_item_model_json_skips_item_id_before_canonical(self):
+        """Use the first ``itemId`` at/after the canonical URL, not an earlier unrelated blob."""
+        html = """<html><head>
+        <script type="text/javascript">{"itemId":"121819241814","buyItNowPrice":{"value":"99.00"}}</script>
+        <link rel="canonical" href="https://www.ebay.com.au/itm/121819241814"/>
+        </head><body>
+        <script>{"itemId":"121819241814","buyItNowPrice":{"value":"7.00"}}</script>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">AU $8.40</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 7.0)
+
     def test_afterpay_installment_amount_skipped(self):
         """BNPL per-payment amounts must not become the headline BIN."""
         html = """<html><head>

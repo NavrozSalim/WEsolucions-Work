@@ -311,9 +311,13 @@ class EbayParser:
     # Tighter patterns for the item model chunk only (avoid unrelated "price" keys sitewide).
     ITEM_MODEL_PRICE_JSON_PATTERNS = (
         r'"buyItNowPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        r'"buyItNowPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)\s*[,}]',
         r'"binPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        r'"binPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)\s*[,}]',
         r'"currentPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        r'"currentPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)\s*[,}]',
         r'"discountedPrice"\s*:\s*\{\s*"value"\s*:\s*"([\d.]+)"',
+        r'"discountedPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)\s*[,}]',
         r'"finalPrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)',
     )
 
@@ -562,6 +566,8 @@ class EbayParser:
     @classmethod
     def _listing_item_id(cls, soup: BeautifulSoup, html: str) -> Optional[str]:
         """Numeric listing id from canonical / og:url / raw HTML (for scoped JSON extraction)."""
+        itm_re = re.compile(r"/itm/(?:[^/?#\"]+/)?(\d{10,})(?:[?#\"']|/|$)", re.IGNORECASE)
+
         for link in soup.find_all("link", rel=True):
             rel = link.get("rel")
             if isinstance(rel, (list, tuple)):
@@ -569,31 +575,75 @@ class EbayParser:
             else:
                 rel_l = (str(rel) if rel else "").lower()
             if "canonical" in rel_l and link.get("href"):
-                m = re.search(r"/itm/(\d{10,})", str(link["href"]))
+                m = itm_re.search(str(link["href"]))
                 if m:
                     return m.group(1)
         og = soup.find("meta", attrs={"property": "og:url"})
         if og and og.get("content"):
-            m = re.search(r"/itm/(\d{10,})", str(og["content"]))
+            m = itm_re.search(str(og["content"]))
             if m:
                 return m.group(1)
-        m = re.search(r"/itm/(\d{10,})", html or "")
+        m = itm_re.search(html or "")
         if m:
             return m.group(1)
         return None
+
+    _CANONICAL_OG_ITM_RE = re.compile(
+        r'(?:href|content)=["\']https?://(?:www\.)?ebay\.(?:com\.au|com|ca)/itm/(?:[^"\']*?/)?(\d{10,})(?:[?#][^"\']*)?["\']',
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _canonical_itm_index(cls, html: str, item_id: str) -> int:
+        """Byte offset of this listing's canonical / og URL (stable anchor vs stray ``itemId`` in recs JSON)."""
+        if not html or not item_id:
+            return -1
+        for m in cls._CANONICAL_OG_ITM_RE.finditer(html):
+            if m.group(1) == item_id:
+                return m.start()
+        return -1
+
+    @classmethod
+    def _item_id_marker_positions(cls, html: str, item_id: str) -> list[int]:
+        """All offsets of this listing id inside JSON-like blobs."""
+        needles = (
+            f'"itemId":"{item_id}"',
+            f'"itemId":{item_id}',
+            f'"legacyItemId":"{item_id}"',
+            f'"legacyItemId":{item_id}',
+        )
+        pos: set[int] = set()
+        for needle in needles:
+            start = 0
+            while True:
+                j = html.find(needle, start)
+                if j < 0:
+                    break
+                pos.add(j)
+                start = j + 1
+        return sorted(pos)
+
+    @classmethod
+    def _item_model_json_anchor_index(cls, html: str, item_id: str) -> int:
+        """Prefer ``itemId`` for this listing in the main model (first match at/after canonical URL)."""
+        positions = cls._item_id_marker_positions(html, item_id)
+        if not positions:
+            return -1
+        cidx = cls._canonical_itm_index(html, item_id)
+        if cidx < 0:
+            return positions[0]
+        after = [p for p in positions if p >= cidx]
+        return min(after) if after else positions[0]
 
     @classmethod
     def _item_model_json_price_candidates(cls, html: str, item_id: Optional[str]) -> list[float]:
         """BIN-related amounts from the preloaded item model near ``itemId`` (seller discounts often only here)."""
         if not html or not item_id:
             return []
-        for needle in (f'"itemId":"{item_id}"', f'"itemId":{item_id}'):
-            idx = html.find(needle)
-            if idx >= 0:
-                break
-        else:
+        idx = cls._item_model_json_anchor_index(html, item_id)
+        if idx < 0:
             return []
-        chunk = html[max(0, idx - 8000) : idx + 240_000]
+        chunk = html[max(0, idx - 12_000) : idx + 320_000]
         found: list[float] = []
         for pat in cls.ITEM_MODEL_PRICE_JSON_PATTERNS:
             for m in re.finditer(pat, chunk):
@@ -1150,22 +1200,45 @@ class EbayBrowserSession:
     def _settle_buy_box(driver) -> None:
         """Scroll buy box into view and wait so promo / discounted rows can hydrate."""
         from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
 
-        selectors = (
+        settle_selectors = (
             "[data-testid='x-item-price']",
+            "section.x-item-price",
+            "[data-testid='x-price-view']",
             "[data-testid='x-price-primary']",
             "[data-testid='x-bin-price']",
             ".x-price-primary",
         )
+        for css in settle_selectors[:3]:
+            try:
+                WebDriverWait(driver, 12).until(
+                    EC.visibility_of_element_located((By.CSS_SELECTOR, css))
+                )
+                break
+            except Exception:
+                continue
         try:
-            for sel in selectors:
+            for sel in settle_selectors:
                 elems = driver.find_elements(By.CSS_SELECTOR, sel)
                 if elems:
                     driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", elems[0])
                     break
         except Exception:
             pass
-        time.sleep(2.5 + random.uniform(0.2, 0.75))
+        time.sleep(1.0 + random.uniform(0.1, 0.35))
+        try:
+            WebDriverWait(driver, 5).until(
+                lambda d: len(d.find_elements(By.CSS_SELECTOR, "[data-testid='x-item-price'] .ux-textspans"))
+                >= 1
+                or len(d.find_elements(By.CSS_SELECTOR, "[data-testid='x-bin-price'] .ux-textspans")) >= 1
+                or len(d.find_elements(By.CSS_SELECTOR, "[data-testid='x-price-primary'] .ux-textspans"))
+                >= 1
+            )
+        except Exception:
+            pass
+        time.sleep(1.8 + random.uniform(0.2, 0.65))
 
     @staticmethod
     def _wait_until_product_or_stable_challenge(driver, timeout: int = PAGE_WAIT_TIMEOUT) -> str:
@@ -1173,11 +1246,18 @@ class EbayBrowserSession:
         start = time.time()
         last_html = ""
 
-        product_locators = [
-            (By.CSS_SELECTOR, "[data-testid='x-price-primary']"),
+        # Prefer the full item price module for the first few seconds — ``x-price-primary`` alone
+        # often exists before discounted rows / BIN sale lines hydrate.
+        preferred_locators = [
+            (By.CSS_SELECTOR, "[data-testid='x-item-price']"),
+            (By.CSS_SELECTOR, "section.x-item-price"),
+            (By.CSS_SELECTOR, "[data-testid='x-price-view']"),
             (By.CSS_SELECTOR, "[data-testid='x-bin-price']"),
-            (By.CSS_SELECTOR, ".x-price-primary"),
             (By.CSS_SELECTOR, ".x-bin-price"),
+        ]
+        late_locators = [
+            (By.CSS_SELECTOR, "[data-testid='x-price-primary']"),
+            (By.CSS_SELECTOR, ".x-price-primary"),
             (By.CSS_SELECTOR, "h1.x-item-title"),
             (By.CSS_SELECTOR, "[data-testid='x-item-title']"),
             (By.CSS_SELECTOR, "span[itemprop='price']"),
@@ -1186,7 +1266,9 @@ class EbayBrowserSession:
 
         while time.time() - start < timeout:
             try:
-                for locator in product_locators:
+                elapsed = time.time() - start
+                locators = preferred_locators + (late_locators if elapsed >= 8.0 else [])
+                for locator in locators:
                     elems = driver.find_elements(*locator)
                     if elems:
                         EbayBrowserSession._settle_buy_box(driver)
@@ -1199,10 +1281,18 @@ class EbayBrowserSession:
             try:
                 html = driver.page_source
                 last_html = html
+                lower = html.lower()
                 blocked, _ = _is_challenge_or_blocked(html)
                 if not blocked and _looks_like_product_html(html):
-                    EbayBrowserSession._settle_buy_box(driver)
-                    return driver.page_source
+                    elapsed = time.time() - start
+                    has_item_price = (
+                        'data-testid="x-item-price"' in lower
+                        or "data-testid='x-item-price'" in lower
+                        or "x-item-price" in lower
+                    )
+                    if has_item_price or elapsed >= 8.0:
+                        EbayBrowserSession._settle_buy_box(driver)
+                        return driver.page_source
             except Exception:
                 pass
 
