@@ -5,7 +5,36 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 
 from scrapers.core import parse_price_text
-from scrapers.ebay_scraper import EbayParser, _strip_price_suffix
+from scrapers.ebay_scraper import (
+    EbayParser,
+    _effective_ebay_region,
+    _normalize_url,
+    _strip_price_suffix,
+)
+
+
+class TestNormalizeUrl(unittest.TestCase):
+    def test_au_hostname_wins_over_usa_region(self):
+        u = "https://www.ebay.com.au/itm/Some-Title/123456789012"
+        self.assertEqual(
+            _normalize_url(u, "USA"),
+            "https://www.ebay.com.au/itm/123456789012",
+        )
+
+    def test_au_region_promotes_com_to_au(self):
+        u = "https://www.ebay.com/itm/123456789012"
+        self.assertEqual(
+            _normalize_url(u, "AU"),
+            "https://www.ebay.com.au/itm/123456789012",
+        )
+
+
+class TestEffectiveEbayRegion(unittest.TestCase):
+    def test_normalized_au_url_forces_au(self):
+        self.assertEqual(
+            _effective_ebay_region("USA", "https://www.ebay.com.au/itm/1"),
+            "AU",
+        )
 
 
 class TestEbayPriceSuffix(unittest.TestCase):

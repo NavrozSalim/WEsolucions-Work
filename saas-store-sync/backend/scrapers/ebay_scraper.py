@@ -115,7 +115,10 @@ def _normalize_url(original_url: str, region: str) -> str:
     if not item_id:
         return original_url
 
-    if region == "AU":
+    orig_lower = (original_url or "").lower()
+    if "ebay.com.au" in orig_lower:
+        return f"https://www.ebay.com.au/itm/{item_id}"
+    if (region or "").strip().upper() == "AU":
         return f"https://www.ebay.com.au/itm/{item_id}"
     return f"https://www.ebay.com/itm/{item_id}"
 
@@ -141,6 +144,13 @@ def _to_ebay_ca_url(url: str) -> str:
         return url
 
     return f"https://www.ebay.ca/itm/{item_id}"
+
+
+def _effective_ebay_region(region: str, normalized_url: str) -> str:
+    """Use AU cookies/referer/HTTP-first when the scrape target is ebay.com.au."""
+    if "ebay.com.au" in (normalized_url or "").lower():
+        return "AU"
+    return (region or "").strip().upper() or "USA"
 
 
 def _strip_price_suffix(text: str) -> str:
@@ -808,12 +818,15 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
         session = {}
 
     url = _normalize_url(vendor_url, region)
-    ca_url = _to_ebay_ca_url(url)
-    candidate_urls = [url]
-    if ca_url != url:
-        candidate_urls.append(ca_url)
+    eff_region = _effective_ebay_region(region, url)
 
-    if (region or "").strip().upper() == "AU":
+    candidate_urls = [url]
+    if "ebay.com.au" not in url.lower():
+        ca_url = _to_ebay_ca_url(url)
+        if ca_url != url:
+            candidate_urls.append(ca_url)
+
+    if eff_region == "AU":
         random_delay(0.25, 0.7)
     else:
         random_delay(0.4, 1.2)
@@ -829,8 +842,8 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
         for candidate in try_urls:
             logger.info("eBay scrape attempt=%s url=%s", attempt + 1, candidate)
 
-            if _ebay_http_first_enabled(region):
-                html, status, err = EbayHTTP.fetch(candidate, region, session)
+            if _ebay_http_first_enabled(eff_region):
+                html, status, err = EbayHTTP.fetch(candidate, eff_region, session)
             else:
                 html, status, err = None, None, "http_skipped"
 
@@ -840,11 +853,11 @@ def scrape_ebay(vendor_url: str, region: str, session: dict = None) -> dict:
                     logger.info("eBay HTTP success for %s", candidate)
                     return parsed
 
-            browser_html, browser_err = EbayBrowserSession.warm_and_fetch(candidate, region, session)
+            browser_html, browser_err = EbayBrowserSession.warm_and_fetch(candidate, eff_region, session)
             if browser_html:
                 last_browser_html = browser_html
 
-            html2, status2, err2 = EbayHTTP.fetch(candidate, region, session)
+            html2, status2, err2 = EbayHTTP.fetch(candidate, eff_region, session)
             if html2 and not err2:
                 parsed = _parse_html_to_result(html2, candidate)
                 if parsed is not None:
