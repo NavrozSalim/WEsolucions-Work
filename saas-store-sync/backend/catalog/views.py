@@ -131,6 +131,8 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         store_id = self.kwargs.get('store_pk')
+        if not store_id:
+            return ProductMapping.objects.none()
         latest_vp = VendorPrice.objects.filter(
             product=OuterRef('product_id')
         ).order_by('-scraped_at')
@@ -710,6 +712,34 @@ class CatalogScrapeTriggerView(APIView):
         """Backward-compat shim for the HEB-specific helper."""
         return cls._maybe_enqueue_vendor_job(store, user, 'heb')
 
+    @staticmethod
+    def _reject_if_server_scrape_active(store) -> Response | None:
+        """Block a second server-side catalog scrape while one is queued/running (same store).
+
+        If Celery state was left behind with no worker start for 30+ minutes, clear it
+        and allow a new scrape (recovery from crashed worker).
+        """
+        from datetime import timedelta
+
+        st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
+        if not st:
+            return None
+        now = timezone.now()
+        if st.first_worker_started_at is None and (now - st.enqueued_at) > timedelta(minutes=30):
+            clear_celery_scrape_state(str(store.id))
+            return None
+        return Response(
+            {
+                'error': 'catalog_scrape_already_running',
+                'detail': (
+                    'A vendor scrape is already queued or running for this store. Wait for it '
+                    'to finish, check Activity, or use Stop scraping and try again.'
+                ),
+                'active_task_id': (st.root_task_id or '')[:128],
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
     def post(self, request, store_pk):
         from catalog.activity_log import append_catalog_log
         from catalog.tasks import (
@@ -719,6 +749,15 @@ class CatalogScrapeTriggerView(APIView):
             run_store_wide_catalog_scrape,
         )
         store = get_object_or_404(Store, id=store_pk, user=request.user)
+        dup = self._reject_if_server_scrape_active(store)
+        if dup is not None:
+            append_catalog_log(
+                store.id,
+                'Vendor scrape not started: one is already queued or running for this store.',
+                action_type='scrape_rejected_duplicate',
+                user_id=request.user.id,
+            )
+            return dup
         append_catalog_log(
             store.id,
             'You requested a vendor scrape from the catalog page.',
@@ -1379,6 +1418,13 @@ class CatalogScrapeProgressView(APIView):
             # from here so adding another vendor doesn't touch this endpoint.
             'vendors': vendors_payload,
             'checked_at': now.isoformat(),
+            'ui_hints': {
+                'scheduled_updates_other_stores': (
+                    'Each store can have its own automatic update schedule. When several are '
+                    'due at the same time, they may all show activity in logs — that is separate '
+                    'from a catalog scrape you start on this page.'
+                ),
+            },
             },
             headers={'Cache-Control': 'no-store, max-age=0, private'},
         )

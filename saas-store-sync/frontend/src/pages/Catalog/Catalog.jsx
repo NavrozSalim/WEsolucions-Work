@@ -648,6 +648,8 @@ export default function Catalog() {
     const productsFetchGenRef = useRef(0);
     /** When store / search / status filter change, clear rows; page-only changes keep prior rows (stale-while-revalidate). */
     const productsListBaseKeyRef = useRef('');
+    /** Increments each merged live poll (used to throttle store-list refetch). */
+    const livePollBurstRef = useRef(0);
     const [exportScope, setExportScope] = useState('all');
     const [exportDownloading, setExportDownloading] = useState(false);
     const [manualPushLoading, setManualPushLoading] = useState(false);
@@ -715,9 +717,12 @@ export default function Catalog() {
             .catch(() => { /* silent — next scheduled re-fetch will retry */ });
     }, [selectedStore, viewMode, currentPage, debouncedSearch, statusFilter]);
 
-    const refreshLiveData = useCallback(() => {
+    const refreshLiveData = useCallback((opts = {}) => {
         if (!selectedStore) return;
-        getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
+        const skipStores = Boolean(opts.skipStores);
+        if (!skipStores) {
+            getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
+        }
         getCatalogUploads(selectedStore)
             .then((r) => setUploads(Array.isArray(r.data) ? r.data : []))
             .catch(() => {});
@@ -941,22 +946,43 @@ export default function Catalog() {
         if (!selectedStore) return undefined;
         const activeFlow = flowStatus === 'syncing' || flowStatus === 'scraping';
         const inGraceWindow = liveRefreshUntil > Date.now();
-        // Poll stores/uploads/products only during sync/scrape, desktop-runner
-        // tracking, or a short post-success grace window — not on every idle
-        // Products tab (avoids hammering the API every few seconds).
+        // Single interval: scrape progress + catalog data. Wider spacing and throttled
+        // store-list refetch reduce UI/API load while workers are busy.
         const needsLivePolling = activeFlow || inGraceWindow || trackingScrape || trackingServerScrape;
         if (!needsLivePolling) return undefined;
 
-        refreshLiveData();
-        const intervalId = setInterval(refreshLiveData, 12000);
-        let timeoutId = null;
+        let cancelled = false;
+        let graceTimeoutId = null;
+
+        const poll = () => {
+            if (cancelled) return;
+            const storeId = selectedStore;
+            livePollBurstRef.current += 1;
+            const burst = livePollBurstRef.current;
+            getScrapeProgress(storeId)
+                .then((res) => {
+                    if (cancelled) return;
+                    const data = res.data || null;
+                    if (data?.store_id && data.store_id !== storeId) return;
+                    setScrapeProgress(data);
+                })
+                .catch(() => { /* transient — retry next tick */ });
+            refreshLiveData({ skipStores: burst % 4 !== 0 });
+        };
+
+        poll();
+        const intervalId = setInterval(poll, 20000);
         if (!activeFlow && !trackingScrape && !trackingServerScrape && inGraceWindow) {
-            timeoutId = setTimeout(() => clearInterval(intervalId), Math.max(0, liveRefreshUntil - Date.now()));
+            graceTimeoutId = setTimeout(() => {
+                cancelled = true;
+                clearInterval(intervalId);
+            }, Math.max(0, liveRefreshUntil - Date.now()));
         }
 
         return () => {
+            cancelled = true;
             clearInterval(intervalId);
-            if (timeoutId) clearTimeout(timeoutId);
+            if (graceTimeoutId) clearTimeout(graceTimeoutId);
         };
     }, [selectedStore, flowStatus, liveRefreshUntil, trackingScrape, trackingServerScrape, refreshLiveData]);
 
@@ -978,34 +1004,6 @@ export default function Catalog() {
             .catch(() => { /* ignore */ });
         return () => { cancelled = true; };
     }, [selectedStore, viewMode]);
-
-    // Poll scrape-progress on a slower cadence only while sync/scrape, tracking, or grace window.
-    useEffect(() => {
-        if (!selectedStore) return undefined;
-        const activeFlow = flowStatus === 'syncing' || flowStatus === 'scraping';
-        const inGraceWindow = liveRefreshUntil > Date.now();
-        const shouldPoll = activeFlow || trackingScrape || trackingServerScrape || inGraceWindow;
-        if (!shouldPoll) return undefined;
-
-        let cancelled = false;
-        const fetchOnce = () => {
-            const storeId = selectedStore;
-            getScrapeProgress(storeId)
-                .then((res) => {
-                    if (cancelled) return;
-                    const data = res.data || null;
-                    if (data?.store_id && data.store_id !== storeId) return;
-                    setScrapeProgress(data);
-                })
-                .catch(() => { /* transient — just ignore and retry */ });
-        };
-        fetchOnce();
-        const intervalId = setInterval(fetchOnce, 12000);
-        return () => {
-            cancelled = true;
-            clearInterval(intervalId);
-        };
-    }, [selectedStore, flowStatus, trackingScrape, trackingServerScrape, liveRefreshUntil]);
 
     // Auto-stop tracking when every desktop-runner vendor the store uses has
     // either completed, failed, been cancelled, or has no pending rows left.
@@ -1175,7 +1173,7 @@ export default function Catalog() {
             const speed = tick < 5 ? 0.02 : tick < 20 ? 0.008 : tick < 60 ? 0.003 : 0.001;
             p += (95 - p) * speed;
             setProgress(Math.min(Math.round(p), 95));
-        }, 500);
+        }, 1800);
     }, []);
 
     const finishProgress = useCallback((success = true) => {
@@ -1372,6 +1370,23 @@ export default function Catalog() {
                     return finishKickoffAndSyncProgress(ok, proc);
                 })
                 .catch((err) => {
+                    if (err.response?.status === 409) {
+                        finishProgress(false);
+                        setFlowStatus('');
+                        const d = err.response?.data || {};
+                        const detail = typeof d.detail === 'string' ? d.detail : '';
+                        setMessage(
+                            detail
+                                || (d.error === 'catalog_scrape_already_running'
+                                    ? 'A vendor scrape is already running for this store. Wait for it to finish or use Stop scraping.'
+                                    : formatCatalogError(err)),
+                        );
+                        setTrackingScrape(false);
+                        setTrackingServerScrape(false);
+                        trackingScrapeRef.current = false;
+                        trackingServerScrapeRef.current = false;
+                        return Promise.resolve();
+                    }
                     const isNetworkError = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
                     const scheduleRetry = () => {
                         setMessage(`Connection issue — trying again (${attempt + 1} of ${MAX_RETRIES})… Your price check is still running in the background.`);

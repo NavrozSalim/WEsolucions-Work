@@ -67,6 +67,15 @@ try:
 except ValueError:
     CATALOG_SCRAPE_RESUME_AFTER_STOP_SECONDS = 600
 
+# No server-scrapable listing leaves ``pending`` for this many minutes → stall (see ``catalog.tasks``).
+# Wider default reduces false stops on slow vendor pages; clamp 5–120 in code.
+try:
+    CATALOG_SCRAPE_STALL_MINUTES = max(
+        5, min(120, int(os.getenv('CATALOG_SCRAPE_STALL_MINUTES', '20'))),
+    )
+except ValueError:
+    CATALOG_SCRAPE_STALL_MINUTES = 20
+
 if DEBUG:
     ALLOWED_HOSTS = _env_list('ALLOWED_HOSTS', 'localhost,127.0.0.1,backend')
 else:

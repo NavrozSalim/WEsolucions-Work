@@ -16,7 +16,14 @@ logger = logging.getLogger(__name__)
 # If no server-scrapable listing leaves ``pending`` (scraped or failed) within this
 # window, assume the scraper is stuck and stop early. Ingest-only rows do not
 # count — the timer starts on the first non-ingest pending row.
-SCRAPER_STALL_NO_PENDING_PROGRESS = timedelta(minutes=10)
+def _stall_no_pending_timedelta() -> timedelta:
+    """Wall time without moving a server-scrapable row off ``pending`` before we stop early."""
+    try:
+        m = int(getattr(settings, 'CATALOG_SCRAPE_STALL_MINUTES', 20) or 20)
+    except (TypeError, ValueError):
+        m = 20
+    m = max(5, min(120, m))
+    return timedelta(minutes=m)
 
 from .celery_scrape_state import mark_celery_scrape_worker_started, should_abort_celery_scrape
 from .models import (
@@ -544,20 +551,20 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
             now_ts = timezone.now()
             if last_progress_at is None:
                 last_progress_at = now_ts
-            elif now_ts - last_progress_at > SCRAPER_STALL_NO_PENDING_PROGRESS:
+            elif now_ts - last_progress_at > _stall_no_pending_timedelta():
                 stalled_out = True
                 logger.warning(
                     'Catalog scrape stalled for upload %s store %s: no listing left Pending '
                     'within %s.',
                     upload_id,
                     store.id,
-                    SCRAPER_STALL_NO_PENDING_PROGRESS,
+                    _stall_no_pending_timedelta(),
                 )
                 if emit_stall_log:
                     append_catalog_log(
                         store.id,
                         f'Vendor scrape stopped early: nothing moved off Pending for '
-                        f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes '
+                        f'{int(_stall_no_pending_timedelta().total_seconds() // 60)} minutes '
                         f'(scraper may be hung or blocked). Remaining rows stay Pending.',
                         action_type='scrape_stalled',
                         metadata={'upload_id': str(upload_id), 'scope': 'upload'},
@@ -715,7 +722,7 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
     When nothing is left pending, this run simply finishes (no further passes).
 
     If no server-scraped listing leaves ``pending`` within
-    ``SCRAPER_STALL_NO_PENDING_PROGRESS`` (10 minutes), the run stops early;
+    ``CATALOG_SCRAPE_STALL_MINUTES`` (default 20), the run stops early;
     ingest-only rows do not start that timer until the first live-scrape row.
 
     When *parallel* is True (Celery entrypoint) and ``CATALOG_SCRAPE_CHUNK_SIZE`` > 0 and
@@ -822,7 +829,7 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
             else ScrapeRun.Status.FAILED
         )
         run.error_summary = (
-            f'Stalled: no listing left Pending within {int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+            f'Stalled: no listing left Pending within {int(_stall_no_pending_timedelta().total_seconds() // 60)} minutes.'
         )
     else:
         run.status = ScrapeRun.Status.FAILED if succeeded == 0 and run.rows_processed > 0 else (
@@ -848,7 +855,7 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
     if stalled_out:
         finish_msg += (
             f' Stopped early: no progress moving listings off Pending for '
-            f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+            f'{int(_stall_no_pending_timedelta().total_seconds() // 60)} minutes.'
         )
     if user_cancelled:
         append_catalog_log(
@@ -978,7 +985,7 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
                 else ScrapeRun.Status.FAILED
             )
             run.error_summary = (
-                f'Stalled: no listing left Pending within {int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+                f'Stalled: no listing left Pending within {int(_stall_no_pending_timedelta().total_seconds() // 60)} minutes.'
             )
         else:
             run.status = ScrapeRun.Status.FAILED if succeeded == 0 and rows_processed > 0 else (
@@ -993,7 +1000,7 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
         if stalled_out:
             finish_msg += (
                 f' Stopped early: no progress moving listings off Pending for '
-                f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+                f'{int(_stall_no_pending_timedelta().total_seconds() // 60)} minutes.'
             )
         if user_cancelled:
             finish_msg += ' Stopped because you clicked Stop.'
@@ -1078,11 +1085,11 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
             now_ts = timezone.now()
             if last_progress_at is None:
                 last_progress_at = now_ts
-            elif now_ts - last_progress_at > SCRAPER_STALL_NO_PENDING_PROGRESS:
+            elif now_ts - last_progress_at > _stall_no_pending_timedelta():
                 stalled_out = True
                 stall_msg = (
                     f'no listing left Pending within '
-                    f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes'
+                    f'{int(_stall_no_pending_timedelta().total_seconds() // 60)} minutes'
                 )
                 logger.warning(
                     'Store-wide scrape stalled for store %s: %s.',
@@ -1315,7 +1322,7 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> d
     if stalled_out:
         end_msg += (
             f' Stopped early: no progress moving listings off Pending for '
-            f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+            f'{int(_stall_no_pending_timedelta().total_seconds() // 60)} minutes.'
         )
     if user_cancelled:
         append_catalog_log(
@@ -1437,7 +1444,7 @@ def catalog_scrape_store_finalize(results, store_id: str):
         if stalled_out:
             end_msg += (
                 f' Stopped early: no progress moving listings off Pending for '
-                f'{int(SCRAPER_STALL_NO_PENDING_PROGRESS.total_seconds() // 60)} minutes.'
+                f'{int(_stall_no_pending_timedelta().total_seconds() // 60)} minutes.'
             )
         if user_cancelled:
             end_msg += ' Stopped because you clicked Stop.'

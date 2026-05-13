@@ -548,10 +548,13 @@ def run_store_sync(self, store_id):
 
 
 @shared_task(bind=True, max_retries=3)
-def run_store_update(self, store_id):
+def run_store_update(self, store_id, source='beat'):
     """
     Full scheduled update: scrape vendor prices, apply rules, push to marketplace.
     Called by scheduled jobs and manual "Update now".
+
+    ``source`` is ``beat`` when Celery Beat enqueues the job, ``manual`` when the user
+    triggers an update from the sync API — used for clearer per-store activity logs.
     """
     import logging
     logger = logging.getLogger(__name__)
@@ -569,6 +572,31 @@ def run_store_update(self, store_id):
     if store.connection_status != 'connected':
         logger.warning("Store %s not connected, skipping update", store.name)
         return {'store_id': str(store_id), 'skipped': True, 'reason': 'not_connected'}
+
+    if source == 'beat':
+        try:
+            from catalog.activity_log import append_catalog_log
+
+            append_catalog_log(
+                store.id,
+                'Scheduled automatic update started (vendor scrape + marketplace push).',
+                action_type='scheduled_sync_start',
+                metadata={'source': 'beat'},
+            )
+        except Exception:
+            logger.exception('append_catalog_log failed for scheduled_sync_start')
+    elif source == 'manual':
+        try:
+            from catalog.activity_log import append_catalog_log
+
+            append_catalog_log(
+                store.id,
+                'Manual marketplace update started from your store sync page.',
+                action_type='manual_update_start',
+                metadata={'source': 'manual'},
+            )
+        except Exception:
+            logger.exception('append_catalog_log failed for manual_update_start')
 
     now = timezone.now()
     sync_run = StoreSyncRun.objects.create(store=store, status='running')
@@ -943,8 +971,19 @@ def check_scheduled_updates():
                     is_due = False
 
         if is_due:
-            logger.info("Enqueuing scheduled update for store %s", sched.store.name)
-            run_store_update.delay(str(sched.store_id))
+            import hashlib
+
+            h = int(hashlib.md5(str(sched.store_id).encode('utf-8')).hexdigest()[:8], 16)
+            countdown = h % 30
+            logger.info(
+                "Enqueuing scheduled update for store %s (countdown=%ss)",
+                sched.store.name,
+                countdown,
+            )
+            run_store_update.apply_async(
+                args=[str(sched.store_id), 'beat'],
+                countdown=countdown,
+            )
 
 
 def _crontab_matches(sched, now_local):

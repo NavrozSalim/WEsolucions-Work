@@ -106,12 +106,12 @@ class TriggerManualUpdateView(APIView):
 
         if run_inline:
             from sync.tasks import run_store_update
-            result = run_store_update(str(store.pk))
+            result = run_store_update(str(store.pk), 'manual')
             return Response(result, status=status.HTTP_200_OK)
 
         try:
             from sync.tasks import run_store_update
-            async_result = run_store_update.delay(str(store.pk))
+            async_result = run_store_update.delay(str(store.pk), 'manual')
         except Exception as e:
             detail = str(e)
             if "redis" in detail.lower() or "connection" in detail.lower():
@@ -120,7 +120,7 @@ class TriggerManualUpdateView(APIView):
                     "Start Redis + worker for background jobs."
                 )
                 from sync.tasks import run_store_update
-                result = run_store_update(str(store.pk))
+                result = run_store_update(str(store.pk), 'manual')
                 return Response(result, status=status.HTTP_200_OK)
             return Response({"detail": detail}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
