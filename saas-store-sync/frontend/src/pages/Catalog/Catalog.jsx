@@ -1236,6 +1236,7 @@ export default function Catalog() {
             return triggerCatalogSync(selectedStore, false, uploadId, { autoScrape: false })
                 .then((res) => {
                 const added = res?.data?.added ?? 0;
+                const updated = res?.data?.updated ?? 0;
                 const scrape = res?.data?.scrape;
                 let scrapeMsg = '';
                 if (scrape && !scrape.error && !scrape.skipped) {
@@ -1249,9 +1250,11 @@ export default function Catalog() {
                 }
                 finishProgress(true);
                 setFlowStatus('success');
-                setMessage(
-                    (added > 0 ? `Sync complete. ${added} product(s) created.` : 'Sync complete.') + scrapeMsg,
-                );
+                const parts = [];
+                if (added > 0) parts.push(`${added} new listing(s) created`);
+                if (updated > 0) parts.push(`${updated} existing listing(s) updated`);
+                const summary = parts.length > 0 ? `Sync complete. ${parts.join('; ')}.` : 'Sync complete.';
+                setMessage(summary + scrapeMsg);
                 getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
                 })

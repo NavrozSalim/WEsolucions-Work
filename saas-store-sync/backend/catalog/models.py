@@ -62,6 +62,11 @@ class ProductMapping(models.Model):
             ),
         ]
         indexes = [
+            # Must match migration 0023 so ``makemigrations --check`` stays clean.
+            models.Index(
+                fields=['store', 'is_active', 'sync_status'],
+                name='catalog_pm_store_act_sync',
+            ),
             models.Index(
                 fields=['store', 'is_active', 'marketplace_child_sku'],
                 name='cat_pm_st_act_mcsku',
@@ -458,7 +463,9 @@ class StoreCatalogCeleryScrapeState(models.Model):
     first_worker_started_at = models.DateTimeField(
         null=True,
         blank=True,
-        help_text='First time a worker began processing rows; null means queued only.',
+        help_text=(
+            'Set when a worker first begins scraping rows; until then the job is only queued.'
+        ),
     )
     enqueued_at = models.DateTimeField(auto_now_add=True)
 
