@@ -644,6 +644,8 @@ export default function Catalog() {
     const [currentPage, setCurrentPage] = useState(1);
     const PRODUCTS_PER_PAGE = 25;
     const [totalProductCount, setTotalProductCount] = useState(0);
+    /** Bumped after catalog sync so the Products tab refetches (even if you stayed on this tab). */
+    const [catalogMutationNonce, setCatalogMutationNonce] = useState(0);
     const [debouncedSearch, setDebouncedSearch] = useState('');
     const productsFetchGenRef = useRef(0);
     /** When store / search / status filter change, clear rows; page-only changes keep prior rows (stale-while-revalidate). */
@@ -806,7 +808,6 @@ export default function Catalog() {
         const gen = ++productsFetchGenRef.current;
         const ac = new AbortController();
         setProductsFetching(true);
-        setMessage('');
         getProducts(selectedStore, {
             page: currentPage,
             pageSize: PRODUCTS_PER_PAGE,
@@ -830,7 +831,7 @@ export default function Catalog() {
                 if (gen === productsFetchGenRef.current) setProductsFetching(false);
             });
         return () => ac.abort();
-    }, [selectedStore, viewMode, currentPage, debouncedSearch, statusFilter]);
+    }, [selectedStore, viewMode, currentPage, debouncedSearch, statusFilter, catalogMutationNonce]);
 
     useEffect(() => {
         if (!selectedStore || viewMode !== 'logs') return;
@@ -1254,9 +1255,18 @@ export default function Catalog() {
                 if (added > 0) parts.push(`${added} new listing(s) created`);
                 if (updated > 0) parts.push(`${updated} existing listing(s) updated`);
                 const summary = parts.length > 0 ? `Sync complete. ${parts.join('; ')}.` : 'Sync complete.';
-                setMessage(summary + scrapeMsg);
+                setMessage(
+                    `${summary}${scrapeMsg} `
+                    + 'The product list shows every active listing for this store (new and updated rows from the file). '
+                    + 'Use Start Scraping when price columns show “—”.',
+                );
                 getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
+                setSearch('');
+                setDebouncedSearch('');
+                setStatusFilter('');
+                setCurrentPage(1);
+                setCatalogMutationNonce((n) => n + 1);
                 })
                 .catch((err) => {
                     const isNetErr = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
