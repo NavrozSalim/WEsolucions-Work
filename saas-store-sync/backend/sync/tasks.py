@@ -260,6 +260,38 @@ def _get_inventory_for_vendor(store, vendor_id):
         return StoreVendorInventorySettings.objects.filter(store=store).first()
 
 
+def _build_store_vendor_pricing_inventory_caches(store):
+    """Load per-store vendor pricing/inventory settings once per job.
+
+    Calling ``_get_pricing_for_vendor`` / ``_get_inventory_for_vendor`` inside
+    tight loops issues two queries per listing; at 100k+ rows/day that dominates
+    DB time. Snapshots are consistent for one run (same as repeated get()).
+    """
+    prices = list(StoreVendorPriceSettings.objects.filter(store=store))
+    price_by_vendor_id = {p.vendor_id: p for p in prices}
+    price_fallback = prices[0] if prices else None
+    invs = list(StoreVendorInventorySettings.objects.filter(store=store))
+    inv_by_vendor_id = {i.vendor_id: i for i in invs}
+    inv_fallback = invs[0] if invs else None
+    return price_by_vendor_id, price_fallback, inv_by_vendor_id, inv_fallback
+
+
+def _get_pricing_for_vendor_from_cache(vendor_id, price_by_vendor_id, price_fallback):
+    if not price_by_vendor_id and price_fallback is None:
+        return None
+    if vendor_id is None:
+        return price_fallback
+    return price_by_vendor_id.get(vendor_id) or price_fallback
+
+
+def _get_inventory_for_vendor_from_cache(vendor_id, inv_by_vendor_id, inv_fallback):
+    if not inv_by_vendor_id and inv_fallback is None:
+        return None
+    if vendor_id is None:
+        return inv_fallback
+    return inv_by_vendor_id.get(vendor_id) or inv_fallback
+
+
 def _apply_pricing(
     vendor_price,
     pricing_settings,
@@ -438,8 +470,9 @@ def run_store_sync(self, store_id):
     mappings = ProductMapping.objects.filter(store=store).select_related('product', 'product__vendor')
     session = {}
     error_summary = None
+    price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
     try:
-        for pm in mappings:
+        for pm in mappings.iterator(chunk_size=300):
             processed += 1
             # Ingest-only vendors (HEB, Costco AU, Vevor AU): the desktop
             # runner / S3 feed writes store_price + store_stock directly via
@@ -453,8 +486,8 @@ def run_store_sync(self, store_id):
                     (pm.product.vendor.code if pm.product.vendor else '?'),
                 )
                 continue
-            pricing = _get_pricing_for_vendor(store, pm.product.vendor_id)
-            inventory = _get_inventory_for_vendor(store, pm.product.vendor_id)
+            pricing = _get_pricing_for_vendor_from_cache(pm.product.vendor_id, price_by_vid, price_fb)
+            inventory = _get_inventory_for_vendor_from_cache(pm.product.vendor_id, inv_by_vid, inv_fb)
             url = resolve_vendor_scrape_url(pm.product, store, None)
             vendor_price = None
             vendor_stock = 0
@@ -635,7 +668,8 @@ def run_store_update(self, store_id, source='beat'):
     try:
         bulk_supported = callable(getattr(adapter, 'update_products_bulk', None))
         bulk_queue = []  # list of (pm, sku, price, stock)
-        for pm in mappings:
+        price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
+        for pm in mappings.iterator(chunk_size=300):
             processed += 1
             # Ingest-only vendors (HEB, Costco AU, Vevor AU): do NOT
             # re-apply old VendorPrice rows. Whatever the last fresh
@@ -694,8 +728,8 @@ def run_store_update(self, store_id, source='beat'):
                 else:
                     push_skipped += 1
                 continue
-            pricing = _get_pricing_for_vendor(store, pm.product.vendor_id)
-            inventory = _get_inventory_for_vendor(store, pm.product.vendor_id)
+            pricing = _get_pricing_for_vendor_from_cache(pm.product.vendor_id, price_by_vid, price_fb)
+            inventory = _get_inventory_for_vendor_from_cache(pm.product.vendor_id, inv_by_vid, inv_fb)
 
             # --- Scrape ---
             url = resolve_vendor_scrape_url(pm.product, store, None)

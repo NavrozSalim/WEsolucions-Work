@@ -61,6 +61,20 @@ class ProductMapping(models.Model):
                 name='uq_productmapping_store_product',
             ),
         ]
+        indexes = [
+            models.Index(
+                fields=['store', 'is_active', 'marketplace_child_sku'],
+                name='cat_pm_st_act_mcsku',
+            ),
+            models.Index(
+                fields=['store', 'is_active', 'marketplace_parent_sku'],
+                name='cat_pm_st_act_mpsku',
+            ),
+            models.Index(
+                fields=['store', 'is_active', 'marketplace_id'],
+                name='cat_pm_st_act_mid',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.product.vendor_sku} - {self.store.name}"

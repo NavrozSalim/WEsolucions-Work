@@ -2,6 +2,7 @@
 Catalog Celery tasks: sync, scrape, update.
 """
 import logging
+import time
 import uuid
 from datetime import timedelta
 
@@ -79,7 +80,32 @@ def _fail_mapping(pm, code: str, message: str = '') -> None:
     ])
 
 
-def _resolve_vendor(vendor_name_raw: str) -> Vendor | None:
+class VendorResolveIndex:
+    """O(1) vendor lookup for catalog sync — avoids ``Vendor.objects.all()`` per row."""
+
+    __slots__ = ('by_name_lower', 'by_code_lower')
+
+    def __init__(self, by_name_lower: dict, by_code_lower: dict):
+        self.by_name_lower = by_name_lower
+        self.by_code_lower = by_code_lower
+
+    @classmethod
+    def build(cls) -> 'VendorResolveIndex':
+        by_name: dict[str, Vendor] = {}
+        by_code: dict[str, Vendor] = {}
+        for v in Vendor.objects.all().only('id', 'name', 'code'):
+            if v.name:
+                key = v.name.strip().lower()
+                if key:
+                    by_name[key] = v
+            if v.code:
+                ckey = v.code.strip().lower()
+                if ckey:
+                    by_code[ckey] = v
+        return cls(by_name, by_code)
+
+
+def _resolve_vendor(vendor_name_raw: str, *, index: VendorResolveIndex | None = None) -> Vendor | None:
     """Resolve vendor by name, code, or canonical alias."""
     from .services import resolve_canonical_vendor_code
 
@@ -87,6 +113,14 @@ def _resolve_vendor(vendor_name_raw: str) -> Vendor | None:
     if not vn:
         return None
     vn_lower = vn.lower()
+    if index is not None:
+        v = index.by_name_lower.get(vn_lower) or index.by_code_lower.get(vn_lower)
+        if v:
+            return v
+        canon = resolve_canonical_vendor_code(vn)
+        if canon:
+            return index.by_code_lower.get(canon.strip().lower())
+        return None
     for v in Vendor.objects.all():
         if v.name and v.name.lower() == vn_lower:
             return v
@@ -129,9 +163,15 @@ def _to_decimal_or_none(raw_val):
         return None
 
 
-def _find_product_mapping(row: CatalogUploadRow, store, *, active_only: bool = True) -> ProductMapping | None:
+def _find_product_mapping(
+    row: CatalogUploadRow,
+    store,
+    *,
+    active_only: bool = True,
+    vendor_index: VendorResolveIndex | None = None,
+) -> ProductMapping | None:
     """Find ProductMapping by marketplace_id, marketplace SKUs, or vendor+product key."""
-    vendor_early = row.vendor or _resolve_vendor(row.vendor_name_raw)
+    vendor_early = row.vendor or _resolve_vendor(row.vendor_name_raw, index=vendor_index)
     reverb = store_is_reverb(store)
     ebay_v = vendor_is_ebay(vendor_early, row.vendor_name_raw)
     mid = _normalize(row.marketplace_id_raw)
@@ -271,6 +311,63 @@ def _update_product_mapping(pm: ProductMapping, row: CatalogUploadRow) -> None:
         pm.save(update_fields=list(updates.keys()))
 
 
+def _chunked_reset_store_active_listings_pending_scrape(store) -> dict:
+    """Mark all active listings pending rescrape after catalog sync — chunked UPDATEs only.
+
+    A single store-wide UPDATE would lock/update every row at once and stall the API.
+    Same semantics as before: ``sync_status='pending'``, clear scrape errors and counters.
+    """
+    batch = int(getattr(settings, 'CATALOG_POST_SYNC_PENDING_RESET_BATCH', 2500) or 2500)
+    batch = max(200, min(batch, 20000))
+    sleep_ms = int(getattr(settings, 'CATALOG_POST_SYNC_PENDING_RESET_SLEEP_MS', 0) or 0)
+    sleep_ms = max(0, min(sleep_ms, 5000))
+
+    t0 = time.perf_counter()
+    total_updated = 0
+    batches = 0
+    last_id = None
+
+    while True:
+        q = (
+            ProductMapping.objects.filter(store=store, is_active=True)
+            .order_by('id')
+            .values_list('id', flat=True)
+        )
+        if last_id is not None:
+            q = q.filter(id__gt=last_id)
+        ids = list(q[:batch])
+        if not ids:
+            break
+        updated = ProductMapping.objects.filter(id__in=ids).update(
+            sync_status='pending',
+            failed_sync_count=0,
+            scrape_error=None,
+        )
+        total_updated += updated
+        batches += 1
+        last_id = ids[-1]
+        if sleep_ms:
+            time.sleep(sleep_ms / 1000.0)
+
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    logger.info(
+        'catalog post-sync pending reset: store_id=%s batches=%s rows_updated=%s '
+        'elapsed_ms=%s batch_size=%s sleep_ms=%s',
+        store.id,
+        batches,
+        total_updated,
+        elapsed_ms,
+        batch,
+        sleep_ms,
+    )
+    return {
+        'batches': batches,
+        'rows_updated': total_updated,
+        'elapsed_ms': elapsed_ms,
+        'batch_size': batch,
+    }
+
+
 def run_catalog_sync(upload_id: str):
     """
     Sync CatalogUpload rows: Add/Update/Delete Product and ProductMapping.
@@ -296,6 +393,13 @@ def run_catalog_sync(upload_id: str):
     upload.save(update_fields=['status'])
     added, updated, deleted, errors = 0, 0, 0, 0
 
+    vendor_index = VendorResolveIndex.build()
+    rows_iter = (
+        upload.rows.select_related('vendor')
+        .order_by('row_number')
+        .iterator(chunk_size=200)
+    )
+
     def _action_for_log(a: str) -> str:
         return a if a in {x.value for x in CatalogSyncLog.Action} else 'add'
 
@@ -308,7 +412,7 @@ def run_catalog_sync(upload_id: str):
         log_buffer.clear()
 
     processed = 0
-    for row in upload.rows.all().order_by('row_number').iterator(chunk_size=200):
+    for row in rows_iter:
         action = _normalize_action(row.action_raw)
         log_status = CatalogSyncLog.Status.SUCCESS
         log_message = None
@@ -316,7 +420,7 @@ def run_catalog_sync(upload_id: str):
         try:
             with transaction.atomic():
                 if action == 'delete':
-                    pm = _find_product_mapping(row, store, active_only=False)
+                    pm = _find_product_mapping(row, store, active_only=False, vendor_index=vendor_index)
                     if pm:
                         pm.is_active = False
                         pm.save(update_fields=['is_active'])
@@ -330,7 +434,7 @@ def run_catalog_sync(upload_id: str):
                         log_message = row.sync_error
                         errors += 1
                 else:
-                    vendor = row.vendor or _resolve_vendor(row.vendor_name_raw)
+                    vendor = row.vendor or _resolve_vendor(row.vendor_name_raw, index=vendor_index)
                     if not vendor:
                         row.sync_status = CatalogUploadRow.SyncStatus.ERROR
                         row.sync_error = f"Vendor not found: {row.vendor_name_raw}"
@@ -371,7 +475,7 @@ def run_catalog_sync(upload_id: str):
                             _update_product_mapping(pm, row)
                             updated += 1
                     else:  # update
-                        pm = _find_product_mapping(row, store)
+                        pm = _find_product_mapping(row, store, vendor_index=vendor_index)
                         if pm:
                             _update_product_mapping(pm, row)
                             row.product_mapping = pm
@@ -436,13 +540,16 @@ def run_catalog_sync(upload_id: str):
     upload.error_summary = f"Added: {added}, Updated: {updated}, Deleted: {deleted}, Errors: {errors}" if errors else None
     upload.save(update_fields=['status', 'error_summary', 'processed_rows'])
 
+    reset_stats = None
     # After a successful sync, all active listings need a fresh vendor scrape.
     # Failed rows on the file do not block this — users fix those separately.
     if upload.status in (CatalogUpload.Status.SYNCED, CatalogUpload.Status.PARTIAL):
-        ProductMapping.objects.filter(store=store, is_active=True).update(
-            sync_status='pending',
-            failed_sync_count=0,
-            scrape_error=None,
+        reset_stats = _chunked_reset_store_active_listings_pending_scrape(store)
+        logger.info(
+            'catalog sync complete upload_id=%s store_id=%s pending_reset_batches=%s',
+            upload_id,
+            store.id,
+            reset_stats.get('batches'),
         )
 
     return {
@@ -452,6 +559,9 @@ def run_catalog_sync(upload_id: str):
         'updated': updated,
         'deleted': deleted,
         'errors': errors,
+        'pending_reset_batches': reset_stats.get('batches') if reset_stats else None,
+        'pending_reset_rows': reset_stats.get('rows_updated') if reset_stats else None,
+        'pending_reset_elapsed_ms': reset_stats.get('elapsed_ms') if reset_stats else None,
     }
 
 
@@ -497,9 +607,10 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
     from sync.tasks import (
         _apply_inventory,
         _apply_pricing,
+        _build_store_vendor_pricing_inventory_caches,
         _fail_mapping,
-        _get_inventory_for_vendor,
-        _get_pricing_for_vendor,
+        _get_inventory_for_vendor_from_cache,
+        _get_pricing_for_vendor_from_cache,
         _has_fixed_tier,
         _inventory_from_scrape_result,
         _missing_fixed_inputs,
@@ -521,6 +632,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
     mark_celery_scrape_worker_started(str(store.id))
 
     try:
+        price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
         for row in rows:
             if should_abort_celery_scrape(str(store.id)):
                 user_cancelled = True
@@ -637,8 +749,8 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                 vendor_stock = 0
 
             try:
-                pricing = _get_pricing_for_vendor(store, product.vendor_id)
-                inventory = _get_inventory_for_vendor(store, product.vendor_id)
+                pricing = _get_pricing_for_vendor_from_cache(product.vendor_id, price_by_vid, price_fb)
+                inventory = _get_inventory_for_vendor_from_cache(product.vendor_id, inv_by_vid, inv_fb)
 
                 if _has_fixed_tier(pricing):
                     tier_now = resolve_margin_tier_for_raw_cost(pricing, vendor_price)
@@ -1044,9 +1156,10 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
     from sync.tasks import (
         _apply_inventory,
         _apply_pricing,
+        _build_store_vendor_pricing_inventory_caches,
         _fail_mapping,
-        _get_inventory_for_vendor,
-        _get_pricing_for_vendor,
+        _get_inventory_for_vendor_from_cache,
+        _get_pricing_for_vendor_from_cache,
         _has_fixed_tier,
         _inventory_from_scrape_result,
         _missing_fixed_inputs,
@@ -1066,6 +1179,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
     mark_celery_scrape_worker_started(str(store.id))
 
     try:
+        price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
         for pm in mappings:
             if should_abort_celery_scrape(str(store.id)):
                 user_cancelled = True
@@ -1107,8 +1221,8 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
                 error_summary = stall_msg if not error_summary else error_summary
                 break
 
-            pricing = _get_pricing_for_vendor(store, product.vendor_id)
-            inventory = _get_inventory_for_vendor(store, product.vendor_id)
+            pricing = _get_pricing_for_vendor_from_cache(product.vendor_id, price_by_vid, price_fb)
+            inventory = _get_inventory_for_vendor_from_cache(product.vendor_id, inv_by_vid, inv_fb)
 
             url = resolve_vendor_scrape_url(product, store, None)
             vendor_price = None
@@ -1536,8 +1650,9 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
     from sync.tasks import (
         _apply_inventory,
         _apply_pricing,
-        _get_inventory_for_vendor,
-        _get_pricing_for_vendor,
+        _build_store_vendor_pricing_inventory_caches,
+        _get_inventory_for_vendor_from_cache,
+        _get_pricing_for_vendor_from_cache,
     )
     from vendor.models import Vendor, VendorPrice
     from stores.models import Store
@@ -1580,6 +1695,7 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
 
     now = timezone.now()
     matched = missing = updated_rows = 0
+    store_pi_cache: dict = {}
 
     for pm in pm_qs.iterator():
         product = pm.product
@@ -1608,8 +1724,11 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
 
         try:
             store = pm.store
-            pricing = _get_pricing_for_vendor(store, product.vendor_id)
-            inventory = _get_inventory_for_vendor(store, product.vendor_id)
+            if store.id not in store_pi_cache:
+                store_pi_cache[store.id] = _build_store_vendor_pricing_inventory_caches(store)
+            price_by_vid, price_fb, inv_by_vid, inv_fb = store_pi_cache[store.id]
+            pricing = _get_pricing_for_vendor_from_cache(product.vendor_id, price_by_vid, price_fb)
+            inventory = _get_inventory_for_vendor_from_cache(product.vendor_id, inv_by_vid, inv_fb)
             new_price = _apply_pricing(
                 price,
                 pricing,

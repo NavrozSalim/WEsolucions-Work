@@ -209,6 +209,20 @@ try:
 except ValueError:
     CATALOG_SYNC_PROGRESS_EVERY = 32
 
+# After catalog sync: reset scrape state on active listings in chunks (avoids one huge UPDATE).
+try:
+    CATALOG_POST_SYNC_PENDING_RESET_BATCH = max(
+        200, min(20000, int(os.getenv('CATALOG_POST_SYNC_PENDING_RESET_BATCH', '2500'))),
+    )
+except ValueError:
+    CATALOG_POST_SYNC_PENDING_RESET_BATCH = 2500
+try:
+    CATALOG_POST_SYNC_PENDING_RESET_SLEEP_MS = max(
+        0, min(5000, int(os.getenv('CATALOG_POST_SYNC_PENDING_RESET_SLEEP_MS', '0'))),
+    )
+except ValueError:
+    CATALOG_POST_SYNC_PENDING_RESET_SLEEP_MS = 0
+
 # DB persistent connections (seconds). Default 60 reduces new TCP/TLS handshakes to remote Postgres.
 # Use PG_CONN_MAX_AGE=0 when sitting behind PgBouncer (transaction pool) or if you see connection exhaustion.
 # Only apply for PostgreSQL (CI uses sqlite DATABASE_URL without touching CONN_MAX_AGE here).
@@ -306,8 +320,8 @@ if sys.platform == 'win32':
 # --- Celery queues ---
 # Browser scrapes: heavy-us (USA stores) vs heavy-au (AU stores), routed by Store.region
 # (see catalog.celery_routing.CatalogScrapeTaskRouter). Chord finalizers use ``light``.
-# Main server: three workers (-Q celery | -Q ingest | -Q light). US: -Q heavy-us. AU: -Q heavy-au.
-# (same broker + DB). Vevor AU feed task is routed to ``heavy-au`` with Amazon/eBay AU scrapes.
+# Main server: three workers (-Q celery | -Q ingest | -Q light). Catalog file ingest + ``catalog_sync_task`` → ``ingest``.
+# US: -Q heavy-us. AU: -Q heavy-au. (same broker + DB). Vevor AU feed task is routed to ``heavy-au``.
 from kombu import Queue  # noqa: E402
 
 from catalog.celery_routing import CatalogScrapeTaskRouter  # noqa: E402
@@ -325,7 +339,8 @@ CELERY_TASK_ROUTES = (
     CatalogScrapeTaskRouter(),
     {
         'catalog.ingest_upload_file': {'queue': 'ingest'},
-        'catalog.tasks.catalog_sync_task': {'queue': 'light'},
+        # DB-heavy row loop + chunked pending reset; keep off default/light queues.
+        'catalog.tasks.catalog_sync_task': {'queue': 'ingest'},
         'catalog.run_vevor_au_ingest': {'queue': 'heavy-au'},
     },
 )
