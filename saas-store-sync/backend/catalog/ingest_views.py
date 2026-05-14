@@ -201,8 +201,20 @@ def _coerce_stock(value: Any) -> int | None:
     return s
 
 
-def _apply_to_mappings(product: Product, vendor_price: Decimal, vendor_stock: int, title: str | None):
-    """Mirror per-row logic from ``catalog.tasks.run_catalog_scrape`` for a single product."""
+def _apply_to_mappings(
+    product: Product,
+    vendor_price: Decimal,
+    vendor_stock: int,
+    title: str | None,
+    *,
+    restrict_to_user_id: int | None = None,
+):
+    """Mirror per-row logic from ``catalog.tasks.run_catalog_scrape`` for a single product.
+
+    ``restrict_to_user_id`` (ingest token owner): only update ``ProductMapping`` rows for
+    stores owned by that user, so a shared ``Product`` row never writes into another tenant.
+    When ``None``, legacy behavior updates all active mappings for the product (avoid for new tokens).
+    """
     from sync.tasks import (
         _apply_pricing,
         _apply_inventory,
@@ -213,10 +225,13 @@ def _apply_to_mappings(product: Product, vendor_price: Decimal, vendor_stock: in
     )
     from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
 
-    mappings = list(
+    qs = (
         ProductMapping.objects.select_related('store', 'store__marketplace')
         .filter(product=product, is_active=True)
     )
+    if restrict_to_user_id is not None:
+        qs = qs.filter(store__user_id=restrict_to_user_id)
+    mappings = list(qs)
     if not mappings:
         return 0
 
@@ -298,7 +313,7 @@ class VendorIngestView(APIView):
 
     def post(self, request, vendor=None, *args, **kwargs):
         cfg = _vendor_cfg(vendor)
-        _authenticate(request, required_scope=cfg['scope'])
+        tok = _authenticate(request, required_scope=cfg['scope'])
 
         payload = request.data if isinstance(request.data, dict) else {}
         items = payload.get('items')
@@ -388,6 +403,7 @@ class VendorIngestView(APIView):
                                 price,
                                 0 if stock is None else stock,
                                 title,
+                                restrict_to_user_id=tok.created_by_id,
                             )
                         product_ids.append(str(product.id))
                 stats['applied'] += applied_total
@@ -444,8 +460,10 @@ class VendorIngestUrlsView(APIView):
     authentication_classes = []
 
     def get(self, request, vendor=None, *args, **kwargs):
+        from stores.models import Store
+
         cfg = _vendor_cfg(vendor)
-        _authenticate(request, required_scope=cfg['scope'])
+        tok = _authenticate(request, required_scope=cfg['scope'])
 
         vendor_ids = _vendor_db_ids(vendor)
         if not vendor_ids:
@@ -460,7 +478,16 @@ class VendorIngestUrlsView(APIView):
 
         store_id = (request.query_params.get('store_id') or '').strip()
         if store_id:
+            st = Store.objects.filter(id=store_id).only('user_id').first()
+            if not st:
+                return Response({'count': 0, 'urls': [], 'fetched_at': timezone.now().isoformat()})
+            if tok.created_by_id and st.user_id != tok.created_by_id:
+                raise PermissionDenied('store_id does not belong to this ingest token owner.')
             qs = qs.filter(store_id=store_id)
+        elif tok.created_by_id:
+            qs = qs.filter(store__user_id=tok.created_by_id)
+        else:
+            return Response({'count': 0, 'urls': [], 'fetched_at': timezone.now().isoformat()})
 
         urls_iter = (
             qs.order_by('product__vendor_url')
@@ -490,10 +517,20 @@ class HebIngestUrlsView(VendorIngestUrlsView):
         return super().get(request, vendor='heb', *args, **kwargs)
 
 
-def _collect_vendor_urls(store_id: str | None, vendor: str = 'heb') -> list[str]:
-    """Return distinct vendor_url values for ``vendor`` across all (or one) store(s)."""
+def _collect_vendor_urls(
+    store_id: str | None,
+    vendor: str = 'heb',
+    *,
+    restrict_to_user_id: int | None = None,
+) -> list[str]:
+    """Return distinct vendor_url values for ``vendor``.
+
+    Requires either ``store_id`` or ``restrict_to_user_id`` so we never list every tenant's URLs.
+    """
     vendor_ids = _vendor_db_ids(vendor)
     if not vendor_ids:
+        return []
+    if not store_id and restrict_to_user_id is None:
         return []
     qs = (
         ProductMapping.objects
@@ -503,6 +540,10 @@ def _collect_vendor_urls(store_id: str | None, vendor: str = 'heb') -> list[str]
     )
     if store_id:
         qs = qs.filter(store_id=store_id)
+        if restrict_to_user_id is not None:
+            qs = qs.filter(store__user_id=restrict_to_user_id)
+    else:
+        qs = qs.filter(store__user_id=restrict_to_user_id)
     return list(
         qs.order_by('product__vendor_url')
         .values_list('product__vendor_url', flat=True)
@@ -542,6 +583,7 @@ class VendorIngestNextJobView(APIView):
             urls = _collect_vendor_urls(
                 str(job.store_id) if job.store_id else None,
                 vendor=vendor,
+                restrict_to_user_id=token.created_by_id,
             )
             job.status = HebScrapeJob.Status.CLAIMED
             job.claimed_at = timezone.now()

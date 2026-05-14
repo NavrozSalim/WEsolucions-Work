@@ -388,6 +388,17 @@ def run_catalog_sync(upload_id: str):
             'upload_id': str(upload_id),
         }
 
+    if (
+        upload.user_id
+        and upload.store.user_id
+        and upload.user_id != upload.store.user_id
+    ):
+        return {
+            'error': 'upload_store_user_mismatch',
+            'message': 'Catalog upload must belong to the same user as the store.',
+            'upload_id': str(upload_id),
+        }
+
     store = upload.store
     upload.status = CatalogUpload.Status.PROCESSING
     upload.save(update_fields=['status'])
@@ -1631,13 +1642,7 @@ def catalog_scrape_store_task(self, store_id: str):
 def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = None) -> dict:
     """Refresh VendorPrice rows for Vevor AU products from the public S3 XLSX feed.
 
-    Called by ``CatalogScrapeTriggerView`` whenever a store with Vevor AU
-    products is scraped. Downloads the feed once, builds a SKU -> price/stock
-    lookup, then writes the latest values to ``VendorPrice`` for every
-    matching ``Product`` and refreshes the store's ``ProductMapping``
-    (posted price + stock, with margin rules applied).
-
-    Passing ``store_id=None`` updates every store that has Vevor AU listings.
+    ``store_id`` is **required**: mappings are updated only for that store (multi-tenant).
     """
     from decimal import Decimal
 
@@ -1655,7 +1660,6 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
         _get_pricing_for_vendor_from_cache,
     )
     from vendor.models import Vendor, VendorPrice
-    from stores.models import Store
 
     vevor_codes = ('vevorau', 'vevor_au', 'vevor-au', 'vevor')
     vendor_ids = list(
@@ -1664,6 +1668,10 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
     )
     if not vendor_ids:
         return {'status': 'no_vendor', 'message': 'Vevor vendor not seeded.', 'updated': 0}
+
+    if not store_id:
+        logger.warning('run_vevor_au_ingest: store_id missing; refusing global apply (multi-tenant).')
+        return {'status': 'skipped', 'message': 'store_id is required', 'updated': 0}
 
     try:
         xlsx_path = fetch_vevor_feed(VEVOR_AU_FEED_URL)
@@ -1687,11 +1695,10 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
         return {'status': 'empty_feed', 'feed_rows': pos_rows, 'updated': 0}
 
     pm_qs = ProductMapping.objects.filter(
+        store_id=store_id,
         is_active=True,
         product__vendor_id__in=vendor_ids,
     ).select_related('product', 'product__vendor', 'store')
-    if store_id:
-        pm_qs = pm_qs.filter(store_id=store_id)
 
     now = timezone.now()
     matched = missing = updated_rows = 0
