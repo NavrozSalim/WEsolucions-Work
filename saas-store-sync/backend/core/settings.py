@@ -320,8 +320,12 @@ if sys.platform == 'win32':
 # --- Celery queues ---
 # Browser scrapes: heavy-us (USA stores) vs heavy-au (AU stores), routed by Store.region
 # (see catalog.celery_routing.CatalogScrapeTaskRouter). Chord finalizers use ``light``.
-# Main server: three workers (-Q celery | -Q ingest | -Q light). Catalog file ingest + ``catalog_sync_task`` → ``ingest``.
-# US: -Q heavy-us. AU: -Q heavy-au. (same broker + DB). Vevor AU feed task is routed to ``heavy-au``.
+# Main server: three workers (-Q celery | -Q ingest | -Q light).
+# - ``ingest``: file ingest, catalog_sync, marketplace sync/update, scheduled store updates (API-responsive).
+# - ``light``: scrape chord finalizers + short scrape resume scheduler (``resume_catalog_scrape_after_stop``)
+#   + Beat minute tick (``check_scheduled_updates``) so they are not blocked by ``celery`` backlog.
+# - ``celery``: default queue for anything without an explicit route (e.g. nightly analytics).
+# US VPS: -Q heavy-us. AU VPS: -Q heavy-au. Vevor AU feed → ``heavy-au``.
 from kombu import Queue  # noqa: E402
 
 from catalog.celery_routing import CatalogScrapeTaskRouter  # noqa: E402
@@ -341,6 +345,15 @@ CELERY_TASK_ROUTES = (
         'catalog.ingest_upload_file': {'queue': 'ingest'},
         # DB-heavy row loop + chunked pending reset; keep off default/light queues.
         'catalog.tasks.catalog_sync_task': {'queue': 'ingest'},
+        'catalog.tasks.catalog_update_task': {'queue': 'ingest'},
+        'catalog.tasks.resume_catalog_scrape_after_stop': {'queue': 'light'},
         'catalog.run_vevor_au_ingest': {'queue': 'heavy-au'},
+        # Store/marketplace work: keep off default queue so heavy ``celery`` backlog cannot delay ingest/API paths.
+        'sync.tasks.run_store_sync': {'queue': 'ingest'},
+        'sync.tasks.run_store_update': {'queue': 'ingest'},
+        'sync.tasks.run_store_push_listings_only': {'queue': 'ingest'},
+        'sync.tasks.run_store_critical_zero_inventory': {'queue': 'ingest'},
+        # Minute tick: only enqueues ``run_store_update`` → ``ingest``; keep latency predictable.
+        'sync.tasks.check_scheduled_updates': {'queue': 'light'},
     },
 )

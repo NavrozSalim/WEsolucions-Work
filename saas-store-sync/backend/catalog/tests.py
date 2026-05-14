@@ -104,6 +104,37 @@ class CatalogScrapeTaskRouterTests(SimpleTestCase):
         )
 
 
+class CeleryStaticTaskRoutesTests(SimpleTestCase):
+    """``CELERY_TASK_ROUTES`` dict keys must match ``Task.name`` (see core/settings.py)."""
+
+    def test_routed_tasks_match_registered_names(self):
+        from django.conf import settings
+
+        from catalog import tasks as catalog_tasks
+        from sync import tasks as sync_tasks
+
+        static = settings.CELERY_TASK_ROUTES[1]
+        bindings = [
+            (catalog_tasks.catalog_ingest_upload_file_task, 'ingest'),
+            (catalog_tasks.catalog_sync_task, 'ingest'),
+            (catalog_tasks.catalog_update_task, 'ingest'),
+            (catalog_tasks.resume_catalog_scrape_after_stop, 'light'),
+            (catalog_tasks.vevor_au_ingest_task, 'heavy-au'),
+            (sync_tasks.run_store_sync, 'ingest'),
+            (sync_tasks.run_store_update, 'ingest'),
+            (sync_tasks.run_store_push_listings_only, 'ingest'),
+            (sync_tasks.run_store_critical_zero_inventory, 'ingest'),
+            (sync_tasks.check_scheduled_updates, 'light'),
+        ]
+        for task, expected_queue in bindings:
+            with self.subTest(task=task.name):
+                self.assertEqual(
+                    static.get(task.name),
+                    {'queue': expected_queue},
+                    msg=f"Update core/settings.py CELERY_TASK_ROUTES for {task.name}",
+                )
+
+
 class MarketplaceTemplateTests(SimpleTestCase):
     def test_col_index_sku_does_not_match_marketplace_parent_sku_header(self):
         header = ['Vendor Name', 'Marketplace Parent SKU', 'Vendor URL']

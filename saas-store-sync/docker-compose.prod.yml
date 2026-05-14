@@ -187,7 +187,8 @@ services:
       start_period: 15s
 
   # Split workers so ingest/light cannot starve default `celery` queue (no heavy-* here).
-  # Ingest queue: catalog file ingest + ``catalog_sync_task`` (DB-heavy row processing).
+  # Ingest: file ingest, catalog_sync, catalog_update, store sync/update/push/critical-zero (see CELERY_TASK_ROUTES).
+  # Light: scrape chord finalizers, ``resume_catalog_scrape_after_stop``, Beat ``check_scheduled_updates``.
   # US: docker-compose.us-scraper.prod.yml (-Q heavy-us). AU: docker-compose.au-scraper.prod.yml (-Q heavy-au).
   celery_worker_celery:
     <<: *backend-image
