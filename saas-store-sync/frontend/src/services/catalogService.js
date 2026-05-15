@@ -208,6 +208,9 @@ export const triggerCatalogSync = (storeId, runInline = false, uploadId = null, 
         auto_scrape: options.autoScrape !== false,
     };
     if (uploadId) body.upload_id = uploadId;
+    if (options.replaceStoreCatalog === true) {
+        body.replace_store_catalog = true;
+    }
     return runWithCeleryFallback(`/stores/${storeId}/catalog/sync/`, body, storeId);
 };
 

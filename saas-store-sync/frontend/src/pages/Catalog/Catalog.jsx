@@ -633,6 +633,7 @@ export default function Catalog() {
     const [deletingStoreId, setDeletingStoreId] = useState(null);
     const [resettingId, setResettingId] = useState(null);
     const [syncingUploadId, setSyncingUploadId] = useState(null);
+    const [replaceCatalogOnSync, setReplaceCatalogOnSync] = useState(false);
     const [scraping, setScraping] = useState(false);
     const [scrapingUploadId, setScrapingUploadId] = useState(null);
     const [deleteUploadConfirm, setDeleteUploadConfirm] = useState(null);
@@ -1234,10 +1235,14 @@ export default function Catalog() {
 
         const runSync = () => {
             attempt++;
-            return triggerCatalogSync(selectedStore, false, uploadId, { autoScrape: false })
+            return triggerCatalogSync(selectedStore, false, uploadId, {
+                autoScrape: false,
+                replaceStoreCatalog: replaceCatalogOnSync,
+            })
                 .then((res) => {
                 const added = res?.data?.added ?? 0;
                 const updated = res?.data?.updated ?? 0;
+                const replaceDeactivated = res?.data?.replace_deactivated ?? 0;
                 const scrape = res?.data?.scrape;
                 let scrapeMsg = '';
                 if (scrape && !scrape.error && !scrape.skipped) {
@@ -1252,12 +1257,18 @@ export default function Catalog() {
                 finishProgress(true);
                 setFlowStatus('success');
                 const parts = [];
-                if (added > 0) parts.push(`${added} new listing(s) created`);
-                if (updated > 0) parts.push(`${updated} existing listing(s) updated`);
+                if (replaceDeactivated > 0) {
+                    parts.push(`${replaceDeactivated} previous listing(s) deactivated (replace catalog)`);
+                }
+                if (added > 0) parts.push(`${added} new listing(s) added to your store`);
+                if (updated > 0) {
+                    parts.push(`${updated} listing(s) in your store updated from this file`);
+                }
                 const summary = parts.length > 0 ? `Sync complete. ${parts.join('; ')}.` : 'Sync complete.';
                 setMessage(
                     `${summary}${scrapeMsg} `
-                    + 'The product list shows every active listing for this store (new and updated rows from the file). '
+                    + 'Counts apply only to this store and your account — not another user’s catalog. '
+                    + 'The product list shows active listings for this store. '
                     + 'Use Start Scraping when price columns show “—”.',
                 );
                 getCatalogUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
@@ -1938,8 +1949,20 @@ export default function Catalog() {
                     {hasPendingUpload && flowStatus === 'ready to sync' && (
                         <div className="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 space-y-2">
                             <p className="text-xs text-slate-500 dark:text-slate-400">
-                                Ready to Upload creates products from your file. Use Start Scraping (or your schedule) when you want vendor prices and stock.
+                                Ready to Upload creates listings in your store from your file. Use Start Scraping (or your schedule) when you want vendor prices and stock.
                             </p>
+                            <label className="flex items-start gap-2 text-xs text-slate-600 dark:text-slate-400 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    className="mt-0.5 rounded border-slate-300"
+                                    checked={replaceCatalogOnSync}
+                                    onChange={(e) => setReplaceCatalogOnSync(e.target.checked)}
+                                    disabled={syncing}
+                                />
+                                <span>
+                                    Replace store catalog — deactivate all current listings in this store before applying the file (use for a full re-import).
+                                </span>
+                            </label>
                             <Button variant="primary" onClick={handleSyncFromModal} disabled={syncing}>
                                 <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
                                 Ready to Upload

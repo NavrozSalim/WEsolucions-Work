@@ -556,10 +556,16 @@ class CatalogSyncTriggerView(APIView):
         auto_scrape = request.data.get('auto_scrape', True)
         if isinstance(auto_scrape, str):
             auto_scrape = auto_scrape.lower() in ('1', 'true', 'yes')
+        replace_store_catalog = request.data.get('replace_store_catalog', False)
+        if isinstance(replace_store_catalog, str):
+            replace_store_catalog = replace_store_catalog.lower() in ('1', 'true', 'yes')
 
         if run_inline:
             from catalog.tasks import run_catalog_sync, run_catalog_scrape
-            result = run_catalog_sync(str(upload.id))
+            result = run_catalog_sync(
+                str(upload.id),
+                replace_store_catalog=bool(replace_store_catalog),
+            )
             upload.refresh_from_db()
             if auto_scrape and upload.status in (
                 CatalogUpload.Status.SYNCED,
@@ -578,6 +584,7 @@ class CatalogSyncTriggerView(APIView):
             from catalog.tasks import catalog_scrape_task
             async_result = catalog_sync_task.apply_async(
                 args=[str(upload.id)],
+                kwargs={'replace_store_catalog': bool(replace_store_catalog)},
                 link=catalog_scrape_task.si(str(upload.id)),
             )
             return Response({
@@ -587,11 +594,15 @@ class CatalogSyncTriggerView(APIView):
                 "scrape_after_sync": True,
             }, status=status.HTTP_202_ACCEPTED)
 
-        task = catalog_sync_task.delay(str(upload.id))
+        task = catalog_sync_task.delay(
+            str(upload.id),
+            replace_store_catalog=bool(replace_store_catalog),
+        )
         return Response({
             "job_id": task.id,
             "upload_id": str(upload.id),
             "status": "queued",
+            "replace_store_catalog": bool(replace_store_catalog),
         }, status=status.HTTP_202_ACCEPTED)
 
 

@@ -61,10 +61,21 @@ class Upload(models.Model):
 
 class Product(models.Model):
     """
-    Vendor/source catalog item. Global, not store-specific.
-    ProductMapping links Product to Store for marketplace listings.
+    Vendor/source catalog item scoped to the account that created it.
+
+    ProductMapping links Product to Store for marketplace listings. The same
+    vendor SKU may exist as separate Product rows for different users so scrape
+    history and ingest never leak across tenants.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='owned_products',
+        null=True,
+        blank=True,
+        db_index=True,
+    )
     vendor = models.ForeignKey(
         'vendor.Vendor',
         on_delete=models.PROTECT,
@@ -88,8 +99,8 @@ class Product(models.Model):
         ordering = ['vendor_sku']
         constraints = [
             models.UniqueConstraint(
-                fields=['vendor', 'vendor_sku', 'variation_id'],
-                name='uq_product_vendor_sku_variation',
+                fields=['vendor', 'vendor_sku', 'variation_id', 'owner'],
+                name='uq_product_vendor_sku_variation_owner',
             ),
         ]
 

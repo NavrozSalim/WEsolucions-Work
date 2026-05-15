@@ -372,13 +372,14 @@ class VendorIngestView(APIView):
                 stats['skipped'] += 1
                 continue
 
-            products = list(
-                Product.objects.filter(vendor_id__in=vendor_ids, vendor_url=url)
-            )
+            product_filter = {'vendor_id__in': vendor_ids, 'vendor_url': url}
+            if tok.created_by_id:
+                product_filter['owner_id'] = tok.created_by_id
+            products = list(Product.objects.filter(**product_filter))
             if not products:
-                products = list(
-                    Product.objects.filter(vendor_id__in=vendor_ids, vendor_url__iexact=url)
-                )
+                iexact_filter = {**product_filter, 'vendor_url__iexact': url}
+                del iexact_filter['vendor_url']
+                products = list(Product.objects.filter(**iexact_filter))
             if not products:
                 results.append({'index': idx, 'status': 'unmatched', 'url': url})
                 stats['skipped'] += 1

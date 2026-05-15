@@ -227,7 +227,10 @@ def _find_product_mapping(
     if not vsku:
         return None
     product = Product.objects.filter(
-        vendor=vendor, vendor_sku=vsku, variation_id=vid
+        vendor=vendor,
+        vendor_sku=vsku,
+        variation_id=vid,
+        owner_id=store.user_id,
     ).first()
     if product:
         pm_qs = ProductMapping.objects.filter(store=store, product=product)
@@ -278,6 +281,7 @@ def _get_or_create_product(vendor: Vendor, row: CatalogUploadRow, *, store) -> P
         vendor=vendor,
         vendor_sku=vsku,
         variation_id=vid,
+        owner_id=store.user_id,
         defaults={'vendor_url': url or None},
     )
     if url and not product.vendor_url:
@@ -368,10 +372,13 @@ def _chunked_reset_store_active_listings_pending_scrape(store) -> dict:
     }
 
 
-def run_catalog_sync(upload_id: str):
+def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
     """
     Sync CatalogUpload rows: Add/Update/Delete Product and ProductMapping.
     Creates CatalogSyncLog per row. Call directly or via catalog_sync_task.
+
+    When replace_store_catalog is True, deactivate all active listings on the
+    store before applying the file so the store reflects only this upload.
     """
     sync_log_batch = int(getattr(settings, 'CATALOG_SYNC_LOG_BATCH', 32) or 32)
     progress_every = int(getattr(settings, 'CATALOG_SYNC_PROGRESS_EVERY', 32) or 32)
@@ -400,6 +407,19 @@ def run_catalog_sync(upload_id: str):
         }
 
     store = upload.store
+    replace_deactivated = 0
+    if replace_store_catalog:
+        replace_deactivated = ProductMapping.objects.filter(
+            store=store,
+            is_active=True,
+        ).update(is_active=False)
+        logger.info(
+            'replace_store_catalog store_id=%s deactivated=%s upload_id=%s',
+            store.id,
+            replace_deactivated,
+            upload_id,
+        )
+
     upload.status = CatalogUpload.Status.PROCESSING
     upload.save(update_fields=['status'])
     added, updated, deleted, errors = 0, 0, 0, 0
@@ -570,6 +590,7 @@ def run_catalog_sync(upload_id: str):
         'updated': updated,
         'deleted': deleted,
         'errors': errors,
+        'replace_deactivated': replace_deactivated,
         'pending_reset_batches': reset_stats.get('batches') if reset_stats else None,
         'pending_reset_rows': reset_stats.get('rows_updated') if reset_stats else None,
         'pending_reset_elapsed_ms': reset_stats.get('elapsed_ms') if reset_stats else None,
@@ -606,9 +627,9 @@ def catalog_ingest_upload_file_task(self, upload_id: str):
 
 
 @shared_task(bind=True, max_retries=3)
-def catalog_sync_task(self, upload_id: str):
+def catalog_sync_task(self, upload_id: str, replace_store_catalog: bool = False):
     """Celery wrapper for run_catalog_sync."""
-    return run_catalog_sync(upload_id)
+    return run_catalog_sync(upload_id, replace_store_catalog=replace_store_catalog)
 
 
 def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, session, run, emit_stall_log: bool):

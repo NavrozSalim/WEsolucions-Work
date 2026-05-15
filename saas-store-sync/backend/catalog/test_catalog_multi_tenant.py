@@ -91,7 +91,50 @@ class CatalogSyncMultiTenantTests(TestCase):
 
         self.assertEqual(ProductMapping.objects.filter(store=self.store_a).count(), 1)
         self.assertEqual(ProductMapping.objects.filter(store=self.store_b).count(), 1)
-        self.assertEqual(Product.objects.filter(vendor=self.vendor, vendor_sku=vsku).count(), 1)
+        self.assertEqual(
+            Product.objects.filter(vendor=self.vendor, vendor_sku=vsku).count(),
+            2,
+        )
+        self.assertEqual(
+            Product.objects.filter(
+                vendor=self.vendor, vendor_sku=vsku, owner=self.user_a,
+            ).count(),
+            1,
+        )
+        self.assertEqual(
+            Product.objects.filter(
+                vendor=self.vendor, vendor_sku=vsku, owner=self.user_b,
+            ).count(),
+            1,
+        )
+
+    @patch('catalog.tasks._chunked_reset_store_active_listings_pending_scrape', side_effect=_noop_reset)
+    def test_replace_store_catalog_deactivates_existing_listings(self, _mock_reset):
+        mid_old = 'OLD-MID-1'
+        mid_new = 'NEW-MID-2'
+        u_old = self._make_upload(
+            user=self.user_a, store=self.store_a, mid=mid_old, vsku='VSKU-OLD',
+        )
+        run_catalog_sync(str(u_old.id))
+        self.assertEqual(
+            ProductMapping.objects.filter(store=self.store_a, is_active=True).count(),
+            1,
+        )
+
+        u_new = self._make_upload(
+            user=self.user_a, store=self.store_a, mid=mid_new, vsku='VSKU-NEW',
+        )
+        result = run_catalog_sync(str(u_new.id), replace_store_catalog=True)
+        self.assertEqual(result.get('replace_deactivated'), 1)
+        self.assertEqual(
+            ProductMapping.objects.filter(store=self.store_a, is_active=True).count(),
+            1,
+        )
+        self.assertFalse(
+            ProductMapping.objects.filter(
+                store=self.store_a, marketplace_id=mid_old, is_active=True,
+            ).exists(),
+        )
 
     @patch('catalog.tasks._chunked_reset_store_active_listings_pending_scrape', side_effect=_noop_reset)
     def test_same_store_second_sync_updates_existing(self, _mock_reset):
@@ -153,28 +196,36 @@ class IngestApplyTenantTests(TestCase):
         self.store_b = Store.objects.create(
             user=self.user_b, name='SB', region='USA', api_token='y', marketplace=self.mp,
         )
-        self.product = Product.objects.create(
+        self.product_a = Product.objects.create(
             vendor=self.vendor,
+            owner=self.user_a,
+            vendor_sku='HEB-URL-1',
+            variation_id='',
+            vendor_url='https://www.heb.com/product/test-ingest-tenant',
+        )
+        self.product_b = Product.objects.create(
+            vendor=self.vendor,
+            owner=self.user_b,
             vendor_sku='HEB-URL-1',
             variation_id='',
             vendor_url='https://www.heb.com/product/test-ingest-tenant',
         )
         self.pm_a = ProductMapping.objects.create(
             store=self.store_a,
-            product=self.product,
+            product=self.product_a,
             marketplace_child_sku='c1',
             is_active=True,
         )
         self.pm_b = ProductMapping.objects.create(
             store=self.store_b,
-            product=self.product,
+            product=self.product_b,
             marketplace_child_sku='c2',
             is_active=True,
         )
 
     def test_apply_to_mappings_restricts_to_one_user(self):
         n = _apply_to_mappings(
-            self.product,
+            self.product_a,
             Decimal('9.99'),
             5,
             'Title',
