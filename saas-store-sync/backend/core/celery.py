@@ -29,6 +29,11 @@ app.conf.beat_schedule = {
         'task': 'analytics.tasks.aggregate_daily_metrics',
         'schedule': crontab(minute=10, hour=0),
     },
+    # Prune old VendorPrice history (keeps latest row per product).
+    'prune-old-vendor-prices': {
+        'task': 'vendor.prune_old_vendor_prices',
+        'schedule': crontab(minute=30, hour=3),
+    },
 }
 
 

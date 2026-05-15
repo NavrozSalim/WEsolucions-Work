@@ -13,7 +13,7 @@ the US worker to subscribe to non-scrape queues.
 
 Deploy:
 
-- Main server worker: ``-Q celery,ingest,light`` — ``celery`` default (e.g. analytics); ``ingest`` for catalog + store sync/update; ``light`` for scrape finalizers, resume-after-stop, Beat schedule tick.
+- Main server workers: ``-Q celery`` | ``-Q ingest`` | ``-Q sync`` | ``-Q light`` — ingest for file/sync; sync for ``run_store_*``; light for scrape finalizers + Beat tick.
 - US worker: ``-Q heavy-us`` (same ``REDIS_URL`` / ``DATABASE_URL`` as main)
 - AU worker: ``-Q heavy-au`` (Amazon AU, eBay AU, ``catalog.run_vevor_au_ingest``)
 - Single-host dev: listen to ``heavy-us`` and ``heavy-au`` together if needed.

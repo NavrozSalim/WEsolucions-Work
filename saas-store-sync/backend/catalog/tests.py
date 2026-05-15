@@ -120,12 +120,18 @@ class CeleryStaticTaskRoutesTests(SimpleTestCase):
             (catalog_tasks.catalog_update_task, 'ingest'),
             (catalog_tasks.resume_catalog_scrape_after_stop, 'light'),
             (catalog_tasks.vevor_au_ingest_task, 'heavy-au'),
-            (sync_tasks.run_store_sync, 'ingest'),
-            (sync_tasks.run_store_update, 'ingest'),
-            (sync_tasks.run_store_push_listings_only, 'ingest'),
-            (sync_tasks.run_store_critical_zero_inventory, 'ingest'),
+            (sync_tasks.run_store_sync, 'sync'),
+            (sync_tasks.run_store_update, 'sync'),
+            (sync_tasks.run_store_push_listings_only, 'sync'),
+            (sync_tasks.run_store_critical_zero_inventory, 'sync'),
             (sync_tasks.check_scheduled_updates, 'light'),
         ]
+        from vendor import tasks as vendor_tasks
+
+        self.assertEqual(
+            static.get(vendor_tasks.prune_old_vendor_prices_task.name),
+            {'queue': 'celery'},
+        )
         for task, expected_queue in bindings:
             with self.subTest(task=task.name):
                 self.assertEqual(
@@ -133,6 +139,22 @@ class CeleryStaticTaskRoutesTests(SimpleTestCase):
                     {'queue': expected_queue},
                     msg=f"Update core/settings.py CELERY_TASK_ROUTES for {task.name}",
                 )
+
+
+class ScrapeProgressCacheTests(SimpleTestCase):
+    def test_cache_key_and_invalidate(self):
+        from catalog.scrape_progress import (
+            invalidate_scrape_progress_cache,
+            scrape_progress_cache_key,
+        )
+        from django.core.cache import cache
+
+        store_id = '11111111-1111-1111-1111-111111111111'
+        key = scrape_progress_cache_key(store_id)
+        cache.set(key, {'total': 1}, 60)
+        self.assertEqual(cache.get(key), {'total': 1})
+        invalidate_scrape_progress_cache(store_id)
+        self.assertIsNone(cache.get(key))
 
 
 class MarketplaceTemplateTests(SimpleTestCase):

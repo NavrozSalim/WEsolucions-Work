@@ -223,6 +223,22 @@ try:
 except ValueError:
     CATALOG_POST_SYNC_PENDING_RESET_SLEEP_MS = 0
 
+# Catalog scrape progress API cache TTL (seconds). Invalidated on scrape state changes.
+try:
+    SCRAPE_PROGRESS_CACHE_SECONDS = max(
+        5, min(120, int(os.getenv('SCRAPE_PROGRESS_CACHE_SECONDS', '12'))),
+    )
+except ValueError:
+    SCRAPE_PROGRESS_CACHE_SECONDS = 12
+
+# ``vendor.prune_old_vendor_prices`` retention (days). Keeps latest row per product always.
+try:
+    VENDOR_PRICE_RETENTION_DAYS = max(
+        7, min(3650, int(os.getenv('VENDOR_PRICE_RETENTION_DAYS', '90'))),
+    )
+except ValueError:
+    VENDOR_PRICE_RETENTION_DAYS = 90
+
 # DB persistent connections (seconds). Default 60 reduces new TCP/TLS handshakes to remote Postgres.
 # Use PG_CONN_MAX_AGE=0 when sitting behind PgBouncer (transaction pool) or if you see connection exhaustion.
 # Only apply for PostgreSQL (CI uses sqlite DATABASE_URL without touching CONN_MAX_AGE here).
@@ -320,11 +336,11 @@ if sys.platform == 'win32':
 # --- Celery queues ---
 # Browser scrapes: heavy-us (USA stores) vs heavy-au (AU stores), routed by Store.region
 # (see catalog.celery_routing.CatalogScrapeTaskRouter). Chord finalizers use ``light``.
-# Main server: three workers (-Q celery | -Q ingest | -Q light).
-# - ``ingest``: file ingest, catalog_sync, marketplace sync/update, scheduled store updates (API-responsive).
-# - ``light``: scrape chord finalizers + short scrape resume scheduler (``resume_catalog_scrape_after_stop``)
-#   + Beat minute tick (``check_scheduled_updates``) so they are not blocked by ``celery`` backlog.
-# - ``celery``: default queue for anything without an explicit route (e.g. nightly analytics).
+# Main server: four workers (-Q celery | -Q ingest | -Q sync | -Q light).
+# - ``ingest``: file ingest + catalog_sync + catalog_update (fast API paths).
+# - ``sync``: store scrape/push/update tasks (``run_store_*``) — isolated from ingest uploads.
+# - ``light``: scrape chord finalizers, resume-after-stop, Beat ``check_scheduled_updates``.
+# - ``celery``: default (analytics, vendor price prune).
 # US VPS: -Q heavy-us. AU VPS: -Q heavy-au. Vevor AU feed → ``heavy-au``.
 from kombu import Queue  # noqa: E402
 
@@ -334,6 +350,7 @@ CELERY_TASK_CREATE_MISSING_QUEUES = True
 CELERY_TASK_QUEUES = (
     Queue('celery'),
     Queue('ingest'),
+    Queue('sync'),
     Queue('light'),
     Queue('heavy-us'),
     Queue('heavy-au'),
@@ -348,12 +365,13 @@ CELERY_TASK_ROUTES = (
         'catalog.tasks.catalog_update_task': {'queue': 'ingest'},
         'catalog.tasks.resume_catalog_scrape_after_stop': {'queue': 'light'},
         'catalog.run_vevor_au_ingest': {'queue': 'heavy-au'},
-        # Store/marketplace work: keep off default queue so heavy ``celery`` backlog cannot delay ingest/API paths.
-        'sync.tasks.run_store_sync': {'queue': 'ingest'},
-        'sync.tasks.run_store_update': {'queue': 'ingest'},
-        'sync.tasks.run_store_push_listings_only': {'queue': 'ingest'},
-        'sync.tasks.run_store_critical_zero_inventory': {'queue': 'ingest'},
-        # Minute tick: only enqueues ``run_store_update`` → ``ingest``; keep latency predictable.
+        # Store-wide scrape + marketplace push: separate from catalog file ingest.
+        'sync.tasks.run_store_sync': {'queue': 'sync'},
+        'sync.tasks.run_store_update': {'queue': 'sync'},
+        'sync.tasks.run_store_push_listings_only': {'queue': 'sync'},
+        'sync.tasks.run_store_critical_zero_inventory': {'queue': 'sync'},
+        # Minute tick enqueues ``run_store_update`` → ``sync`` queue.
         'sync.tasks.check_scheduled_updates': {'queue': 'light'},
+        'vendor.prune_old_vendor_prices': {'queue': 'celery'},
     },
 )

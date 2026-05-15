@@ -35,6 +35,9 @@ def set_celery_scrape_state(
         },
     )
     if created:
+        from catalog.scrape_progress import invalidate_scrape_progress_cache
+
+        invalidate_scrape_progress_cache(str(store.id))
         return
     prev_tid = (st.root_task_id or '')[:255]
     st.scope = scope
@@ -54,6 +57,9 @@ def set_celery_scrape_state(
             'first_worker_started_at',
         ]
     )
+    from catalog.scrape_progress import invalidate_scrape_progress_cache
+
+    invalidate_scrape_progress_cache(str(store.id))
 
 
 def mark_celery_scrape_worker_started(store_id: str | None) -> None:
@@ -98,3 +104,6 @@ def clear_celery_scrape_state(store_id: str | None) -> None:
     from catalog.models import StoreCatalogCeleryScrapeState
 
     StoreCatalogCeleryScrapeState.objects.filter(store_id=store_id).delete()
+    from catalog.scrape_progress import invalidate_scrape_progress_cache
+
+    invalidate_scrape_progress_cache(str(store_id))

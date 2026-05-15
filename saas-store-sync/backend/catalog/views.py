@@ -961,6 +961,9 @@ class CatalogScrapeCancelView(APIView):
 
         jobs = list(qs)
         now = timezone.now()
+        from catalog.scrape_progress import invalidate_scrape_progress_cache
+
+        invalidate_scrape_progress_cache(str(store.id))
         cancelled_payload = []
         for job in jobs:
             prior_status = job.status
@@ -1231,201 +1234,12 @@ class CatalogScrapeProgressView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk):
-        from datetime import timedelta
-        from vendor.models import VendorPrice
-        from catalog.ingest_views import SUPPORTED_VENDORS
+        from catalog.scrape_progress import get_scrape_progress_payload
 
         store = get_object_or_404(Store, id=store_pk, user=request.user)
-
-        active = ProductMapping.objects.filter(store=store, is_active=True)
-        total = active.count()
-        by_status_rows = active.values('sync_status').annotate(n=Count('id'))
-        by_status = {r['sync_status']: r['n'] for r in by_status_rows}
-
-        now = timezone.now()
-        vendors_payload: dict[str, dict] = {}
-
-        # Progress is rendered for EVERY vendor the store has listings for —
-        # not just the registered desktop/server runners. Amazon & eBay rows
-        # get a "scraped N / M" strip too, even though they have no ingest
-        # queue. Start by collecting every vendor code that actually appears
-        # in this store's active mappings; then layer the runner metadata
-        # from ``SUPPORTED_VENDORS`` on top.
-        from vendor.models import Vendor as _Vendor
-        store_vendor_codes = list(
-            active.values_list('product__vendor__code', flat=True).distinct()
-        )
-        store_vendor_codes = [c for c in store_vendor_codes if c]
-
-        runner_codes = set(SUPPORTED_VENDORS.keys())
-        other_codes = []
-        for raw_code in store_vendor_codes:
-            rc = (raw_code or '').strip().lower()
-            if not rc:
-                continue
-            mapped = rc
-            if rc in ('heb', 'hebus') or rc.startswith('heb_'):
-                mapped = 'heb'
-            elif rc in ('costcoau', 'costco') or rc.startswith('costco_'):
-                mapped = 'costco'
-            elif rc in ('vevorau', 'vevor') or rc.startswith('vevor_'):
-                mapped = 'vevor'
-            if mapped in runner_codes:
-                continue
-            if rc not in other_codes:
-                other_codes.append(rc)
-
-        iter_codes = list(SUPPORTED_VENDORS.keys()) + other_codes
-        for vendor_code in iter_codes:
-            is_runner = vendor_code in runner_codes
-            vendor_ids = (
-                _vendor_db_ids_for(vendor_code) if is_runner
-                else list(
-                    _Vendor.objects.filter(code__iexact=vendor_code)
-                    .values_list('id', flat=True)
-                )
-            )
-            if not vendor_ids:
-                continue
-
-            vq = active.filter(product__vendor_id__in=vendor_ids)
-            v_total = vq.count()
-            v_rows = vq.values('sync_status').annotate(n=Count('id'))
-            v_by_status = {r['sync_status']: r['n'] for r in v_rows}
-
-            v_last_ingest_at = None
-            v_ingested_last_5m = 0
-            v_ingested_last_24h = 0
-            if v_total:
-                v_product_ids = list(vq.values_list('product_id', flat=True).distinct())
-                vp_qs = VendorPrice.objects.filter(product_id__in=v_product_ids)
-                last_vp = vp_qs.order_by('-scraped_at').values_list('scraped_at', flat=True).first()
-                v_last_ingest_at = last_vp.isoformat() if last_vp else None
-                v_ingested_last_5m = vp_qs.filter(scraped_at__gte=now - timedelta(minutes=5)).count()
-                v_ingested_last_24h = vp_qs.filter(scraped_at__gte=now - timedelta(hours=24)).count()
-
-            v_scraped = v_by_status.get('scraped', 0) + v_by_status.get('synced', 0)
-            v_pending = (
-                v_by_status.get('pending', 0)
-                + v_by_status.get('needs_attention', 0)
-                + v_by_status.get('failed', 0)
-            )
-            v_pct = int(round(v_scraped * 100 / v_total)) if v_total else 0
-
-            latest_job = None
-            v_job_payload = None
-            v_queue_payload = None
-            if is_runner:
-                latest_job = (
-                    HebScrapeJob.objects
-                    .filter(store=store, vendor_code=vendor_code)
-                    .order_by('-requested_at')
-                    .first()
-                )
-                if latest_job is not None:
-                    v_job_payload = {
-                        'id': str(latest_job.id),
-                        'vendor': latest_job.vendor_code,
-                        'status': latest_job.status,
-                        'requested_at': latest_job.requested_at.isoformat(),
-                        'claimed_at': latest_job.claimed_at.isoformat() if latest_job.claimed_at else None,
-                        'completed_at': latest_job.completed_at.isoformat() if latest_job.completed_at else None,
-                        'url_count': latest_job.url_count,
-                        'stats': latest_job.stats or {},
-                    }
-                v_queue_payload = _compute_vendor_queue_payload(store, vendor_code, latest_job)
-
-            default_label = vendor_code.upper()
-            label = (
-                SUPPORTED_VENDORS.get(vendor_code, {}).get('label', default_label)
-                if is_runner
-                else default_label
-            )
-
-            runner_kind = (
-                SUPPORTED_VENDORS.get(vendor_code, {}).get('runner', 'desktop')
-                if is_runner else 'live'
-            )
-            # Amazon / eBay / … use server-side Celery, not the HebScrapeJob desktop queue.
-            if runner_kind == 'live':
-                v_job_payload = None
-                v_queue_payload = None
-
-            vendors_payload[vendor_code] = {
-                'vendor': vendor_code,
-                'label': label,
-                'has_products': v_total > 0,
-                'total': v_total,
-                'scraped': v_scraped,
-                'pending': v_pending,
-                'by_status': v_by_status,
-                'pct': v_pct,
-                'last_ingest_at': v_last_ingest_at,
-                'ingested_last_5m': v_ingested_last_5m,
-                'ingested_last_24h': v_ingested_last_24h,
-                'job': v_job_payload,
-                'queue': v_queue_payload,
-                'runner': runner_kind,
-            }
-
-        # Backward-compat: flatten the HEB payload into the top-level `heb_*`
-        # keys that the current frontend build still reads.
-        heb = vendors_payload.get('heb') or {}
-        heb_total = heb.get('total', 0)
-        heb_scraped = heb.get('scraped', 0)
-        heb_pending = heb.get('pending', 0)
-
-        server_celery_scrape = {
-            'active': False,
-            'store_id': str(store.id),
-            'phase': None,
-        }
-        try:
-            st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
-            if st:
-                server_celery_scrape = {
-                    'active': True,
-                    'store_id': str(store.id),
-                    # Any in-flight server scrape shows as running — avoids "queued" when the
-                    # row exists but a client/proxy error prevented started-at from updating.
-                    'phase': 'running',
-                    'scope': st.scope,
-                    'upload_id': str(st.upload_id) if st.upload_id else None,
-                    'enqueued_at': st.enqueued_at.isoformat(),
-                    'task_id': st.root_task_id or '',
-                }
-        except Exception:
-            pass
-
+        payload = get_scrape_progress_payload(store)
         return Response(
-            {
-            'store_id': str(store.id),
-            'total': total,
-            'by_status': by_status,
-            'server_celery_scrape': server_celery_scrape,
-            'has_heb': bool(heb_total > 0),
-            'heb_total': heb_total,
-            'heb_scraped': heb_scraped,
-            'heb_pending': heb_pending,
-            'heb_by_status': heb.get('by_status', {}),
-            'heb_pct': heb.get('pct', 0),
-            'heb_last_ingest_at': heb.get('last_ingest_at'),
-            'heb_ingested_last_5m': heb.get('ingested_last_5m', 0),
-            'heb_ingested_last_24h': heb.get('ingested_last_24h', 0),
-            'heb_job': heb.get('job'),
-            'heb_queue': heb.get('queue'),
-            # New vendor-aware payload. Frontend should migrate to reading
-            # from here so adding another vendor doesn't touch this endpoint.
-            'vendors': vendors_payload,
-            'checked_at': now.isoformat(),
-            'ui_hints': {
-                'scheduled_updates_other_stores': (
-                    'Each store can have its own automatic update schedule. When several are '
-                    'due at the same time, they may all show activity in logs — that is separate '
-                    'from a catalog scrape you start on this page.'
-                ),
-            },
-            },
+            payload,
             headers={'Cache-Control': 'no-store, max-age=0, private'},
         )
 
