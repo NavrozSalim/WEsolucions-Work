@@ -27,10 +27,20 @@ import requests
 
 logger = logging.getLogger("scrapers.vevor_au")
 
-VEVOR_AU_FEED_URL = os.getenv(
-    "VEVOR_AU_FEED_URL",
-    "https://ads-feed.s3.us-west-2.amazonaws.com/ads/business/563/vevor-563.xlsx",
+DEFAULT_VEVOR_AU_FEED_URL = (
+    "https://ads-feed.s3.us-west-2.amazonaws.com/ads/business/563/vevor-563.xlsx"
 )
+
+
+def resolve_vevor_au_feed_url(raw: str | None = None) -> str:
+    """Return feed URL; treat unset/blank env as the public default (Docker may pass '')."""
+    if raw is None:
+        raw = os.getenv("VEVOR_AU_FEED_URL")
+    url = (raw or "").strip()
+    return url or DEFAULT_VEVOR_AU_FEED_URL
+
+
+VEVOR_AU_FEED_URL = resolve_vevor_au_feed_url()
 
 
 def _ingest_only_result() -> dict:
@@ -161,9 +171,14 @@ def load_veror_via_excel_positions(path: str) -> tuple[dict, dict, int]:
         wb.close()
 
 
-def fetch_vevor_feed(url: str = VEVOR_AU_FEED_URL, timeout: int = 60) -> str:
+def fetch_vevor_feed(url: str | None = None, timeout: int = 60) -> str:
     """Download the Vevor AU XLSX to a temp file and return its path."""
-    resp = requests.get(url, timeout=timeout, stream=True)
+    feed_url = resolve_vevor_au_feed_url(url)
+    if not feed_url.startswith(("http://", "https://")):
+        raise ValueError(
+            f"VEVOR_AU_FEED_URL must be an http(s) URL; got {feed_url!r}"
+        )
+    resp = requests.get(feed_url, timeout=timeout, stream=True)
     resp.raise_for_status()
     tmp = tempfile.NamedTemporaryFile(prefix="vevor_au_", suffix=".xlsx", delete=False)
     try:
@@ -193,7 +208,9 @@ def iter_vevor_entries(lookup: dict) -> Iterable[tuple[str, dict]]:
 
 
 __all__ = [
+    "DEFAULT_VEVOR_AU_FEED_URL",
     "VEVOR_AU_FEED_URL",
+    "resolve_vevor_au_feed_url",
     "_ingest_only_result",
     "clean_id",
     "compact_id",

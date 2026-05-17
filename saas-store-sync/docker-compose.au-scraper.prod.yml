@@ -52,7 +52,7 @@ services:
       - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-0}
       - EBAY_AU_HTTP_FIRST=${EBAY_AU_HTTP_FIRST:-}
       - CATALOG_SCRAPE_CHUNK_SIZE=${CATALOG_SCRAPE_CHUNK_SIZE:-}
-      - VEVOR_AU_FEED_URL=${VEVOR_AU_FEED_URL:-}
+      - VEVOR_AU_FEED_URL=${VEVOR_AU_FEED_URL:-https://ads-feed.s3.us-west-2.amazonaws.com/ads/business/563/vevor-563.xlsx}
       - PROXY_URL=${PROXY_URL:-}
       - PROXY_URLS=${PROXY_URLS:-}
       - COSTCO_AU_PROXY_URL=${COSTCO_AU_PROXY_URL:-}
