@@ -41,7 +41,7 @@ export default function MydealSetupFields({
                         disabled={!storeId}
                     >
                         <UploadCloud className="h-4 w-4 mr-1.5 inline" aria-hidden />
-                        Upload Templates for Price and Inventory
+                        Upload / replace templates
                     </Button>
                     {!storeId ? (
                         <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -49,7 +49,7 @@ export default function MydealSetupFields({
                         </p>
                     ) : (
                         <p className="text-xs text-slate-500 dark:text-slate-400">
-                            Upload Mydeal Price CSV first, then Inventory. Scraped prices update Price(IncGST) and RRP(IncGST) only; stock updates StockOnHand only.
+                            Upload or replace Price and Inventory CSVs anytime. Each file overwrites that template for this store. Re-scrape after SKU changes, then download templates.
                         </p>
                     )}
                 </div>

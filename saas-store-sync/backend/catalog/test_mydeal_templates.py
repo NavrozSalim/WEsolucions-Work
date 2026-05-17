@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import zipfile
 from decimal import Decimal
 
 from cryptography.fernet import Fernet
@@ -15,6 +16,7 @@ from catalog.mydeal_templates import (
     _compute_rrp,
     _export_price_csv,
     ingest_mydeal_template,
+    ingest_mydeal_templates_zip,
 )
 from marketplace.models import Marketplace
 from products.models import Product
@@ -103,6 +105,59 @@ class MydealTemplateTests(TestCase):
             ).count(),
             1,
         )
+
+    def test_reupload_replaces_previous_rows(self):
+        price_buf = _csv_bytes(
+            MYDEAL_PRICE_HEADERS,
+            [['D1', 'V1', 'E1', 'OLD-SKU', '', 'Title', '', '']],
+        )
+        first = ingest_mydeal_template(self.store, MydealTemplateRow.Kind.PRICE, price_buf)
+        self.assertFalse(first['replaced'])
+
+        price_buf2 = _csv_bytes(
+            MYDEAL_PRICE_HEADERS,
+            [
+                ['D2', 'V2', 'E2', 'NEW-1', '', 'A', '', ''],
+                ['D3', 'V3', 'E3', 'NEW-2', '', 'B', '', ''],
+            ],
+        )
+        second = ingest_mydeal_template(self.store, MydealTemplateRow.Kind.PRICE, price_buf2)
+        self.assertTrue(second['replaced'])
+        self.assertEqual(second['previous_row_count'], 1)
+        self.assertEqual(
+            MydealTemplateRow.objects.filter(
+                store=self.store, kind=MydealTemplateRow.Kind.PRICE,
+            ).count(),
+            2,
+        )
+        skus = set(
+            MydealTemplateRow.objects.filter(
+                store=self.store, kind=MydealTemplateRow.Kind.PRICE,
+            ).values_list('sku', flat=True)
+        )
+        self.assertEqual(skus, {'NEW-1', 'NEW-2'})
+
+    def test_zip_ingest_replaces_both_kinds(self):
+        zbuf = io.BytesIO()
+        with zipfile.ZipFile(zbuf, 'w') as zf:
+            zf.writestr(
+                'price.csv',
+                '\n'.join([
+                    ','.join(MYDEAL_PRICE_HEADERS),
+                    'D1,V1,E1,ZIP-SKU,,T,,',
+                ]),
+            )
+            zf.writestr(
+                'inv.csv',
+                '\n'.join([
+                    ','.join(MYDEAL_INVENTORY_HEADERS),
+                    'D1,V1,E1,ZIP-SKU,,T,,FALSE,Approved',
+                ]),
+            )
+        zbuf.seek(0)
+        out = ingest_mydeal_templates_zip(self.store, zbuf)
+        self.assertEqual(set(out['kinds']), {'price', 'inventory'})
+        self.assertTrue(out['status']['ready'])
 
     def test_export_price_fills_price_and_rrp(self):
         MydealTemplateRow.objects.create(

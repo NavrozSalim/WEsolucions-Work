@@ -1836,7 +1836,7 @@ export default function Catalog() {
                                         disabled={uploading}
                                     >
                                         <UploadCloud className="h-4 w-4 mr-1.5" />
-                                        Upload templates
+                                        Upload / replace templates
                                     </Button>
                                     <Button
                                         variant="secondary"

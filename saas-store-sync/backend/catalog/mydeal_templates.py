@@ -88,12 +88,13 @@ def _normalize_sku(raw: Any) -> str:
     return s
 
 
-def _read_csv_rows(file_obj) -> tuple[list[str], list[dict[str, str]]]:
-    raw = file_obj.read()
+def _read_csv_text(raw: bytes | str) -> str:
     if isinstance(raw, bytes):
-        text = raw.decode('utf-8-sig', errors='replace')
-    else:
-        text = raw
+        return raw.decode('utf-8-sig', errors='replace')
+    return raw
+
+
+def _read_csv_rows_from_text(text: str) -> tuple[list[str], list[dict[str, str]]]:
     reader = csv.DictReader(io.StringIO(text))
     if not reader.fieldnames:
         raise ValueError('CSV has no header row.')
@@ -108,6 +109,19 @@ def _read_csv_rows(file_obj) -> tuple[list[str], list[dict[str, str]]]:
             raise ValueError(f'Row {i}: SKU is required.')
         rows.append(cleaned)
     return headers, rows
+
+
+def _read_csv_rows(file_obj) -> tuple[list[str], list[dict[str, str]]]:
+    raw = file_obj.read()
+    return _read_csv_rows_from_text(_read_csv_text(raw))
+
+
+def _classify_mydeal_csv_headers(headers: list[str]) -> str | None:
+    if headers == MYDEAL_PRICE_HEADERS:
+        return MydealTemplateRow.Kind.PRICE
+    if headers == MYDEAL_INVENTORY_HEADERS:
+        return MydealTemplateRow.Kind.INVENTORY
+    return None
 
 
 def _validate_headers(headers: list[str], expected: list[str]) -> None:
@@ -134,6 +148,7 @@ def ingest_mydeal_template(store: Store, kind: str, file_obj) -> dict[str, Any]:
     if not rows:
         raise ValueError('Template file has no data rows.')
 
+    previous_count = MydealTemplateRow.objects.filter(store=store, kind=kind).count()
     MydealTemplateRow.objects.filter(store=store, kind=kind).delete()
 
     bulk: list[MydealTemplateRow] = []
@@ -158,6 +173,107 @@ def ingest_mydeal_template(store: Store, kind: str, file_obj) -> dict[str, Any]:
     return {
         'kind': kind,
         'row_count': len(bulk),
+        'replaced': previous_count > 0,
+        'previous_row_count': previous_count,
+        'status': template_status(store),
+    }
+
+
+@transaction.atomic
+def ingest_mydeal_template_csv_bytes(
+    store: Store,
+    kind: str,
+    raw: bytes,
+    *,
+    source_name: str = '',
+) -> dict[str, Any]:
+    """Ingest from in-memory CSV bytes (used by ZIP upload)."""
+    if not store_is_mydeal(store):
+        raise ValueError('Store is not a Mydeal marketplace store.')
+    if kind not in (MydealTemplateRow.Kind.PRICE, MydealTemplateRow.Kind.INVENTORY):
+        raise ValueError('kind must be price or inventory.')
+
+    expected = (
+        MYDEAL_PRICE_HEADERS
+        if kind == MydealTemplateRow.Kind.PRICE
+        else MYDEAL_INVENTORY_HEADERS
+    )
+    headers, rows = _read_csv_rows_from_text(_read_csv_text(raw))
+    _validate_headers(headers, expected)
+    if not rows:
+        raise ValueError(
+            f'Template file has no data rows{f" ({source_name})" if source_name else ""}.'
+        )
+
+    previous_count = MydealTemplateRow.objects.filter(store=store, kind=kind).count()
+    MydealTemplateRow.objects.filter(store=store, kind=kind).delete()
+
+    bulk: list[MydealTemplateRow] = []
+    for idx, row in enumerate(rows, start=1):
+        bulk.append(
+            MydealTemplateRow(
+                store=store,
+                kind=kind,
+                row_number=idx,
+                deal_id=row.get('DealID', ''),
+                variant_id=row.get('VariantID', ''),
+                external_id=row.get('ExternalID', ''),
+                sku=_normalize_sku(row.get('SKU')),
+                options=row.get('Options', ''),
+                deal_title=row.get('DealTitle', ''),
+                discontinued=row.get('Discontinued', ''),
+                mydeal_approved=row.get('MyDealApproved', ''),
+            )
+        )
+    MydealTemplateRow.objects.bulk_create(bulk, batch_size=500)
+
+    return {
+        'kind': kind,
+        'row_count': len(bulk),
+        'replaced': previous_count > 0,
+        'previous_row_count': previous_count,
+        'source_name': source_name,
+    }
+
+
+@transaction.atomic
+def ingest_mydeal_templates_zip(store: Store, file_obj) -> dict[str, Any]:
+    """Replace price and/or inventory templates from a ZIP of Mydeal CSV files."""
+    if not store_is_mydeal(store):
+        raise ValueError('Store is not a Mydeal marketplace store.')
+
+    found: dict[str, tuple[bytes, str]] = {}
+    with zipfile.ZipFile(file_obj) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename.split('/')[-1]
+            if not name.lower().endswith('.csv'):
+                continue
+            raw = zf.read(info)
+            try:
+                headers, _ = _read_csv_rows_from_text(_read_csv_text(raw))
+            except ValueError:
+                continue
+            kind = _classify_mydeal_csv_headers(headers)
+            if kind and kind not in found:
+                found[kind] = (raw, name)
+
+    if not found:
+        raise ValueError(
+            'ZIP must contain Mydeal Price and/or Inventory CSV files with the correct headers.'
+        )
+
+    results: dict[str, Any] = {}
+    for kind in (MydealTemplateRow.Kind.PRICE, MydealTemplateRow.Kind.INVENTORY):
+        if kind not in found:
+            continue
+        raw, name = found[kind]
+        results[kind] = ingest_mydeal_template_csv_bytes(store, kind, raw, source_name=name)
+
+    return {
+        'kinds': list(results.keys()),
+        'details': results,
         'status': template_status(store),
     }
 

@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 from catalog.mydeal_templates import (
     build_export_response,
     ingest_mydeal_template,
+    ingest_mydeal_templates_zip,
     store_is_mydeal,
     template_status,
 )
@@ -50,11 +51,6 @@ class MydealTemplateUploadView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         kind = (request.data.get('kind') or request.query_params.get('kind') or '').strip().lower()
-        if kind not in ('price', 'inventory'):
-            return Response(
-                {'error': 'kind must be price or inventory.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         file_obj = request.data.get('file')
         if not file_obj:
             return Response(
@@ -62,7 +58,15 @@ class MydealTemplateUploadView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         try:
-            result = ingest_mydeal_template(store, kind, file_obj)
+            if kind in ('zip', 'both'):
+                result = ingest_mydeal_templates_zip(store, file_obj)
+            elif kind in ('price', 'inventory'):
+                result = ingest_mydeal_template(store, kind, file_obj)
+            else:
+                return Response(
+                    {'error': 'kind must be price, inventory, or zip.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result, status=status.HTTP_201_CREATED)

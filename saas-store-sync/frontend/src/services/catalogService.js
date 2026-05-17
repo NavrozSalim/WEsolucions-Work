@@ -357,6 +357,7 @@ function runCatalogJobPost(url, body, storeId) {
 export const getMydealTemplateStatus = (storeId) =>
     api.get(`/stores/${storeId}/mydeal/templates/status/`);
 
+/** kind: price | inventory | zip (ZIP with one or both Mydeal CSV templates) */
 export const uploadMydealTemplate = (storeId, kind, file) => {
     const form = new FormData();
     form.append('file', file);
