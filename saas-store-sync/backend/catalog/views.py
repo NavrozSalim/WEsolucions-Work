@@ -108,10 +108,23 @@ class CatalogStoresView(APIView):
             .values_list('price_settings__store_id', flat=True)
             .distinct()
         )
+        from catalog.mydeal_templates import store_is_mydeal, template_status
+
+        mydeal_store_ids = [
+            s.id for s in stores
+            if store_is_mydeal(s)
+        ]
+        mydeal_status_map = {}
+        if mydeal_store_ids:
+            from catalog.models import MydealTemplateRow
+            for sid in mydeal_store_ids:
+                st = next(x for x in stores if x.id == sid)
+                mydeal_status_map[str(sid)] = template_status(st)
+
         data = []
         for s in stores:
             sch = sched_map.get(str(s.id))
-            data.append({
+            row = {
                 'id': str(s.id),
                 'name': s.name,
                 'marketplace_id': str(s.marketplace_id) if s.marketplace_id else None,
@@ -120,7 +133,11 @@ class CatalogStoresView(APIView):
                 'product_count': s.product_count,
                 'schedule_active': sch.is_active if sch else None,
                 'has_fixed_tier': s.id in fixed_tier_store_ids,
-            })
+            }
+            if store_is_mydeal(s):
+                row['mydeal_profile'] = getattr(s, 'mydeal_profile', None) or 'TFS'
+                row['mydeal_templates'] = mydeal_status_map.get(str(s.id), {})
+            data.append(row)
         return Response(data)
 
 

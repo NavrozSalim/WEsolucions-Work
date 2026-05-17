@@ -59,10 +59,12 @@ function storeToForm(store) {
         kogan_sheet_id: store.kogan_sheet_id || '',
         kogan_tab_name: store.kogan_tab_name || '',
         kogan_service_account_json: '',
+        mydeal_profile: store.mydeal_profile || 'TFS',
         vendor_price_settings: (store.vendor_price_settings || []).map((vp) => ({
             vendor_id: vp.vendor || vp.vendor_id,
             purchase_tax_percentage: vp.purchase_tax_percentage ?? 0,
             marketplace_fees_percentage: vp.marketplace_fees_percentage ?? 0,
+            mydeal_rrp_margin_percentage: vp.mydeal_rrp_margin_percentage ?? '',
             rounding_option: vp.rounding_option || 'none',
             continuous_update: !!vp.continuous_update,
             range_margins: (vp.range_margins || []).map((r) => ({
@@ -272,6 +274,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
 
     const regionTimezones = TIMEZONE_OPTIONS[store?.region] || TIMEZONE_OPTIONS.USA;
     const isKogan = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'kogan';
+    const isMydeal = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'mydeal';
     const koganAuth = (form.kogan_auth_method || 'json') === 'token' ? 'token' : 'json';
 
     const buildPayload = () => {
@@ -287,6 +290,9 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                 marketplace_fees_percentage: allDirect ? 0 : (parseFloat(vp.marketplace_fees_percentage) || 0),
                 rounding_option: vp.rounding_option || 'none',
                 continuous_update: !!vp.continuous_update,
+                mydeal_rrp_margin_percentage: isMydeal
+                    ? (parseFloat(vp.mydeal_rrp_margin_percentage) || 0)
+                    : undefined,
                 range_margins: ranges.map((r) => ({
                     from_value: parseFloat(r.from_value) || 0,
                     to_value: r.to_value === '' || r.to_value === 'MAX' ? null : parseFloat(r.to_value),
@@ -322,6 +328,9 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
             payload.kogan_sheet_id = form.kogan_sheet_id?.trim();
             payload.kogan_tab_name = form.kogan_tab_name?.trim();
             if (form.kogan_service_account_json?.trim()) payload.kogan_service_account_json = form.kogan_service_account_json;
+        }
+        if (isMydeal && form.mydeal_profile) {
+            payload.mydeal_profile = form.mydeal_profile;
         }
         return payload;
     };
@@ -464,7 +473,18 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                     <Input label="Store Name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} required />
                                 </div>
                                 <div className="sm:col-span-2">
-                                    {!isKogan ? (
+                                    {isMydeal ? (
+                                        <Select
+                                            label="Mydeal template profile"
+                                            value={form.mydeal_profile}
+                                            onChange={(e) => setForm((f) => ({ ...f, mydeal_profile: e.target.value }))}
+                                            options={[
+                                                { value: 'TFS', label: 'TFS' },
+                                                { value: 'P&P', label: 'P&P' },
+                                            ]}
+                                            required
+                                        />
+                                    ) : !isKogan ? (
                                         <>
                                             <Input label="API Token / Credentials JSON" type="password" placeholder="Leave blank to keep current token" value={form.api_token} onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))} />
                                             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Leave empty to keep the existing token unchanged. Sears/Walmart can use JSON credentials.</p>
@@ -672,6 +692,21 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                                 <Input label="Purchase Tax (%)" type="number" min={0} step="0.01" value={allDirect ? 0 : vp.purchase_tax_percentage} disabled={allDirect} onChange={(e) => { const v = e.target.value; if (v === '') { updateVendorPrice(i, 'purchase_tax_percentage', ''); return; } const n = parseFloat(v); updateVendorPrice(i, 'purchase_tax_percentage', Number.isFinite(n) ? Math.max(0, n) : ''); }} />
                                                 <Input label="Marketplace Fees (%)" type="number" min={0} step="0.01" value={allDirect ? 0 : vp.marketplace_fees_percentage} disabled={allDirect} onChange={(e) => { const v = e.target.value; if (v === '') { updateVendorPrice(i, 'marketplace_fees_percentage', ''); return; } const n = parseFloat(v); updateVendorPrice(i, 'marketplace_fees_percentage', Number.isFinite(n) ? Math.max(0, n) : ''); }} />
                                             </div>
+                                            {isMydeal && (
+                                                <Input
+                                                    label="RRP margin (%)"
+                                                    type="number"
+                                                    min={0}
+                                                    step="0.01"
+                                                    value={vp.mydeal_rrp_margin_percentage ?? ''}
+                                                    onChange={(e) => {
+                                                        const v = e.target.value;
+                                                        if (v === '') { updateVendorPrice(i, 'mydeal_rrp_margin_percentage', ''); return; }
+                                                        const n = parseFloat(v);
+                                                        updateVendorPrice(i, 'mydeal_rrp_margin_percentage', Number.isFinite(n) ? Math.max(0, n) : '');
+                                                    }}
+                                                />
+                                            )}
                                             <label className="flex items-center gap-2.5 cursor-pointer select-none">
                                                 <input
                                                     type="checkbox"

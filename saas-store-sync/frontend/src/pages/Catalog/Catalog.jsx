@@ -7,6 +7,7 @@ import {
     RefreshCw,
     Trash2,
     ChevronLeft,
+    ChevronDown,
     Store,
     ExternalLink,
     Settings,
@@ -41,7 +42,9 @@ import {
     getScrapeProgress,
     cancelCatalogScrape,
     updateProductMapping,
+    downloadMydealTemplates,
 } from '../../services/catalogService';
+import MydealUploadModal from '../../components/catalog/MydealUploadModal';
 import Button from '../../components/ui/Button';
 import Select from '../../components/ui/Select';
 import ConfirmModal from '../../components/ui/ConfirmModal';
@@ -92,6 +95,14 @@ function formatEtaShort(seconds) {
 }
 
 /** Prefer server detail for errors; keep wording plain for non-technical users. */
+function isMydealMarketplace(storeData) {
+    const code = (storeData?.marketplace_code || storeData?.marketplace_name || '')
+        .toString()
+        .trim()
+        .toLowerCase();
+    return code === 'mydeal';
+}
+
 function formatCatalogError(err) {
     const status = err.response?.status;
     const d = err.response?.data;
@@ -629,6 +640,9 @@ export default function Catalog() {
     const [flowStatus, setFlowStatus] = useState(''); // file uploaded | ready to sync | syncing | success | failed
     const [message, setMessage] = useState('');
     const [uploadModalOpen, setUploadModalOpen] = useState(false);
+    const [mydealUploadOpen, setMydealUploadOpen] = useState(false);
+    const [mydealDownloadOpen, setMydealDownloadOpen] = useState(false);
+    const [mydealDownloading, setMydealDownloading] = useState(false);
     const [deleteStoreConfirm, setDeleteStoreConfirm] = useState(null);
     const [deletingStoreId, setDeletingStoreId] = useState(null);
     const [resettingId, setResettingId] = useState(null);
@@ -685,6 +699,7 @@ export default function Catalog() {
     const { setSidebarActivity, clearSidebarActivity, clearCatalogActivities } = useSidebarActivity();
 
     const selectedStoreData = storeList.find((s) => s.id === selectedStore);
+    const isMydealStore = isMydealMarketplace(selectedStoreData);
     // Only show Pack QTY / Prep Fees / Shipping Fees columns when the store
     // has at least one ``margin_type='fixed'`` tier configured. The backend
     // (CatalogStoresView) exposes this via ``has_fixed_tier`` so we don't
@@ -1220,6 +1235,32 @@ export default function Catalog() {
                 setMessage(formatCatalogError(err) || 'Upload failed');
             })
             .finally(() => setUploading(false));
+    };
+
+    const handleMydealDownload = (type) => {
+        if (!selectedStore) return;
+        setMydealDownloading(true);
+        setMydealDownloadOpen(false);
+        downloadMydealTemplates(selectedStore, type)
+            .then((res) => {
+                const profile = selectedStoreData?.mydeal_profile || selectedStoreData?.mydeal_templates?.profile || 'TFS';
+                const name = type === 'price'
+                    ? `Mydeal - ${profile} - Price Template.csv`
+                    : type === 'inventory'
+                        ? `Mydeal - ${profile} - Inventory Template.csv`
+                        : `Mydeal - ${profile} - Templates.zip`;
+                const blob = new Blob([res.data], {
+                    type: type === 'both' ? 'application/zip' : 'text/csv',
+                });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = name;
+                a.click();
+                URL.revokeObjectURL(url);
+            })
+            .catch((err) => setMessage(formatCatalogError(err) || 'Download failed'))
+            .finally(() => setMydealDownloading(false));
     };
 
     const handleSync = (uploadId = null) => {
@@ -1786,15 +1827,56 @@ export default function Catalog() {
                                     Logs
                                 </button>
                             </div>
-                            <Button
-                                variant="primary"
-                                size="sm"
-                                onClick={() => setUploadModalOpen(true)}
-                                disabled={uploading}
-                            >
-                                <UploadCloud className="h-4 w-4 mr-1.5" />
-                                Upload Catalog
-                            </Button>
+                            {isMydealStore ? (
+                                <>
+                                    <Button
+                                        variant="primary"
+                                        size="sm"
+                                        onClick={() => setMydealUploadOpen(true)}
+                                        disabled={uploading}
+                                    >
+                                        <UploadCloud className="h-4 w-4 mr-1.5" />
+                                        Upload templates
+                                    </Button>
+                                    <Button
+                                        variant="secondary"
+                                        size="sm"
+                                        onClick={() => setUploadModalOpen(true)}
+                                        disabled={uploading}
+                                    >
+                                        Upload catalog
+                                    </Button>
+                                    <div className="relative">
+                                        <Button
+                                            variant="secondary"
+                                            size="sm"
+                                            onClick={() => setMydealDownloadOpen((o) => !o)}
+                                            disabled={mydealDownloading}
+                                        >
+                                            <Download className="h-4 w-4 mr-1.5" />
+                                            Download templates
+                                            <ChevronDown className="h-3 w-3 ml-1" />
+                                        </Button>
+                                        {mydealDownloadOpen && (
+                                            <div className="absolute right-0 top-full z-20 mt-1 min-w-[11rem] rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 py-1 shadow-lg">
+                                                <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('price')}>Price CSV</button>
+                                                <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('inventory')}>Inventory CSV</button>
+                                                <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('both')}>Both (ZIP)</button>
+                                            </div>
+                                        )}
+                                    </div>
+                                </>
+                            ) : (
+                                <Button
+                                    variant="primary"
+                                    size="sm"
+                                    onClick={() => setUploadModalOpen(true)}
+                                    disabled={uploading}
+                                >
+                                    <UploadCloud className="h-4 w-4 mr-1.5" />
+                                    Upload Catalog
+                                </Button>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -2508,6 +2590,15 @@ export default function Catalog() {
                 )}
             </div>
             )}
+
+            <MydealUploadModal
+                open={mydealUploadOpen && !!selectedStore}
+                storeId={selectedStore}
+                onClose={() => setMydealUploadOpen(false)}
+                onComplete={() => {
+                    getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
+                }}
+            />
 
             <UpdateWithFileModal
                 open={uploadModalOpen && !!selectedStore}

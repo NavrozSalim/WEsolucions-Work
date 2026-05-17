@@ -21,6 +21,7 @@ class StoreVendorPriceSettingsReadSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'vendor', 'vendor_code', 'vendor_name',
             'purchase_tax_percentage', 'marketplace_fees_percentage',
+            'mydeal_rrp_margin_percentage',
             'multiplier', 'optional_fee', 'rounding_option', 'continuous_update',
             'range_margins',
         ]
@@ -89,6 +90,7 @@ class StoreSerializer(serializers.ModelSerializer):
             'id', 'name', 'region', 'api_token', 'marketplace', 'marketplace_id', 'marketplace_name',
             'kogan_service_account_json', 'kogan_sheet_id', 'kogan_tab_name',
             'kogan_sku_column', 'kogan_stock_column', 'kogan_price_column', 'kogan_rrp_column', 'kogan_first_price_column',
+            'mydeal_profile',
             'connection_status', 'last_validated_at',
             'is_active', 'created_at', 'updated_at',
             'vendor_price_settings', 'vendor_inventory_settings',
@@ -136,6 +138,12 @@ class StoreSerializer(serializers.ModelSerializer):
             except Marketplace.DoesNotExist:
                 pass
         is_kogan = bool(mkt and (str(mkt.code or '').strip().lower() == 'kogan' or str(mkt.name or '').strip().lower() == 'kogan'))
+        is_mydeal = bool(mkt and (str(mkt.code or '').strip().lower() == 'mydeal' or str(mkt.name or '').strip().lower() == 'mydeal'))
+        if is_mydeal:
+            profile = (req.get('mydeal_profile') or '').strip()
+            if profile not in ('TFS', 'P&P'):
+                raise ValidationError({'mydeal_profile': 'Mydeal profile must be TFS or P&P.'})
+            validated_data['mydeal_profile'] = profile
         if is_kogan:
             # Kogan uses Google Sheets service account JSON + spreadsheet details, not Store.api_token.
             if not (req.get('kogan_sheet_id') or '').strip():
@@ -146,6 +154,8 @@ class StoreSerializer(serializers.ModelSerializer):
             has_json = bool((req.get('kogan_service_account_json') or '').strip() or (validated_data.get('kogan_service_account_json') or '').strip())
             if not has_json and not (req.get('api_token') or '').strip():
                 raise ValidationError({'kogan_service_account_json': 'Upload service account JSON for Kogan (or paste it into API token).'})
+        elif is_mydeal:
+            pass
         else:
             if not (req.get('api_token') or '').strip():
                 raise ValidationError({'api_token': 'API key is required.'})
@@ -173,6 +183,7 @@ class StoreSerializer(serializers.ModelSerializer):
                 'kogan_price_column',
                 'kogan_rrp_column',
                 'kogan_first_price_column',
+                'mydeal_profile',
             )
         }
         if store_data.get('name'):
@@ -216,6 +227,7 @@ class StoreSerializer(serializers.ModelSerializer):
                 'kogan_price_column',
                 'kogan_rrp_column',
                 'kogan_first_price_column',
+                'mydeal_profile',
             ):
                 setattr(instance, attr, value)
         marketplace_id = req.get('marketplace_id') or req.get('marketplace')
@@ -227,6 +239,13 @@ class StoreSerializer(serializers.ModelSerializer):
                 pass
         mkt_now = instance.marketplace
         is_kogan = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'kogan' or str(mkt_now.name or '').strip().lower() == 'kogan'))
+        is_mydeal = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'mydeal' or str(mkt_now.name or '').strip().lower() == 'mydeal'))
+        if is_mydeal and 'mydeal_profile' in req:
+            profile = (req.get('mydeal_profile') or '').strip()
+            if profile and profile not in ('TFS', 'P&P'):
+                raise ValidationError({'mydeal_profile': 'Mydeal profile must be TFS or P&P.'})
+            if profile:
+                instance.mydeal_profile = profile
         if is_kogan:
             if 'kogan_sheet_id' in req and not (req.get('kogan_sheet_id') or '').strip():
                 raise ValidationError({'kogan_sheet_id': 'Spreadsheet ID is required for Kogan.'})
@@ -397,10 +416,15 @@ class StoreSerializer(serializers.ModelSerializer):
                 vendor = Vendor.objects.get(id=vendor_id)
             except Vendor.DoesNotExist:
                 continue
+            rrp_margin = item.get('mydeal_rrp_margin_percentage')
+            rrp_margin_dec = None
+            if rrp_margin not in (None, ''):
+                rrp_margin_dec = _c(rrp_margin, default=0)
             ps = StoreVendorPriceSettings.objects.create(
                 store=store, vendor=vendor,
                 purchase_tax_percentage=_c(item.get('purchase_tax_percentage', 0) or 0),
                 marketplace_fees_percentage=_c(item.get('marketplace_fees_percentage', 0) or 0),
+                mydeal_rrp_margin_percentage=rrp_margin_dec,
                 multiplier=max(0.0, float(item.get('multiplier', 1) or 1)),
                 optional_fee=max(0.0, float(item.get('optional_fee', 0) or 0)),
                 rounding_option=str(item.get('rounding_option', 'none') or 'none'),

@@ -30,6 +30,13 @@ class Store(models.Model):
     kogan_price_column = models.CharField(max_length=64, default='PRICE')
     kogan_rrp_column = models.CharField(max_length=64, default='rrp')
     kogan_first_price_column = models.CharField(max_length=64, default='kogan_first_price')
+    mydeal_profile = models.CharField(
+        max_length=10,
+        choices=[('TFS', 'TFS'), ('P&P', 'P&P')],
+        null=True,
+        blank=True,
+        help_text='Mydeal template family: TFS or P&P.',
+    )
     marketplace = models.ForeignKey(
         'marketplace.Marketplace',
         on_delete=models.SET_NULL,
@@ -109,6 +116,13 @@ class StoreVendorPriceSettings(models.Model):
     continuous_update = models.BooleanField(
         default=False,
         help_text='If True, only push listing updates to the marketplace when vendor price/stock changed since last scrape.',
+    )
+    mydeal_rrp_margin_percentage = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text='Mydeal only: RRP(IncGST) = Price(IncGST) / (this % / 100).',
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -25,6 +25,11 @@ from .views import (
     CatalogResetListingsPendingView,
     CatalogActivityLogListView,
 )
+from .mydeal_views import (
+    MydealTemplateStatusView,
+    MydealTemplateUploadView,
+    MydealTemplateExportView,
+)
 from .ingest_views import (
     HebIngestView,
     HebIngestUrlsView,
@@ -65,6 +70,9 @@ urlpatterns = [
     path('stores/<uuid:store_pk>/catalog/push-listings/', CatalogPushListingsView.as_view(), name='catalog-push-listings'),
     path('stores/<uuid:store_pk>/catalog/critical-zero/', StoreCriticalZeroView.as_view(), name='catalog-critical-zero'),
     path('stores/<uuid:store_pk>/catalog/reset-pending/', CatalogResetListingsPendingView.as_view(), name='catalog-reset-pending'),
+    path('stores/<uuid:store_pk>/mydeal/templates/status/', MydealTemplateStatusView.as_view(), name='mydeal-template-status'),
+    path('stores/<uuid:store_pk>/mydeal/templates/upload/', MydealTemplateUploadView.as_view(), name='mydeal-template-upload'),
+    path('stores/<uuid:store_pk>/mydeal/templates/export/', MydealTemplateExportView.as_view(), name='mydeal-template-export'),
     path('ingest/heb/', HebIngestView.as_view(), name='ingest-heb'),
     path('ingest/heb/urls/', HebIngestUrlsView.as_view(), name='ingest-heb-urls'),
     path('ingest/heb/next-job/', HebIngestNextJobView.as_view(), name='ingest-heb-next-job'),

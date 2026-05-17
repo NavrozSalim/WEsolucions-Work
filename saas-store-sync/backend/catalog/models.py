@@ -502,3 +502,43 @@ class ReverbUpdateLog(models.Model):
     class Meta:
         db_table = 'catalog_reverbupdatelog'
         ordering = ['-created_at']
+
+
+class MydealTemplateRow(models.Model):
+    """Frozen Mydeal bulk-upload template row (price or inventory) for a store."""
+
+    class Kind(models.TextChoices):
+        PRICE = 'price', 'Price'
+        INVENTORY = 'inventory', 'Inventory'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        related_name='mydeal_template_rows',
+        db_index=True,
+    )
+    kind = models.CharField(max_length=16, choices=Kind.choices, db_index=True)
+    row_number = models.PositiveIntegerField()
+    deal_id = models.CharField(max_length=64, blank=True, default='')
+    variant_id = models.CharField(max_length=64, blank=True, default='')
+    external_id = models.CharField(max_length=255, blank=True, default='')
+    sku = models.CharField(max_length=255, db_index=True)
+    options = models.TextField(blank=True, default='')
+    deal_title = models.TextField(blank=True, default='')
+    discontinued = models.CharField(max_length=16, blank=True, default='')
+    mydeal_approved = models.CharField(max_length=32, blank=True, default='')
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'catalog_mydealtemplaterow'
+        ordering = ['row_number']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['store', 'kind', 'row_number'],
+                name='uq_mydeal_template_store_kind_row',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['store', 'kind', 'sku'], name='cat_mydeal_st_kind_sku'),
+        ]

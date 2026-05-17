@@ -354,6 +354,25 @@ function runCatalogJobPost(url, body, storeId) {
         });
 }
 
+export const getMydealTemplateStatus = (storeId) =>
+    api.get(`/stores/${storeId}/mydeal/templates/status/`);
+
+export const uploadMydealTemplate = (storeId, kind, file) => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('kind', kind);
+    return api.post(`/stores/${storeId}/mydeal/templates/upload/`, form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+    });
+};
+
+/** type: price | inventory | both */
+export const downloadMydealTemplates = (storeId, type = 'both') =>
+    api.get(`/stores/${storeId}/mydeal/templates/export/`, {
+        params: { type },
+        responseType: 'blob',
+    });
+
 /** Push scraped/synced listings to marketplace (no vendor scrape). */
 export const triggerCatalogPushListings = (storeId, runInline = false) =>
     runCatalogJobPost(`/stores/${storeId}/catalog/push-listings/`, { run_inline: runInline }, storeId);
