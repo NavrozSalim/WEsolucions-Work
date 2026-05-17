@@ -135,7 +135,7 @@ class CatalogStoresView(APIView):
                 'has_fixed_tier': s.id in fixed_tier_store_ids,
             }
             if store_is_mydeal(s):
-                row['mydeal_profile'] = getattr(s, 'mydeal_profile', None) or 'TFS'
+                row['mydeal_setup_method'] = getattr(s, 'mydeal_setup_method', None) or 'upload'
                 row['mydeal_templates'] = mydeal_status_map.get(str(s.id), {})
             data.append(row)
         return Response(data)

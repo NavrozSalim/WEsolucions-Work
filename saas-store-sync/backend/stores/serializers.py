@@ -90,7 +90,7 @@ class StoreSerializer(serializers.ModelSerializer):
             'id', 'name', 'region', 'api_token', 'marketplace', 'marketplace_id', 'marketplace_name',
             'kogan_service_account_json', 'kogan_sheet_id', 'kogan_tab_name',
             'kogan_sku_column', 'kogan_stock_column', 'kogan_price_column', 'kogan_rrp_column', 'kogan_first_price_column',
-            'mydeal_profile',
+            'mydeal_setup_method',
             'connection_status', 'last_validated_at',
             'is_active', 'created_at', 'updated_at',
             'vendor_price_settings', 'vendor_inventory_settings',
@@ -140,10 +140,13 @@ class StoreSerializer(serializers.ModelSerializer):
         is_kogan = bool(mkt and (str(mkt.code or '').strip().lower() == 'kogan' or str(mkt.name or '').strip().lower() == 'kogan'))
         is_mydeal = bool(mkt and (str(mkt.code or '').strip().lower() == 'mydeal' or str(mkt.name or '').strip().lower() == 'mydeal'))
         if is_mydeal:
-            profile = (req.get('mydeal_profile') or '').strip()
-            if profile not in ('TFS', 'P&P'):
-                raise ValidationError({'mydeal_profile': 'Mydeal profile must be TFS or P&P.'})
-            validated_data['mydeal_profile'] = profile
+            method = (req.get('mydeal_setup_method') or 'upload').strip()
+            if method not in ('upload', 'api'):
+                raise ValidationError({'mydeal_setup_method': 'Mydeal setup must be upload or api.'})
+            validated_data['mydeal_setup_method'] = method
+            if method == 'api':
+                raise ValidationError({'mydeal_setup_method': 'Mydeal API connection is not available yet. Use Upload templates.'})
+            validated_data.setdefault('api_token', '')
         if is_kogan:
             # Kogan uses Google Sheets service account JSON + spreadsheet details, not Store.api_token.
             if not (req.get('kogan_sheet_id') or '').strip():
@@ -183,7 +186,7 @@ class StoreSerializer(serializers.ModelSerializer):
                 'kogan_price_column',
                 'kogan_rrp_column',
                 'kogan_first_price_column',
-                'mydeal_profile',
+                'mydeal_setup_method',
             )
         }
         if store_data.get('name'):
@@ -227,7 +230,7 @@ class StoreSerializer(serializers.ModelSerializer):
                 'kogan_price_column',
                 'kogan_rrp_column',
                 'kogan_first_price_column',
-                'mydeal_profile',
+                'mydeal_setup_method',
             ):
                 setattr(instance, attr, value)
         marketplace_id = req.get('marketplace_id') or req.get('marketplace')
@@ -240,12 +243,14 @@ class StoreSerializer(serializers.ModelSerializer):
         mkt_now = instance.marketplace
         is_kogan = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'kogan' or str(mkt_now.name or '').strip().lower() == 'kogan'))
         is_mydeal = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'mydeal' or str(mkt_now.name or '').strip().lower() == 'mydeal'))
-        if is_mydeal and 'mydeal_profile' in req:
-            profile = (req.get('mydeal_profile') or '').strip()
-            if profile and profile not in ('TFS', 'P&P'):
-                raise ValidationError({'mydeal_profile': 'Mydeal profile must be TFS or P&P.'})
-            if profile:
-                instance.mydeal_profile = profile
+        if is_mydeal and 'mydeal_setup_method' in req:
+            method = (req.get('mydeal_setup_method') or '').strip()
+            if method and method not in ('upload', 'api'):
+                raise ValidationError({'mydeal_setup_method': 'Mydeal setup must be upload or api.'})
+            if method == 'api':
+                raise ValidationError({'mydeal_setup_method': 'Mydeal API connection is not available yet. Use Upload templates.'})
+            if method:
+                instance.mydeal_setup_method = method
         if is_kogan:
             if 'kogan_sheet_id' in req and not (req.get('kogan_sheet_id') or '').strip():
                 raise ValidationError({'kogan_sheet_id': 'Spreadsheet ID is required for Kogan.'})

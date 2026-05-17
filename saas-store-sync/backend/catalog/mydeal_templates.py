@@ -51,11 +51,10 @@ def store_is_mydeal(store: Store) -> bool:
     return code == 'mydeal' or name == 'mydeal'
 
 
-def mydeal_profile_label(store: Store) -> str:
-    profile = (getattr(store, 'mydeal_profile', None) or '').strip()
-    if profile in ('TFS', 'P&P'):
-        return profile
-    return 'TFS'
+def mydeal_store_label(store: Store) -> str:
+    """Use store name (e.g. TFS, P&P) for export filenames."""
+    name = (getattr(store, 'name', None) or '').strip()
+    return name or 'Mydeal Store'
 
 
 def template_status(store: Store) -> dict[str, Any]:
@@ -71,7 +70,7 @@ def template_status(store: Store) -> dict[str, Any]:
         store=store, kind=MydealTemplateRow.Kind.INVENTORY,
     ).count()
     return {
-        'profile': mydeal_profile_label(store),
+        'store_name': mydeal_store_label(store),
         'price_uploaded': MydealTemplateRow.Kind.PRICE in kinds,
         'inventory_uploaded': MydealTemplateRow.Kind.INVENTORY in kinds,
         'price_row_count': price_rows,
@@ -295,16 +294,16 @@ def _export_inventory_csv(store: Store) -> bytes:
 
 
 def export_filename(store: Store, kind: str) -> str:
-    profile = mydeal_profile_label(store)
+    label = mydeal_store_label(store)
     if kind == 'price':
-        return f'Mydeal - {profile} - Price Template.csv'
+        return f'Mydeal - {label} - Price Template.csv'
     if kind == 'inventory':
-        return f'Mydeal - {profile} - Inventory Template.csv'
-    return f'Mydeal - {profile} - Templates.zip'
+        return f'Mydeal - {label} - Inventory Template.csv'
+    return f'Mydeal - {label} - Templates.zip'
 
 
 def build_export_response(store: Store, export_type: str) -> HttpResponse:
-    profile = mydeal_profile_label(store)
+    label = mydeal_store_label(store)
     if export_type == 'price':
         content = _export_price_csv(store)
         resp = HttpResponse(content, content_type='text/csv; charset=utf-8')
@@ -323,16 +322,16 @@ def build_export_response(store: Store, export_type: str) -> HttpResponse:
         zbuf = io.BytesIO()
         with zipfile.ZipFile(zbuf, 'w', zipfile.ZIP_DEFLATED) as zf:
             zf.writestr(
-                f'Mydeal - {profile} - Price Template.csv',
+                f'Mydeal - {label} - Price Template.csv',
                 _export_price_csv(store),
             )
             zf.writestr(
-                f'Mydeal - {profile} - Inventory Template.csv',
+                f'Mydeal - {label} - Inventory Template.csv',
                 _export_inventory_csv(store),
             )
         resp = HttpResponse(zbuf.getvalue(), content_type='application/zip')
         resp['Content-Disposition'] = (
-            f'attachment; filename="Mydeal - {profile} - Templates.zip"'
+            f'attachment; filename="Mydeal - {label} - Templates.zip"'
         )
         return resp
     raise ValueError('export_type must be price, inventory, or both.')

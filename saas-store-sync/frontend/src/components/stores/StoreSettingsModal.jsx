@@ -5,6 +5,8 @@ import Input from '../ui/Input';
 import Select from '../ui/Select';
 import { getMarketplaces, getVendors, updateStore } from '../../services/storeService';
 import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
+import MydealSetupFields from './MydealSetupFields';
+import MydealUploadModal from '../catalog/MydealUploadModal';
 
 const emptyPriceRange = () => ({ from_value: 0, to_value: null, margin_type: 'percentage', margin_percentage: 25 });
 const emptyInventoryRange = () => ({ from_value: 0, to_value: 999999999, range_type: 'multiplier', multiplier: 0.5, fixed_value: null });
@@ -59,7 +61,7 @@ function storeToForm(store) {
         kogan_sheet_id: store.kogan_sheet_id || '',
         kogan_tab_name: store.kogan_tab_name || '',
         kogan_service_account_json: '',
-        mydeal_profile: store.mydeal_profile || 'TFS',
+        mydeal_setup_method: store.mydeal_setup_method || 'upload',
         vendor_price_settings: (store.vendor_price_settings || []).map((vp) => ({
             vendor_id: vp.vendor || vp.vendor_id,
             purchase_tax_percentage: vp.purchase_tax_percentage ?? 0,
@@ -100,6 +102,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const [selectedVendorInventory, setSelectedVendorInventory] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+    const [mydealUploadOpen, setMydealUploadOpen] = useState(false);
     const [form, setForm] = useState(storeToForm(store));
 
     useEffect(() => {
@@ -275,6 +278,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const regionTimezones = TIMEZONE_OPTIONS[store?.region] || TIMEZONE_OPTIONS.USA;
     const isKogan = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'kogan';
     const isMydeal = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'mydeal';
+    const mydealSetup = (form.mydeal_setup_method || 'upload') === 'api' ? 'api' : 'upload';
     const koganAuth = (form.kogan_auth_method || 'json') === 'token' ? 'token' : 'json';
 
     const buildPayload = () => {
@@ -329,8 +333,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
             payload.kogan_tab_name = form.kogan_tab_name?.trim();
             if (form.kogan_service_account_json?.trim()) payload.kogan_service_account_json = form.kogan_service_account_json;
         }
-        if (isMydeal && form.mydeal_profile) {
-            payload.mydeal_profile = form.mydeal_profile;
+        if (isMydeal) {
+            payload.mydeal_setup_method = mydealSetup;
         }
         return payload;
     };
@@ -470,19 +474,15 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                         <div className="space-y-5">
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div className="sm:col-span-2">
-                                    <Input label="Store Name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} required />
+                                    <Input label="Store Name" placeholder={isMydeal ? 'e.g. TFS or P&P' : undefined} value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} required />
                                 </div>
                                 <div className="sm:col-span-2">
                                     {isMydeal ? (
-                                        <Select
-                                            label="Mydeal template profile"
-                                            value={form.mydeal_profile}
-                                            onChange={(e) => setForm((f) => ({ ...f, mydeal_profile: e.target.value }))}
-                                            options={[
-                                                { value: 'TFS', label: 'TFS' },
-                                                { value: 'P&P', label: 'P&P' },
-                                            ]}
-                                            required
+                                        <MydealSetupFields
+                                            setupMethod={mydealSetup}
+                                            onSetupMethodChange={(v) => setForm((f) => ({ ...f, mydeal_setup_method: v }))}
+                                            storeId={store?.id}
+                                            onOpenUpload={() => setMydealUploadOpen(true)}
                                         />
                                     ) : !isKogan ? (
                                         <>
@@ -887,6 +887,12 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                     </Button>
                 </div>
             </div>
+            <MydealUploadModal
+                open={mydealUploadOpen && !!store?.id}
+                storeId={store?.id}
+                onClose={() => setMydealUploadOpen(false)}
+                onComplete={() => setMydealUploadOpen(false)}
+            />
         </div>
     );
 }

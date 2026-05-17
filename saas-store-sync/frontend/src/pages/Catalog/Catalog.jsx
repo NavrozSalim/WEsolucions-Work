@@ -1243,7 +1243,7 @@ export default function Catalog() {
         setMydealDownloadOpen(false);
         downloadMydealTemplates(selectedStore, type)
             .then((res) => {
-                const profile = selectedStoreData?.mydeal_profile || selectedStoreData?.mydeal_templates?.profile || 'TFS';
+                const profile = selectedStoreData?.name || selectedStoreData?.mydeal_templates?.store_name || 'Mydeal';
                 const name = type === 'price'
                     ? `Mydeal - ${profile} - Price Template.csv`
                     : type === 'inventory'

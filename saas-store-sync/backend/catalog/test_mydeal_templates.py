@@ -44,11 +44,11 @@ class MydealTemplateTests(TestCase):
         )
         self.store = Store.objects.create(
             user=self.user,
-            name='Mydeal Store',
+            name='TFS',
             region='AU',
             api_token='tok',
             marketplace=self.mp,
-            mydeal_profile='TFS',
+            mydeal_setup_method='upload',
         )
         StoreVendorPriceSettings.objects.create(
             store=self.store,

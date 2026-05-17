@@ -5,6 +5,8 @@ import Input from '../ui/Input';
 import Select from '../ui/Select';
 import { createStore, getMarketplaces, getVendors } from '../../services/storeService';
 import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
+import MydealSetupFields from './MydealSetupFields';
+import MydealUploadModal from '../catalog/MydealUploadModal';
 
 const emptyPriceRange = () => ({ from_value: 0, to_value: null, margin_type: 'percentage', margin_percentage: 25 });
 const emptyInventoryRange = () => ({ from_value: 0, to_value: 999999999, range_type: 'multiplier', multiplier: 0.5, fixed_value: null });
@@ -53,6 +55,8 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const [error, setError] = useState('');
     const [selectedVendorPrice, setSelectedVendorPrice] = useState('');
     const [selectedVendorInventory, setSelectedVendorInventory] = useState('');
+    const [mydealUploadOpen, setMydealUploadOpen] = useState(false);
+    const [createdStoreId, setCreatedStoreId] = useState(null);
     const [form, setForm] = useState({
         name: '',
         marketplace_id: '',
@@ -61,7 +65,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         kogan_sheet_id: '',
         kogan_tab_name: '',
         kogan_service_account_json: '',
-        mydeal_profile: 'TFS',
+        mydeal_setup_method: 'upload',
         region: 'USA',
         vendor_price_settings: [],
         vendor_inventory_settings: [],
@@ -104,6 +108,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const selectedMarketplace = marketplaces.find((m) => String(m.id) === String(form.marketplace_id));
     const isKogan = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'kogan';
     const isMydeal = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'mydeal';
+    const mydealSetup = (form.mydeal_setup_method || 'upload') === 'api' ? 'api' : 'upload';
     const koganAuth = (form.kogan_auth_method || 'json') === 'token' ? 'token' : 'json';
 
     const usedPriceVendorIds = (form.vendor_price_settings || []).map((v) => v.vendor_id).filter(Boolean);
@@ -240,7 +245,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 if (!form.api_token?.trim()) errs.push('API token is required');
             }
         } else if (isMydeal) {
-            if (!['TFS', 'P&P'].includes(form.mydeal_profile)) errs.push('Mydeal profile must be TFS or P&P');
+            if (mydealSetup === 'api') errs.push('Mydeal API connection is not available yet. Use Upload Option.');
         } else {
             if (!form.api_token?.trim()) errs.push('API key is required');
         }
@@ -360,7 +365,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     : isKogan && koganAuth === 'token'
                         ? { api_token: form.api_token }
                     : isMydeal
-                        ? { mydeal_profile: form.mydeal_profile }
+                        ? { mydeal_setup_method: mydealSetup }
                     : { api_token: form.api_token }),
                 region: form.region,
                 sync_schedule: buildSchedulePayload(),
@@ -397,7 +402,16 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 })).filter((vi) => vi.vendor_id && (vi.range_multipliers?.length || 0) > 0);
             }
             createStore(payload)
-                .then(() => { onSuccess(); onClose(); })
+                .then((res) => {
+                    onSuccess();
+                    const id = res.data?.id;
+                    if (isMydeal && mydealSetup === 'upload' && id) {
+                        setCreatedStoreId(id);
+                        setMydealUploadOpen(true);
+                    } else {
+                        onClose();
+                    }
+                })
                 .catch((err) => {
                     const d = err.response?.data;
                     let msg = d?.detail;
@@ -434,14 +448,23 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 : isKogan && koganAuth === 'token'
                     ? { api_token: form.api_token }
                 : isMydeal
-                    ? { mydeal_profile: form.mydeal_profile }
+                    ? { mydeal_setup_method: mydealSetup }
                 : { api_token: form.api_token }),
             region: form.region,
             ...buildSettingsPayload(),
             sync_schedule: buildSchedulePayload(),
         };
         createStore(payload)
-            .then(() => { onSuccess(); onClose(); })
+            .then((res) => {
+                onSuccess();
+                const id = res.data?.id;
+                if (isMydeal && mydealSetup === 'upload' && id) {
+                    setCreatedStoreId(id);
+                    setMydealUploadOpen(true);
+                } else {
+                    onClose();
+                }
+            })
             .catch((err) => {
                 const d = err.response?.data;
                 let msg = d?.detail;
@@ -532,7 +555,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                             <div className="space-y-5">
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                     <div className="sm:col-span-2">
-                                        <Input label="Store Name" placeholder="e.g. My Reverb Store" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} required />
+                                        <Input label="Store Name" placeholder={isMydeal ? 'e.g. TFS or P&P' : 'e.g. My Reverb Store'} value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} required />
                                     </div>
                                     <div className="sm:col-span-2">
                                         <Select
@@ -554,15 +577,11 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                     </div>
                                     <div className="sm:col-span-2">
                                         {isMydeal ? (
-                                            <Select
-                                                label="Mydeal template profile"
-                                                value={form.mydeal_profile}
-                                                onChange={(e) => setForm((f) => ({ ...f, mydeal_profile: e.target.value }))}
-                                                options={[
-                                                    { value: 'TFS', label: 'TFS' },
-                                                    { value: 'P&P', label: 'P&P' },
-                                                ]}
-                                                required
+                                            <MydealSetupFields
+                                                setupMethod={mydealSetup}
+                                                onSetupMethodChange={(v) => setForm((f) => ({ ...f, mydeal_setup_method: v }))}
+                                                storeId={createdStoreId}
+                                                onOpenUpload={() => setMydealUploadOpen(true)}
                                             />
                                         ) : !isKogan ? (
                                             <Input
@@ -976,6 +995,20 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     </Button>
                 </div>
             </div>
+            <MydealUploadModal
+                open={mydealUploadOpen && !!createdStoreId}
+                storeId={createdStoreId}
+                onClose={() => {
+                    setMydealUploadOpen(false);
+                    setCreatedStoreId(null);
+                    onClose();
+                }}
+                onComplete={() => {
+                    setMydealUploadOpen(false);
+                    setCreatedStoreId(null);
+                    onClose();
+                }}
+            />
         </div>
     );
 }

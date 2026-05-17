@@ -30,12 +30,16 @@ class Store(models.Model):
     kogan_price_column = models.CharField(max_length=64, default='PRICE')
     kogan_rrp_column = models.CharField(max_length=64, default='rrp')
     kogan_first_price_column = models.CharField(max_length=64, default='kogan_first_price')
-    mydeal_profile = models.CharField(
-        max_length=10,
-        choices=[('TFS', 'TFS'), ('P&P', 'P&P')],
-        null=True,
+    MYDEAL_SETUP_CHOICES = [
+        ('upload', 'Upload templates'),
+        ('api', 'API connection'),
+    ]
+    mydeal_setup_method = models.CharField(
+        max_length=20,
+        choices=MYDEAL_SETUP_CHOICES,
+        default='upload',
         blank=True,
-        help_text='Mydeal template family: TFS or P&P.',
+        help_text='Mydeal: upload Price/Inventory CSV templates or API (future).',
     )
     marketplace = models.ForeignKey(
         'marketplace.Marketplace',

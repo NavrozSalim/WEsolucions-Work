@@ -69,7 +69,7 @@ export default function MydealUploadModal({ open, onClose, storeId, onComplete }
             });
     };
 
-    const profile = status?.profile || 'TFS';
+    const storeLabel = status?.store_name || status?.profile || 'Store';
     const allDone = priceDone && inventoryDone;
 
     return (
@@ -82,7 +82,7 @@ export default function MydealUploadModal({ open, onClose, storeId, onComplete }
                 <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-700 px-5 py-4">
                     <div>
                         <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Upload Mydeal templates</h2>
-                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Profile: {profile} — upload Price, then Inventory.</p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Store: {storeLabel} — upload Price, then Inventory.</p>
                     </div>
                     <button type="button" onClick={onClose} className="p-1 rounded-md text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Close">
                         <X className="h-5 w-5" />
