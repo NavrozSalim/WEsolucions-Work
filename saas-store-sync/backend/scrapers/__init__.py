@@ -34,6 +34,10 @@ _scrape_amazon_us = None
 _close_amazon_us = None
 _scrape_amazon_au = None
 _close_amazon_au = None
+_scrape_ebay_us = None
+_close_ebay_us = None
+_scrape_ebay_au = None
+_close_ebay_au = None
 
 
 def _get_amazon_us_scraper():
@@ -62,6 +66,34 @@ def _get_amazon_au_scraper():
             _scrape_amazon_au = _placeholder_scrape
             _close_amazon_au = lambda s: None
     return _scrape_amazon_au, _close_amazon_au
+
+
+def _get_ebay_us_scraper():
+    global _scrape_ebay_us, _close_ebay_us
+    if _scrape_ebay_us is None:
+        try:
+            from .ebay_us_scraper import scrape_ebay_us, close_ebay_us_session
+            _scrape_ebay_us = scrape_ebay_us
+            _close_ebay_us = close_ebay_us_session
+        except ImportError as exc:
+            logger.warning("eBay US scraper unavailable: %s", exc)
+            _scrape_ebay_us = _placeholder_scrape
+            _close_ebay_us = lambda s: None
+    return _scrape_ebay_us, _close_ebay_us
+
+
+def _get_ebay_au_scraper():
+    global _scrape_ebay_au, _close_ebay_au
+    if _scrape_ebay_au is None:
+        try:
+            from .ebay_au_scraper import scrape_ebay_au, close_ebay_au_session
+            _scrape_ebay_au = scrape_ebay_au
+            _close_ebay_au = close_ebay_au_session
+        except ImportError as exc:
+            logger.warning("eBay AU scraper unavailable: %s", exc)
+            _scrape_ebay_au = _placeholder_scrape
+            _close_ebay_au = lambda s: None
+    return _scrape_ebay_au, _close_ebay_au
 
 
 def _rewrite_url_for_region(vendor_url: str, region: str) -> str:
@@ -163,12 +195,13 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
         return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
 
     if "ebay." in url_lower:
-        from .ebay_scraper import scrape_ebay
-        region_tag = "AU" if "ebay.com.au" in url_lower else (
-            region.upper() if region else "USA"
-        )
-        logger.info("Routing to eBay %s scraper: %s", region_tag, vendor_url[:80])
-        return _normalize_scrape_payload(scrape_ebay(vendor_url, region, session))
+        if "ebay.com.au" in url_lower:
+            scrape_fn, _ = _get_ebay_au_scraper()
+            logger.info("Routing to eBay AU scraper: %s", vendor_url[:80])
+        else:
+            scrape_fn, _ = _get_ebay_us_scraper()
+            logger.info("Routing to eBay US scraper: %s", vendor_url[:80])
+        return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
 
     if "heb.com" in url_lower:
         logger.info("HEB URL skipped server-side (ingest-only): %s", vendor_url[:80])
@@ -216,18 +249,17 @@ def _normalize_scrape_payload(result: dict | None) -> dict:
 
 
 def close_amazon_session(session):
-    """Close all browser sessions (Amazon US, Amazon AU, eBay) held in this session dict."""
+    """Close all browser sessions (Amazon US, Amazon AU, eBay US, eBay AU) held in this session dict."""
     if session is None:
         return
     _, close_us = _get_amazon_us_scraper()
     _, close_au = _get_amazon_au_scraper()
     close_us(session)
     close_au(session)
-    try:
-        from .ebay_scraper import close_ebay_session
-        close_ebay_session(session)
-    except ImportError:
-        pass
+    _, close_ebay_us = _get_ebay_us_scraper()
+    _, close_ebay_au = _get_ebay_au_scraper()
+    close_ebay_us(session)
+    close_ebay_au(session)
 
 
 __all__ = ["get_price_and_stock", "close_amazon_session"]

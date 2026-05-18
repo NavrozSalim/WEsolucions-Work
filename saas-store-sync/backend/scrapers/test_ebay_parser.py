@@ -7,7 +7,7 @@ from unittest.mock import patch
 from bs4 import BeautifulSoup
 
 from scrapers.core import parse_price_text
-from scrapers.ebay_scraper import (
+from scrapers.ebay_common import (
     EbayParser,
     _ebay_bin_hydrate_max_seconds,
     _effective_ebay_region,
