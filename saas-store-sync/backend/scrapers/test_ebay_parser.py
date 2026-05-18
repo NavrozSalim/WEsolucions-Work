@@ -50,13 +50,13 @@ class TestEffectiveEbayRegion(unittest.TestCase):
 class TestBinHydrateDefaults(unittest.TestCase):
     def test_au_default_poll_budget(self):
         with patch.dict(os.environ, {"EBAY_BIN_HYDRATE_MAX_SEC": ""}):
-            self.assertEqual(_ebay_bin_hydrate_max_seconds("AU", "https://www.ebay.com/itm/1"), 12.0)
+            self.assertEqual(_ebay_bin_hydrate_max_seconds("AU", "https://www.ebay.com/itm/1"), 6.0)
 
     def test_au_hostname_poll_budget_even_if_region_usa(self):
         with patch.dict(os.environ, {"EBAY_BIN_HYDRATE_MAX_SEC": ""}):
             self.assertEqual(
                 _ebay_bin_hydrate_max_seconds("USA", "https://www.ebay.com.au/itm/1"),
-                12.0,
+                6.0,
             )
 
     def test_non_au_default_no_extra_poll(self):

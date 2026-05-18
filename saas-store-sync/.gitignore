@@ -10,6 +10,8 @@
 *.p12
 *.pfx
 secrets/
+backend/scrapers/ebay_au_cookies.json
+.ebay_au_cookies.json
 
 # Python
 __pycache__/

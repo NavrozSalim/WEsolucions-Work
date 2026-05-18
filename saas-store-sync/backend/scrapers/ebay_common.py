@@ -60,9 +60,9 @@ def _migrate_legacy_ebay_session(session: dict | None, market: str) -> None:
 SESSION_DEBUG_HTML_KEY = "_debug_save_html_path"
 
 TIMEOUT_SEC = 45
-EBAY_HTTP_TIMEOUT_SEC = 25
-PAGE_WAIT_TIMEOUT = 25
-RETRY_LIMIT = 4
+EBAY_HTTP_TIMEOUT_SEC = 20
+PAGE_WAIT_TIMEOUT = 18
+RETRY_LIMIT = 3
 
 PRICE_SUFFIX_PATTERN = re.compile(
     r"(or Best Offer|Buy It Now|Best Offer|Make Offer|each|/ea).*$",
@@ -211,7 +211,7 @@ def _ebay_bin_hydrate_max_seconds(eff_region: str, item_url: str) -> float:
     raw = (os.environ.get("EBAY_BIN_HYDRATE_MAX_SEC") or "").strip()
     if raw:
         return max(0.0, float(raw))
-    return 12.0 if auish else 0.0
+    return 6.0 if auish else 0.0
 
 
 def _ebay_debug_write_html(session: Optional[dict], html: Optional[str], tag: str, candidate: str) -> None:
@@ -240,7 +240,8 @@ def _ebay_http_first_enabled(region: Optional[str]) -> bool:
         if au is not None:
             return au.lower() in trueish
         return os.environ.get("EBAY_HTTP_FIRST", "1").lower() in trueish
-    return os.environ.get("EBAY_HTTP_FIRST", "0").lower() in trueish
+    # Default HTTP-first for US too — skips Selenium when curl_cffi returns a parseable PDP.
+    return os.environ.get("EBAY_HTTP_FIRST", "1").lower() in trueish
 
 
 def _random_user_agent() -> str:
@@ -1300,9 +1301,9 @@ class EbayBrowserSession:
         if max_wait <= 0:
             return seed_html or (driver.page_source or "")
 
-        interval = float(os.environ.get("EBAY_BIN_HYDRATE_POLL_SEC", "0.55"))
-        stable_needed = int(os.environ.get("EBAY_BIN_HYDRATE_STABLE_POLLS", "4"))
-        min_elapsed = float(os.environ.get("EBAY_BIN_HYDRATE_MIN_SEC", "2.0"))
+        interval = float(os.environ.get("EBAY_BIN_HYDRATE_POLL_SEC", "0.4"))
+        stable_needed = int(os.environ.get("EBAY_BIN_HYDRATE_STABLE_POLLS", "2"))
+        min_elapsed = float(os.environ.get("EBAY_BIN_HYDRATE_MIN_SEC", "1.0"))
 
         def parse_price(html_blob: str) -> Optional[float]:
             if not html_blob:
@@ -1393,9 +1394,9 @@ class EbayBrowserSession:
                     break
         except Exception:
             pass
-        time.sleep(1.0 + random.uniform(0.1, 0.35))
+        time.sleep(0.45 + random.uniform(0.05, 0.2))
         try:
-            WebDriverWait(driver, 5).until(
+            WebDriverWait(driver, 3).until(
                 lambda d: len(d.find_elements(By.CSS_SELECTOR, "[data-testid='x-item-price'] .ux-textspans"))
                 >= 1
                 or len(d.find_elements(By.CSS_SELECTOR, "[data-testid='x-bin-price'] .ux-textspans")) >= 1
@@ -1404,7 +1405,7 @@ class EbayBrowserSession:
             )
         except Exception:
             pass
-        time.sleep(1.8 + random.uniform(0.2, 0.65))
+        time.sleep(0.65 + random.uniform(0.1, 0.25))
 
     @staticmethod
     def _wait_until_product_or_stable_challenge(driver, timeout: int = PAGE_WAIT_TIMEOUT) -> str:
@@ -1437,10 +1438,10 @@ class EbayBrowserSession:
                 for locator in locators:
                     elems = driver.find_elements(*locator)
                     if elems:
-                        EbayBrowserSession._settle_buy_box(driver)
                         html = driver.page_source
                         if _looks_like_product_html(html):
-                            return html
+                            EbayBrowserSession._settle_buy_box(driver)
+                            return driver.page_source
             except Exception:
                 pass
 
@@ -1462,7 +1463,7 @@ class EbayBrowserSession:
             except Exception:
                 pass
 
-            time.sleep(1.5)
+            time.sleep(0.75)
 
         return last_html
 
@@ -1476,19 +1477,23 @@ class EbayBrowserSession:
         try:
             cls._apply_region_browser_profile(driver, region, url)
 
-            home = _ebay_home_origin_for_item_url(url)
-            driver.get(home)
-            time.sleep(1.5 + random.uniform(0.5, 1.5))
+            warmed_key = _ebay_sk(market, "browser_warmed")
+            already_warmed = bool(session_dict and session_dict.get(warmed_key))
+            if not already_warmed:
+                home = _ebay_home_origin_for_item_url(url)
+                driver.get(home)
+                time.sleep(0.8 + random.uniform(0.2, 0.6))
+                if session_dict is not None:
+                    session_dict[warmed_key] = True
 
             driver.get(url)
             html = cls._wait_until_product_or_stable_challenge(driver, timeout=PAGE_WAIT_TIMEOUT)
-            try:
-                cls._settle_buy_box(driver)
-                html = driver.page_source or html
-            except Exception:
-                pass
 
-            html = cls._finalize_bin_price_hydration(driver, html, region, url)
+            # Skip long discount polling when the first DOM already yields a BIN price.
+            if _parse_html_to_result(html, url) is not None:
+                html = driver.page_source or html
+            else:
+                html = cls._finalize_bin_price_hydration(driver, html, region, url)
 
             current_url = ""
             try:
@@ -1608,17 +1613,13 @@ def scrape_ebay_for_market(
             browser_html, browser_err = EbayBrowserSession.warm_and_fetch(candidate, eff_region, session, market)
             if browser_html:
                 last_browser_html = browser_html
-
-            html2, status2, err2 = EbayHTTP.fetch(candidate, eff_region, session, market)
-
-            # Prefer Selenium DOM over cookie-handoff HTTP: the HTTP response is often a thinner
-            # SSR shell (list / undiscounted BIN) while Chromium has the full buy box (sale price).
-            if browser_html:
                 parsed = _parse_html_to_result(browser_html, candidate)
                 if parsed is not None:
                     logger.info("eBay Selenium HTML success for %s", candidate)
                     _ebay_debug_write_html(session, browser_html, "selenium", candidate)
                     return parsed
+
+            html2, status2, err2 = EbayHTTP.fetch(candidate, eff_region, session, market)
 
             if html2 and not err2:
                 parsed = _parse_html_to_result(html2, candidate)

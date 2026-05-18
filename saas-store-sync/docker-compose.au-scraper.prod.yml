@@ -51,6 +51,10 @@ services:
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
       - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-0}
       - EBAY_AU_HTTP_FIRST=${EBAY_AU_HTTP_FIRST:-}
+      - EBAY_AU_FAST_SCRAPE=${EBAY_AU_FAST_SCRAPE:-1}
+      - EBAY_AU_COOKIES_FILE=${EBAY_AU_COOKIES_FILE:-/app/secrets/ebay_au_cookies.json}
+      - EBAY_AU_PAGE_WAIT_SEC=${EBAY_AU_PAGE_WAIT_SEC:-1.2}
+      - EBAY_AU_PAGE_LOAD_TIMEOUT_SEC=${EBAY_AU_PAGE_LOAD_TIMEOUT_SEC:-18}
       - CATALOG_SCRAPE_CHUNK_SIZE=${CATALOG_SCRAPE_CHUNK_SIZE:-}
       - VEVOR_AU_FEED_URL=${VEVOR_AU_FEED_URL:-https://ads-feed.s3.us-west-2.amazonaws.com/ads/business/563/vevor-563.xlsx}
       - PROXY_URL=${PROXY_URL:-}
@@ -67,6 +71,8 @@ services:
       - COSTCO_AU_LOCK_WAIT_SEC=${COSTCO_AU_LOCK_WAIT_SEC:-120}
     volumes:
       - catalog_media_au_worker:/app/media
+      # Host dir must contain ebay_au_cookies.json (browser export for ebay.com.au). See .env.prod.example.
+      - ${EBAY_AU_SECRETS_DIR:-./secrets}:/app/secrets:ro
     restart: always
     stop_grace_period: 60s
     logging: *default-logging
