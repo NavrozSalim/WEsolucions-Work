@@ -1,5 +1,5 @@
 """
-VevorAU "scraper" — reads the public S3 XLSX feed and looks up price/stock per SKU.
+Vevor AU ingest — reads the public S3 XLSX feed and looks up price/stock per SKU.
 
 Unlike Amazon/eBay, Vevor AU publishes a live catalog feed on S3. Instead of
 scraping product pages (which gets rate-limited / Cloudflare-blocked), we:
@@ -25,7 +25,7 @@ from typing import Iterable
 
 import requests
 
-logger = logging.getLogger("scrapers.vevor_au")
+logger = logging.getLogger("scrapers.vevor_au_ingest")
 
 DEFAULT_VEVOR_AU_FEED_URL = (
     "https://ads-feed.s3.us-west-2.amazonaws.com/ads/business/563/vevor-563.xlsx"

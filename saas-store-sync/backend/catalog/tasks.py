@@ -1667,7 +1667,7 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
     """
     from decimal import Decimal
 
-    from scrapers.vevor_au import (
+    from scrapers.vevor_au_ingest import (
         VEVOR_AU_FEED_URL,
         fetch_vevor_feed,
         load_veror_via_excel_positions,

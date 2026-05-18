@@ -32,8 +32,8 @@ logger = logging.getLogger("scrapers")
 # Lazy imports — Selenium is heavy; don't load it until needed.
 _scrape_amazon_us = None
 _close_amazon_us = None
-_scrape_amazon_legacy = None
-_close_amazon_legacy = None
+_scrape_amazon_au = None
+_close_amazon_au = None
 
 
 def _get_amazon_us_scraper():
@@ -50,18 +50,18 @@ def _get_amazon_us_scraper():
     return _scrape_amazon_us, _close_amazon_us
 
 
-def _get_amazon_legacy_scraper():
-    global _scrape_amazon_legacy, _close_amazon_legacy
-    if _scrape_amazon_legacy is None:
+def _get_amazon_au_scraper():
+    global _scrape_amazon_au, _close_amazon_au
+    if _scrape_amazon_au is None:
         try:
-            from .amazon_scraper import scrape_amazon, close_amazon_session
-            _scrape_amazon_legacy = scrape_amazon
-            _close_amazon_legacy = close_amazon_session
+            from .amazon_au_scraper import scrape_amazon_au, close_amazon_au_session
+            _scrape_amazon_au = scrape_amazon_au
+            _close_amazon_au = close_amazon_au_session
         except ImportError as exc:
-            logger.warning("Amazon legacy scraper unavailable: %s", exc)
-            _scrape_amazon_legacy = _placeholder_scrape
-            _close_amazon_legacy = lambda s: None
-    return _scrape_amazon_legacy, _close_amazon_legacy
+            logger.warning("Amazon AU scraper unavailable: %s", exc)
+            _scrape_amazon_au = _placeholder_scrape
+            _close_amazon_au = lambda s: None
+    return _scrape_amazon_au, _close_amazon_au
 
 
 def _rewrite_url_for_region(vendor_url: str, region: str) -> str:
@@ -120,7 +120,7 @@ def _costco_ingest_only_result() -> dict:
 
 def _vevor_ingest_only_result() -> dict:
     """Vevor AU is refreshed from the public S3 XLSX feed, not per-URL scraped."""
-    from .vevor_au import _ingest_only_result as _res
+    from .vevor_au_ingest import _ingest_only_result as _res
     return _res()
 
 
@@ -155,7 +155,7 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
 
     if "amazon." in url_lower:
         if "amazon.com.au" in url_lower:
-            scrape_fn, _ = _get_amazon_legacy_scraper()
+            scrape_fn, _ = _get_amazon_au_scraper()
             logger.info("Routing to Amazon AU scraper: %s", vendor_url[:80])
             return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
         scrape_fn, _ = _get_amazon_us_scraper()
@@ -220,9 +220,9 @@ def close_amazon_session(session):
     if session is None:
         return
     _, close_us = _get_amazon_us_scraper()
-    _, close_legacy = _get_amazon_legacy_scraper()
+    _, close_au = _get_amazon_au_scraper()
     close_us(session)
-    close_legacy(session)
+    close_au(session)
     try:
         from .ebay_scraper import close_ebay_session
         close_ebay_session(session)

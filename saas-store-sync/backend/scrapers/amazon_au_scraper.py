@@ -1,14 +1,12 @@
 """
-Amazon legacy / AU scraper.
+Amazon AU scraper (amazon.com.au).
 
 Primary: requests + BeautifulSoup (fast).
 Fallback: Selenium headless Chrome (when HTTP is blocked or price not found).
 
-Handles amazon.com.au and other non-US Amazon domains.
-
 Public API:
-  scrape_amazon(vendor_url, region, session) -> {"price": float|None, "stock": int|None, "title": str|None}
-  close_amazon_session(session)
+  scrape_amazon_au(vendor_url, region, session) -> {"price": float|None, "stock": int|None, "title": str|None}
+  close_amazon_au_session(session)
 """
 import logging
 
@@ -22,7 +20,7 @@ from .core import (
 )
 from .amazon_us_scraper import AmazonDriver, AmazonParser, AmazonScraper
 
-logger = logging.getLogger("scrapers.amazon_legacy")
+logger = logging.getLogger("scrapers.amazon_au")
 
 RETRY_LIMIT = 3
 FETCH_TIMEOUT = 30
@@ -42,8 +40,8 @@ _USD_COOKIES = {
 # HTTP-based scraper (primary)
 # ═══════════════════════════════════════════════════════════════════════════
 
-class AmazonLegacyHTTP:
-    """Fast requests-based scraper for non-US Amazon domains."""
+class AmazonAUHTTP:
+    """Fast requests-based scraper for Amazon AU."""
 
     _ZIP_CHANGE_URLS = {
         False: "https://www.amazon.com/gp/delivery/ajax/address-change.html",
@@ -52,7 +50,7 @@ class AmazonLegacyHTTP:
 
     @staticmethod
     def _get_session(session_dict: dict, is_au: bool) -> requests.Session:
-        key = "amazon_legacy_http_session"
+        key = "amazon_au_http_session"
         if session_dict is not None and key in session_dict:
             return session_dict[key]
         s = requests.Session()
@@ -66,7 +64,7 @@ class AmazonLegacyHTTP:
     @classmethod
     def _ensure_zip(cls, s: requests.Session, seed_url: str, session_dict: dict, is_au: bool):
         """Set delivery location for accurate pricing."""
-        zip_key = "amazon_legacy_http_zip_set"
+        zip_key = "amazon_au_http_zip_set"
         if session_dict is not None and session_dict.get(zip_key):
             return
         zip_code = "3000" if is_au else "10001"
@@ -102,7 +100,7 @@ class AmazonLegacyHTTP:
     def fetch(cls, url: str, session_dict: dict = None, is_au: bool = False) -> ScrapeResult:
         s = cls._get_session(session_dict, is_au)
         cls._ensure_zip(s, url, session_dict, is_au)
-        vendor = "amazon_au" if is_au else "amazon_legacy"
+        vendor = "amazon_au"
         try:
             resp = s.get(url, timeout=FETCH_TIMEOUT, allow_redirects=True)
         except requests.Timeout:
@@ -153,7 +151,7 @@ class AmazonLegacyHTTP:
                 s = cls._get_session(session_dict, is_au)
                 domain = "amazon.com.au" if is_au else "amazon.com"
                 s.headers.update(get_random_headers(f"https://www.{domain}/"))
-        return last_result or ScrapeResult.fail("max_retries", "All HTTP attempts failed", "", "amazon_legacy", url)
+        return last_result or ScrapeResult.fail("max_retries", "All HTTP attempts failed", "", "amazon_au", url)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -286,9 +284,9 @@ def _selenium_scrape_page(url: str, driver) -> ScrapeResult:
 # Public API
 # ═══════════════════════════════════════════════════════════════════════════
 
-def scrape_amazon(vendor_url: str, region: str, session: dict = None) -> dict:
+def scrape_amazon_au(vendor_url: str, region: str, session: dict = None) -> dict:
     """
-    Scrape Amazon product page (AU/legacy regions).
+    Scrape Amazon AU product page (amazon.com.au).
 
     Strategy: HTTP first, Selenium fallback.
     Returns {"price": float|None, "stock": int|None, "title": str|None}
@@ -299,7 +297,7 @@ def scrape_amazon(vendor_url: str, region: str, session: dict = None) -> dict:
     is_au = "amazon.com.au" in (vendor_url or "").lower()
 
     # --- Primary: HTTP ---
-    http_result = AmazonLegacyHTTP.scrape_with_retry(vendor_url, session, is_au)
+    http_result = AmazonAUHTTP.scrape_with_retry(vendor_url, session, is_au)
     if http_result.success:
         logger.info("HTTP scrape OK for %s (price=%s)", vendor_url[:60], http_result.price)
         return http_result.to_legacy()
@@ -361,17 +359,18 @@ def scrape_amazon(vendor_url: str, region: str, session: dict = None) -> dict:
             AmazonDriver.quit_safe(driver)
 
 
-def close_amazon_session(session):
-    """Close and cleanup Amazon driver if present in session."""
+def close_amazon_au_session(session):
+    """Close and cleanup Amazon AU driver / HTTP session if present in session."""
     if session is None:
         return
     driver = session.pop("amazon_driver", None)
     AmazonDriver.quit_safe(driver)
     session.pop("amazon_au_location_set", None)
     session.pop("amazon_location_set", None)
-    http_sess = session.pop("amazon_legacy_http_session", None)
+    http_sess = session.pop("amazon_au_http_session", None)
     if http_sess:
         try:
             http_sess.close()
         except Exception:
             pass
+    session.pop("amazon_au_http_zip_set", None)
