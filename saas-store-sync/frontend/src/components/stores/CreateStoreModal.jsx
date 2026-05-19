@@ -818,9 +818,10 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                 </div>
                                                 {isMydeal && (
                                                     <Input
-                                                        label="RRP margin (%)"
+                                                        label="RRP discount (%)"
                                                         type="number"
                                                         min={0}
+                                                        max={99.99}
                                                         step="0.01"
                                                         value={vp.mydeal_rrp_margin_percentage ?? ''}
                                                         onChange={(e) => {

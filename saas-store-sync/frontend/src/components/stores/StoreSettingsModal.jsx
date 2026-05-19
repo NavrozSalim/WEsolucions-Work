@@ -694,9 +694,10 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                             </div>
                                             {isMydeal && (
                                                 <Input
-                                                    label="RRP margin (%)"
+                                                    label="RRP discount (%)"
                                                     type="number"
                                                     min={0}
+                                                    max={99.99}
                                                     step="0.01"
                                                     value={vp.mydeal_rrp_margin_percentage ?? ''}
                                                     onChange={(e) => {

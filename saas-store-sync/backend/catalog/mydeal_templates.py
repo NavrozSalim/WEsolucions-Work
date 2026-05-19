@@ -1,8 +1,8 @@
 """
 Mydeal marketplace: upload Price / Inventory CSV templates and export filled files.
 
-RRP(IncGST) = Price(IncGST) / (mydeal_rrp_margin_percentage / 100)
-when margin is set and > 0.
+RRP(IncGST) = Price(IncGST) / ((100 - mydeal_rrp_margin_percentage) / 100)
+when discount % is set and > 0 (e.g. 26 means price is 74% of RRP).
 """
 from __future__ import annotations
 
@@ -322,9 +322,9 @@ def _compute_rrp(price: Decimal, margin_pct: Decimal | None) -> Decimal | None:
         m = Decimal(str(margin_pct))
     except Exception:
         return None
-    if m <= 0:
+    if m <= 0 or m >= Decimal('100'):
         return None
-    divisor = m / Decimal('100')
+    divisor = (Decimal('100') - m) / Decimal('100')
     if divisor <= 0:
         return None
     return (price / divisor).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)

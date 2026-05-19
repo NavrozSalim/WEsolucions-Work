@@ -126,7 +126,7 @@ class StoreVendorPriceSettings(models.Model):
         decimal_places=2,
         null=True,
         blank=True,
-        help_text='Mydeal only: RRP(IncGST) = Price(IncGST) / (this % / 100).',
+        help_text='Mydeal only: RRP discount % off RRP. RRP(IncGST) = Price(IncGST) / ((100 - this) / 100).',
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

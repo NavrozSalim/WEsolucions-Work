@@ -75,6 +75,10 @@ class MydealTemplateTests(TestCase):
         rrp = _compute_rrp(Decimal('50.00'), Decimal('50'))
         self.assertEqual(rrp, Decimal('100.00'))
 
+    def test_compute_rrp_discount_off_rrp(self):
+        rrp = _compute_rrp(Decimal('74.00'), Decimal('26'))
+        self.assertEqual(rrp, Decimal('100.00'))
+
     def test_ingest_rejects_bad_headers(self):
         buf = _csv_bytes(['SKU', 'Price'], [['A', '1']])
         with self.assertRaises(ValueError) as ctx:
