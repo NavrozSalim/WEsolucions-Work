@@ -1471,7 +1471,7 @@ class EbayBrowserSession:
         )
         for css in settle_selectors[:3]:
             try:
-                WebDriverWait(driver, 12).until(
+                WebDriverWait(driver, 4).until(
                     EC.visibility_of_element_located((By.CSS_SELECTOR, css))
                 )
                 break
@@ -1485,9 +1485,9 @@ class EbayBrowserSession:
                     break
         except Exception:
             pass
-        time.sleep(0.45 + random.uniform(0.05, 0.2))
+        time.sleep(0.18 + random.uniform(0.04, 0.1))
         try:
-            WebDriverWait(driver, 3).until(
+            WebDriverWait(driver, 1.5).until(
                 lambda d: len(d.find_elements(By.CSS_SELECTOR, "[data-testid='x-item-price'] .ux-textspans"))
                 >= 1
                 or len(d.find_elements(By.CSS_SELECTOR, "[data-testid='x-bin-price'] .ux-textspans")) >= 1
@@ -1496,7 +1496,7 @@ class EbayBrowserSession:
             )
         except Exception:
             pass
-        time.sleep(0.65 + random.uniform(0.1, 0.25))
+        time.sleep(0.2 + random.uniform(0.05, 0.15))
 
     @staticmethod
     def _wait_until_product_or_stable_challenge(driver, timeout: int = PAGE_WAIT_TIMEOUT) -> str:
@@ -1525,12 +1525,16 @@ class EbayBrowserSession:
         while time.time() - start < timeout:
             try:
                 elapsed = time.time() - start
-                locators = preferred_locators + (late_locators if elapsed >= 8.0 else [])
+                locators = preferred_locators + (late_locators if elapsed >= 5.0 else [])
                 for locator in locators:
                     elems = driver.find_elements(*locator)
                     if elems:
                         html = driver.page_source
                         if _looks_like_product_html(html):
+                            # Fast exit: if the current DOM already yields a parseable price,
+                            # skip the buy-box settle (saves 1.5–5s per URL on cold sessions).
+                            if _parse_html_to_result(html, "") is not None:
+                                return html
                             EbayBrowserSession._settle_buy_box(driver)
                             return driver.page_source
             except Exception:
@@ -1548,13 +1552,15 @@ class EbayBrowserSession:
                         or "data-testid='x-item-price'" in lower
                         or "x-item-price" in lower
                     )
-                    if has_item_price or elapsed >= 8.0:
+                    if has_item_price or elapsed >= 5.0:
+                        if _parse_html_to_result(html, "") is not None:
+                            return html
                         EbayBrowserSession._settle_buy_box(driver)
                         return driver.page_source
             except Exception:
                 pass
 
-            time.sleep(0.75)
+            time.sleep(0.4)
 
         return last_html
 
@@ -1573,7 +1579,7 @@ class EbayBrowserSession:
             if not already_warmed:
                 home = _ebay_home_origin_for_item_url(url)
                 driver.get(home)
-                time.sleep(0.8 + random.uniform(0.2, 0.6))
+                time.sleep(0.3 + random.uniform(0.1, 0.3))
                 if session_dict is not None:
                     session_dict[warmed_key] = True
 
@@ -1674,9 +1680,9 @@ def scrape_ebay_for_market(
                 candidate_urls.append(ca_url)
 
     if eff_region == "AU":
-        random_delay(0.25, 0.7)
+        random_delay(0.15, 0.4)
     else:
-        random_delay(0.4, 1.2)
+        random_delay(0.2, 0.6)
     last_error = None
     last_browser_html = None
 
