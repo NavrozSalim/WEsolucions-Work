@@ -73,6 +73,10 @@ services:
       - PROXY_SCHEME=${PROXY_SCHEME:-http}
       - COSTCO_AU_MIN_REQUEST_GAP_SEC=${COSTCO_AU_MIN_REQUEST_GAP_SEC:-20}
       - COSTCO_AU_LOCK_WAIT_SEC=${COSTCO_AU_LOCK_WAIT_SEC:-120}
+      - COSTCO_AU_HTTP_RETRIES=${COSTCO_AU_HTTP_RETRIES:-2}
+      - COSTCO_AU_HTTP_TIMEOUT_SEC=${COSTCO_AU_HTTP_TIMEOUT_SEC:-25}
+      - COSTCO_AU_BLOCK_COOLDOWN_SEC=${COSTCO_AU_BLOCK_COOLDOWN_SEC:-600}
+      - COSTCO_AU_SELENIUM_FALLBACK=${COSTCO_AU_SELENIUM_FALLBACK:-0}
     volumes:
       - catalog_media_au_worker:/app/media
       # Host dir must contain ebay_au_cookies.json (browser export for ebay.com.au). See .env.prod.example.

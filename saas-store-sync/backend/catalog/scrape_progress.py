@@ -40,6 +40,47 @@ def invalidate_scrape_progress_cache(store_id: str | None) -> None:
         logger.exception('invalidate_scrape_progress_cache failed store_id=%s', store_id)
 
 
+def heal_stale_server_vendor_job(store, vendor_code: str, job) -> None:
+    """Mark a stuck ``CLAIMED`` server-vendor job done when no listings are pending.
+
+    Server-side feed ingests (VevorAU) set ``CLAIMED`` at dispatch and ``DONE`` when
+    the Celery task finishes. If the worker crashed or an older build omitted the
+    finalize step, the UI would show "scraping" forever even though every listing
+    has left ``sync_status='pending'``.
+    """
+    from catalog.ingest_views import SUPPORTED_VENDORS
+
+    if job is None or job.status != 'claimed':
+        return
+    runner = (SUPPORTED_VENDORS.get(vendor_code) or {}).get('runner')
+    if runner != 'server':
+        return
+    from catalog.models import HebScrapeJob, ProductMapping
+    from catalog.views import _vendor_db_ids_for
+
+    vendor_ids = _vendor_db_ids_for(vendor_code)
+    if not vendor_ids:
+        return
+    has_sync_pending = ProductMapping.objects.filter(
+        store=store,
+        is_active=True,
+        sync_status='pending',
+        product__vendor_id__in=vendor_ids,
+    ).exists()
+    if has_sync_pending:
+        return
+
+    job.status = HebScrapeJob.Status.DONE
+    if not job.completed_at:
+        job.completed_at = timezone.now()
+    job.save(update_fields=['status', 'completed_at'])
+    invalidate_scrape_progress_cache(str(store.id))
+    logger.info(
+        'Healed stale %s scrape job %s for store %s (no sync pending left)',
+        vendor_code, job.id, store.id,
+    )
+
+
 def get_scrape_progress_payload(store) -> dict[str, Any]:
     """Return progress dict (from cache when fresh)."""
     key = scrape_progress_cache_key(str(store.id))
@@ -176,6 +217,7 @@ def build_scrape_progress_payload(store) -> dict[str, Any]:
                 .order_by('-requested_at')
                 .first()
             )
+            heal_stale_server_vendor_job(store, vendor_code, latest_job)
             if latest_job is not None:
                 v_job_payload = {
                     'id': str(latest_job.id),
@@ -200,6 +242,15 @@ def build_scrape_progress_payload(store) -> dict[str, Any]:
             if is_runner
             else 'live'
         )
+        # Costco AU dynamically becomes a 'live' server vendor when residential
+        # proxies are configured for the AU worker — same UX as Amazon/eBay.
+        if vendor_code == 'costco' and runner_kind == 'desktop':
+            try:
+                from scrapers.costco_au_proxies import load_proxy_urls
+                if load_proxy_urls():
+                    runner_kind = 'live'
+            except Exception:
+                pass
         if runner_kind == 'live':
             v_job_payload = None
             v_queue_payload = None
@@ -211,6 +262,7 @@ def build_scrape_progress_payload(store) -> dict[str, Any]:
             'total': v_total,
             'scraped': v_scraped,
             'pending': v_pending,
+            'sync_pending': v_by_status.get('pending', 0),
             'by_status': v_by_status,
             'pct': v_pct,
             'last_ingest_at': v_last_ingest_at,

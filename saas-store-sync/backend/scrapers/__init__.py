@@ -1,20 +1,31 @@
 """
 Scraper dispatcher.
 
-Routes vendor URLs to the correct scraper (Amazon US, Amazon AU, eBay) based on
-domain. Each scraper returns {"price": float|None, "stock": int|None} and may
-include "title" (str) when extracted — same shape for Amazon US and eBay.
+Routes vendor URLs to the correct scraper based on domain. Each scraper returns
+``{"price": float|None, "stock": int|None}`` and may include ``"title"`` (str)
+when extracted.
 
-HEB and Costco AU are **not** scraped server-side. Their PDPs are protected
-by Akamai / Bot Management from datacenter IPs, so pricing is pushed by
-desktop runners via ``/api/v1/ingest/heb/`` and ``/api/v1/ingest/costco/``.
-Vevor AU uses the public S3 XLSX feed (``catalog.tasks.run_vevor_au_ingest``).
-Those flows write directly to both ``VendorPrice`` **and** ``ProductMapping``.
-The catalog scrape and store-sync tasks detect those vendors
-(``_is_ingest_only_product``) and skip server-side HTTP scraping for them.
-Amazon and eBay are scraped server-side via this dispatcher.
+Server-side vendors (scraped from this dispatcher):
 
-Usage in tasks:
+* **Amazon US / AU** — HTTP-first + Selenium fallback
+* **eBay US / AU**   — curl_cffi (Cloudflare TLS) + Selenium fallback
+* **Costco AU**      — curl_cffi through residential AU proxies
+  (set ``COSTCO_AU_PROXY_URLS`` on the worker; without proxies the dispatcher
+  returns an ``ingest_only`` sentinel so the catalog task keeps the existing
+  ``ProductMapping`` row untouched.)
+
+Ingest-only vendors (NOT scraped server-side):
+
+* **HEB**       — pushed by the desktop runner via ``/api/v1/ingest/heb/``
+* **Vevor AU**  — refreshed from the public S3 XLSX feed via
+  ``catalog.tasks.run_vevor_au_ingest``
+
+The catalog and store-sync tasks detect ingest-only vendors via
+``catalog.tasks._is_ingest_only_product`` and skip server-side HTTP scraping
+for them so historical ``VendorPrice`` data is never silently re-applied.
+
+Usage in tasks::
+
     from scrapers import get_price_and_stock, close_amazon_session
 
     session = {}
@@ -38,6 +49,22 @@ _scrape_ebay_us = None
 _close_ebay_us = None
 _scrape_ebay_au = None
 _close_ebay_au = None
+_scrape_costco_au = None
+_close_costco_au = None
+
+
+def _get_costco_au_scraper():
+    global _scrape_costco_au, _close_costco_au
+    if _scrape_costco_au is None:
+        try:
+            from .costco_au_scraper import scrape_costco_au, close_costco_au_session
+            _scrape_costco_au = scrape_costco_au
+            _close_costco_au = close_costco_au_session
+        except ImportError as exc:
+            logger.warning("Costco AU scraper unavailable: %s", exc)
+            _scrape_costco_au = _placeholder_scrape
+            _close_costco_au = lambda s: None
+    return _scrape_costco_au, _close_costco_au
 
 
 def _get_amazon_us_scraper():
@@ -136,16 +163,31 @@ def _heb_ingest_only_result() -> dict:
     }
 
 
+def _costco_au_server_scrape_enabled() -> bool:
+    """True when residential proxies are configured for server-side Costco AU scraping.
+
+    Without proxies we fall back to the legacy ingest-only behavior so a worker
+    deployed with the new code but no env update never silently hits Costco
+    from a datacenter IP (guaranteed Cloudflare block).
+    """
+    from .costco_au_proxies import load_proxy_urls
+    return bool(load_proxy_urls())
+
+
 def _costco_ingest_only_result() -> dict:
-    """Costco AU has no server-side scraper; data comes from the /api/v1/ingest/costco/ endpoint."""
+    """Sentinel returned only when server scraping is not enabled for Costco AU.
+
+    Once ``COSTCO_AU_PROXY_URLS`` is set on the AU worker, the dispatcher routes
+    Costco URLs through the live scraper instead of returning this stub.
+    """
     return {
         "price": None,
         "inventory": None,
         "title": None,
         "error_code": "costco_ingest_only",
         "error_message": (
-            "Costco AU is ingest-only on the server; the desktop runner POSTs prices to "
-            "/api/v1/ingest/costco/. The task will fall back to the latest VendorPrice."
+            "Costco AU server scraping disabled (no COSTCO_AU_PROXY_URLS configured); "
+            "the task will keep the latest VendorPrice and skip this row."
         ),
     }
 
@@ -208,7 +250,11 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
         return _normalize_scrape_payload(_heb_ingest_only_result())
 
     if "costco.com.au" in url_lower:
-        logger.info("Costco AU URL skipped server-side (ingest-only): %s", vendor_url[:80])
+        if _costco_au_server_scrape_enabled():
+            scrape_fn, _ = _get_costco_au_scraper()
+            logger.info("Routing to Costco AU scraper: %s", vendor_url[:80])
+            return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
+        logger.info("Costco AU URL skipped server-side (no proxies configured): %s", vendor_url[:80])
         return _normalize_scrape_payload(_costco_ingest_only_result())
 
     if "vevor.com.au" in url_lower or "vevor.au" in url_lower:
@@ -249,7 +295,12 @@ def _normalize_scrape_payload(result: dict | None) -> dict:
 
 
 def close_amazon_session(session):
-    """Close all browser sessions (Amazon US, Amazon AU, eBay US, eBay AU) held in this session dict."""
+    """Close all browser/HTTP sessions held in ``session``.
+
+    Despite the legacy name, this closes Amazon US/AU, eBay US/AU, and Costco AU
+    sessions — callers pass a single shared session dict per Celery task and
+    this function is the one cleanup hook.
+    """
     if session is None:
         return
     _, close_us = _get_amazon_us_scraper()
@@ -260,6 +311,8 @@ def close_amazon_session(session):
     _, close_ebay_au = _get_ebay_au_scraper()
     close_ebay_us(session)
     close_ebay_au(session)
+    _, close_costco = _get_costco_au_scraper()
+    close_costco(session)
 
 
 __all__ = ["get_price_and_stock", "close_amazon_session"]

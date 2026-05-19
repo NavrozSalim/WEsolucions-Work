@@ -9,7 +9,8 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 
 from catalog.ingest_views import _apply_to_mappings
-from catalog.models import CatalogUpload, CatalogUploadRow, ProductMapping
+from catalog.models import CatalogUpload, CatalogUploadRow, HebScrapeJob, ProductMapping
+from catalog.scrape_progress import build_scrape_progress_payload, heal_stale_server_vendor_job
 from catalog.tasks import (
     run_catalog_sync,
     run_store_wide_catalog_scrape,
@@ -305,3 +306,91 @@ class VevorIngestTenantTests(TestCase):
         self.assertTrue(out.get('skipped'))
         self.assertEqual(out.get('reason'), 'no_scrapeable_pending')
         self.assertEqual(out.get('rows_processed'), 0)
+
+    @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+    def test_heal_stale_vevor_claimed_job_when_no_sync_pending(self):
+        mp, _ = Marketplace.objects.get_or_create(code='kogan_vevor4', defaults={'name': 'Kogan Vevor'})
+        user = User.objects.create_user(username='vevor_u4', email='vevor_u4@example.com', password='pass12345')
+        store = Store.objects.create(
+            user=user, name='Vevor Heal', region='AU', api_token='tok-v4', marketplace=mp,
+        )
+        vendor, _ = Vendor.objects.get_or_create(code='vevorau', defaults={'name': 'VevorAU'})
+        product = Product.objects.create(vendor=vendor, vendor_sku='VEV-SKU-4', owner=user)
+        ProductMapping.objects.create(
+            store=store, product=product, marketplace_id='MID-4', sync_status='scraped', is_active=True,
+        )
+        job = HebScrapeJob.objects.create(
+            store=store,
+            requested_by=user,
+            vendor_code='vevor',
+            status=HebScrapeJob.Status.CLAIMED,
+        )
+        heal_stale_server_vendor_job(store, 'vevor', job)
+        job.refresh_from_db()
+        self.assertEqual(job.status, HebScrapeJob.Status.DONE)
+        self.assertIsNotNone(job.completed_at)
+
+        payload = build_scrape_progress_payload(store)
+        vevor = payload['vendors']['vevor']
+        self.assertEqual(vevor['job']['status'], 'done')
+        self.assertEqual(vevor['sync_pending'], 0)
+
+
+class CostcoServerScrapeRoutingTests(TestCase):
+    """Costco AU joins the live server-scrape path when proxies are configured.
+
+    These tests cover the routing-level decisions only (ingest-only flag, store
+    has scrapeable pending, vendor payload runner kind). The actual HTTP fetch
+    is exercised in ``scrapers.test_costco_au_scraper``.
+    """
+
+    @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+    def test_costco_pending_is_scrapeable_when_proxies_set(self):
+        from unittest.mock import patch as _patch
+        from catalog.tasks import store_has_scrapeable_pending_mappings
+
+        mp, _ = Marketplace.objects.get_or_create(code='kogan_costco1', defaults={'name': 'Kogan Costco'})
+        user = User.objects.create_user(username='costco_u1', email='costco_u1@example.com', password='pass12345')
+        store = Store.objects.create(
+            user=user, name='Costco Live', region='AU', api_token='tok-c1', marketplace=mp,
+        )
+        vendor, _ = Vendor.objects.get_or_create(code='costcoau', defaults={'name': 'CostcoAU'})
+        product = Product.objects.create(vendor=vendor, vendor_sku='COS-1', owner=user)
+        ProductMapping.objects.create(
+            store=store, product=product, marketplace_id='MIDC-1', sync_status='pending', is_active=True,
+        )
+
+        # No proxies → ingest-only behavior (current production default).
+        with _patch.dict('os.environ', {}, clear=False):
+            import os as _os
+            for k in ('COSTCO_AU_PROXY_URLS', 'PROXY_URLS', 'COSTCO_AU_PROXY_URL',
+                      'PROXY_URL', 'PROXY_ENDPOINTS'):
+                _os.environ.pop(k, None)
+            self.assertFalse(store_has_scrapeable_pending_mappings(store))
+
+        # With proxies → Costco is scrapeable like Amazon AU.
+        with _patch.dict('os.environ', {'COSTCO_AU_PROXY_URLS': 'http://u:p@a:1'}, clear=False):
+            self.assertTrue(store_has_scrapeable_pending_mappings(store))
+
+    @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+    def test_vendor_payload_runner_flips_to_live_when_proxies_set(self):
+        from unittest.mock import patch as _patch
+
+        mp, _ = Marketplace.objects.get_or_create(code='kogan_costco2', defaults={'name': 'Kogan Costco'})
+        user = User.objects.create_user(username='costco_u2', email='costco_u2@example.com', password='pass12345')
+        store = Store.objects.create(
+            user=user, name='Costco Payload', region='AU', api_token='tok-c2', marketplace=mp,
+        )
+        vendor, _ = Vendor.objects.get_or_create(code='costcoau', defaults={'name': 'CostcoAU'})
+        product = Product.objects.create(vendor=vendor, vendor_sku='COS-2', owner=user)
+        ProductMapping.objects.create(
+            store=store, product=product, marketplace_id='MIDC-2', sync_status='pending', is_active=True,
+        )
+
+        with _patch.dict('os.environ', {'COSTCO_AU_PROXY_URLS': 'http://u:p@a:1'}, clear=False):
+            payload = build_scrape_progress_payload(store)
+        costco = payload['vendors'].get('costco') or {}
+        self.assertEqual(costco.get('runner'), 'live')
+        # Live vendors never carry a desktop job/queue payload.
+        self.assertIsNone(costco.get('job'))
+        self.assertIsNone(costco.get('queue'))

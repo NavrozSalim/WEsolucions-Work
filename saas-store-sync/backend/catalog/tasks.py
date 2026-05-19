@@ -41,27 +41,59 @@ from products.models import Product
 from vendor.models import Vendor
 
 
+def _costco_au_runs_on_server() -> bool:
+    """Return True when the AU worker is configured to scrape Costco AU directly.
+
+    The deciding factor is whether ``COSTCO_AU_PROXY_URLS`` (or one of the
+    accepted fallbacks) is set: residential proxies are mandatory to bypass
+    Cloudflare, so without them Costco stays ingest-only.
+
+    Read every call (not cached) so toggling the env on a running worker after
+    a restart immediately changes routing without code redeploys.
+    """
+    try:
+        from scrapers.costco_au_proxies import load_proxy_urls
+        return bool(load_proxy_urls())
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("Failed to determine Costco AU server-scrape mode; defaulting to ingest-only")
+        return False
+
+
 def _is_ingest_only_product(product) -> bool:
-    """True when the vendor has no live server-side scraper (prices come from
-    the desktop runner or the Vevor S3 XLSX feed). Those flows write to
-    ``ProductMapping`` directly via the ingest endpoints, so the catalog
-    scrape task must never clobber them with a 'failed' flag just because
-    the HTTP dispatcher returned an ``*_ingest_only_result`` sentinel.
+    """True when the vendor has no live server-side scraper for this deployment.
+
+    HEB and Vevor AU are always ingest-only (HEB is desktop runner, Vevor uses
+    a feed). Costco AU is ingest-only **only when** residential proxies are not
+    configured — set ``COSTCO_AU_PROXY_URLS`` on the AU worker and Costco moves
+    into the live server-scrape path.
     """
     vendor = getattr(product, 'vendor', None)
     code = (getattr(vendor, 'code', '') or '').lower()
-    if code in ('heb', 'hebus', 'costcoau', 'costco_au', 'costco-au', 'vevor', 'vevorau'):
+    if code in ('heb', 'hebus', 'vevor', 'vevorau'):
         return True
-    if code.startswith('heb_') or code.startswith('costco_') or code.startswith('vevor_'):
+    if code.startswith('heb_') or code.startswith('vevor_'):
         return True
+    is_costco = (
+        code in ('costcoau', 'costco_au', 'costco-au')
+        or code.startswith('costco_')
+    )
+    if is_costco:
+        return not _costco_au_runs_on_server()
     return False
 
 
 def _ingest_only_vendor_ids() -> list:
-    """Primary keys for vendors handled by feed/desktop ingest (not browser scrape)."""
-    codes = ('heb', 'hebus', 'costcoau', 'costco_au', 'costco-au', 'vevor', 'vevorau')
-    q = Q(code__in=codes)
-    q |= Q(code__istartswith='heb_') | Q(code__istartswith='costco_') | Q(code__istartswith='vevor_')
+    """Primary keys for vendors handled by feed/desktop ingest (not browser scrape).
+
+    Costco AU joins this set only when proxies aren't configured (see
+    ``_costco_au_runs_on_server``).
+    """
+    codes = ['heb', 'hebus', 'vevor', 'vevorau']
+    prefix_q = Q(code__istartswith='heb_') | Q(code__istartswith='vevor_')
+    if not _costco_au_runs_on_server():
+        codes.extend(['costcoau', 'costco_au', 'costco-au'])
+        prefix_q = prefix_q | Q(code__istartswith='costco_')
+    q = Q(code__in=codes) | prefix_q
     return list(Vendor.objects.filter(q).values_list('id', flat=True))
 
 
@@ -1701,6 +1733,40 @@ def catalog_scrape_store_task(self, store_id: str):
     return out
 
 
+def _finalize_vevor_scrape_job(
+    job_id: str | None,
+    store_id: str | None,
+    *,
+    status: str = 'done',
+    stats: dict | None = None,
+) -> None:
+    """Update the tracking ``HebScrapeJob`` row and bust progress cache."""
+    if not job_id:
+        return
+    try:
+        from catalog.models import HebScrapeJob
+        from catalog.scrape_progress import invalidate_scrape_progress_cache
+
+        job = HebScrapeJob.objects.filter(id=job_id).first()
+        if not job:
+            return
+        terminal = {
+            'done': HebScrapeJob.Status.DONE,
+            'failed': HebScrapeJob.Status.FAILED,
+        }.get(status, HebScrapeJob.Status.DONE)
+        if job.status == terminal:
+            return
+        job.status = terminal
+        job.completed_at = timezone.now()
+        if stats is not None:
+            job.stats = stats
+        job.save(update_fields=['status', 'completed_at', 'stats'])
+        if store_id:
+            invalidate_scrape_progress_cache(str(store_id))
+    except Exception:
+        logger.exception('Failed to finalize VevorAU job %s', job_id)
+
+
 def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = None) -> dict:
     """Refresh VendorPrice rows for Vevor AU products from the public S3 XLSX feed.
 
@@ -1761,16 +1827,10 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
             'job_id': str(job_id) if job_id else None,
         }
         if job_id:
-            try:
-                from catalog.models import HebScrapeJob
-                job = HebScrapeJob.objects.filter(id=job_id).first()
-                if job and job.status != HebScrapeJob.Status.DONE:
-                    job.status = HebScrapeJob.Status.DONE
-                    job.completed_at = timezone.now()
-                    job.stats = {'received': 0, 'matched': 0, 'applied': 0}
-                    job.save(update_fields=['status', 'completed_at', 'stats'])
-            except Exception:
-                logger.exception('Failed to mark VevorAU job %s done (no listings)', job_id)
+            _finalize_vevor_scrape_job(
+                job_id, store_id,
+                stats={'received': 0, 'matched': 0, 'applied': 0},
+            )
         logger.info('Vevor AU ingest skipped: %s', result)
         return result
 
@@ -1778,12 +1838,14 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
         xlsx_path = fetch_vevor_feed(VEVOR_AU_FEED_URL)
     except Exception as e:
         logger.exception('Vevor AU feed download failed: %s', e)
+        _finalize_vevor_scrape_job(job_id, store_id, status='failed', stats={'error': str(e)[:240]})
         return {'status': 'failed', 'error': str(e), 'updated': 0}
 
     try:
         lookup, lookup_compact, pos_rows = load_veror_via_excel_positions(xlsx_path)
     except Exception as e:
         logger.exception('Vevor AU feed parse failed: %s', e)
+        _finalize_vevor_scrape_job(job_id, store_id, status='failed', stats={'error': str(e)[:240]})
         return {'status': 'failed', 'error': str(e), 'updated': 0}
     finally:
         try:
@@ -1793,6 +1855,7 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
             pass
 
     if not lookup:
+        _finalize_vevor_scrape_job(job_id, store_id, stats={'received': pos_rows, 'matched': 0, 'applied': 0})
         return {'status': 'empty_feed', 'feed_rows': pos_rows, 'updated': 0}
 
     pm_list = list(pm_qs)
@@ -1905,20 +1968,14 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
     }
 
     if job_id:
-        try:
-            from catalog.models import HebScrapeJob
-            job = HebScrapeJob.objects.filter(id=job_id).first()
-            if job and job.status != HebScrapeJob.Status.DONE:
-                job.status = HebScrapeJob.Status.DONE
-                job.completed_at = timezone.now()
-                job.stats = {
-                    'received': pos_rows,
-                    'matched': matched,
-                    'applied': updated_rows,
-                }
-                job.save(update_fields=['status', 'completed_at', 'stats'])
-        except Exception:
-            logger.exception('Failed to mark VevorAU job %s done', job_id)
+        _finalize_vevor_scrape_job(
+            job_id, store_id,
+            stats={
+                'received': pos_rows,
+                'matched': matched,
+                'applied': updated_rows,
+            },
+        )
 
     logger.info('Vevor AU ingest summary: %s', result)
     return result

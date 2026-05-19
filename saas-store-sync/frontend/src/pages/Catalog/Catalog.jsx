@@ -431,13 +431,40 @@ function getVendorSummaries(progress) {
 }
 
 /**
+ * Rows still waiting for a scrape pass (``sync_status='pending'`` only).
+ * ``pending`` on the vendor payload also counts failed/needs_attention for
+ * display; use this when deciding whether a scrape is still running.
+ */
+function vendorSyncPending(vendor) {
+    if (!vendor) return 0;
+    if (typeof vendor.sync_pending === 'number') return vendor.sync_pending;
+    return (vendor.by_status?.pending) || 0;
+}
+
+/** True when a desktop/server ingest job is actively running (not merely failed rows). */
+function vendorIngestIsRunning(vendor) {
+    if (!vendor) return false;
+    const job = vendorIngestJob(vendor);
+    const jobStatus = job?.status;
+    if (jobStatus === 'pending') return true;
+    if (jobStatus === 'claimed') {
+        const runner = vendor.runner || 'desktop';
+        if (runner === 'server') {
+            return vendorSyncPending(vendor) > 0;
+        }
+        return true;
+    }
+    return false;
+}
+
+/**
  * Pick the vendor that should drive the Scrape button label and tracking
  * state when a store has products from multiple desktop-runner vendors.
  * Prefer one that still has pending work; otherwise fall back to the first.
  */
 function getActiveVendor(vendors) {
     if (!Array.isArray(vendors) || vendors.length === 0) return null;
-    return vendors.find((v) => (v.pending || 0) > 0) || vendors[0];
+    return vendors.find((v) => vendorSyncPending(v) > 0 || vendorIngestIsRunning(v)) || vendors[0];
 }
 
 /** HebScrapeJob desktop queue — not used for ``runner: live`` (Amazon/eBay server scrapes). */
@@ -485,7 +512,7 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
     const queue = vendorIngestQueue(vendor);
     const jobStatus = job?.status;
     const isPending = jobStatus === 'pending';
-    const isClaimed = jobStatus === 'claimed';
+    const isClaimed = jobStatus === 'claimed' && vendorIngestIsRunning(vendor);
     const isActive = isPending || isClaimed;
     const ahead = queue?.ahead_count || 0;
     const etaLabel = formatEtaShort(queue?.eta_seconds);
@@ -545,7 +572,7 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
         <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4 mb-4 shadow-sm">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-center gap-3">
-                    <span className={`inline-flex h-2.5 w-2.5 rounded-full ${recent5 > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300 dark:bg-slate-600'}`} />
+                    <span className={`inline-flex h-2.5 w-2.5 rounded-full ${isActive ? 'bg-emerald-500 animate-pulse' : recent5 > 0 ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600'}`} />
                     <div>
                         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                             {label}
@@ -1047,7 +1074,14 @@ export default function Catalog() {
             setMessage(`${activeLabel} price check failed on your computer.`);
             return;
         }
-        const allDone = vendors.every((v) => (v.pending || 0) === 0 && (v.total || 0) > 0);
+        if (jobStatus === 'done') {
+            setTrackingScrape(false);
+            setFlowStatus('success');
+            return;
+        }
+        const allDone = vendors.every(
+            (v) => vendorSyncPending(v) === 0 && !vendorIngestIsRunning(v) && (v.total || 0) > 0,
+        );
         if (allDone) {
             setTrackingScrape(false);
             setFlowStatus('success');
@@ -1374,7 +1408,7 @@ export default function Catalog() {
                     }
                     const vendors = getVendorSummaries(progress);
                     const pendingVendors = vendors.filter(
-                        (v) => (v.pending || 0) > 0,
+                        (v) => vendorSyncPending(v) > 0 || vendorIngestIsRunning(v),
                     );
                     const shouldTrack = !uploadId && pendingVendors.length > 0;
                     if (shouldTrack) {
@@ -1382,7 +1416,7 @@ export default function Catalog() {
                         setFlowStatus('scraping');
                         const parts = pendingVendors.map((v) => {
                             const lbl = v.label || (v.code || '').toUpperCase();
-                            return `${lbl}: ${v.scraped || 0}/${v.total || 0} populated (${v.pending} remaining)`;
+                            return `${lbl}: ${v.scraped || 0}/${v.total || 0} populated (${vendorSyncPending(v)} remaining)`;
                         });
                         if (serverOn) {
                             setMessage(
@@ -2160,7 +2194,8 @@ export default function Catalog() {
                                     || (activeVendor?.code || '').toUpperCase();
                                 const activeJobStatus = vendorIngestJob(activeVendor)?.status;
                                 const isPending = activeJobStatus === 'pending';
-                                const isClaimed = activeJobStatus === 'claimed';
+                                const isClaimed = activeJobStatus === 'claimed'
+                                    && vendorIngestIsRunning(activeVendor);
                                 const desktopRunnerBusy = isPending || isClaimed || trackingScrape;
                                 const isActive = desktopRunnerBusy || trackingServerScrape;
                                 const aheadCount = vendorIngestQueue(activeVendor)?.ahead_count || 0;

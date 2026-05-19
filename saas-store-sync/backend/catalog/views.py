@@ -735,18 +735,44 @@ class CatalogScrapeTriggerView(APIView):
 
     @classmethod
     def _maybe_enqueue_desktop_jobs(cls, store, user) -> list:
-        """Walk every supported desktop-runner vendor and enqueue a job for
+        """Walk every supported non-live runner vendor and enqueue a job for
         each one that has products in ``store``. Returns a list of
         ``(vendor_code, job)`` tuples for the ones that got queued (new or
         pre-existing pending/claimed).
+
+        Vendors with ``runner='live'`` (e.g. Costco AU when residential proxies
+        are configured) are intentionally skipped — they're scraped through the
+        same ``catalog_scrape_store_task`` browser path as Amazon/eBay and don't
+        need their own ``HebScrapeJob`` row.
         """
         from catalog.ingest_views import SUPPORTED_VENDORS
         jobs: list = []
-        for vendor_code in SUPPORTED_VENDORS.keys():
+        for vendor_code, cfg in SUPPORTED_VENDORS.items():
+            if cls._vendor_runs_live(vendor_code, cfg):
+                continue
             job = cls._maybe_enqueue_vendor_job(store, user, vendor_code)
             if job is not None:
                 jobs.append((vendor_code, job))
         return jobs
+
+    @staticmethod
+    def _vendor_runs_live(vendor_code: str, cfg: dict) -> bool:
+        """True when a vendor is currently routed through the live server-scrape path.
+
+        Static ``runner='live'`` always counts. ``runner='desktop'`` for Costco
+        also counts when ``COSTCO_AU_PROXY_URLS`` is set, because the server
+        scrape path takes over and a desktop job would never get claimed.
+        """
+        runner = (cfg or {}).get('runner', 'desktop')
+        if runner == 'live':
+            return True
+        if vendor_code == 'costco':
+            try:
+                from scrapers.costco_au_proxies import load_proxy_urls
+                return bool(load_proxy_urls())
+            except Exception:
+                return False
+        return False
 
     @classmethod
     def _maybe_enqueue_heb_job(cls, store, user) -> HebScrapeJob | None:

@@ -31,18 +31,29 @@ def _is_heb_product(product) -> bool:
 
 
 def _is_ingest_only_product(product) -> bool:
-    """Vendors whose price/stock comes from a desktop runner or S3 feed
-    (HEB, Costco AU, Vevor AU). There is no live server-side scraper for
-    these — the ingest endpoint writes ``ProductMapping.store_price`` /
-    ``store_stock`` / ``last_scrape_time`` directly on every POST, and
-    server-side scrape/sync loops skip these rows so old VendorPrice data
-    is never silently re-applied."""
+    """Vendors whose price/stock comes from a desktop runner or S3 feed.
+
+    HEB and Vevor AU are always ingest-only. Costco AU is ingest-only **only
+    when** the AU worker has no residential proxies configured — once
+    ``COSTCO_AU_PROXY_URLS`` is set, Costco runs through the live server
+    scraper (``scrapers.costco_au_scraper``).
+    """
     vendor = getattr(product, 'vendor', None)
     code = (getattr(vendor, 'code', '') or '').lower()
-    if code in ('heb', 'hebus', 'costcoau', 'costco_au', 'costco-au', 'vevor', 'vevorau'):
+    if code in ('heb', 'hebus', 'vevor', 'vevorau'):
         return True
-    if code.startswith('heb_') or code.startswith('costco_') or code.startswith('vevor_'):
+    if code.startswith('heb_') or code.startswith('vevor_'):
         return True
+    is_costco = (
+        code in ('costcoau', 'costco_au', 'costco-au')
+        or code.startswith('costco_')
+    )
+    if is_costco:
+        try:
+            from scrapers.costco_au_proxies import load_proxy_urls
+            return not bool(load_proxy_urls())
+        except Exception:
+            return True
     return False
 
 
