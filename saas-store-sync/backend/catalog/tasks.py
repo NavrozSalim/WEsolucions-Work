@@ -1663,6 +1663,9 @@ def catalog_scrape_store_task(self, store_id: str):
 def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = None) -> dict:
     """Refresh VendorPrice rows for Vevor AU products from the public S3 XLSX feed.
 
+    Only ``ProductMapping`` rows with ``sync_status='pending'`` are processed.
+    When none are pending, the task returns immediately without downloading the feed.
+
     ``store_id`` is **required**: mappings are updated only for that store (multi-tenant).
     """
     from decimal import Decimal
@@ -1694,6 +1697,35 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
         logger.warning('run_vevor_au_ingest: store_id missing; refusing global apply (multi-tenant).')
         return {'status': 'skipped', 'message': 'store_id is required', 'updated': 0}
 
+    pm_qs = ProductMapping.objects.filter(
+        store_id=store_id,
+        is_active=True,
+        sync_status='pending',
+        product__vendor_id__in=vendor_ids,
+    ).select_related('product', 'product__vendor', 'store')
+
+    if not pm_qs.exists():
+        result = {
+            'status': 'skipped',
+            'reason': 'no_pending_vevor',
+            'updated': 0,
+            'store_id': str(store_id),
+            'job_id': str(job_id) if job_id else None,
+        }
+        if job_id:
+            try:
+                from catalog.models import HebScrapeJob
+                job = HebScrapeJob.objects.filter(id=job_id).first()
+                if job and job.status != HebScrapeJob.Status.DONE:
+                    job.status = HebScrapeJob.Status.DONE
+                    job.completed_at = timezone.now()
+                    job.stats = {'received': 0, 'matched': 0, 'applied': 0}
+                    job.save(update_fields=['status', 'completed_at', 'stats'])
+            except Exception:
+                logger.exception('Failed to mark VevorAU job %s done (no pending)', job_id)
+        logger.info('Vevor AU ingest skipped: %s', result)
+        return result
+
     try:
         xlsx_path = fetch_vevor_feed(VEVOR_AU_FEED_URL)
     except Exception as e:
@@ -1714,12 +1746,6 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
 
     if not lookup:
         return {'status': 'empty_feed', 'feed_rows': pos_rows, 'updated': 0}
-
-    pm_qs = ProductMapping.objects.filter(
-        store_id=store_id,
-        is_active=True,
-        product__vendor_id__in=vendor_ids,
-    ).select_related('product', 'product__vendor', 'store')
 
     now = timezone.now()
     matched = missing = updated_rows = 0

@@ -4,8 +4,9 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import patch
 
+from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from catalog.ingest_views import _apply_to_mappings
 from catalog.models import CatalogUpload, CatalogUploadRow, ProductMapping
@@ -243,3 +244,28 @@ class VevorIngestTenantTests(TestCase):
         out = run_vevor_au_ingest(store_id=None)
         self.assertEqual(out.get('status'), 'skipped')
         self.assertEqual(out.get('updated'), 0)
+
+    @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+    @patch('scrapers.vevor_au_ingest.fetch_vevor_feed')
+    def test_vevor_skips_when_no_pending_rows(self, mock_fetch):
+        mp, _ = Marketplace.objects.get_or_create(code='kogan_vevor', defaults={'name': 'Kogan Vevor'})
+        user = User.objects.create_user(username='vevor_u', email='vevor_u@example.com', password='pass12345')
+        store = Store.objects.create(
+            user=user, name='Vevor Store', region='AU', api_token='tok-v', marketplace=mp,
+        )
+        vendor, _ = Vendor.objects.get_or_create(code='vevorau', defaults={'name': 'VevorAU'})
+        product = Product.objects.create(
+            vendor=vendor, vendor_sku='VEV-SKU-1', owner=user,
+        )
+        ProductMapping.objects.create(
+            store=store,
+            product=product,
+            marketplace_id='MID-1',
+            sync_status='scraped',
+            is_active=True,
+        )
+        out = run_vevor_au_ingest(store_id=str(store.id))
+        self.assertEqual(out.get('status'), 'skipped')
+        self.assertEqual(out.get('reason'), 'no_pending_vevor')
+        self.assertEqual(out.get('updated'), 0)
+        mock_fetch.assert_not_called()

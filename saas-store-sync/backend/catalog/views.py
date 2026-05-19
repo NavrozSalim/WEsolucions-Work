@@ -656,6 +656,19 @@ def _store_has_vendor_products(store, vendor_code: str) -> bool:
     ).exists()
 
 
+def _store_has_pending_vendor_products(store, vendor_code: str) -> bool:
+    """True when ``store`` has at least one active pending listing for ``vendor_code``."""
+    vendor_ids = _vendor_db_ids_for(vendor_code)
+    if not vendor_ids:
+        return False
+    return ProductMapping.objects.filter(
+        store=store,
+        is_active=True,
+        sync_status='pending',
+        product__vendor_id__in=vendor_ids,
+    ).exists()
+
+
 def _store_has_heb_products(store) -> bool:
     """Legacy alias retained for any external callers. Prefer
     ``_store_has_vendor_products(store, 'heb')`` in new code."""
@@ -702,6 +715,8 @@ class CatalogScrapeTriggerView(APIView):
         from catalog.ingest_views import SUPPORTED_VENDORS
 
         if not _store_has_vendor_products(store, vendor_code):
+            return None
+        if vendor_code == 'vevor' and not _store_has_pending_vendor_products(store, vendor_code):
             return None
         existing = HebScrapeJob.objects.filter(
             store=store,
