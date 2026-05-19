@@ -9,6 +9,7 @@
 #   docker compose -f docker-compose.us-scraper.prod.yml --env-file .env.prod up -d
 #
 # Env: copy secrets from .env.prod on the main server; point DATABASE_URL / REDIS_URL at that stack.
+# Default EBAY_HTTP_FIRST=1 (curl_cffi before Selenium). Set EBAY_HTTP_FIRST=0 in .env.prod to force browser-first.
 
 x-backend-image: &backend-image
   image: ${BACKEND_IMAGE:-saas-store-sync-backend}
@@ -45,7 +46,7 @@ services:
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
-      - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-0}
+      - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-1}
       - PROXY_URL=${PROXY_URL:-}
       - PROXY_URLS=${PROXY_URLS:-}
       - PROXY_ENDPOINTS=${PROXY_ENDPOINTS:-}
