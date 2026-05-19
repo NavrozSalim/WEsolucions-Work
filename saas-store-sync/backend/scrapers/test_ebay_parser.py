@@ -12,6 +12,7 @@ from scrapers.ebay_common import (
     _ebay_bin_hydrate_max_seconds,
     _effective_ebay_region,
     _normalize_url,
+    _parse_ebay_display_price_text,
     _strip_price_suffix,
 )
 
@@ -256,6 +257,44 @@ class TestEbayBuyNowDisplayPrice(unittest.TestCase):
         </body></html>"""
         soup = BeautifulSoup(html, "lxml")
         self.assertEqual(EbayParser.extract_price(soup, html), 19.0)
+
+    def test_us_headline_with_list_price_percent_off(self):
+        """US BIN: headline US $173.99; list-price footnote must not become $21 from '21% off'."""
+        html = """<html><body>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">US $173.99</span>
+          </div>
+          <div class="x-price-aux">
+            <span class="ux-textspans">List price US $219.99 (21% off)</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 173.99)
+
+    def test_percent_off_only_span_ignored(self):
+        html = """<html><body>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">US $173.99</span>
+          </div>
+          <span class="ux-textspans">21% off</span>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 173.99)
+
+
+class TestEbayDisplayPriceText(unittest.TestCase):
+    def test_rejects_list_price_line(self):
+        self.assertIsNone(_parse_ebay_display_price_text("List price US $219.99 (21% off)"))
+
+    def test_rejects_bare_percent_off(self):
+        self.assertIsNone(_parse_ebay_display_price_text("21% off"))
+
+    def test_parses_us_dollar_headline(self):
+        self.assertEqual(_parse_ebay_display_price_text("US $173.99"), 173.99)
 
 
 class TestEbayPriceSuffix(unittest.TestCase):

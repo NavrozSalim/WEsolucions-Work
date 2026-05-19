@@ -69,6 +69,20 @@ PRICE_SUFFIX_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Reference / footnote rows — not the live BIN headline.
+_RE_LIST_PRICE_PHRASE = re.compile(r"\blist\s+price\b", re.IGNORECASE)
+_RE_COMPARE_AT_PHRASE = re.compile(r"\bcompare\s+at\b", re.IGNORECASE)
+_RE_PERCENT_OFF_ONLY = re.compile(
+    r"^\s*\(?\s*\d+(?:\.\d+)?\s*%\s*off\s*\)?\s*$",
+    re.IGNORECASE,
+)
+_RE_CURRENCY_AMOUNT = re.compile(
+    r"(?:US|AU|USD|AUD|CAD|GBP|EUR)?\s*"
+    r"(?:\$|£|€)\s*"
+    r"([\d,]+(?:\.\d{1,2})?)",
+    re.IGNORECASE,
+)
+
 _CHALLENGE_INDICATORS = [
     "pardon our interruption",
     "checking your browser",
@@ -190,6 +204,40 @@ def _strip_price_suffix(text: str) -> str:
     if not text:
         return ""
     return PRICE_SUFFIX_PATTERN.sub("", text).strip()
+
+
+def _parse_ebay_display_price_text(text: str) -> Optional[float]:
+    """Parse a single eBay ``ux-textspans`` price line (headline BIN, not footnotes).
+
+    Rejects list-price reference rows, bare ``21% off`` percent lines, and any text
+    where the only numeric token is a discount percentage (no currency marker).
+    """
+    if not text:
+        return None
+    stripped = _strip_price_suffix(text.strip())
+    if not stripped or len(stripped) > 120:
+        return None
+    if _RE_LIST_PRICE_PHRASE.search(stripped) or _RE_COMPARE_AT_PHRASE.search(stripped):
+        return None
+    if _RE_PERCENT_OFF_ONLY.match(stripped):
+        return None
+    if "%" in stripped and not _RE_CURRENCY_AMOUNT.search(stripped):
+        return None
+
+    amounts: list[float] = []
+    for m in _RE_CURRENCY_AMOUNT.finditer(stripped):
+        try:
+            val = float(m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        if 0.01 <= val < 999_999:
+            amounts.append(val)
+    if amounts:
+        return min(amounts)
+
+    if "%" in stripped:
+        return None
+    return parse_price_text(stripped)
 
 
 def _ebay_home_origin_for_item_url(item_url: str) -> str:
@@ -748,7 +796,7 @@ class EbayParser:
             t = el.get_text(strip=True)
             if not t or len(t) > 120:
                 continue
-            p = parse_price_text(_strip_price_suffix(t))
+            p = _parse_ebay_display_price_text(t)
             if p and 0.01 <= p < 999_999:
                 found.append(p)
         for mp in root.select("[itemprop='price']"):
@@ -759,7 +807,7 @@ class EbayParser:
                 continue
             if cls._is_strikethrough_element(mp):
                 continue
-            p = parse_price_text(_strip_price_suffix(raw))
+            p = _parse_ebay_display_price_text(raw)
             if p and 0.01 <= p < 999_999:
                 found.append(p)
         return found
@@ -794,7 +842,7 @@ class EbayParser:
                 t = span.get_text(strip=True)
                 if not t or len(t) > 120:
                     continue
-                p = parse_price_text(_strip_price_suffix(t))
+                p = _parse_ebay_display_price_text(t)
                 if p and 0.01 <= p < 999_999:
                     bloc_prices.append(p)
             if bloc_prices:
@@ -816,75 +864,75 @@ class EbayParser:
             t = span.get_text(strip=True)
             if not t or len(t) > 120:
                 continue
-            p = parse_price_text(_strip_price_suffix(t))
+            p = _parse_ebay_display_price_text(t)
             if p and 0.01 <= p < 999_999:
                 found.append(p)
         return found
 
+    _PRIMARY_BIN_SELECTORS = (
+        "[data-testid='x-price-primary']",
+        "[data-test-id='x-price-primary']",
+        ".x-price-primary",
+    )
+    _BIN_ROW_SELECTORS = (
+        "[data-testid='x-bin-price']",
+        ".x-bin-price__content",
+        ".x-bin-price",
+    )
+
+    @classmethod
+    def _headline_prices_in_nodes(cls, nodes) -> list[float]:
+        found: list[float] = []
+        for node in nodes:
+            if node is None or cls._under_price_noise(node):
+                continue
+            found.extend(cls._ux_textspan_prices_in_subtree(node))
+        return found
+
+    @classmethod
+    def _pick_headline_bin_price(cls, candidates: list[float]) -> Optional[float]:
+        if not candidates:
+            return None
+        return min(candidates)
+
     @classmethod
     def _buy_now_display_price(cls, soup: BeautifulSoup, html: str = "") -> Optional[float]:
-        """Headline BIN: min of primary, BIN row, item-price region, and item-scoped embedded JSON."""
-        seen_primary: set[int] = set()
-        primary_cands: list[float] = []
-        for sel in (
-            "[data-testid='x-price-primary']",
-            "[data-test-id='x-price-primary']",
-            ".x-price-primary",
-        ):
-            for node in soup.select(sel):
-                nid = id(node)
-                if nid in seen_primary:
-                    continue
-                seen_primary.add(nid)
-                if cls._under_price_noise(node):
-                    continue
-                primary_cands.extend(cls._ux_textspan_prices_in_subtree(node))
-        seen_bin: set[int] = set()
-        bin_cands: list[float] = []
-        for sel in (
-            "[data-testid='x-bin-price']",
-            ".x-bin-price__content",
-            ".x-bin-price",
-        ):
-            for node in soup.select(sel):
-                nid = id(node)
-                if nid in seen_bin:
-                    continue
-                seen_bin.add(nid)
-                if cls._under_price_noise(node):
-                    continue
-                bin_cands.extend(cls._ux_textspan_prices_in_subtree(node))
-
-        # Promo / sale headline is often only under x-bin-price while x-price-primary still shows MSRP.
-        headline = primary_cands + bin_cands
-        seen_sec: set[int] = set()
+        """Headline BIN from item-price section (primary + BIN row), then JSON supplements."""
+        headline: list[float] = []
+        item_section = None
         for sec_sel in cls._ITEM_PRICE_SECTION_SELECTORS:
-            section = soup.select_one(sec_sel)
-            if section is None:
-                continue
-            sid = id(section)
-            if sid in seen_sec:
-                continue
-            seen_sec.add(sid)
-            headline.extend(cls._collect_bin_price_candidates(section))
+            item_section = soup.select_one(sec_sel)
+            if item_section is not None:
+                break
+
+        if item_section is not None:
+            for sel in cls._PRIMARY_BIN_SELECTORS:
+                headline.extend(cls._headline_prices_in_nodes(item_section.select(sel)))
+            for sel in cls._BIN_ROW_SELECTORS:
+                headline.extend(cls._headline_prices_in_nodes(item_section.select(sel)))
+            headline.extend(cls._collect_bin_price_candidates(item_section))
+
+        if not headline:
+            headline.extend(
+                cls._headline_prices_in_nodes(soup.select(", ".join(cls._PRIMARY_BIN_SELECTORS)))
+            )
+
         item_id = cls._listing_item_id(soup, html or "")
         headline.extend(cls._item_model_json_price_candidates(html or "", item_id))
         headline.extend(cls._ld_json_product_offer_prices(soup, item_id))
-        if headline:
-            return min(headline)
-        return None
+        return cls._pick_headline_bin_price(headline)
 
     @staticmethod
     def _price_from_element(elem) -> Optional[float]:
         if elem is None:
             return None
-        text = _strip_price_suffix(elem.get_text(strip=True))
+        text = elem.get_text(strip=True)
         if not text:
             return None
         if " to " in text.lower():
             parts = re.split(r"\s+to\s+", text, flags=re.IGNORECASE)
-            return parse_price_text(_strip_price_suffix(parts[0]))
-        return parse_price_text(text)
+            return _parse_ebay_display_price_text(parts[0])
+        return _parse_ebay_display_price_text(text)
 
     @classmethod
     def extract_price(cls, soup: BeautifulSoup, html: str) -> Optional[float]:
