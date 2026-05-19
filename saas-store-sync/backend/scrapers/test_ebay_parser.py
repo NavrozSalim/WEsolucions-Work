@@ -273,6 +273,29 @@ class TestEbayBuyNowDisplayPrice(unittest.TestCase):
         soup = BeautifulSoup(html, "lxml")
         self.assertEqual(EbayParser.extract_price(soup, html), 173.99)
 
+    def test_us_bin_price_nested_primary_span(self):
+        """US layout: headline lives in .x-bin-price .x-price-primary > span (DevTools path)."""
+        html = """<html><body>
+        <div id="mainContent">
+          <div>
+            <div class="vim x-price-section mar-t-20">
+              <div class="vim x-bin-price">
+                <div>
+                  <div class="x-price-primary">
+                    <span>US $173.99</span>
+                  </div>
+                </div>
+              </div>
+              <div class="x-price-aux">
+                <span class="ux-textspans">List price US $219.99 (21% off)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 173.99)
+
     def test_percent_off_only_span_ignored(self):
         html = """<html><body>
         <section data-testid="x-item-price">

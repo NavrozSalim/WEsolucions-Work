@@ -337,7 +337,22 @@ class EbayParser:
         "[data-testid='x-price-view']",
     )
 
+    # US BIN headline: ``x-price-primary`` nested inside ``x-bin-price`` (not a sibling row).
+    _US_BIN_HEADLINE_SELECTORS = (
+        "#mainContent .x-bin-price .x-price-primary > span",
+        ".x-price-section .x-bin-price .x-price-primary span",
+        ".vim.x-bin-price .x-price-primary span",
+        "[data-testid='x-bin-price'] .x-price-primary span",
+        ".x-bin-price .x-price-primary > span",
+        ".x-bin-price .x-price-primary .ux-textspans",
+        ".x-bin-price .x-price-primary span",
+    )
+
     PRIMARY_PRICE_SELECTORS = [
+        ".x-bin-price .x-price-primary .ux-textspans--BOLD",
+        ".x-bin-price .x-price-primary .ux-textspans",
+        ".x-bin-price .x-price-primary span",
+        "[data-testid='x-bin-price'] .x-price-primary span",
         "[data-testid='x-price-primary'] .ux-textspans--BOLD",
         "[data-testid='x-price-primary'] .ux-textspans",
         "[data-testid='x-price-primary'] span",
@@ -896,6 +911,30 @@ class EbayParser:
         return min(candidates)
 
     @classmethod
+    def _us_bin_headline_price(cls, soup: BeautifulSoup, root=None) -> Optional[float]:
+        """First valid price from the US BIN headline span (``.x-bin-price .x-price-primary span``)."""
+        scopes: list = []
+        if root is not None:
+            scopes.append(root)
+        scopes.append(soup)
+        for scope in scopes:
+            if scope is None:
+                continue
+            for sel in cls._US_BIN_HEADLINE_SELECTORS:
+                for span in scope.select(sel):
+                    if span.name not in ("span", "div", "p"):
+                        continue
+                    if cls._ux_span_installment_payment_row(span):
+                        continue
+                    if cls._is_strikethrough_element(span):
+                        continue
+                    t = span.get_text(strip=True)
+                    p = _parse_ebay_display_price_text(t)
+                    if p and 0.01 <= p < 999_999:
+                        return p
+        return None
+
+    @classmethod
     def _buy_now_display_price(cls, soup: BeautifulSoup, html: str = "") -> Optional[float]:
         """Headline BIN from item-price section (primary + BIN row), then JSON supplements."""
         headline: list[float] = []
@@ -904,6 +943,10 @@ class EbayParser:
             item_section = soup.select_one(sec_sel)
             if item_section is not None:
                 break
+
+        us_headline = cls._us_bin_headline_price(soup, item_section)
+        if us_headline is not None:
+            return us_headline
 
         if item_section is not None:
             for sel in cls._PRIMARY_BIN_SELECTORS:
