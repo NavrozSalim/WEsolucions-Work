@@ -23,8 +23,10 @@ class TestFastScrapeEnabled(unittest.TestCase):
 class TestParseFastHtml(unittest.TestCase):
     def test_bin_price_and_stock(self):
         html = (
-            "<html><body>"
-            '<div class="x-price-primary"><span>AU $9.99</span></div>'
+            '<html><head><link rel="canonical" href="https://www.ebay.com.au/itm/1"/></head><body>'
+            '<section data-testid="x-item-price">'
+            '<div data-testid="x-price-primary"><span>AU $9.99</span></div>'
+            "</section>"
             '<div class="x-quantity__availability">20 available</div>'
             '<h1 class="x-item-title__mainTitle">Test Tuner</h1>'
             "</body></html>"

@@ -119,7 +119,7 @@ class CeleryStaticTaskRoutesTests(SimpleTestCase):
             (catalog_tasks.catalog_sync_task, 'ingest'),
             (catalog_tasks.catalog_update_task, 'ingest'),
             (catalog_tasks.resume_catalog_scrape_after_stop, 'light'),
-            (catalog_tasks.vevor_au_ingest_task, 'heavy-au'),
+            (catalog_tasks.vevor_au_ingest_task, 'light'),
             (sync_tasks.run_store_sync, 'sync'),
             (sync_tasks.run_store_update, 'sync'),
             (sync_tasks.run_store_push_listings_only, 'sync'),

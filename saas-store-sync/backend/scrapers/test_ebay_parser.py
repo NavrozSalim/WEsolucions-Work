@@ -51,13 +51,13 @@ class TestEffectiveEbayRegion(unittest.TestCase):
 class TestBinHydrateDefaults(unittest.TestCase):
     def test_au_default_poll_budget(self):
         with patch.dict(os.environ, {"EBAY_BIN_HYDRATE_MAX_SEC": ""}):
-            self.assertEqual(_ebay_bin_hydrate_max_seconds("AU", "https://www.ebay.com/itm/1"), 6.0)
+            self.assertEqual(_ebay_bin_hydrate_max_seconds("AU", "https://www.ebay.com/itm/1"), 2.0)
 
     def test_au_hostname_poll_budget_even_if_region_usa(self):
         with patch.dict(os.environ, {"EBAY_BIN_HYDRATE_MAX_SEC": ""}):
             self.assertEqual(
                 _ebay_bin_hydrate_max_seconds("USA", "https://www.ebay.com.au/itm/1"),
-                6.0,
+                2.0,
             )
 
     def test_non_au_default_no_extra_poll(self):
@@ -296,6 +296,60 @@ class TestEbayBuyNowDisplayPrice(unittest.TestCase):
         soup = BeautifulSoup(html, "lxml")
         self.assertEqual(EbayParser.extract_price(soup, html), 173.99)
 
+    def test_au_x_price_primary_us_headline_not_json_min(self):
+        """eBay AU: use [data-testid=x-price-primary] span; ignore Approximately AU + JSON."""
+        html = """<html><head>
+        <link rel="canonical" href="https://www.ebay.com.au/itm/373817490567"/>
+        </head><body>
+        <script>{"itemId":"373817490567","buyItNowPrice":{"value":"208.79"}}</script>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span>US $191.39</span>
+          </div>
+          <div class="x-price-aux">
+            <span>Approximately AU $267.01</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 191.39)
+
+    def test_au_coupon_extra_off_not_used_as_price(self):
+        """eBay AU promo banner 'Extra AU $100.00 off seller's price with code MAYSS2'
+        must NOT lower the headline to $100. Headline AU $1,798.55 wins.
+        """
+        html = """<html><head>
+        <link rel="canonical" href="https://www.ebay.com.au/itm/116494323320"/>
+        </head><body>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">AU $1,798.55</span>
+          </div>
+          <div class="x-buy-it-now__message">
+            <span class="ux-textspans">Buy now, pay later available</span>
+          </div>
+          <div class="x-coupon-pricing">
+            <span class="ux-textspans">Extra AU $100.00 off seller's price with code MAYSS2</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 1798.55)
+
+    def test_au_thousands_separator_headline(self):
+        """eBay AU prices over 1,000 keep the comma; parser must return full amount."""
+        html = """<html><head>
+        <link rel="canonical" href="https://www.ebay.com.au/itm/1"/>
+        </head><body>
+        <section data-testid="x-item-price">
+          <div data-testid="x-price-primary">
+            <span class="ux-textspans">AU $1,798.55</span>
+          </div>
+        </section>
+        </body></html>"""
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(EbayParser.extract_price(soup, html), 1798.55)
+
     def test_percent_off_only_span_ignored(self):
         html = """<html><body>
         <section data-testid="x-item-price">
@@ -315,6 +369,21 @@ class TestEbayDisplayPriceText(unittest.TestCase):
 
     def test_rejects_bare_percent_off(self):
         self.assertIsNone(_parse_ebay_display_price_text("21% off"))
+
+    def test_rejects_coupon_banner(self):
+        self.assertIsNone(
+            _parse_ebay_display_price_text(
+                "Extra AU $100.00 off seller's price with code MAYSS2"
+            )
+        )
+
+    def test_rejects_save_with_code(self):
+        self.assertIsNone(
+            _parse_ebay_display_price_text("Save AU $50.00 off with code SAVE50")
+        )
+
+    def test_parses_au_thousands(self):
+        self.assertEqual(_parse_ebay_display_price_text("AU $1,798.55"), 1798.55)
 
     def test_parses_us_dollar_headline(self):
         self.assertEqual(_parse_ebay_display_price_text("US $173.99"), 173.99)

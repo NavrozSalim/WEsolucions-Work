@@ -341,7 +341,7 @@ if sys.platform == 'win32':
 # - ``sync``: store scrape/push/update tasks (``run_store_*``) — isolated from ingest uploads.
 # - ``light``: scrape chord finalizers, resume-after-stop, Beat ``check_scheduled_updates``.
 # - ``celery``: default (analytics, vendor price prune).
-# US VPS: -Q heavy-us. AU VPS: -Q heavy-au. Vevor AU feed → ``heavy-au``.
+# US VPS: -Q heavy-us. AU VPS: -Q heavy-au. Vevor AU feed → ``light`` (no browser).
 from kombu import Queue  # noqa: E402
 
 from catalog.celery_routing import CatalogScrapeTaskRouter  # noqa: E402
@@ -364,7 +364,7 @@ CELERY_TASK_ROUTES = (
         'catalog.tasks.catalog_sync_task': {'queue': 'ingest'},
         'catalog.tasks.catalog_update_task': {'queue': 'ingest'},
         'catalog.tasks.resume_catalog_scrape_after_stop': {'queue': 'light'},
-        'catalog.run_vevor_au_ingest': {'queue': 'heavy-au'},
+        'catalog.run_vevor_au_ingest': {'queue': 'light'},
         # Store-wide scrape + marketplace push: separate from catalog file ingest.
         'sync.tasks.run_store_sync': {'queue': 'sync'},
         'sync.tasks.run_store_update': {'queue': 'sync'},

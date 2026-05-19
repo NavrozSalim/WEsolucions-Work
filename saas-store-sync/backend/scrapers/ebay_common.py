@@ -64,6 +64,36 @@ EBAY_HTTP_TIMEOUT_SEC = 20
 PAGE_WAIT_TIMEOUT = 18
 RETRY_LIMIT = 3
 
+
+def _ebay_http_timeout_sec() -> int:
+    raw = (os.environ.get("EBAY_HTTP_TIMEOUT_SEC") or "").strip()
+    if raw:
+        try:
+            return max(5, int(raw))
+        except ValueError:
+            pass
+    return EBAY_HTTP_TIMEOUT_SEC
+
+
+def _ebay_page_wait_timeout(region: str, item_url: str = "") -> int:
+    """Max seconds to poll Selenium for product DOM (lower for AU = faster fail on blocks)."""
+    auish = (region or "").upper() == "AU" or "ebay.com.au" in (item_url or "").lower()
+    if auish:
+        raw = (os.environ.get("EBAY_AU_PAGE_WAIT_TIMEOUT_SEC") or "").strip()
+        if raw:
+            try:
+                return max(4, int(raw))
+            except ValueError:
+                pass
+        return 10
+    raw = (os.environ.get("EBAY_PAGE_WAIT_TIMEOUT_SEC") or "").strip()
+    if raw:
+        try:
+            return max(4, int(raw))
+        except ValueError:
+            pass
+    return PAGE_WAIT_TIMEOUT
+
 PRICE_SUFFIX_PATTERN = re.compile(
     r"(or Best Offer|Buy It Now|Best Offer|Make Offer|each|/ea).*$",
     re.IGNORECASE,
@@ -74,6 +104,14 @@ _RE_LIST_PRICE_PHRASE = re.compile(r"\blist\s+price\b", re.IGNORECASE)
 _RE_COMPARE_AT_PHRASE = re.compile(r"\bcompare\s+at\b", re.IGNORECASE)
 _RE_PERCENT_OFF_ONLY = re.compile(
     r"^\s*\(?\s*\d+(?:\.\d+)?\s*%\s*off\s*\)?\s*$",
+    re.IGNORECASE,
+)
+# Coupon / promo banners (eBay AU shows "Extra AU $100.00 off seller's price with code MAYSS2").
+# These are NOT the BIN price — the live price stays in x-price-primary.
+_RE_PROMO_PHRASE = re.compile(
+    r"\b(?:off\s+seller'?s\s+price|with\s+code|coupon|promo\s*code"
+    r"|extra\s+[^.]{0,40}\boff\b|save\s+[^.]{0,40}\bcode\b"
+    r"|seller'?s\s+price\s+with\s+code|apply\s+at\s+checkout)\b",
     re.IGNORECASE,
 )
 _RE_CURRENCY_AMOUNT = re.compile(
@@ -219,6 +257,8 @@ def _parse_ebay_display_price_text(text: str) -> Optional[float]:
         return None
     if _RE_LIST_PRICE_PHRASE.search(stripped) or _RE_COMPARE_AT_PHRASE.search(stripped):
         return None
+    if _RE_PROMO_PHRASE.search(stripped):
+        return None
     if _RE_PERCENT_OFF_ONLY.match(stripped):
         return None
     if "%" in stripped and not _RE_CURRENCY_AMOUNT.search(stripped):
@@ -259,7 +299,7 @@ def _ebay_bin_hydrate_max_seconds(eff_region: str, item_url: str) -> float:
     raw = (os.environ.get("EBAY_BIN_HYDRATE_MAX_SEC") or "").strip()
     if raw:
         return max(0.0, float(raw))
-    return 6.0 if auish else 0.0
+    return 2.0 if auish else 0.0
 
 
 def _ebay_debug_write_html(session: Optional[dict], html: Optional[str], tag: str, candidate: str) -> None:
@@ -335,6 +375,22 @@ class EbayParser:
         "[data-testid='x-item-price']",
         "section.x-item-price",
         "[data-testid='x-price-view']",
+    )
+
+    # AU BIN headline: first ``span`` under ``[data-testid='x-price-primary']`` (ebay.com.au layout).
+    _AU_PRIMARY_HEADLINE_SELECTORS = (
+        "[data-testid='x-price-primary'] > span",
+        "[data-testid='x-price-primary'] span.ux-textspans",
+        "[data-testid='x-price-primary'] span",
+        "[data-test-id='x-price-primary'] > span",
+        "[data-test-id='x-price-primary'] span",
+        # AU pages occasionally drop ``x-price-primary`` and expose headline
+        # directly under ``x-bin-price`` (single-row BIN layout).
+        "[data-testid='x-bin-price'] .ux-textspans--BOLD",
+        "[data-testid='x-bin-price'] > div > span.ux-textspans",
+        ".x-bin-price .x-price-primary span",
+        ".x-price-primary span.ux-textspans",
+        ".x-price-primary > span",
     )
 
     # US BIN headline: ``x-price-primary`` nested inside ``x-bin-price`` (not a sibling row).
@@ -911,6 +967,50 @@ class EbayParser:
         return min(candidates)
 
     @classmethod
+    def _is_ebay_au_page(cls, soup: BeautifulSoup, html: str = "") -> bool:
+        """True when the HTML is from ebay.com.au (canonical / og:url / host hints)."""
+        for link in soup.find_all("link", rel=True):
+            rel = link.get("rel")
+            if isinstance(rel, (list, tuple)):
+                rel_l = " ".join(str(x) for x in rel).lower()
+            else:
+                rel_l = (str(rel) if rel else "").lower()
+            href = (link.get("href") or "").lower()
+            if "canonical" in rel_l and "ebay.com.au" in href:
+                return True
+        og = soup.find("meta", attrs={"property": "og:url"})
+        if og and og.get("content") and "ebay.com.au" in str(og["content"]).lower():
+            return True
+        sample = (html or "")[:80_000].lower()
+        return "ebay.com.au" in sample
+
+    @classmethod
+    def _au_primary_headline_price(cls, soup: BeautifulSoup, root=None) -> Optional[float]:
+        """First valid price from ``[data-testid='x-price-primary'] span`` (eBay AU)."""
+        scopes: list = []
+        if root is not None:
+            scopes.append(root)
+        scopes.append(soup)
+        for scope in scopes:
+            if scope is None:
+                continue
+            for sel in cls._AU_PRIMARY_HEADLINE_SELECTORS:
+                for span in scope.select(sel):
+                    if span.name not in ("span", "div", "p"):
+                        continue
+                    if cls._ux_span_installment_payment_row(span):
+                        continue
+                    if cls._is_strikethrough_element(span):
+                        continue
+                    t = span.get_text(strip=True)
+                    if not t or "approximately" in t.lower():
+                        continue
+                    p = _parse_ebay_display_price_text(t)
+                    if p and 0.01 <= p < 999_999:
+                        return p
+        return None
+
+    @classmethod
     def _us_bin_headline_price(cls, soup: BeautifulSoup, root=None) -> Optional[float]:
         """First valid price from the US BIN headline span (``.x-bin-price .x-price-primary span``)."""
         scopes: list = []
@@ -943,6 +1043,22 @@ class EbayParser:
             item_section = soup.select_one(sec_sel)
             if item_section is not None:
                 break
+
+        if cls._is_ebay_au_page(soup, html):
+            au_headline = cls._au_primary_headline_price(soup, item_section)
+            if au_headline is not None:
+                # Seller promos are sometimes ONLY in the item-model JSON (DOM still shows
+                # pre-discount). Allow JSON / LD-JSON to override IF strictly lower. Do NOT
+                # scan promo banners (".x-coupon-pricing", "Extra $100 off ... with code")
+                # which would pollute the candidate list with coupon dollar amounts.
+                supplements: list[float] = []
+                item_id = cls._listing_item_id(soup, html or "")
+                supplements.extend(cls._item_model_json_price_candidates(html or "", item_id))
+                supplements.extend(cls._ld_json_product_offer_prices(soup, item_id))
+                lower = [p for p in supplements if p < au_headline - 0.001]
+                if lower:
+                    return min(lower)
+                return au_headline
 
         us_headline = cls._us_bin_headline_price(soup, item_section)
         if us_headline is not None:
@@ -1178,7 +1294,7 @@ class EbayHTTP:
             resp = client.get(
                 url,
                 headers=headers,
-                timeout=EBAY_HTTP_TIMEOUT_SEC,
+                timeout=_ebay_http_timeout_sec(),
                 allow_redirects=True,
                 impersonate="chrome131",
             )
@@ -1524,6 +1640,15 @@ class EbayBrowserSession:
 
         while time.time() - start < timeout:
             try:
+                html = driver.page_source
+                last_html = html
+                blocked, _ = _is_challenge_or_blocked(html)
+                if blocked:
+                    return html
+            except Exception:
+                pass
+
+            try:
                 elapsed = time.time() - start
                 locators = preferred_locators + (late_locators if elapsed >= 5.0 else [])
                 for locator in locators:
@@ -1574,6 +1699,18 @@ class EbayBrowserSession:
         try:
             cls._apply_region_browser_profile(driver, region, url)
 
+            if market == EBAY_MARKET_AU:
+                try:
+                    from .ebay_au_fast import inject_au_cookies_into_driver
+
+                    inject_au_cookies_into_driver(
+                        driver,
+                        session_dict,
+                        loaded_key=_ebay_sk(EBAY_MARKET_AU, "market_cookies_loaded"),
+                    )
+                except Exception as exc:
+                    logger.debug("eBay AU market cookie inject: %s", exc)
+
             warmed_key = _ebay_sk(market, "browser_warmed")
             already_warmed = bool(session_dict and session_dict.get(warmed_key))
             if not already_warmed:
@@ -1584,7 +1721,8 @@ class EbayBrowserSession:
                     session_dict[warmed_key] = True
 
             driver.get(url)
-            html = cls._wait_until_product_or_stable_challenge(driver, timeout=PAGE_WAIT_TIMEOUT)
+            wait_timeout = _ebay_page_wait_timeout(region, url)
+            html = cls._wait_until_product_or_stable_challenge(driver, timeout=wait_timeout)
 
             # Skip long discount polling when the first DOM already yields a BIN price.
             if _parse_html_to_result(html, url) is not None:
@@ -1665,6 +1803,7 @@ def scrape_ebay_for_market(
     session: dict = None,
     *,
     market: str,
+    max_attempts: int | None = None,
 ) -> dict:
     if session is None:
         session = {}
@@ -1685,8 +1824,9 @@ def scrape_ebay_for_market(
         random_delay(0.2, 0.6)
     last_error = None
     last_browser_html = None
+    attempts = max(1, min(max_attempts if max_attempts is not None else RETRY_LIMIT, RETRY_LIMIT))
 
-    for attempt in range(RETRY_LIMIT):
+    for attempt in range(attempts):
         if attempt > 0:
             backoff_delay(attempt, base=2.0, jitter=1.5)
 

@@ -1,6 +1,7 @@
 # Australia browser + AU feed worker — run on an AU-region VPS (e.g. Contabo AU).
 #
-# Consumes Celery queue ``heavy-au``: Amazon AU, eBay AU, and ``catalog.run_vevor_au_ingest``
+# Consumes Celery queue ``heavy-au``: Amazon AU, eBay AU.
+# Vevor AU feed ingest (``catalog.run_vevor_au_ingest``) runs on the main app's ``light`` worker.
 # (Vevor AU XLSX feed). Same broker/DB as the main stack.
 #
 # Requirements:
@@ -49,12 +50,15 @@ services:
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
-      - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-0}
+      - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-1}
+      - EBAY_HTTP_TIMEOUT_SEC=${EBAY_HTTP_TIMEOUT_SEC:-12}
       - EBAY_AU_HTTP_FIRST=${EBAY_AU_HTTP_FIRST:-}
       - EBAY_AU_FAST_SCRAPE=${EBAY_AU_FAST_SCRAPE:-1}
       - EBAY_AU_COOKIES_FILE=${EBAY_AU_COOKIES_FILE:-/app/secrets/ebay_au_cookies.json}
-      - EBAY_AU_PAGE_WAIT_SEC=${EBAY_AU_PAGE_WAIT_SEC:-1.2}
-      - EBAY_AU_PAGE_LOAD_TIMEOUT_SEC=${EBAY_AU_PAGE_LOAD_TIMEOUT_SEC:-18}
+      - EBAY_AU_PAGE_WAIT_SEC=${EBAY_AU_PAGE_WAIT_SEC:-0.8}
+      - EBAY_AU_PAGE_LOAD_TIMEOUT_SEC=${EBAY_AU_PAGE_LOAD_TIMEOUT_SEC:-12}
+      - EBAY_AU_PAGE_WAIT_TIMEOUT_SEC=${EBAY_AU_PAGE_WAIT_TIMEOUT_SEC:-10}
+      - EBAY_BIN_HYDRATE_MAX_SEC=${EBAY_BIN_HYDRATE_MAX_SEC:-2}
       - CATALOG_SCRAPE_CHUNK_SIZE=${CATALOG_SCRAPE_CHUNK_SIZE:-}
       - VEVOR_AU_FEED_URL=${VEVOR_AU_FEED_URL:-https://ads-feed.s3.us-west-2.amazonaws.com/ads/business/563/vevor-563.xlsx}
       - PROXY_URL=${PROXY_URL:-}

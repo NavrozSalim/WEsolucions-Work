@@ -716,8 +716,6 @@ class CatalogScrapeTriggerView(APIView):
 
         if not _store_has_vendor_products(store, vendor_code):
             return None
-        if vendor_code == 'vevor' and not _store_has_pending_vendor_products(store, vendor_code):
-            return None
         existing = HebScrapeJob.objects.filter(
             store=store,
             vendor_code=vendor_code,
@@ -790,6 +788,7 @@ class CatalogScrapeTriggerView(APIView):
             catalog_scrape_task,
             run_catalog_scrape,
             run_store_wide_catalog_scrape,
+            store_has_scrapeable_pending_mappings,
         )
         store = get_object_or_404(Store, id=store_pk, user=request.user)
         dup = self._reject_if_server_scrape_active(store)
@@ -950,15 +949,33 @@ class CatalogScrapeTriggerView(APIView):
                 )
             return Response(result, status=status.HTTP_200_OK)
         celery_task_id = str(uuid.uuid4())
+        has_browser_scrape = store_has_scrapeable_pending_mappings(store)
         with transaction.atomic():
-            set_celery_scrape_state(
-                store,
-                task_id=celery_task_id,
-                scope=StoreCatalogCeleryScrapeState.Scope.STORE,
-                upload=None,
-            )
-            mark_celery_scrape_worker_started(str(store.id))
+            if has_browser_scrape:
+                set_celery_scrape_state(
+                    store,
+                    task_id=celery_task_id,
+                    scope=StoreCatalogCeleryScrapeState.Scope.STORE,
+                    upload=None,
+                )
+                mark_celery_scrape_worker_started(str(store.id))
             schedule_desktop_jobs_after_commit()
+        if not has_browser_scrape:
+            append_catalog_log(
+                store.id,
+                'Browser scrape skipped (no pending Amazon/eBay listings). '
+                'Feed vendors (VevorAU, etc.) were queued separately.',
+                action_type='scrape_start',
+                user_id=request.user.id,
+                metadata={'scope': 'store', 'browser_scrape': False},
+            )
+            return Response({
+                "job_id": celery_task_id,
+                "scope": "store",
+                "status": "accepted",
+                "browser_scrape": False,
+                "message": "Feed/desktop vendors queued; no browser scrape needed.",
+            }, status=status.HTTP_202_ACCEPTED)
         try:
             catalog_scrape_store_task.apply_async(
                 args=[str(store.id)],

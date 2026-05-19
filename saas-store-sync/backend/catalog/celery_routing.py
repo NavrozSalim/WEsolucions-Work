@@ -5,17 +5,19 @@ Dynamic Celery routes for catalog browser scrapes.
 server-side Amazon/eBay scrape tasks are routed to:
 
 - ``heavy-us`` — US marketplace scrapers (Amazon US, eBay US).
-- ``heavy-au`` — AU marketplace scrapers (Amazon AU, eBay AU) plus ``catalog.run_vevor_au_ingest``.
+- ``heavy-au`` — AU marketplace scrapers (Amazon AU, eBay AU).
 
 Chord finalizers (aggregate chunk results, update ``ScrapeRun``, activity log)
 run on ``light`` so the main app worker can finish jobs without requiring
 the US worker to subscribe to non-scrape queues.
 
+``catalog.run_vevor_au_ingest`` also runs on ``light`` (XLSX feed, no browser).
+
 Deploy:
 
 - Main server workers: ``-Q celery`` | ``-Q ingest`` | ``-Q sync`` | ``-Q light`` — ingest for file/sync; sync for ``run_store_*``; light for scrape finalizers + Beat tick.
 - US worker: ``-Q heavy-us`` (same ``REDIS_URL`` / ``DATABASE_URL`` as main)
-- AU worker: ``-Q heavy-au`` (Amazon AU, eBay AU, ``catalog.run_vevor_au_ingest``)
+- AU worker: ``-Q heavy-au`` (Amazon AU, eBay AU)
 - Single-host dev: listen to ``heavy-us`` and ``heavy-au`` together if needed.
 """
 from __future__ import annotations

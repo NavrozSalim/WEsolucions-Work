@@ -10,7 +10,12 @@ from django.test import TestCase, override_settings
 
 from catalog.ingest_views import _apply_to_mappings
 from catalog.models import CatalogUpload, CatalogUploadRow, ProductMapping
-from catalog.tasks import run_catalog_sync, run_vevor_au_ingest
+from catalog.tasks import (
+    run_catalog_sync,
+    run_store_wide_catalog_scrape,
+    run_vevor_au_ingest,
+    store_has_scrapeable_pending_mappings,
+)
 from marketplace.models import Marketplace
 from products.models import Product
 from stores.models import Store
@@ -269,3 +274,34 @@ class VevorIngestTenantTests(TestCase):
         self.assertEqual(out.get('reason'), 'no_pending_vevor')
         self.assertEqual(out.get('updated'), 0)
         mock_fetch.assert_not_called()
+
+    @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+    def test_vevor_only_store_has_no_scrapeable_pending(self):
+        mp, _ = Marketplace.objects.get_or_create(code='kogan_vevor2', defaults={'name': 'Kogan Vevor'})
+        user = User.objects.create_user(username='vevor_u2', email='vevor_u2@example.com', password='pass12345')
+        store = Store.objects.create(
+            user=user, name='Vevor Only', region='AU', api_token='tok-v2', marketplace=mp,
+        )
+        vendor, _ = Vendor.objects.get_or_create(code='vevorau', defaults={'name': 'VevorAU'})
+        product = Product.objects.create(vendor=vendor, vendor_sku='VEV-SKU-2', owner=user)
+        ProductMapping.objects.create(
+            store=store, product=product, marketplace_id='MID-2', sync_status='pending', is_active=True,
+        )
+        self.assertFalse(store_has_scrapeable_pending_mappings(store))
+
+    @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+    def test_store_scrape_skips_when_only_vevor_pending(self):
+        mp, _ = Marketplace.objects.get_or_create(code='kogan_vevor3', defaults={'name': 'Kogan Vevor'})
+        user = User.objects.create_user(username='vevor_u3', email='vevor_u3@example.com', password='pass12345')
+        store = Store.objects.create(
+            user=user, name='Vevor Skip', region='AU', api_token='tok-v3', marketplace=mp,
+        )
+        vendor, _ = Vendor.objects.get_or_create(code='vevorau', defaults={'name': 'VevorAU'})
+        product = Product.objects.create(vendor=vendor, vendor_sku='VEV-SKU-3', owner=user)
+        ProductMapping.objects.create(
+            store=store, product=product, marketplace_id='MID-3', sync_status='pending', is_active=True,
+        )
+        out = run_store_wide_catalog_scrape(str(store.id))
+        self.assertTrue(out.get('skipped'))
+        self.assertEqual(out.get('reason'), 'no_scrapeable_pending')
+        self.assertEqual(out.get('rows_processed'), 0)

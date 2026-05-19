@@ -19,13 +19,14 @@ from typing import Any, Optional
 
 from bs4 import BeautifulSoup
 
-from .core import parse_price_text
 from .ebay_common import (
     EBAY_MARKET_AU,
     EbayParser,
     _ebay_sk,
     _is_challenge_or_blocked,
+    _looks_like_product_html,
     _normalize_url,
+    _parse_ebay_display_price_text,
 )
 
 logger = logging.getLogger("scrapers.ebay_au_fast")
@@ -34,6 +35,9 @@ EBAY_AU_HOME = "https://www.ebay.com.au"
 
 _DRIVER_KEY = _ebay_sk(EBAY_MARKET_AU, "fast_driver")
 _COOKIES_LOADED_KEY = _ebay_sk(EBAY_MARKET_AU, "fast_cookies_loaded")
+_AU_BLOCKED_KEY = _ebay_sk(EBAY_MARKET_AU, "blocked")
+_AU_LAST_HTML_KEY = _ebay_sk(EBAY_MARKET_AU, "last_html")
+_AU_PRODUCT_HTML_KEY = _ebay_sk(EBAY_MARKET_AU, "saw_product_html")
 
 _QUANTITY_PATTERN = re.compile(
     r'"NumberValidation","minValue":"(\d+)","maxValue":"(\d+)"'
@@ -41,7 +45,7 @@ _QUANTITY_PATTERN = re.compile(
 
 _SELECTORS = {
     "status_message": ".ux-layout-section__textual-display--statusMessage span",
-    "price": ".x-price-primary span",
+    "price": "[data-testid='x-price-primary'] span",
     "seller_away": ".x-alert--ALERT_SA div.ux-message",
     "stock": "div.x-quantity__availability",
     "stock_fallback": "div.ux-message",
@@ -95,6 +99,22 @@ def _load_cookie_list() -> list[dict[str, Any]]:
     if not isinstance(data, list):
         raise ValueError(f"{path}: cookie file must be a JSON array")
     return data
+
+
+def cookies_configured() -> bool:
+    """True when ``EBAY_AU_COOKIES_FILE`` or ``EBAY_AU_COOKIES_JSON`` is set."""
+    return bool((os.environ.get("EBAY_AU_COOKIES_FILE") or "").strip()) or bool(
+        (os.environ.get("EBAY_AU_COOKIES_JSON") or "").strip()
+    )
+
+
+def load_cookies_for_http() -> list[dict[str, Any]]:
+    """Return the configured cookies (file or inline). Empty list on missing config."""
+    try:
+        return _load_cookie_list()
+    except Exception as exc:
+        logger.debug("eBay AU cookie load failed: %s", exc)
+        return []
 
 
 def _create_fast_driver():
@@ -158,16 +178,54 @@ def _get_driver(session: dict | None):
     return driver
 
 
-def _inject_cookies(driver, session: dict | None) -> None:
-    if session is not None and session.get(_COOKIES_LOADED_KEY):
+def inject_au_cookies_into_driver(
+    driver,
+    session: dict | None,
+    *,
+    loaded_key: str | None = None,
+) -> None:
+    """Load ``EBAY_AU_COOKIES_FILE`` / inline JSON into any Selenium driver (once per key).
+
+    Uses a short page-load timeout for the throwaway ``ebay.com.au`` navigation so a
+    slow/blocked home page can't burn the whole budget. add_cookie() does not require
+    a full DOM, only that we're on the cookie domain.
+    """
+    if session is None:
+        session = {}
+    key = loaded_key or _COOKIES_LOADED_KEY
+    if session.get(key):
         return
 
-    cookies = _load_cookie_list()
+    cookies = load_cookies_for_http()
     if not cookies:
-        raise ValueError("eBay AU fast scrape: no cookies configured")
+        return
 
-    driver.get(EBAY_AU_HOME)
-    time.sleep(0.6)
+    cookie_pageload_timeout = max(2, int(os.environ.get("EBAY_AU_COOKIE_HOME_TIMEOUT_SEC", "5") or 5))
+    prev_timeout = None
+    try:
+        prev_timeout = driver.timeouts.page_load
+    except Exception:
+        pass
+    try:
+        driver.set_page_load_timeout(cookie_pageload_timeout)
+    except Exception:
+        pass
+
+    try:
+        driver.get(EBAY_AU_HOME)
+    except Exception:
+        try:
+            driver.execute_script("window.stop();")
+        except Exception:
+            pass
+
+    try:
+        if prev_timeout is not None:
+            driver.set_page_load_timeout(int(prev_timeout))
+        else:
+            driver.set_page_load_timeout(_page_load_timeout())
+    except Exception:
+        pass
 
     for cookie in cookies:
         if not isinstance(cookie, dict):
@@ -181,15 +239,60 @@ def _inject_cookies(driver, session: dict | None) -> None:
         except Exception:
             pass
 
-    driver.get(EBAY_AU_HOME)
-    time.sleep(0.5)
-    if session is not None:
-        session[_COOKIES_LOADED_KEY] = True
-    logger.info("eBay AU fast: loaded %s cookies", len(cookies))
+    session[key] = True
+    logger.info("eBay AU: injected %d file cookies into browser", len(cookies))
+
+
+def _note_au_html(session: dict | None, html: str) -> None:
+    if not session or not html:
+        return
+    session[_AU_LAST_HTML_KEY] = html
+    if _looks_like_product_html(html):
+        session[_AU_PRODUCT_HTML_KEY] = True
+        session.pop(_AU_BLOCKED_KEY, None)
+        return
+    blocked, reason = _is_challenge_or_blocked(html)
+    if blocked:
+        session[_AU_BLOCKED_KEY] = reason
+
+
+def _inject_cookies(driver, session: dict | None) -> None:
+    inject_au_cookies_into_driver(driver, session, loaded_key=_COOKIES_LOADED_KEY)
 
 
 def _clean_text(el) -> str:
     return el.get_text(" ", strip=True) if el else ""
+
+
+def _wait_for_price_dom(driver, max_wait_sec: float) -> None:
+    """Poll for any eBay price/title element rather than blindly sleeping.
+
+    Returns as soon as the primary price selector renders. Caps at
+    ``max_wait_sec`` and returns even on miss (parser may still find a fallback).
+    """
+    from selenium.webdriver.common.by import By
+
+    deadline = time.monotonic() + max(0.4, max_wait_sec)
+    selectors = (
+        (By.CSS_SELECTOR, "[data-testid='x-price-primary'] span"),
+        (By.CSS_SELECTOR, ".x-price-primary span"),
+        (By.CSS_SELECTOR, "[data-testid='x-bin-price'] .ux-textspans"),
+        (By.CSS_SELECTOR, ".x-buy-box__price-section .ux-textspans"),
+        (By.CSS_SELECTOR, ".x-item-title__mainTitle"),
+        (By.CSS_SELECTOR, "p.error-header-v2__title"),
+    )
+    while time.monotonic() < deadline:
+        try:
+            for by, sel in selectors:
+                els = driver.find_elements(by, sel)
+                for el in els:
+                    txt = (el.text or "").strip()
+                    if txt:
+                        return
+        except Exception:
+            pass
+        time.sleep(0.15)
+    return
 
 
 def _stock_from_text(text: str) -> Optional[int]:
@@ -228,9 +331,12 @@ def _parse_fast_html(html: str, url: str) -> Optional[dict]:
         title = EbayParser.extract_title(soup)
         return {"price": None, "stock": 0, "title": title}
 
-    price_el = soup.select_one(_SELECTORS["price"])
-    price_text = _clean_text(price_el)
-    price = parse_price_text(price_text) if price_text else None
+    price = EbayParser._au_primary_headline_price(soup)
+    if price is None:
+        price_el = soup.select_one(_SELECTORS["price"])
+        price_text = _clean_text(price_el)
+        if price_text and "approximately" not in price_text.lower():
+            price = _parse_ebay_display_price_text(price_text)
     if price is None:
         price = EbayParser.extract_price(soup, html)
 
@@ -269,18 +375,43 @@ def scrape_ebay_au_fast(vendor_url: str, region: str, session: dict | None = Non
 
     url = _normalize_url(vendor_url, region or "AU")
     try:
+        cookies = _load_cookie_list()
+        if not cookies:
+            raise ValueError("eBay AU fast scrape: no cookies configured")
+
         driver = _get_driver(session)
         _inject_cookies(driver, session)
         driver.get(url)
-        time.sleep(_page_wait_seconds())
+        _wait_for_price_dom(driver, _page_wait_seconds())
         html = driver.page_source or ""
+        _note_au_html(session, html)
+
         parsed = _parse_fast_html(html, url)
+        if parsed is None and html and session.get(_AU_PRODUCT_HTML_KEY):
+            try:
+                from .ebay_common import EbayBrowserSession
+
+                html = EbayBrowserSession._finalize_bin_price_hydration(
+                    driver, html, region or "AU", url
+                )
+                _note_au_html(session, html)
+                parsed = _parse_fast_html(html, url)
+            except Exception as exc:
+                logger.debug("eBay AU fast hydrate retry: %s", exc)
+
         if parsed is not None:
             logger.info(
                 "eBay AU fast OK %s price=%s stock=%s",
                 url[:70],
                 parsed.get("price"),
                 parsed.get("stock"),
+            )
+        else:
+            logger.info(
+                "eBay AU fast no-parse %s html_len=%d blocked=%s",
+                url[:80],
+                len(html),
+                session.get(_AU_BLOCKED_KEY),
             )
         return parsed
     except Exception as exc:

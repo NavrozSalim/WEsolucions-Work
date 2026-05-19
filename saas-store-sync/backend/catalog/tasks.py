@@ -10,6 +10,7 @@ from celery import chord, group, shared_task
 from django.conf import settings
 from django.utils import timezone
 from django.db import transaction
+from django.db.models import Q
 from decimal import Decimal
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,23 @@ def _is_ingest_only_product(product) -> bool:
     if code.startswith('heb_') or code.startswith('costco_') or code.startswith('vevor_'):
         return True
     return False
+
+
+def _ingest_only_vendor_ids() -> list:
+    """Primary keys for vendors handled by feed/desktop ingest (not browser scrape)."""
+    codes = ('heb', 'hebus', 'costcoau', 'costco_au', 'costco-au', 'vevor', 'vevorau')
+    q = Q(code__in=codes)
+    q |= Q(code__istartswith='heb_') | Q(code__istartswith='costco_') | Q(code__istartswith='vevor_')
+    return list(Vendor.objects.filter(q).values_list('id', flat=True))
+
+
+def store_has_scrapeable_pending_mappings(store) -> bool:
+    """True when the store has pending listings that need live browser scraping."""
+    ingest_ids = _ingest_only_vendor_ids()
+    qs = ProductMapping.objects.filter(store=store, is_active=True, sync_status='pending')
+    if ingest_ids:
+        qs = qs.exclude(product__vendor_id__in=ingest_ids)
+    return qs.exists()
 
 
 def _fail_mapping(pm, code: str, message: str = '') -> None:
@@ -897,6 +915,9 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
         product_mapping__is_active=True,
         product_mapping__sync_status='pending',
     ).order_by('row_number')
+    ingest_ids = _ingest_only_vendor_ids()
+    if ingest_ids:
+        rows_qs = rows_qs.exclude(product_mapping__product__vendor_id__in=ingest_ids)
 
     row_ids = list(rows_qs.values_list('id', flat=True))
     chunk_sz = int(getattr(settings, 'CATALOG_SCRAPE_CHUNK_SIZE', 0) or 0)
@@ -1414,8 +1435,28 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> d
     base_qs = ProductMapping.objects.filter(
         store=store, is_active=True, sync_status='pending',
     ).order_by('id')
+    ingest_ids = _ingest_only_vendor_ids()
+    if ingest_ids:
+        base_qs = base_qs.exclude(product__vendor_id__in=ingest_ids)
 
     mapping_ids = list(base_qs.values_list('id', flat=True))
+    if not mapping_ids:
+        append_catalog_log(
+            store.id,
+            'Store-wide browser scrape skipped: no pending live-scrape listings '
+            '(feed/desktop vendors are handled separately).',
+            action_type='scrape_end',
+            metadata={'scope': 'store', 'skipped': 'ingest_only_only'},
+        )
+        return {
+            'store_id': str(store_id),
+            'scope': 'store',
+            'rows_processed': 0,
+            'rows_succeeded': 0,
+            'failed': 0,
+            'skipped': True,
+            'reason': 'no_scrapeable_pending',
+        }
     chunk_sz = int(getattr(settings, 'CATALOG_SCRAPE_CHUNK_SIZE', 0) or 0)
     use_parallel = bool(parallel and chunk_sz > 0 and len(mapping_ids) > chunk_sz)
 
@@ -1663,8 +1704,11 @@ def catalog_scrape_store_task(self, store_id: str):
 def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = None) -> dict:
     """Refresh VendorPrice rows for Vevor AU products from the public S3 XLSX feed.
 
-    Only ``ProductMapping`` rows with ``sync_status='pending'`` are processed.
-    When none are pending, the task returns immediately without downloading the feed.
+    When ``job_id`` is set (user clicked Start Scraping), **all active** Vevor
+    listings for the store are refreshed in one bulk pass from the feed.
+
+    Without ``job_id`` (background/cron), only ``sync_status='pending'`` rows
+    are processed; when none are pending the feed is not downloaded.
 
     ``store_id`` is **required**: mappings are updated only for that store (multi-tenant).
     """
@@ -1700,14 +1744,18 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
     pm_qs = ProductMapping.objects.filter(
         store_id=store_id,
         is_active=True,
-        sync_status='pending',
         product__vendor_id__in=vendor_ids,
     ).select_related('product', 'product__vendor', 'store')
 
+    user_triggered = bool(job_id)
+    if not user_triggered:
+        pm_qs = pm_qs.filter(sync_status='pending')
+
     if not pm_qs.exists():
+        reason = 'no_vevor_listings' if user_triggered else 'no_pending_vevor'
         result = {
             'status': 'skipped',
-            'reason': 'no_pending_vevor',
+            'reason': reason,
             'updated': 0,
             'store_id': str(store_id),
             'job_id': str(job_id) if job_id else None,
@@ -1722,7 +1770,7 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
                     job.stats = {'received': 0, 'matched': 0, 'applied': 0}
                     job.save(update_fields=['status', 'completed_at', 'stats'])
             except Exception:
-                logger.exception('Failed to mark VevorAU job %s done (no pending)', job_id)
+                logger.exception('Failed to mark VevorAU job %s done (no listings)', job_id)
         logger.info('Vevor AU ingest skipped: %s', result)
         return result
 
@@ -1747,11 +1795,45 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
     if not lookup:
         return {'status': 'empty_feed', 'feed_rows': pos_rows, 'updated': 0}
 
+    pm_list = list(pm_qs)
+    store = pm_list[0].store if pm_list else None
+    if store is None:
+        try:
+            from stores.models import Store
+            store = Store.objects.get(id=store_id)
+        except Exception:
+            store = None
+
+    price_by_vid, price_fb, inv_by_vid, inv_fb = (
+        _build_store_vendor_pricing_inventory_caches(store) if store else ({}, {}, {}, {})
+    )
+
     now = timezone.now()
     matched = missing = updated_rows = 0
-    store_pi_cache: dict = {}
+    pm_batch: list[ProductMapping] = []
+    vp_batch: list[VendorPrice] = []
+    bulk_pm_size = int(getattr(settings, 'VEVOR_INGEST_BULK_BATCH', 500) or 500)
+    bulk_pm_size = max(50, min(bulk_pm_size, 2000))
+    pm_fields = (
+        'store_price', 'store_stock', 'sync_status',
+        'failed_sync_count', 'last_scrape_time', 'scrape_error',
+    )
 
-    for pm in pm_qs.iterator():
+    def _flush_pm_batch() -> None:
+        nonlocal updated_rows
+        if not pm_batch:
+            return
+        ProductMapping.objects.bulk_update(pm_batch, pm_fields, batch_size=bulk_pm_size)
+        updated_rows += len(pm_batch)
+        pm_batch.clear()
+
+    def _flush_vp_batch() -> None:
+        if not vp_batch:
+            return
+        VendorPrice.objects.bulk_create(vp_batch, batch_size=bulk_pm_size)
+        vp_batch.clear()
+
+    for pm in pm_list:
         product = pm.product
         if not product:
             continue
@@ -1774,13 +1856,11 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
             _fail_mapping(pm, 'vevor_feed_row_invalid', str(parse_err)[:240])
             continue
 
-        VendorPrice.objects.create(product=product, price=price, stock=stock_val)
+        vp_batch.append(VendorPrice(product=product, price=price, stock=stock_val))
+        if len(vp_batch) >= bulk_pm_size:
+            _flush_vp_batch()
 
         try:
-            store = pm.store
-            if store.id not in store_pi_cache:
-                store_pi_cache[store.id] = _build_store_vendor_pricing_inventory_caches(store)
-            price_by_vid, price_fb, inv_by_vid, inv_fb = store_pi_cache[store.id]
             pricing = _get_pricing_for_vendor_from_cache(product.vendor_id, price_by_vid, price_fb)
             inventory = _get_inventory_for_vendor_from_cache(product.vendor_id, inv_by_vid, inv_fb)
             new_price = _apply_pricing(
@@ -1799,16 +1879,17 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
             pm.failed_sync_count = 0
             pm.last_scrape_time = now
             pm.scrape_error = None
-            pm.save(update_fields=[
-                'store_price', 'store_stock', 'sync_status',
-                'failed_sync_count', 'last_scrape_time', 'scrape_error',
-            ])
-            updated_rows += 1
+            pm_batch.append(pm)
+            if len(pm_batch) >= bulk_pm_size:
+                _flush_pm_batch()
         except Exception as apply_err:
             logger.exception(
                 'Vevor AU apply failed for SKU %s (store=%s): %s',
                 product.vendor_sku, pm.store_id, apply_err,
             )
+
+    _flush_vp_batch()
+    _flush_pm_batch()
 
     result = {
         'status': 'ok',
@@ -1819,6 +1900,8 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
         'updated': updated_rows,
         'store_id': str(store_id) if store_id else None,
         'job_id': str(job_id) if job_id else None,
+        'user_triggered': user_triggered,
+        'listing_count': len(pm_list),
     }
 
     if job_id:
