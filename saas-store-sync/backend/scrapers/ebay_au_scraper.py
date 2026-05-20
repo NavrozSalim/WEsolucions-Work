@@ -20,7 +20,6 @@ from .ebay_au_fast import (
 from .ebay_common import (
     EBAY_MARKET_AU,
     SESSION_DEBUG_HTML_KEY,
-    EbayBrowserSession,
     EbayHTTP,
     EbayParser,
     _ebay_http_first_enabled,
@@ -30,6 +29,7 @@ from .ebay_common import (
     _normalize_url,
     _parse_html_to_result,
     close_ebay_market_session,
+    scrape_ebay_for_market,
 )
 
 logger = logging.getLogger("scrapers.ebay_au")
@@ -72,26 +72,6 @@ def _http_first_disabled() -> bool:
     return os.environ.get("EBAY_AU_DISABLE_HTTP_FIRST", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _market_fallback_enabled() -> bool:
-    """Whether to run the heavy ``warm_and_fetch`` after the fast Selenium path.
-
-    Default OFF — the fast path already uses Selenium with cookies, so re-running the
-    full market browser path almost always fails the same way and wastes 30-60s.
-    Set ``EBAY_AU_MARKET_FALLBACK=1`` to re-enable for debugging.
-    """
-    return os.environ.get("EBAY_AU_MARKET_FALLBACK", "0").strip().lower() in ("1", "true", "yes", "on")
-
-
-def _total_budget_sec() -> float:
-    raw = (os.environ.get("EBAY_AU_TOTAL_BUDGET_SEC") or "").strip()
-    if raw:
-        try:
-            return max(5.0, float(raw))
-        except ValueError:
-            pass
-    return 25.0
-
-
 def _note_au_html(session: dict, html: str | None, err: str | None = None) -> None:
     if html:
         session[_AU_LAST_HTML_KEY] = html
@@ -117,37 +97,29 @@ def _title_from_session_html(session: dict) -> str | None:
     return EbayParser.extract_title(soup)
 
 
-def _au_fail_fast(session: dict, url: str) -> dict | None:
-    """Return empty result immediately when every path saw a block/challenge (not a PDP)."""
-    if session.get(_AU_PRODUCT_HTML_KEY):
-        return None
-    if not session.get(_AU_BLOCKED_KEY):
-        return None
-    title = _title_from_session_html(session)
-    logger.warning(
-        "eBay AU fail-fast (blocked) %s reason=%s",
-        url[:70],
-        session.get(_AU_BLOCKED_KEY),
-    )
-    return {"price": None, "stock": None, "title": title}
-
-
 def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
+    """Scrape an ebay.com.au product page.
+
+    Strategy mirrors ``ebay_us_scraper`` for parity (HTTP-first, then Selenium
+    with cookie handoff and retries), with two AU-specific fast paths layered
+    on top for speed when cookies are healthy:
+
+      1. **HTTP-first** with pre-loaded AU cookies (~1-2s typical hit).
+      2. **Cookie-based fast Selenium** (eager load + short DOM wait).
+      3. **Full ``scrape_ebay_for_market`` engine** — the same proven HTTP +
+         warm-Selenium + cookie-handoff retry loop the US scraper uses, so a
+         single fast-path miss never causes an immediate failure.
+
+    Step 3 is what makes AU as accurate as US: instead of giving up after one
+    fast-Selenium attempt, we run the full engine with backoff retries.
+    """
     if session is None:
         session = {}
 
     eff_region = region or "AU"
     url = _normalize_url(vendor_url, eff_region)
     t_start = time.monotonic()
-    budget = _total_budget_sec()
 
-    def elapsed() -> float:
-        return time.monotonic() - t_start
-
-    def budget_left() -> float:
-        return max(0.0, budget - elapsed())
-
-    # 1) HTTP-first via curl_cffi (~1-2s when cookies work).
     if _ebay_http_first_enabled(eff_region) and not _http_first_disabled():
         _ensure_cookies_in_http_client(session)
         t0 = time.monotonic()
@@ -159,19 +131,13 @@ def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
         )
         if html and not err:
             parsed = _parse_html_to_result(html, url)
-            if parsed is not None and parsed.get("price") is not None:
+            if parsed is not None:
                 logger.info(
                     "eBay AU HTTP-first OK %s price=%s total=%.2fs",
-                    url[:70], parsed.get("price"), elapsed(),
+                    url[:70], parsed.get("price"), time.monotonic() - t_start,
                 )
                 return parsed
 
-    if budget_left() <= 1.0:
-        title = _title_from_session_html(session)
-        logger.warning("eBay AU budget exhausted before Selenium %s total=%.2fs", url[:70], elapsed())
-        return {"price": None, "stock": None, "title": title}
-
-    # 2) Cookie-based Selenium fast path. With expired/blocked cookies returns None fast.
     if fast_scrape_enabled():
         t0 = time.monotonic()
         fast = scrape_ebay_au_fast(vendor_url, region, session)
@@ -181,51 +147,34 @@ def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
             time.monotonic() - t0,
             None if fast is None else fast.get("price"),
         )
-        if fast is not None and fast.get("price") is not None:
-            return fast
-        if fast is not None and fast.get("stock") == 0:
-            return fast
         if fast is not None:
+            logger.info(
+                "eBay AU fast-Selenium OK %s price=%s total=%.2fs",
+                url[:70], fast.get("price"), time.monotonic() - t_start,
+            )
             return fast
 
-    # Skip the heavy market warm_and_fetch by default — it uses the same cookies + same
-    # Selenium against the same site, so when the fast path failed it almost always also
-    # fails, wasting another ~30-60s. Set ``EBAY_AU_MARKET_FALLBACK=1`` to re-enable.
-    if not _market_fallback_enabled() or budget_left() <= 2.0:
-        title = _title_from_session_html(session)
-        logger.warning(
-            "eBay AU give up (fast paths missed) %s blocked=%s total=%.2fs",
-            url[:70],
-            session.get(_AU_BLOCKED_KEY),
-            elapsed(),
-        )
-        return {"price": None, "stock": None, "title": title}
-
-    # 3) Optional final browser attempt (disabled by default).
+    _ensure_cookies_in_http_client(session)
     t0 = time.monotonic()
-    html, browser_err = EbayBrowserSession.warm_and_fetch(url, eff_region, session, EBAY_MARKET_AU)
-    _note_au_html(session, html, browser_err)
+    result = scrape_ebay_for_market(
+        vendor_url, eff_region, session, market=EBAY_MARKET_AU,
+    )
     logger.info(
-        "eBay AU step=market_browser url=%s dt=%.2fs err=%s",
-        url[:70], time.monotonic() - t0, browser_err,
+        "eBay AU step=full_engine url=%s dt=%.2fs got_price=%s total=%.2fs",
+        url[:70],
+        time.monotonic() - t0,
+        (result or {}).get("price"),
+        time.monotonic() - t_start,
     )
-    if html:
-        parsed = _parse_html_to_result(html, url)
-        if parsed is not None and parsed.get("price") is not None:
-            logger.info(
-                "eBay AU browser OK %s price=%s total=%.2fs",
-                url[:70], parsed.get("price"), elapsed(),
-            )
-            return parsed
-        if parsed is not None:
-            return parsed
+    if result and result.get("price") is not None:
+        return result
 
-    title = _title_from_session_html(session)
-    logger.warning(
-        "eBay AU scrape failed %s last_err=%s total=%.2fs",
-        url[:70], browser_err, elapsed(),
-    )
-    return {"price": None, "stock": None, "title": title}
+    title = (result or {}).get("title") or _title_from_session_html(session)
+    return {
+        "price": (result or {}).get("price"),
+        "stock": (result or {}).get("stock"),
+        "title": title,
+    }
 
 
 def close_ebay_au_session(session: dict):
