@@ -210,10 +210,35 @@ _PDP_HTML_HOT_BUY_PARTIAL = """
 </body></html>
 """
 
-# Angular/JSON embedded prices — typical costco.com.au HOT BUY HTTP response.
+# Production SSR shape: Online Price in DOM, Your Price in meta + Schema.org JSON-LD.
+_PDP_HTML_HOT_BUY_SCHEMAORG = """
+<html><head><title>Cuckoo IH 10 Cup Pressure Cooker | Costco Australia</title>
+  <meta property="product:price:amount" content="399.99">
+  <script id="schemaorg_product" type="application/ld+json">
+  {"@type":"product","sku":"120795","offers":{"@type":"Offer","price":"399.99","priceCurrency":"AUD",
+   "priceSpecification":[{"@type":"UnitPriceSpecification","price":"399.99","priceCurrency":"AUD"}]}}
+  </script>
+</head><body>
+  <h1>Cuckoo IH 10 Cup Pressure Cooker CRP-CHSS1009F</h1>
+  <sip-add-to-cart-form>
+    <button data-cy="addtocart-button-120795" class="btn btn-primary">Add to cart</button>
+  </sip-add-to-cart-form>
+  <div class="price-original"><span class="notranslate">$589.99</span></div>
+  <span class="you-pay-value"></span>
+  <div>HOT BUY</div>
+  <div>Your Price</div>
+  <div>Online Price</div>
+</body></html>
+"""
+
+# Angular/JSON embedded prices — legacy test fixture (ld+json + meta like production SSR).
 _PDP_HTML_HOT_BUY_EMBEDDED = """
-<html><head><title>Cuckoo IH 10 Cup Pressure Cooker | Costco Australia</title></head>
-<body>
+<html><head><title>Cuckoo IH 10 Cup Pressure Cooker | Costco Australia</title>
+  <meta property="product:price:amount" content="399.99">
+  <script type="application/ld+json">
+  {"@type":"product","code":"120795","offers":{"@type":"Offer","price":"399.99","priceCurrency":"AUD"}}
+  </script>
+</head><body>
   <h1>Cuckoo IH 10 Cup Pressure Cooker CRP-CHSS1009F</h1>
   <sip-add-to-cart-form>
     <button data-cy="addtocart-button-120795" class="btn btn-primary">Add to cart</button>
@@ -224,9 +249,6 @@ _PDP_HTML_HOT_BUY_EMBEDDED = """
   <div>Your Price</div>
   <div>Online Price</div>
   <div>Price valid from 12/05/2026 to 31/05/2026. While stock lasts.</div>
-  <script type="application/json">
-  {"code":"120795","price":{"currencyIso":"AUD","value":399.99},"wasPrice":{"currencyIso":"AUD","value":589.99}}
-  </script>
 </body></html>
 """
 
@@ -372,13 +394,20 @@ class ParseCostcoPdpTests(SimpleTestCase):
         self.assertEqual(result.price, 999.00)
         self.assertEqual(result.stock, 3)
 
-    def test_hot_buy_partial_html_computes_your_price_from_less(self):
-        """HOT BUY: Online Price + Less in HTML → compute Your Price locally (no Selenium)."""
+    def test_hot_buy_partial_html_falls_back_to_online_price(self):
+        """HOT BUY with Less text but no Your Price source → Online Price."""
         url = "https://www.costco.com.au/p/120795"
         result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_HOT_BUY_PARTIAL)
         self.assertTrue(result.success, msg=f"error_code={result.error_code}")
-        self.assertEqual(result.price, 399.99)
+        self.assertEqual(result.price, 589.99)
         self.assertEqual(result.stock, 3)
+
+    def test_hot_buy_schemaorg_ssr_returns_your_price(self):
+        """Production SSR: Your Price in meta/ld+json, Online Price in DOM."""
+        url = "https://www.costco.com.au/p/120795"
+        result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_HOT_BUY_SCHEMAORG)
+        self.assertTrue(result.success, msg=f"error_code={result.error_code}")
+        self.assertEqual(result.price, 399.99)
 
     def test_hot_buy_embedded_json_returns_your_price(self):
         url = "https://www.costco.com.au/p/120795"
@@ -386,11 +415,11 @@ class ParseCostcoPdpTests(SimpleTestCase):
         self.assertTrue(result.success, msg=f"error_code={result.error_code}")
         self.assertEqual(result.price, 399.99)
 
-    def test_hot_buy_price_less_class_computes_your_price(self):
+    def test_hot_buy_price_less_class_falls_back_to_online_price(self):
         url = "https://www.costco.com.au/p/120795"
         result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_HOT_BUY_PRICE_LESS_CLASS)
         self.assertTrue(result.success, msg=f"error_code={result.error_code}")
-        self.assertEqual(result.price, 399.99)
+        self.assertEqual(result.price, 589.99)
 
     def test_hot_buy_full_html_returns_your_price(self):
         url = "https://www.costco.com.au/p/120795"
@@ -399,12 +428,12 @@ class ParseCostcoPdpTests(SimpleTestCase):
         self.assertEqual(result.price, 399.99)
         self.assertEqual(result.stock, 3)
 
-    def test_hot_buy_no_less_amount_returns_incomplete(self):
-        """Promo hints but no Less amount and no you-pay-value → fail clean."""
+    def test_hot_buy_no_your_price_falls_back_to_online(self):
+        """Promo page with empty you-pay-value and no meta/JSON → Online Price."""
         url = "https://www.costco.com.au/p/120795"
         result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_HOT_BUY_NO_LESS)
-        self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "incomplete_sale_price")
+        self.assertTrue(result.success)
+        self.assertEqual(result.price, 589.99)
 
     def test_jsonld_fallback_price(self):
         url = "https://www.costco.com.au/p/100200"
@@ -486,6 +515,21 @@ class ScrapeCostcoAuOrchestrationTests(SimpleTestCase):
         self.assertEqual(result["price"], 1299.99)
         self.assertEqual(result["stock"], 3)
         self.assertIn("Vacuum", result["title"])
+
+    def test_hot_buy_http_schemaorg_no_selenium(self):
+        hot_url = "https://www.costco.com.au/p/120795"
+        with patch.object(
+            costco_au_scraper, "_http_fetch",
+            return_value=(_PDP_HTML_HOT_BUY_SCHEMAORG, hot_url, ""),
+        ) as mock_fetch, patch.object(
+            costco_au_scraper, "_selenium_fetch",
+        ) as mock_sel:
+            result = costco_au_scraper.scrape_costco_au(
+                hot_url, "AU", session={}, pool=self.pool,
+            )
+        mock_fetch.assert_called_once()
+        mock_sel.assert_not_called()
+        self.assertEqual(result["price"], 399.99)
 
     def test_hot_buy_http_embedded_json_no_selenium(self):
         hot_url = "https://www.costco.com.au/p/120795"
