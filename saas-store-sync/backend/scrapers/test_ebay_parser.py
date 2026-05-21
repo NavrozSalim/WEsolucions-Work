@@ -461,6 +461,11 @@ _AU_SHIPPING_JSON_ONLY = """
 """
 
 
+_AU_SHIPPING_GRAPHQL_SNIPPET = """
+<script>,\"converted\":null,\"original\":{\"__typename\":\"Price\",\"amount\":12.99,\"currency\":\"AUD\"}},\"shipToLocations\":[\"AUS\"],\"shippingServiceName\":\"Standard\"</script>
+"""
+
+
 def _au_html(*blocks: str) -> str:
     return f"<html><body><h1 class='x-item-title'><span>Test title</span></h1>{''.join(blocks)}</body></html>"
 
@@ -584,6 +589,19 @@ class TestEbayAuShippingAddOn(unittest.TestCase):
             '<div class="ux-labels-values ux-labels-values--shipping">'
             '<div>Item doesn\'t post to you</div></div>'
             '<span>AU $12.99 delivery in 2-4 days</span>',
+        )
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result["price"], 62.99)
+
+    def test_graphql_shipping_price_near_ship_to_locations(self):
+        """Production HTTP embed: amount is numeric JSON before shipToLocations."""
+        html = _au_html(
+            _AU_PRICE_BLOCK,
+            _AU_QTY_BLOCK,
+            '<div class="ux-labels-values ux-labels-values--shipping">'
+            '<div class="ux-labels-values__values-content">'
+            "<div>Item doesn't post to you</div></div></div>",
+            _AU_SHIPPING_GRAPHQL_SNIPPET,
         )
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
         self.assertEqual(result["price"], 62.99)

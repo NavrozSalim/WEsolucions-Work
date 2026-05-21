@@ -123,6 +123,21 @@ _RE_CURRENCY_AMOUNT = re.compile(
 
 # AU postage in embedded JSON (HTTP HTML often lacks hydrated shipping DOM).
 _AU_SHIPPING_JSON_PATTERNS = (
+    # eBay GraphQL shipping quote (amount is numeric, not a string).
+    re.compile(
+        r'"converted"\s*:\s*null\s*,\s*"original"\s*:\s*\{\s*"__typename"\s*:\s*"Price"\s*,'
+        r'\s*"amount"\s*:\s*([\d.]+)\s*,\s*"currency"\s*:\s*"AUD"\s*\}\s*\}\s*,\s*"shipToLocations"',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'"original"\s*:\s*\{\s*"__typename"\s*:\s*"Price"\s*,\s*"amount"\s*:\s*([\d.]+)\s*,'
+        r'\s*"currency"\s*:\s*"AUD"\s*\}\s*\}\s*,\s*"shipToLocations"',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'"amount"\s*:\s*([\d.]+)\s*,\s*"currency"\s*:\s*"AUD"\s*\}\s*\}\s*,\s*"shipToLocations"',
+        re.IGNORECASE,
+    ),
     re.compile(
         r'"shipping(?:Cost|Price|Amount)"\s*:\s*\{[^}]{0,200}?"value"\s*:\s*"([\d.]+)"',
         re.IGNORECASE,
@@ -1372,15 +1387,21 @@ class EbayParser:
         if not html:
             return None
 
+        amounts: list[float] = []
         for pat in _AU_SHIPPING_JSON_PATTERNS:
-            m = pat.search(html)
-            if m:
+            for m in pat.finditer(html):
                 try:
                     val = float(m.group(1))
                 except ValueError:
                     continue
                 if 0.0 <= val < 999_999:
-                    return val
+                    amounts.append(val)
+
+        if amounts:
+            positive = [a for a in amounts if a > 0]
+            if positive:
+                return min(positive)
+            return 0.0
 
         for m in _RE_AU_DELIVERY_PRICE_LINE.finditer(html):
             try:
