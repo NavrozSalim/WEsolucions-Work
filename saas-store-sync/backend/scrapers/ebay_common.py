@@ -324,12 +324,11 @@ def _ebay_http_first_enabled(region: Optional[str]) -> bool:
     r = (region or "").strip().upper()
     trueish = ("1", "true", "yes")
     if r == "AU":
-        au = os.environ.get("EBAY_AU_HTTP_FIRST")
-        if au is not None:
+        au = (os.environ.get("EBAY_AU_HTTP_FIRST") or "").strip()
+        if au:
             return au.lower() in trueish
-        return os.environ.get("EBAY_HTTP_FIRST", "1").lower() in trueish
-    # Default HTTP-first for US too — skips Selenium when curl_cffi returns a parseable PDP.
-    return os.environ.get("EBAY_HTTP_FIRST", "1").lower() in trueish
+        return (os.environ.get("EBAY_HTTP_FIRST", "1") or "1").strip().lower() in trueish
+    return (os.environ.get("EBAY_HTTP_FIRST", "1") or "1").strip().lower() in trueish
 
 
 def _random_user_agent() -> str:
@@ -1365,8 +1364,9 @@ class EbayHTTP:
                 continue
 
             if not _looks_like_product_html(html):
+                # Parser/page-shape miss is NOT a proxy-quality signal — don't burn the
+                # proxy. Rotate to a fresh one for the next try, keep this one available.
                 last_err = "not_product_like"
-                mark_proxy_blocked(assignment)
                 continue
 
             mark_proxy_success(assignment)
@@ -2009,6 +2009,13 @@ def scrape_ebay_for_market(
     last_browser_html = None
     attempts = max(1, min(max_attempts if max_attempts is not None else RETRY_LIMIT, RETRY_LIMIT))
 
+    au_http_only = False
+    if market == EBAY_MARKET_AU:
+        from .ebay_au_proxies import proxies_configured as _au_proxies_on
+
+        force_sel = (os.environ.get("EBAY_AU_FULL_ENGINE_SELENIUM") or "").strip().lower() in ("1", "true", "yes", "on")
+        au_http_only = _au_proxies_on() and not force_sel
+
     for attempt in range(attempts):
         if attempt > 0:
             backoff_delay(attempt, base=2.0, jitter=1.5)
@@ -2035,22 +2042,30 @@ def scrape_ebay_for_market(
                     _ebay_debug_write_html(session, html, "http_cold", candidate)
                     return parsed
 
-            browser_html, browser_err = EbayBrowserSession.warm_and_fetch(
-                candidate,
-                eff_region,
-                session,
-                market,
-                force_proxy_rotate=attempt > 0,
-            )
-            if browser_html:
-                last_browser_html = browser_html
-                parsed = _parse_html_to_result(browser_html, candidate)
-                if parsed is not None:
-                    logger.info("eBay Selenium HTML success for %s", candidate)
-                    _ebay_debug_write_html(session, browser_html, "selenium", candidate)
-                    return parsed
+            if au_http_only:
+                # Chrome can't auth Webshare proxies via --proxy-server (no creds on
+                # bare host:port), so Selenium warm-fetches return ~39-byte stubs and
+                # only waste ~30s. Retry HTTP with the same warm curl_cffi session —
+                # eBay BIN hydration often unlocks on the 2nd hit.
+                browser_html, browser_err = None, ""
+                html2, status2, err2 = EbayHTTP.fetch(candidate, eff_region, session, market)
+            else:
+                browser_html, browser_err = EbayBrowserSession.warm_and_fetch(
+                    candidate,
+                    eff_region,
+                    session,
+                    market,
+                    force_proxy_rotate=attempt > 0,
+                )
+                if browser_html:
+                    last_browser_html = browser_html
+                    parsed = _parse_html_to_result(browser_html, candidate)
+                    if parsed is not None:
+                        logger.info("eBay Selenium HTML success for %s", candidate)
+                        _ebay_debug_write_html(session, browser_html, "selenium", candidate)
+                        return parsed
 
-            html2, status2, err2 = EbayHTTP.fetch(candidate, eff_region, session, market)
+                html2, status2, err2 = EbayHTTP.fetch(candidate, eff_region, session, market)
 
             if html2 and not err2:
                 parsed = _parse_html_to_result(html2, candidate)

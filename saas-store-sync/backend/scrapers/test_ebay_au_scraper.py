@@ -66,18 +66,18 @@ class TestScrapeEbayAuOrchestration(unittest.TestCase):
         full_mock.assert_called_once()
         self.assertEqual(session.get(au._AU_BLOCKED_KEY), "challenge")
 
-    def test_proxies_enabled_keeps_fast_selenium_after_http_block(self):
+    def test_proxies_enabled_skips_fast_selenium_entirely(self):
+        """Webshare proxies can't auth Chrome --proxy-server, so fast Selenium is useless."""
         full_hit = {"price": 22.5, "stock": 3, "title": "T"}
-        fast_hit = {"price": 19.0, "stock": 2, "title": "Fast"}
         session = {}
         with patch.object(au, "proxies_configured", return_value=True), \
              patch.object(au.EbayHTTP, "fetch", return_value=("", None, "challenge")), \
-             patch.object(au, "scrape_ebay_au_fast", return_value=fast_hit) as fast_mock, \
+             patch.object(au, "scrape_ebay_au_fast") as fast_mock, \
              patch.object(au, "scrape_ebay_for_market", return_value=full_hit) as full_mock:
             result = au.scrape_ebay_au(_TEST_URL, "AU", session)
-        self.assertEqual(result, fast_hit)
-        fast_mock.assert_called_once()
-        full_mock.assert_not_called()
+        self.assertEqual(result, full_hit)
+        fast_mock.assert_not_called()
+        full_mock.assert_called_once()
 
     def test_proxies_enabled_uses_full_retry_count(self):
         with patch.object(au, "proxies_configured", return_value=True), \
@@ -87,6 +87,31 @@ class TestScrapeEbayAuOrchestration(unittest.TestCase):
             au.scrape_ebay_au(_TEST_URL, "AU", {})
         _, kwargs = full_mock.call_args
         self.assertIsNone(kwargs.get("max_attempts"))
+
+    def test_http_first_parse_miss_retries_with_warm_session(self):
+        """HTTP returns HTML but parser misses → retry HTTP once (warm BIN hydration)."""
+        miss_then_hit = {"price": 49.99, "stock": 1, "title": "T"}
+        fetch_results = [
+            ("<html>nopricyet</html>", 200, ""),
+            ("<html>now-with-price</html>", 200, ""),
+        ]
+        parse_results = [None, miss_then_hit]
+
+        def fetch_side(*_a, **_k):
+            return fetch_results.pop(0)
+
+        def parse_side(*_a, **_k):
+            return parse_results.pop(0)
+
+        with patch.object(au.EbayHTTP, "fetch", side_effect=fetch_side) as fetch_mock, \
+             patch.object(au, "_parse_html_to_result", side_effect=parse_side), \
+             patch.object(au, "scrape_ebay_au_fast") as fast_mock, \
+             patch.object(au, "scrape_ebay_for_market") as full_mock:
+            result = au.scrape_ebay_au(_TEST_URL, "AU", {})
+        self.assertEqual(result, miss_then_hit)
+        self.assertEqual(fetch_mock.call_count, 2)
+        fast_mock.assert_not_called()
+        full_mock.assert_not_called()
 
     def test_both_fast_paths_miss_runs_full_engine(self):
         full_hit = {"price": 99.0, "stock": 7, "title": "T"}

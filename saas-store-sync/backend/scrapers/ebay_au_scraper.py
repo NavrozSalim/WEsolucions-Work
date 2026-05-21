@@ -73,14 +73,24 @@ def _http_first_disabled() -> bool:
     return os.environ.get("EBAY_AU_DISABLE_HTTP_FIRST", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _should_skip_fast_selenium(session: dict) -> bool:
-    """Skip fast Selenium when HTTP already saw a block/challenge on datacenter IP.
+def _http_first_warm_retries() -> int:
+    """Extra HTTP-first attempts after a parse miss (warm cookies often unlock BIN price)."""
+    raw = (os.environ.get("EBAY_AU_HTTP_FIRST_WARM_RETRIES") or "1").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 1
 
-    With residential proxies, HTTP and Selenium use a different IP so fast Selenium
-    is still worth trying.
+
+def _should_skip_fast_selenium(session: dict) -> bool:
+    """Skip fast Selenium when proxies are on or HTTP already saw a block.
+
+    With Webshare/residential proxies Chrome can't authenticate via ``--proxy-server``
+    (no creds on bare ``host:port``), so fast Selenium returns ~39-byte stubs. Skip
+    it entirely when proxies are configured.
     """
     if proxies_configured():
-        return False
+        return True
     if not session.get(_AU_BLOCKED_KEY):
         return False
     if os.environ.get("EBAY_AU_FORCE_FAST_SELENIUM", "").strip().lower() in ("1", "true", "yes", "on"):
@@ -152,23 +162,33 @@ def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
 
     if _ebay_http_first_enabled(eff_region) and not _http_first_disabled():
         _ensure_cookies_in_http_client(session)
-        t0 = time.monotonic()
-        html, status, err = EbayHTTP.fetch(url, eff_region, session, EBAY_MARKET_AU)
-        _note_au_html(session, html, err)
-        logger.info(
-            "eBay AU step=http url=%s dt=%.2fs status=%s err=%s",
-            url[:70], time.monotonic() - t0, status, err,
-        )
-        if html and not err:
-            parsed = _parse_html_to_result(html, url)
-            if parsed is not None:
-                logger.info(
-                    "eBay AU HTTP-first OK %s price=%s total=%.2fs",
-                    url[:70], parsed.get("price"), time.monotonic() - t_start,
-                )
-                return parsed
-            if not session.get(_AU_PRODUCT_HTML_KEY):
-                session[_AU_BLOCKED_KEY] = session.get(_AU_BLOCKED_KEY) or "not_product_like"
+        http_attempts = 1 + _http_first_warm_retries()
+        for http_attempt in range(http_attempts):
+            t0 = time.monotonic()
+            html, status, err = EbayHTTP.fetch(url, eff_region, session, EBAY_MARKET_AU)
+            _note_au_html(session, html, err)
+            logger.info(
+                "eBay AU step=http attempt=%s url=%s dt=%.2fs status=%s err=%s",
+                http_attempt + 1, url[:70], time.monotonic() - t0, status, err,
+            )
+            if html and not err:
+                parsed = _parse_html_to_result(html, url)
+                if parsed is not None:
+                    logger.info(
+                        "eBay AU HTTP-first OK %s price=%s total=%.2fs",
+                        url[:70], parsed.get("price"), time.monotonic() - t_start,
+                    )
+                    return parsed
+                # HTML looked like a product but parser found no price.
+                # Retry once: eBay BIN hydration often needs a warm session.
+                if http_attempt + 1 < http_attempts:
+                    time.sleep(0.4)
+                    continue
+                if not session.get(_AU_PRODUCT_HTML_KEY):
+                    session[_AU_BLOCKED_KEY] = session.get(_AU_BLOCKED_KEY) or "not_product_like"
+            if err and err not in ("not_product_like",):
+                # Hard error (block, http_4xx/5xx) — break out and let next stage retry/rotate.
+                break
 
     if fast_scrape_enabled() and not _should_skip_fast_selenium(session):
         t0 = time.monotonic()
