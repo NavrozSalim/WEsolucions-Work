@@ -734,9 +734,19 @@ def scrape_costco_au(
         if result.error_code == "product_not_found":
             return result.to_legacy()
 
+        # ``no_price`` — the proxy fetched the PDP just fine, the parser simply
+        # couldn't find a price (out of stock w/o price, discontinued listing,
+        # category landing page, etc.). Retrying with another proxy returns the
+        # same HTML, so don't burn the pool or log a cooldown — fail terminally.
+        if result.error_code == "no_price":
+            active_pool.mark_success(assignment)
+            return result.to_legacy()
+
         if result.error_code.startswith("blocked_"):
             active_pool.mark_blocked(assignment, cooldown_sec=BLOCK_COOLDOWN_SEC)
         else:
+            # ``empty_response`` and other rare parse errors — short cooldown
+            # so we rotate to a fresh proxy on the next attempt.
             active_pool.mark_blocked(assignment, cooldown_sec=BLOCK_COOLDOWN_SEC / 6)
 
     if SELENIUM_FALLBACK:

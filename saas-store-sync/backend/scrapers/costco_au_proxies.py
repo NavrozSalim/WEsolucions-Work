@@ -269,13 +269,19 @@ class CostcoAuProxyPool:
             return ProxyAssignment(index=idx, url=url, label=self._label(url))
 
     def mark_blocked(self, assignment: ProxyAssignment, cooldown_sec: float = 300.0) -> None:
-        """Mark ``assignment`` as banned for ``cooldown_sec`` seconds."""
+        """Mark ``assignment`` as banned for ``cooldown_sec`` seconds.
+
+        Logs at ``warning`` only for long cooldowns (real Cloudflare-style bans).
+        Short cooldowns (used for transient HTTP / parse errors) log at ``debug``
+        to avoid flooding the worker log during catalog runs.
+        """
         if assignment is None:
             return
         now = time.monotonic()
         with self._lock:
             self._cooldown_until[assignment.index] = now + max(0.0, float(cooldown_sec))
-        logger.warning(
+        log_fn = logger.warning if cooldown_sec >= 300.0 else logger.debug
+        log_fn(
             "Costco AU proxy %d (%s) cooled down for %.0fs after block",
             assignment.index, assignment.label, cooldown_sec,
         )

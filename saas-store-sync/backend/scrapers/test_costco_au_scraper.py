@@ -579,6 +579,25 @@ class ScrapeCostcoAuOrchestrationTests(SimpleTestCase):
         self.assertEqual(result["error_code"], "product_not_found")
         self.assertEqual(len(calls), 1, "product_not_found is terminal — must not rotate")
 
+    def test_no_price_does_not_rotate_or_cooldown(self):
+        """``no_price`` is a parse miss, not a proxy fault — fail terminally."""
+        calls = []
+
+        def fake_fetch(url, session, assignment):
+            calls.append(assignment.index)
+            return _PDP_HTML_NO_PRICE, "https://www.costco.com.au/p/444555", ""
+
+        with patch.object(costco_au_scraper, "_http_fetch", side_effect=fake_fetch), \
+                patch.object(self.pool, "mark_blocked") as mock_block:
+            result = costco_au_scraper.scrape_costco_au(
+                "https://www.costco.com.au/p/444555", "AU", session={}, pool=self.pool,
+            )
+
+        self.assertIsNone(result["price"])
+        self.assertEqual(result["error_code"], "no_price")
+        self.assertEqual(len(calls), 1, "no_price must not retry — parser issue, not proxy issue")
+        mock_block.assert_not_called()
+
     def test_http_error_rotates_through_pool(self):
         calls = []
 
