@@ -191,6 +191,42 @@ _PDP_HTML_SALE = """
 </body></html>
 """
 
+# HTTP-first partial HTML: Online Price present, Your Price not hydrated yet (Angular).
+_PDP_HTML_HOT_BUY_PARTIAL = """
+<html><head><title>Cuckoo IH 10 Cup Pressure Cooker | Costco Australia</title></head>
+<body>
+  <h1>Cuckoo IH 10 Cup Pressure Cooker CRP-CHSS1009F</h1>
+  <sip-add-to-cart-form>
+    <button data-cy="addtocart-button-120795" class="btn btn-primary">Add to cart</button>
+  </sip-add-to-cart-form>
+  <div>Online Price</div>
+  <div class="price-original"><span class="notranslate">$589.99</span></div>
+  <div>Less</div>
+  <div>-$190.00</div>
+  <div>Your Price</div>
+  <div>HOT BUY</div>
+  <div>Price valid from 12/05/2026 to 31/05/2026. While stock lasts.</div>
+</body></html>
+"""
+
+# After Selenium hydration — Your Price populated.
+_PDP_HTML_HOT_BUY_FULL = """
+<html><head><title>Cuckoo IH 10 Cup Pressure Cooker | Costco Australia</title></head>
+<body>
+  <h1>Cuckoo IH 10 Cup Pressure Cooker CRP-CHSS1009F</h1>
+  <sip-add-to-cart-form>
+    <button data-cy="addtocart-button-120795" class="btn btn-primary">Add to cart</button>
+  </sip-add-to-cart-form>
+  <div>Online Price</div>
+  <div class="price-original"><span class="notranslate">$589.99</span></div>
+  <div>Less</div>
+  <div>-$190.00</div>
+  <div>Your Price</div>
+  <span class="you-pay-value"><span class="notranslate">$399.99</span></span>
+  <div>HOT BUY</div>
+</body></html>
+"""
+
 _PDP_HTML_JSONLD = """
 <html><head><title>Some Product | Costco Australia</title></head>
 <body>
@@ -284,6 +320,19 @@ class ParseCostcoPdpTests(SimpleTestCase):
         self.assertEqual(result.price, 999.00)
         self.assertEqual(result.stock, 3)
 
+    def test_hot_buy_partial_html_requests_hydration(self):
+        url = "https://www.costco.com.au/p/120795"
+        result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_HOT_BUY_PARTIAL)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "incomplete_sale_price")
+
+    def test_hot_buy_full_html_returns_your_price(self):
+        url = "https://www.costco.com.au/p/120795"
+        result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_HOT_BUY_FULL)
+        self.assertTrue(result.success)
+        self.assertEqual(result.price, 399.99)
+        self.assertEqual(result.stock, 3)
+
     def test_jsonld_fallback_price(self):
         url = "https://www.costco.com.au/p/100200"
         result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_JSONLD)
@@ -364,6 +413,23 @@ class ScrapeCostcoAuOrchestrationTests(SimpleTestCase):
         self.assertEqual(result["price"], 1299.99)
         self.assertEqual(result["stock"], 3)
         self.assertIn("Vacuum", result["title"])
+
+    def test_hot_buy_http_partial_triggers_selenium_for_your_price(self):
+        hot_url = "https://www.costco.com.au/p/120795"
+        with patch.object(
+            costco_au_scraper, "_http_fetch",
+            return_value=(_PDP_HTML_HOT_BUY_PARTIAL, hot_url, ""),
+        ) as mock_fetch, patch.object(
+            costco_au_scraper, "_selenium_fetch",
+            return_value=(_PDP_HTML_HOT_BUY_FULL, hot_url, ""),
+        ) as mock_sel:
+            result = costco_au_scraper.scrape_costco_au(
+                hot_url, "AU", session={}, pool=self.pool,
+            )
+        mock_fetch.assert_called_once()
+        mock_sel.assert_called_once()
+        self.assertEqual(result["price"], 399.99)
+        self.assertEqual(result["stock"], 3)
 
     def test_rotates_proxy_on_block(self):
         calls = []

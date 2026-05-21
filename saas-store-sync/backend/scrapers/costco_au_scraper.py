@@ -164,9 +164,17 @@ def _extract_prices(soup: BeautifulSoup) -> tuple[Optional[float], Optional[floa
                     break
 
     sale = None
-    sale_raw = _text_first(soup, "span.you-pay-value")
-    if sale_raw:
-        sale = _parse_price_text(sale_raw)
+    for sel in (
+        ".you-pay-value",
+        ".you-pay-value span.notranslate",
+        "span.you-pay-value",
+        "[class*='you-pay-value']",
+    ):
+        sale_raw = _text_first(soup, sel)
+        if sale_raw:
+            sale = _parse_price_text(sale_raw)
+            if sale is not None:
+                break
 
     if normal is None and sale is None:
         for sel in (
@@ -213,6 +221,49 @@ def _extract_prices(soup: BeautifulSoup) -> tuple[Optional[float], Optional[floa
                     break
 
     return normal, sale
+
+
+def _html_expects_you_pay_price(
+    html: str,
+    soup: BeautifulSoup,
+    *,
+    normal: Optional[float],
+    sale: Optional[float],
+) -> bool:
+    """Return True when the PDP shows promo pricing but ``you-pay-value`` is not parsed yet.
+
+    Costco AU HOT BUY pages render ``price-original`` (Online Price) in the initial HTML
+    but hydrate ``span.you-pay-value`` (Your Price) via Angular. HTTP-first would otherwise
+    return the higher online price and treat the scrape as success.
+    """
+    if sale is not None:
+        return False
+    if normal is None:
+        return False
+
+    low = (html or "").lower()
+    has_online = (
+        soup.select_one(".price-original span.notranslate") is not None
+        or "online price" in low
+    )
+    if not has_online:
+        return False
+
+    promo_hints = (
+        "your price",
+        "you-pay-value",
+        "you-pay",
+        "hot buy",
+        "price valid from",
+        "while stock lasts",
+    )
+    if any(h in low for h in promo_hints):
+        return True
+
+    if "less" in low and ("-$" in html or "−$" in html or re.search(r"less[^<]{0,40}-\s*\$", low)):
+        return True
+
+    return False
 
 
 def _button_disabled(el) -> bool:
@@ -407,6 +458,16 @@ def parse_costco_pdp(url: str, html: str, final_url: str = "") -> ScrapeResult:
     title = _extract_title(soup)
     normal, sale = _extract_prices(soup)
     stock = _extract_inventory(soup, url)
+
+    if sale is None and _html_expects_you_pay_price(html, soup, normal=normal, sale=sale):
+        return ScrapeResult.fail(
+            "incomplete_sale_price",
+            "Your Price (you-pay-value) not hydrated in HTML yet",
+            html,
+            VENDOR_TAG,
+            url,
+        )
+
     price = sale if sale is not None else normal
 
     if price is None:
@@ -583,18 +644,26 @@ def _selenium_fetch(url: str, session: dict, assignment: ProxyAssignment) -> tup
     except Exception as exc:
         return "", "", f"selenium_navigate_error: {exc}"
 
-    # Give Angular hydration a moment without overpolling.
-    deadline = time.time() + 8
+    # Give Angular time to hydrate ``you-pay-value`` (Your Price on HOT BUY promos).
+    deadline = time.time() + 10
     while time.time() < deadline:
         try:
             html = driver.page_source or ""
         except Exception:
             html = ""
         challenged, _ = html_is_challenge(html)
-        if not challenged and (
+        if challenged:
+            time.sleep(0.5)
+            continue
+
+        soup = BeautifulSoup(html, _BS4_PARSER)
+        normal, sale = _extract_prices(soup)
+        if sale is not None:
+            break
+        if not _html_expects_you_pay_price(html, soup, normal=normal, sale=sale) and (
             "sip-add-to-cart-form" in html
             or "data-cy=\"addtocart-button-" in html
-            or "you-pay-value" in html
+            or soup.select_one(".price-original span.notranslate") is not None
         ):
             break
         time.sleep(0.5)
@@ -680,6 +749,27 @@ def scrape_costco_au(
                 vendor_url[:80], result.price, result.stock, assignment.label,
             )
             return result.to_legacy()
+
+        if result.error_code == "incomplete_sale_price":
+            logger.info(
+                "Costco AU HTTP missing Your Price, Selenium hydration url=%s proxy=%s",
+                vendor_url[:80], assignment.label,
+            )
+            sel_html, sel_final, sel_err = _selenium_fetch(vendor_url, session, assignment)
+            if not sel_err:
+                sel_result = parse_costco_pdp(vendor_url, sel_html, sel_final)
+                if sel_result.success:
+                    active_pool.mark_success(assignment)
+                    logger.info(
+                        "Costco AU OK (Selenium Your Price) url=%s price=%s stock=%s proxy=%s",
+                        vendor_url[:80], sel_result.price, sel_result.stock, assignment.label,
+                    )
+                    return sel_result.to_legacy()
+                last_error = sel_result.error_code
+                last_html_saved = sel_result.raw_html_saved
+            else:
+                last_error = sel_err
+            continue
 
         last_error = result.error_code
         last_html_saved = result.raw_html_saved
