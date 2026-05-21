@@ -121,6 +121,35 @@ _RE_CURRENCY_AMOUNT = re.compile(
     re.IGNORECASE,
 )
 
+# AU postage in embedded JSON (HTTP HTML often lacks hydrated shipping DOM).
+_AU_SHIPPING_JSON_PATTERNS = (
+    re.compile(
+        r'"shipping(?:Cost|Price|Amount)"\s*:\s*\{[^}]{0,200}?"value"\s*:\s*"([\d.]+)"',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'"shipping(?:Cost|Price|Amount)"\s*:\s*"([\d.]+)"',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'"postage(?:Cost|Price|Amount)"\s*:\s*\{[^}]{0,200}?"value"\s*:\s*"([\d.]+)"',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'"delivery(?:Cost|Price)"\s*:\s*\{[^}]{0,200}?"value"\s*:\s*"([\d.]+)"',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'"postagePrice"\s*:\s*\{[^}]{0,200}?"value"\s*:\s*"([\d.]+)"',
+        re.IGNORECASE,
+    ),
+)
+
+_RE_AU_DELIVERY_PRICE_LINE = re.compile(
+    r"AU\s*\$\s*([\d,]+(?:\.\d{2})?)\s*delivery",
+    re.IGNORECASE,
+)
+
 _CHALLENGE_INDICATORS = [
     "pardon our interruption",
     "checking your browser",
@@ -511,8 +540,25 @@ class EbayParser:
     )
 
     # AU postage row. Paid postage is added on top of the scraped item price.
+    AU_SHIPPING_BLOCK_SELECTOR = ".ux-labels-values--shipping"
     AU_SHIPPING_SELECTOR = (
         ".ux-labels-values--shipping .ux-labels-values__values-content div:nth-of-type(1)"
+    )
+
+    _AU_SHIPPING_SKIP_PHRASES = (
+        "doesn't post",
+        "does not post",
+        "doesnt post",
+        "can't post",
+        "cannot post",
+        "unable to post",
+        "no postage",
+        "located in:",
+        "get it between",
+        "see details",
+        "buyer pays for return",
+        "returns accepted",
+        "returns.",
     )
 
     TITLE_SELECTORS = [
@@ -1278,23 +1324,91 @@ class EbayParser:
         return False
 
     @classmethod
-    def extract_au_shipping_amount(cls, soup: BeautifulSoup) -> Optional[float]:
-        """Return the paid postage amount from the AU shipping row, or ``None``.
+    def _au_shipping_line_is_noise(cls, text: str) -> bool:
+        lower = (text or "").lower()
+        if not lower or len(lower) > 200:
+            return True
+        return any(p in lower for p in cls._AU_SHIPPING_SKIP_PHRASES)
 
-        Returns ``0.0`` when the row says free postage, so callers can choose
-        to short-circuit. Returns ``None`` when the selector is absent or the
-        text has no parsable currency amount.
-        """
-        el = soup.select_one(cls.AU_SHIPPING_SELECTOR)
-        if not el:
-            return None
-        text = el.get_text(" ", strip=True)
-        if not text:
+    @classmethod
+    def _amount_from_au_shipping_line(cls, text: str) -> Optional[float]:
+        if not text or cls._au_shipping_line_is_noise(text):
             return None
         lower = text.lower()
-        if "free" in lower and "$" not in text:
-            return 0.0
+        if ("free postage" in lower or "free delivery" in lower or "free shipping" in lower):
+            if "$" not in text and "au" not in lower:
+                return 0.0
+        m = _RE_AU_DELIVERY_PRICE_LINE.search(text)
+        if m:
+            try:
+                return float(m.group(1).replace(",", ""))
+            except ValueError:
+                pass
         return _parse_ebay_display_price_text(text)
+
+    @classmethod
+    def _extract_au_shipping_from_shipping_block(cls, soup: BeautifulSoup) -> Optional[float]:
+        block = soup.select_one(cls.AU_SHIPPING_BLOCK_SELECTOR)
+        if not block:
+            return None
+
+        amounts: list[float] = []
+        for node in block.select("div, span, p, li"):
+            text = node.get_text(" ", strip=True)
+            amt = cls._amount_from_au_shipping_line(text)
+            if amt is not None:
+                amounts.append(amt)
+
+        if amounts:
+            # Prefer the smallest positive amount (postage, not a bundled total).
+            positive = [a for a in amounts if a > 0]
+            if positive:
+                return min(positive)
+            return 0.0
+        return None
+
+    @classmethod
+    def _extract_au_shipping_from_embedded_html(cls, html: str) -> Optional[float]:
+        if not html:
+            return None
+
+        for pat in _AU_SHIPPING_JSON_PATTERNS:
+            m = pat.search(html)
+            if m:
+                try:
+                    val = float(m.group(1))
+                except ValueError:
+                    continue
+                if 0.0 <= val < 999_999:
+                    return val
+
+        for m in _RE_AU_DELIVERY_PRICE_LINE.finditer(html):
+            try:
+                val = float(m.group(1).replace(",", ""))
+            except ValueError:
+                continue
+            if 0.01 <= val < 999_999:
+                return val
+
+        return None
+
+    @classmethod
+    def extract_au_shipping_amount(cls, soup: BeautifulSoup, html: str = "") -> Optional[float]:
+        """Return the paid postage amount from the AU shipping row, or ``None``.
+
+        Scans every line in the postage block (the first div is often
+        ``Item doesn't post to you`` when no delivery postcode is set).
+        Falls back to shipping-specific JSON / ``AU $X delivery`` snippets
+        embedded in the raw HTML.
+        """
+        from_block = cls._extract_au_shipping_from_shipping_block(soup)
+        if from_block is not None:
+            return from_block
+
+        if html:
+            return cls._extract_au_shipping_from_embedded_html(html)
+
+        return None
 
 
 class EbayHTTP:
@@ -2085,7 +2199,7 @@ def _parse_html_to_result_au(html: str, url: str) -> Optional[dict]:
     if parsed is None or parsed.get("price") is None:
         return parsed
 
-    shipping = EbayParser.extract_au_shipping_amount(soup)
+    shipping = EbayParser.extract_au_shipping_amount(soup, html)
     if shipping is not None and shipping > 0:
         try:
             new_price = round(float(parsed["price"]) + float(shipping), 2)
