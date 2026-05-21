@@ -225,19 +225,245 @@ def _extract_prices(soup: BeautifulSoup) -> tuple[Optional[float], Optional[floa
 
 _LESS_PRICE_CLASS_SELECTORS = (
     ".less-value",
+    ".price-less",
+    ".price-less span.notranslate",
+    "[class*='price-less']",
+    "[class*='less-value']",
     ".member-savings-value",
     ".instant-savings-value",
     ".you-save-value",
     ".discount-amount",
     "[class*='savings-value']",
-    "[class*='less-value']",
     "[class*='member-savings']",
+    "[class*='discount-value']",
 )
 
 _LESS_TEXT_RE = re.compile(
-    r"less[^A-Za-z0-9]{0,30}[-\u2212]\s*\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)",
+    r"less[^A-Za-z0-9]{0,80}[-\u2212]?\s*\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)",
     re.IGNORECASE,
 )
+
+_DOLLAR_AMOUNT_RE = re.compile(
+    r"\$\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)",
+)
+
+# Embedded JSON / Angular state keys seen on costco.com.au PDPs.
+_SALE_JSON_KEY_RE = re.compile(
+    r'"(?:youPayPrice|yourPrice|memberPrice|salePrice|discountedPrice|promoPrice|'
+    r'currentPrice|displayPrice|finalPrice|offerPrice|netPrice)"\s*:\s*'
+    r'(?:"(\d+(?:\.\d+)?)"|(\d+(?:\.\d+)?))',
+    re.IGNORECASE,
+)
+
+_DISCOUNT_JSON_KEY_RE = re.compile(
+    r'"(?:discountAmount|instantSavings|savingsAmount|amountOff|lessAmount|'
+    r'discountValue|savingsValue|discount|savings)"\s*:\s*'
+    r'(?:"(\d+(?:\.\d+)?)"|(\d+(?:\.\d+)?))',
+    re.IGNORECASE,
+)
+
+_WAS_PRICE_JSON_RE = re.compile(
+    r'"wasPrice"\s*:\s*\{[^}]{0,120}?"value"\s*:\s*(\d+(?:\.\d+)?)',
+    re.IGNORECASE,
+)
+
+_PRICE_VALUE_JSON_RE = re.compile(
+    r'"price"\s*:\s*\{[^}]{0,120}?"value"\s*:\s*(\d+(?:\.\d+)?)',
+    re.IGNORECASE,
+)
+
+
+def _float_from_re_groups(groups: tuple) -> Optional[float]:
+    for g in groups:
+        if g is None:
+            continue
+        val = _parse_price_text(str(g))
+        if val is not None:
+            return val
+    return None
+
+
+def _product_html_window(html: str, url: str, *, radius: int = 20_000) -> str:
+    """Return a slice of HTML centred on the product id when possible."""
+    if not html:
+        return ""
+    pid = product_id_from_url(url)
+    if pid:
+        idx = html.find(pid)
+        if idx >= 0:
+            start = max(0, idx - radius)
+            end = min(len(html), idx + radius)
+            return html[start:end]
+    return html
+
+
+def _amounts_near_markers(html: str, markers: tuple[str, ...], *, window: int = 5000) -> list[float]:
+    amounts: list[float] = []
+    if not html:
+        return amounts
+    low = html.lower()
+    seen: set[float] = set()
+    for marker in markers:
+        start = 0
+        while True:
+            idx = low.find(marker.lower(), start)
+            if idx < 0:
+                break
+            chunk = html[idx : idx + window]
+            for m in _DOLLAR_AMOUNT_RE.finditer(chunk):
+                val = _parse_price_text(m.group(1))
+                if val is not None and val not in seen:
+                    seen.add(val)
+                    amounts.append(val)
+            start = idx + len(marker)
+    return amounts
+
+
+def _pick_sale_from_amounts(normal: float, amounts: list[float]) -> Optional[float]:
+    """Choose the lowest plausible sale price below ``normal``."""
+    if normal is None or not amounts:
+        return None
+    below = [a for a in amounts if 0 < a < normal]
+    if not below:
+        return None
+    sale = min(below)
+    # Ignore tiny deltas that are probably shipping/fees, not member price.
+    if sale >= normal * 0.995:
+        return None
+    return round(sale, 2)
+
+
+def _sale_from_price_was_pair(obj: dict) -> Optional[float]:
+    """Return sale ``price.value`` when ``wasPrice.value`` is higher (Hybris/OCC shape)."""
+    price_node = obj.get("price")
+    was_node = obj.get("wasPrice")
+    if not isinstance(price_node, dict) or not isinstance(was_node, dict):
+        return None
+    sale = _parse_price_text(str(price_node.get("value", "")))
+    was = _parse_price_text(str(was_node.get("value", "")))
+    if sale is not None and was is not None and 0 < sale < was:
+        return round(sale, 2)
+    return None
+
+
+def _find_promo_price_in_json(node) -> Optional[float]:
+    if isinstance(node, dict):
+        got = _sale_from_price_was_pair(node)
+        if got is not None:
+            return got
+        for v in node.values():
+            got = _find_promo_price_in_json(v)
+            if got is not None:
+                return got
+    elif isinstance(node, list):
+        for item in node:
+            got = _find_promo_price_in_json(item)
+            if got is not None:
+                return got
+    return None
+
+
+def _extract_sale_from_json_scripts(soup: BeautifulSoup) -> Optional[float]:
+    """Parse ``<script>`` JSON blobs for ``price`` + ``wasPrice`` pairs."""
+    for script in soup.select("script"):
+        raw = (script.string or script.get_text() or "").strip()
+        if not raw or len(raw) < 12:
+            continue
+        if "price" not in raw.lower():
+            continue
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        found = _find_promo_price_in_json(data)
+        if found is not None:
+            return found
+    return None
+
+
+def _extract_sale_from_embedded_json(
+    html: str, url: str, normal: Optional[float], soup: Optional[BeautifulSoup] = None,
+) -> Optional[float]:
+    """Scan Angular/JSON blobs for Your Price or discount fields."""
+    if not html:
+        return None
+
+    if soup is not None:
+        from_scripts = _extract_sale_from_json_scripts(soup)
+        if from_scripts is not None:
+            return from_scripts
+
+    chunks = [_product_html_window(html, url), html]
+    sale_candidates: list[float] = []
+    discount_candidates: list[float] = []
+    was_prices: list[float] = []
+    price_values: list[float] = []
+
+    for chunk in chunks:
+        if not chunk:
+            continue
+        for m in _SALE_JSON_KEY_RE.finditer(chunk):
+            val = _float_from_re_groups(m.groups())
+            if val is not None:
+                sale_candidates.append(val)
+        for m in _DISCOUNT_JSON_KEY_RE.finditer(chunk):
+            val = _float_from_re_groups(m.groups())
+            if val is not None:
+                discount_candidates.append(val)
+        for m in _WAS_PRICE_JSON_RE.finditer(chunk):
+            val = _parse_price_text(m.group(1))
+            if val is not None:
+                was_prices.append(val)
+        for m in _PRICE_VALUE_JSON_RE.finditer(chunk):
+            val = _parse_price_text(m.group(1))
+            if val is not None:
+                price_values.append(val)
+
+        # Generic nested JSON price objects: "value": 399.99 near "currencyIso":"AUD"
+        for m in re.finditer(
+            r'"value"\s*:\s*(\d+(?:\.\d+)?)[^}]{0,80}?"currencyIso"\s*:\s*"AUD"',
+            chunk,
+            re.IGNORECASE,
+        ):
+            val = _parse_price_text(m.group(1))
+            if val is not None:
+                price_values.append(val)
+        for m in re.finditer(
+            r'"currencyIso"\s*:\s*"AUD"[^}]{0,80}?"value"\s*:\s*(\d+(?:\.\d+)?)',
+            chunk,
+            re.IGNORECASE,
+        ):
+            val = _parse_price_text(m.group(1))
+            if val is not None:
+                price_values.append(val)
+
+    ref_normal = normal
+    if ref_normal is None and was_prices:
+        ref_normal = max(was_prices)
+
+    for sale in sale_candidates:
+        if ref_normal is None or (0 < sale < ref_normal):
+            return round(sale, 2)
+
+    if ref_normal is not None:
+        for discount in discount_candidates:
+            if 0 < discount < ref_normal:
+                computed = round(ref_normal - discount, 2)
+                if computed > 0:
+                    return computed
+
+    if ref_normal is not None and price_values:
+        picked = _pick_sale_from_amounts(ref_normal, price_values)
+        if picked is not None:
+            return picked
+
+    if was_prices and price_values:
+        was = max(was_prices)
+        picked = _pick_sale_from_amounts(was, price_values)
+        if picked is not None:
+            return picked
+
+    return None
 
 
 def _extract_less_amount(soup: BeautifulSoup, html: str) -> Optional[float]:
@@ -268,6 +494,72 @@ def _extract_less_amount(soup: BeautifulSoup, html: str) -> Optional[float]:
             if amount is not None and 0 < amount < 1_000_000:
                 return amount
 
+    # Negative dollar amount in markup, e.g. ``>$190.00<`` in a Less row.
+    for m in re.finditer(r"[-\u2212]\s*\$\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)", html or ""):
+        amount = _parse_price_text(m.group(1))
+        if amount is not None and 0 < amount < 1_000_000:
+            return amount
+
+    return None
+
+
+def _resolve_sale_price(
+    soup: BeautifulSoup,
+    html: str,
+    url: str,
+    normal: Optional[float],
+    sale: Optional[float],
+) -> Optional[float]:
+    """Return Your Price using DOM, Less math, embedded JSON, or nearby dollar amounts."""
+    if sale is not None:
+        return sale
+
+    if normal is not None:
+        less = _extract_less_amount(soup, html)
+        if less is not None and 0 < less < normal:
+            computed = round(normal - less, 2)
+            logger.info(
+                "Costco AU computed Your Price from Less math: %.2f - %.2f = %.2f",
+                normal, less, computed,
+            )
+            return computed
+
+    embedded = _extract_sale_from_embedded_json(html, url, normal, soup)
+    if embedded is not None:
+        logger.info("Costco AU Your Price from embedded JSON: %.2f", embedded)
+        return embedded
+
+    if normal is not None:
+        amounts = _amounts_near_markers(
+            html,
+            (
+                "price-original",
+                "you-pay-value",
+                "you-pay",
+                "online price",
+                "your price",
+                "hot buy",
+            ),
+        )
+        picked = _pick_sale_from_amounts(normal, amounts)
+        if picked is not None:
+            logger.info(
+                "Costco AU Your Price from nearby amounts (normal=%.2f sale=%.2f)",
+                normal, picked,
+            )
+            return picked
+
+    # Empty ``you-pay-value`` placeholder — check data-* attrs Angular may pre-seed.
+    for el in soup.select("[class*='you-pay'], [class*='you-pay-value']"):
+        for attr in ("data-price", "data-value", "ng-reflect-price", "content"):
+            raw = (el.get(attr) or "").strip()
+            if not raw:
+                continue
+            val = _parse_price_text(raw)
+            if val is not None and (normal is None or (0 < val < normal)):
+                logger.info("Costco AU Your Price from %s attr: %.2f", attr, val)
+                return val
+
     return None
 
 
@@ -277,6 +569,7 @@ def _html_expects_you_pay_price(
     *,
     normal: Optional[float],
     sale: Optional[float],
+    url: str = "",
 ) -> bool:
     """Return True when the PDP shows promo pricing but ``you-pay-value`` is not parsed yet.
 
@@ -299,16 +592,31 @@ def _html_expects_you_pay_price(
 
     promo_hints = (
         "your price",
-        "you-pay-value",
-        "you-pay",
         "hot buy",
         "price valid from",
         "while stock lasts",
+        "online price",
     )
     if any(h in low for h in promo_hints):
         return True
 
-    if "less" in low and ("-$" in html or "−$" in html or re.search(r"less[^<]{0,40}-\s*\$", low)):
+    if "less" in low and (
+        "-$" in html
+        or "−$" in html
+        or re.search(r"less[^<]{0,80}[-\u2212]?\s*\$", low)
+    ):
+        return True
+
+    # Empty ``you-pay-value`` alongside ``price-original`` → promo page (Angular hydrates later).
+    if soup.select_one(".price-original"):
+        for el in soup.select("[class*='you-pay-value'], [class*='you-pay']"):
+            txt = (el.get_text(" ", strip=True) or "").strip()
+            if not txt:
+                return True
+
+    # Embedded wasPrice + price.value pair in product JSON/state blobs.
+    chunk = _product_html_window(html, url)
+    if chunk and _WAS_PRICE_JSON_RE.search(chunk) and _PRICE_VALUE_JSON_RE.search(chunk):
         return True
 
     return False
@@ -507,23 +815,19 @@ def parse_costco_pdp(url: str, html: str, final_url: str = "") -> ScrapeResult:
     normal, sale = _extract_prices(soup)
     stock = _extract_inventory(soup, url)
 
-    if sale is None and normal is not None:
-        less = _extract_less_amount(soup, html)
-        if less is not None and 0 < less < normal:
-            sale = round(normal - less, 2)
-            logger.info(
-                "Costco AU computed Your Price from Less math: %.2f - %.2f = %.2f",
-                normal, less, sale,
+    expects_sale = _html_expects_you_pay_price(
+        html, soup, normal=normal, sale=sale, url=url,
+    )
+    if expects_sale:
+        sale = _resolve_sale_price(soup, html, url, normal, sale)
+        if sale is None:
+            return ScrapeResult.fail(
+                "incomplete_sale_price",
+                "Your Price not found in DOM, Less math, or embedded JSON",
+                html,
+                VENDOR_TAG,
+                url,
             )
-
-    if sale is None and _html_expects_you_pay_price(html, soup, normal=normal, sale=sale):
-        return ScrapeResult.fail(
-            "incomplete_sale_price",
-            "Your Price not hydrated and Less amount not found in HTML",
-            html,
-            VENDOR_TAG,
-            url,
-        )
 
     price = sale if sale is not None else normal
 
@@ -717,7 +1021,7 @@ def _selenium_fetch(url: str, session: dict, assignment: ProxyAssignment) -> tup
         normal, sale = _extract_prices(soup)
         if sale is not None:
             break
-        if not _html_expects_you_pay_price(html, soup, normal=normal, sale=sale) and (
+        if not _html_expects_you_pay_price(html, soup, normal=normal, sale=sale, url=url) and (
             "sip-add-to-cart-form" in html
             or "data-cy=\"addtocart-button-" in html
             or soup.select_one(".price-original span.notranslate") is not None

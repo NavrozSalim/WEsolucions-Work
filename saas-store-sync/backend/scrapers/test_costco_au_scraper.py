@@ -210,7 +210,42 @@ _PDP_HTML_HOT_BUY_PARTIAL = """
 </body></html>
 """
 
-# Rare case: promo signals present but no Less amount → can't compute → return failure.
+# Angular/JSON embedded prices — typical costco.com.au HOT BUY HTTP response.
+_PDP_HTML_HOT_BUY_EMBEDDED = """
+<html><head><title>Cuckoo IH 10 Cup Pressure Cooker | Costco Australia</title></head>
+<body>
+  <h1>Cuckoo IH 10 Cup Pressure Cooker CRP-CHSS1009F</h1>
+  <sip-add-to-cart-form>
+    <button data-cy="addtocart-button-120795" class="btn btn-primary">Add to cart</button>
+  </sip-add-to-cart-form>
+  <div class="price-original"><span class="notranslate">$589.99</span></div>
+  <span class="you-pay-value"></span>
+  <div>HOT BUY</div>
+  <div>Your Price</div>
+  <div>Online Price</div>
+  <div>Price valid from 12/05/2026 to 31/05/2026. While stock lasts.</div>
+  <script type="application/json">
+  {"code":"120795","price":{"currencyIso":"AUD","value":399.99},"wasPrice":{"currencyIso":"AUD","value":589.99}}
+  </script>
+</body></html>
+"""
+
+# Separate Less row markup (price in its own element/class).
+_PDP_HTML_HOT_BUY_PRICE_LESS_CLASS = """
+<html><head><title>Cuckoo IH 10 Cup Pressure Cooker | Costco Australia</title></head>
+<body>
+  <h1>Cuckoo IH 10 Cup Pressure Cooker CRP-CHSS1009F</h1>
+  <sip-add-to-cart-form>
+    <button data-cy="addtocart-button-120795" class="btn btn-primary">Add to cart</button>
+  </sip-add-to-cart-form>
+  <div class="price-original"><span class="notranslate">$589.99</span></div>
+  <div class="price-less"><span class="notranslate">-$190.00</span></div>
+  <span class="you-pay-value"></span>
+  <div>HOT BUY</div>
+</body></html>
+"""
+
+# Rare case: promo signals present but no Less/JSON sale data → fail clean.
 _PDP_HTML_HOT_BUY_NO_LESS = """
 <html><head><title>Cuckoo IH 10 Cup Pressure Cooker | Costco Australia</title></head>
 <body>
@@ -219,6 +254,7 @@ _PDP_HTML_HOT_BUY_NO_LESS = """
     <button data-cy="addtocart-button-120795" class="btn btn-primary">Add to cart</button>
   </sip-add-to-cart-form>
   <div class="price-original"><span class="notranslate">$589.99</span></div>
+  <span class="you-pay-value"></span>
   <div>HOT BUY</div>
   <div>Your Price</div>
   <div>Price valid from 12/05/2026 to 31/05/2026.</div>
@@ -344,6 +380,18 @@ class ParseCostcoPdpTests(SimpleTestCase):
         self.assertEqual(result.price, 399.99)
         self.assertEqual(result.stock, 3)
 
+    def test_hot_buy_embedded_json_returns_your_price(self):
+        url = "https://www.costco.com.au/p/120795"
+        result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_HOT_BUY_EMBEDDED)
+        self.assertTrue(result.success, msg=f"error_code={result.error_code}")
+        self.assertEqual(result.price, 399.99)
+
+    def test_hot_buy_price_less_class_computes_your_price(self):
+        url = "https://www.costco.com.au/p/120795"
+        result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_HOT_BUY_PRICE_LESS_CLASS)
+        self.assertTrue(result.success, msg=f"error_code={result.error_code}")
+        self.assertEqual(result.price, 399.99)
+
     def test_hot_buy_full_html_returns_your_price(self):
         url = "https://www.costco.com.au/p/120795"
         result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_HOT_BUY_FULL)
@@ -439,12 +487,11 @@ class ScrapeCostcoAuOrchestrationTests(SimpleTestCase):
         self.assertEqual(result["stock"], 3)
         self.assertIn("Vacuum", result["title"])
 
-    def test_hot_buy_http_only_computes_your_price_no_selenium(self):
-        """HOT BUY partial HTML now succeeds on HTTP alone via Less math (no Selenium)."""
+    def test_hot_buy_http_embedded_json_no_selenium(self):
         hot_url = "https://www.costco.com.au/p/120795"
         with patch.object(
             costco_au_scraper, "_http_fetch",
-            return_value=(_PDP_HTML_HOT_BUY_PARTIAL, hot_url, ""),
+            return_value=(_PDP_HTML_HOT_BUY_EMBEDDED, hot_url, ""),
         ) as mock_fetch, patch.object(
             costco_au_scraper, "_selenium_fetch",
         ) as mock_sel:
@@ -454,7 +501,6 @@ class ScrapeCostcoAuOrchestrationTests(SimpleTestCase):
         mock_fetch.assert_called_once()
         mock_sel.assert_not_called()
         self.assertEqual(result["price"], 399.99)
-        self.assertEqual(result["stock"], 3)
 
     def test_rotates_proxy_on_block(self):
         calls = []
