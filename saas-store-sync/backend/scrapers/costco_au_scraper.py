@@ -223,6 +223,54 @@ def _extract_prices(soup: BeautifulSoup) -> tuple[Optional[float], Optional[floa
     return normal, sale
 
 
+_LESS_PRICE_CLASS_SELECTORS = (
+    ".less-value",
+    ".member-savings-value",
+    ".instant-savings-value",
+    ".you-save-value",
+    ".discount-amount",
+    "[class*='savings-value']",
+    "[class*='less-value']",
+    "[class*='member-savings']",
+)
+
+_LESS_TEXT_RE = re.compile(
+    r"less[^A-Za-z0-9]{0,30}[-\u2212]\s*\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def _extract_less_amount(soup: BeautifulSoup, html: str) -> Optional[float]:
+    """Return the ``Less ... -$X.XX`` discount amount when present.
+
+    Costco AU HOT BUY pages render the discount value directly in the initial HTML,
+    even though ``span.you-pay-value`` hydrates later. We can compute Your Price
+    locally as ``Online Price - Less`` without a Selenium round trip.
+    """
+    for sel in _LESS_PRICE_CLASS_SELECTORS:
+        raw = _text_first(soup, sel)
+        if raw:
+            amount = _parse_price_text(raw)
+            if amount is not None and 0 < amount < 1_000_000:
+                return amount
+
+    try:
+        text = soup.get_text(" ", strip=True) if soup else ""
+    except Exception:
+        text = ""
+
+    for haystack in (text, html or ""):
+        if not haystack:
+            continue
+        m = _LESS_TEXT_RE.search(haystack)
+        if m:
+            amount = _parse_price_text(m.group(1))
+            if amount is not None and 0 < amount < 1_000_000:
+                return amount
+
+    return None
+
+
 def _html_expects_you_pay_price(
     html: str,
     soup: BeautifulSoup,
@@ -459,10 +507,19 @@ def parse_costco_pdp(url: str, html: str, final_url: str = "") -> ScrapeResult:
     normal, sale = _extract_prices(soup)
     stock = _extract_inventory(soup, url)
 
+    if sale is None and normal is not None:
+        less = _extract_less_amount(soup, html)
+        if less is not None and 0 < less < normal:
+            sale = round(normal - less, 2)
+            logger.info(
+                "Costco AU computed Your Price from Less math: %.2f - %.2f = %.2f",
+                normal, less, sale,
+            )
+
     if sale is None and _html_expects_you_pay_price(html, soup, normal=normal, sale=sale):
         return ScrapeResult.fail(
             "incomplete_sale_price",
-            "Your Price (you-pay-value) not hydrated in HTML yet",
+            "Your Price not hydrated and Less amount not found in HTML",
             html,
             VENDOR_TAG,
             url,
@@ -750,39 +807,21 @@ def scrape_costco_au(
             )
             return result.to_legacy()
 
-        if result.error_code == "incomplete_sale_price":
-            logger.info(
-                "Costco AU HTTP missing Your Price, Selenium hydration url=%s proxy=%s",
-                vendor_url[:80], assignment.label,
-            )
-            sel_html, sel_final, sel_err = _selenium_fetch(vendor_url, session, assignment)
-            if not sel_err:
-                sel_result = parse_costco_pdp(vendor_url, sel_html, sel_final)
-                if sel_result.success:
-                    active_pool.mark_success(assignment)
-                    logger.info(
-                        "Costco AU OK (Selenium Your Price) url=%s price=%s stock=%s proxy=%s",
-                        vendor_url[:80], sel_result.price, sel_result.stock, assignment.label,
-                    )
-                    return sel_result.to_legacy()
-                last_error = sel_result.error_code
-                last_html_saved = sel_result.raw_html_saved
-            else:
-                last_error = sel_err
-            continue
-
         last_error = result.error_code
         last_html_saved = result.raw_html_saved
 
-        # product_not_found is a terminal state — don't rotate proxies for it.
         if result.error_code == "product_not_found":
             return result.to_legacy()
 
-        # Challenge / no_price — proxy may be banned, rotate.
+        # ``incomplete_sale_price`` — HTML has Online Price but no Your Price + no Less
+        # math available. Almost always a transient hydration miss, not a proxy ban —
+        # don't burn the proxy, just rotate to a fresh one for the next attempt.
+        if result.error_code == "incomplete_sale_price":
+            continue
+
         if result.error_code.startswith("blocked_"):
             active_pool.mark_blocked(assignment, cooldown_sec=BLOCK_COOLDOWN_SEC)
         else:
-            # no_price might be a CF soft block — short cooldown.
             active_pool.mark_blocked(assignment, cooldown_sec=BLOCK_COOLDOWN_SEC / 6)
 
     if SELENIUM_FALLBACK:
