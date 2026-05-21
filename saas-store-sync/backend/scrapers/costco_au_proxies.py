@@ -195,7 +195,12 @@ class CostcoAuProxyPool:
         self._urls = [u for u in urls if u]
         self._min_gap_sec = max(0.0, float(min_gap_sec or 0.0))
         self._lock = threading.Lock()
-        self._cursor = 0
+        # Random starting cursor per process so prefork children don't all land on
+        # index 0 — in production we saw 4 workers all sticky on proxy 0 while
+        # proxies 1-9 sat idle. Each fork inherits the parent _POOL but creates a
+        # new sticky assignment on first acquire(); randomising _cursor spreads
+        # those initial picks across the pool.
+        self._cursor = random.randint(0, max(0, len(self._urls) - 1)) if self._urls else 0
         # Per-thread sticky assignment (process can have multiple Celery worker
         # threads with --pool=threads; prefork has 1 thread per child).
         self._sticky: dict[int, int] = {}

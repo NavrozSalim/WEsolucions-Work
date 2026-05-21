@@ -87,6 +87,10 @@ class CostcoAuProxyPoolTests(SimpleTestCase):
             "http://u:p@c:3",
         ]
         self.pool = costco_au_proxies.CostcoAuProxyPool(self.urls, min_gap_sec=0.0)
+        # Pool ``__init__`` randomises ``_cursor`` so prefork workers spread
+        # across the pool in production; these tests assert deterministic
+        # round-robin behaviour so we reset the cursor to 0.
+        self.pool._cursor = 0
 
     def test_acquire_returns_first_proxy(self):
         a = self.pool.acquire()
@@ -114,6 +118,25 @@ class CostcoAuProxyPoolTests(SimpleTestCase):
     def test_returns_none_when_pool_empty(self):
         pool = costco_au_proxies.CostcoAuProxyPool([], min_gap_sec=0.0)
         self.assertIsNone(pool.acquire())
+
+    def test_initial_cursor_spreads_across_pool(self):
+        """Production prefork forks the parent so all workers shared the same
+        ``_cursor=0`` and every Celery child stuck to proxy index 0. The pool
+        now randomises ``_cursor`` per process so workers fan out across the
+        pool. Smoke-test that the cursor lands in range over many constructions.
+        """
+        seen: set[int] = set()
+        for _ in range(50):
+            pool = costco_au_proxies.CostcoAuProxyPool(self.urls, min_gap_sec=0.0)
+            seen.add(pool._cursor)
+        self.assertTrue(seen.issubset({0, 1, 2}))
+        # Over 50 constructions across 3 indices the odds of *only* index 0
+        # appearing are <1e-8; if this ever fails the randomisation regressed.
+        self.assertGreater(len(seen), 1)
+
+    def test_empty_pool_initial_cursor_is_zero(self):
+        pool = costco_au_proxies.CostcoAuProxyPool([], min_gap_sec=0.0)
+        self.assertEqual(pool._cursor, 0)
 
     def test_round_robin_when_all_in_cooldown(self):
         # Mark every proxy blocked; acquire should still return *some* proxy.
