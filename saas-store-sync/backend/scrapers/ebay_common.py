@@ -498,6 +498,23 @@ class EbayParser:
         "was ended",
     )
 
+    # AU-only terminal status selectors. When the page exposes any of these
+    # banners but the parser cannot extract price or inventory, the AU wrapper
+    # ``_parse_html_to_result_au`` returns ``price=99.99, stock=0`` so the
+    # catalog still posts a zero-inventory update instead of marking the row
+    # failed with ``no_price``.
+    AU_TERMINAL_STATUS_SELECTORS = (
+        ".ux-message__title span.ux-textspans",
+        "[data-testid='ux-hotness-signal-text'] span.signal--time-sensitive",
+        ".ux-layout-section__textual-display--statusMessage span",
+        ".page-notice__title span",
+    )
+
+    # AU postage row. Paid postage is added on top of the scraped item price.
+    AU_SHIPPING_SELECTOR = (
+        ".ux-labels-values--shipping .ux-labels-values__values-content div:nth-of-type(1)"
+    )
+
     TITLE_SELECTORS = [
         ".x-item-title__mainTitle span.ux-textspans",
         ".x-item-title__mainTitle span",
@@ -1246,6 +1263,38 @@ class EbayParser:
                 continue
 
         return None
+
+    @classmethod
+    def has_au_terminal_status(cls, soup: BeautifulSoup) -> bool:
+        """True if any AU terminal status banner is visible on the page.
+
+        The check is *presence + non-empty text*; the wrapper decides whether
+        to trigger the 99.99/stock=0 fallback based on the parse result.
+        """
+        for sel in cls.AU_TERMINAL_STATUS_SELECTORS:
+            el = soup.select_one(sel)
+            if el and el.get_text(strip=True):
+                return True
+        return False
+
+    @classmethod
+    def extract_au_shipping_amount(cls, soup: BeautifulSoup) -> Optional[float]:
+        """Return the paid postage amount from the AU shipping row, or ``None``.
+
+        Returns ``0.0`` when the row says free postage, so callers can choose
+        to short-circuit. Returns ``None`` when the selector is absent or the
+        text has no parsable currency amount.
+        """
+        el = soup.select_one(cls.AU_SHIPPING_SELECTOR)
+        if not el:
+            return None
+        text = el.get_text(" ", strip=True)
+        if not text:
+            return None
+        lower = text.lower()
+        if "free" in lower and "$" not in text:
+            return 0.0
+        return _parse_ebay_display_price_text(text)
 
 
 class EbayHTTP:
@@ -1998,6 +2047,56 @@ def _parse_html_to_result(html: str, url: str) -> Optional[dict]:
     }
 
 
+def _parse_html_to_result_au(html: str, url: str) -> Optional[dict]:
+    """AU-only wrapper around :func:`_parse_html_to_result`.
+
+    Adds two AU-specific behaviors on top of the shared parser:
+
+    1. **Terminal status fallback** — when price or stock is missing but the
+       page exposes any of
+       :pyattr:`EbayParser.AU_TERMINAL_STATUS_SELECTORS` (sold-out banner,
+       hot/time-sensitive signal, listing-status message, or page notice),
+       return ``{"price": 99.99, "stock": 0}`` so the catalog posts a
+       zero-inventory update instead of failing with ``no_price``.
+    2. **Shipping add-on** — when the AU postage row is present with a paid
+       amount, add it to the scraped item price (rounded to 2 decimals).
+       Free postage rows are ignored. The add-on never applies to the
+       terminal fallback price (99.99 stays 99.99).
+    """
+    if not html:
+        return None
+
+    parsed = _parse_html_to_result(html, url)
+
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+
+    needs_terminal_check = (
+        parsed is None
+        or parsed.get("price") is None
+        or parsed.get("stock") is None
+    )
+    if needs_terminal_check and EbayParser.has_au_terminal_status(soup):
+        title = (parsed or {}).get("title") or EbayParser.extract_title(soup)
+        return {"price": 99.99, "stock": 0, "title": title}
+
+    if parsed is None or parsed.get("price") is None:
+        return parsed
+
+    shipping = EbayParser.extract_au_shipping_amount(soup)
+    if shipping is not None and shipping > 0:
+        try:
+            new_price = round(float(parsed["price"]) + float(shipping), 2)
+            parsed = dict(parsed)
+            parsed["price"] = new_price
+        except (TypeError, ValueError):
+            pass
+
+    return parsed
+
+
 def scrape_ebay_for_market(
     vendor_url: str,
     region: str,
@@ -2054,7 +2153,10 @@ def scrape_ebay_for_market(
                 html, status, err = None, None, "http_skipped"
 
             if html and not err:
-                parsed = _parse_html_to_result(html, candidate)
+                if market == EBAY_MARKET_AU:
+                    parsed = _parse_html_to_result_au(html, candidate)
+                else:
+                    parsed = _parse_html_to_result(html, candidate)
                 if parsed is not None:
                     logger.info("eBay HTTP success for %s", candidate)
                     _ebay_debug_write_html(session, html, "http_cold", candidate)
@@ -2077,7 +2179,10 @@ def scrape_ebay_for_market(
                 )
                 if browser_html:
                     last_browser_html = browser_html
-                    parsed = _parse_html_to_result(browser_html, candidate)
+                    if market == EBAY_MARKET_AU:
+                        parsed = _parse_html_to_result_au(browser_html, candidate)
+                    else:
+                        parsed = _parse_html_to_result(browser_html, candidate)
                     if parsed is not None:
                         logger.info("eBay Selenium HTML success for %s", candidate)
                         _ebay_debug_write_html(session, browser_html, "selenium", candidate)
@@ -2086,7 +2191,10 @@ def scrape_ebay_for_market(
                 html2, status2, err2 = EbayHTTP.fetch(candidate, eff_region, session, market)
 
             if html2 and not err2:
-                parsed = _parse_html_to_result(html2, candidate)
+                if market == EBAY_MARKET_AU:
+                    parsed = _parse_html_to_result_au(html2, candidate)
+                else:
+                    parsed = _parse_html_to_result(html2, candidate)
                 if parsed is not None:
                     logger.info("eBay cookie-handoff HTTP success for %s", candidate)
                     _ebay_debug_write_html(session, html2, "http_cookie", candidate)

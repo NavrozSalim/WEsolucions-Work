@@ -13,6 +13,7 @@ from scrapers.ebay_common import (
     _effective_ebay_region,
     _normalize_url,
     _parse_ebay_display_price_text,
+    _parse_html_to_result_au,
     _strip_price_suffix,
 )
 
@@ -409,6 +410,133 @@ class TestEbayDebugSnapshot(unittest.TestCase):
         html = p.read_text(encoding="utf-8", errors="replace")
         soup = BeautifulSoup(html, "lxml")
         self.assertEqual(EbayParser.extract_price(soup, html), 34.69)
+
+
+_AU_PRICE_BLOCK = """
+<section data-testid="x-item-price">
+  <div data-testid="x-price-primary">
+    <span class="ux-textspans">AU $50.00</span>
+  </div>
+</section>
+"""
+
+
+_AU_SHIPPING_BLOCK = """
+<div class="ux-labels-values ux-labels-values--shipping">
+  <div class="ux-labels-values__values-content">
+    <div>AU $12.99 delivery in 2-4 days</div>
+    <div>Get it between Tue, 26 May and Thu, 28 May</div>
+  </div>
+</div>
+"""
+
+
+_AU_FREE_SHIPPING_BLOCK = """
+<div class="ux-labels-values ux-labels-values--shipping">
+  <div class="ux-labels-values__values-content">
+    <div>Free postage</div>
+  </div>
+</div>
+"""
+
+
+_AU_QTY_BLOCK = """
+<div class="x-quantity__availability"><span>More than 10 available</span></div>
+"""
+
+
+def _au_html(*blocks: str) -> str:
+    return f"<html><body><h1 class='x-item-title'><span>Test title</span></h1>{''.join(blocks)}</body></html>"
+
+
+class TestEbayAuTerminalStatus(unittest.TestCase):
+    """AU-only: terminal status banner forces price=99.99, stock=0 when scrape misses."""
+
+    def test_ux_message_title_with_no_price_returns_99_99(self):
+        html = _au_html(
+            "<div class='ux-message__title'><span class='ux-textspans'>This listing was ended by the seller</span></div>"
+        )
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result, {"price": 99.99, "stock": 0, "title": "Test title"})
+
+    def test_hotness_signal_with_no_price_returns_99_99(self):
+        html = _au_html(
+            "<div data-testid='ux-hotness-signal-text'><span class='signal--time-sensitive'>Selling fast</span></div>"
+        )
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result, {"price": 99.99, "stock": 0, "title": "Test title"})
+
+    def test_status_message_with_no_price_returns_99_99(self):
+        html = _au_html(
+            "<div class='ux-layout-section__textual-display--statusMessage'><span>This listing has ended.</span></div>"
+        )
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result, {"price": 99.99, "stock": 0, "title": "Test title"})
+
+    def test_page_notice_with_no_price_returns_99_99(self):
+        html = _au_html(
+            "<div class='page-notice__title'><span>Item not available</span></div>"
+        )
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result, {"price": 99.99, "stock": 0, "title": "Test title"})
+
+    def test_valid_price_and_stock_without_terminal_selector_unchanged(self):
+        html = _au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK)
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result["price"], 50.0)
+        self.assertEqual(result["stock"], 10)
+
+    def test_valid_price_and_stock_with_terminal_selector_does_not_override(self):
+        """Both price and stock present: terminal selector must NOT downgrade to 99.99."""
+        html = _au_html(
+            _AU_PRICE_BLOCK,
+            _AU_QTY_BLOCK,
+            "<div data-testid='ux-hotness-signal-text'><span class='signal--time-sensitive'>Selling fast</span></div>",
+        )
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result["price"], 50.0)
+        self.assertEqual(result["stock"], 10)
+
+    def test_no_price_no_terminal_returns_none(self):
+        html = "<html><body><h1 class='x-item-title'><span>Naked page</span></h1></body></html>"
+        self.assertIsNone(_parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1"))
+
+
+class TestEbayAuShippingAddOn(unittest.TestCase):
+    """AU-only: scraped item price gets shipping added when shipping row is visible."""
+
+    def test_paid_shipping_is_added_to_price(self):
+        html = _au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK, _AU_SHIPPING_BLOCK)
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result["price"], 62.99)
+        self.assertEqual(result["stock"], 10)
+
+    def test_free_shipping_does_not_change_price(self):
+        html = _au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK, _AU_FREE_SHIPPING_BLOCK)
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result["price"], 50.0)
+
+    def test_missing_shipping_row_leaves_price_unchanged(self):
+        html = _au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK)
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result["price"], 50.0)
+
+    def test_terminal_fallback_ignores_shipping(self):
+        """The 99.99 sentinel must not be inflated by shipping."""
+        html = _au_html(
+            _AU_SHIPPING_BLOCK,
+            "<div class='ux-message__title'><span class='ux-textspans'>Out of stock</span></div>",
+        )
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result, {"price": 99.99, "stock": 0, "title": "Test title"})
+
+    def test_shipping_amount_helper_parses_au_dollar(self):
+        soup = BeautifulSoup(_AU_SHIPPING_BLOCK, "lxml")
+        self.assertEqual(EbayParser.extract_au_shipping_amount(soup), 12.99)
+
+    def test_shipping_amount_helper_returns_zero_for_free(self):
+        soup = BeautifulSoup(_AU_FREE_SHIPPING_BLOCK, "lxml")
+        self.assertEqual(EbayParser.extract_au_shipping_amount(soup), 0.0)
 
 
 if __name__ == "__main__":

@@ -409,14 +409,30 @@ def _parse_fast_html(html: str, url: str) -> Optional[dict]:
 
     title = EbayParser.extract_title(soup)
 
+    needs_terminal_check = price is None or stock is None
+    if needs_terminal_check and EbayParser.has_au_terminal_status(soup):
+        return {
+            "price": 99.99,
+            "stock": 0,
+            "title": title or EbayParser.extract_title(soup),
+        }
+
     if price is None and not EbayParser.is_valid_listing(soup, html):
         return None
 
     if price is None:
         return None
 
+    final_price = float(price)
+    shipping = EbayParser.extract_au_shipping_amount(soup)
+    if shipping is not None and shipping > 0:
+        try:
+            final_price = round(final_price + float(shipping), 2)
+        except (TypeError, ValueError):
+            pass
+
     return {
-        "price": float(price),
+        "price": final_price,
         "stock": int(stock) if stock is not None else None,
         "title": title,
     }

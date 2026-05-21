@@ -28,7 +28,7 @@ from .ebay_common import (
     _is_challenge_or_blocked,
     _looks_like_product_html,
     _normalize_url,
-    _parse_html_to_result,
+    _parse_html_to_result_au,
     close_ebay_market_session,
     scrape_ebay_for_market,
 )
@@ -191,7 +191,7 @@ def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
                 http_attempt + 1, url[:70], time.monotonic() - t0, status, err,
             )
             if html and not err:
-                parsed = _parse_html_to_result(html, url)
+                parsed = _parse_html_to_result_au(html, url)
                 if parsed is not None:
                     logger.info(
                         "eBay AU HTTP-first OK %s price=%s total=%.2fs",

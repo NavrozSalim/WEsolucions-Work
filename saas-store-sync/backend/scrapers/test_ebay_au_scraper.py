@@ -59,7 +59,7 @@ class TestScrapeEbayAuOrchestration(unittest.TestCase):
     def test_http_first_hit_returns_immediately(self):
         hit = {"price": 35.0, "stock": 1, "title": "T"}
         with patch.object(au.EbayHTTP, "fetch", return_value=("<html>x</html>", 200, "")), \
-             patch.object(au, "_parse_html_to_result", return_value=hit), \
+             patch.object(au, "_parse_html_to_result_au", return_value=hit), \
              patch.object(au, "_ensure_cookies_in_http_client") as cookies_mock, \
              patch.object(au, "scrape_ebay_au_fast") as fast_mock, \
              patch.object(au, "scrape_ebay_for_market") as full_mock:
@@ -72,7 +72,7 @@ class TestScrapeEbayAuOrchestration(unittest.TestCase):
     def test_http_first_ended_listing_is_terminal(self):
         ended = {"price": None, "stock": 0, "title": "Ended item"}
         with patch.object(au.EbayHTTP, "fetch", return_value=("<html>ended</html>", 200, "")), \
-             patch.object(au, "_parse_html_to_result", return_value=ended), \
+             patch.object(au, "_parse_html_to_result_au", return_value=ended), \
              patch.object(au, "scrape_ebay_au_fast") as fast_mock, \
              patch.object(au, "scrape_ebay_for_market") as full_mock:
             result = au.scrape_ebay_au(_TEST_URL, "AU", {})
@@ -166,7 +166,7 @@ class TestScrapeEbayAuOrchestration(unittest.TestCase):
             return parse_results.pop(0)
 
         with patch.object(au.EbayHTTP, "fetch", side_effect=fetch_side) as fetch_mock, \
-             patch.object(au, "_parse_html_to_result", side_effect=parse_side), \
+             patch.object(au, "_parse_html_to_result_au", side_effect=parse_side), \
              patch.object(au, "scrape_ebay_au_fast") as fast_mock, \
              patch.object(au, "scrape_ebay_for_market") as full_mock:
             result = au.scrape_ebay_au(_TEST_URL, "AU", {})
@@ -188,7 +188,7 @@ class TestScrapeEbayAuOrchestration(unittest.TestCase):
         """HTTP succeeded but parser says 'not a real PDP' (returns None) → keep trying."""
         full_hit = {"price": 55.0, "stock": 2, "title": "T"}
         with patch.object(au.EbayHTTP, "fetch", return_value=("<html>...</html>", 200, "")), \
-             patch.object(au, "_parse_html_to_result", return_value=None), \
+             patch.object(au, "_parse_html_to_result_au", return_value=None), \
              patch.object(au, "scrape_ebay_au_fast", return_value=None), \
              patch.object(au, "scrape_ebay_for_market", return_value=full_hit) as full_mock:
             result = au.scrape_ebay_au(_TEST_URL, "AU", {})
