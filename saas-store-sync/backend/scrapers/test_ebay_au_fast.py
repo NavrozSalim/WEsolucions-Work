@@ -3,7 +3,11 @@ import os
 import unittest
 from unittest.mock import patch
 
-from scrapers.ebay_au_fast import _parse_fast_html, fast_scrape_enabled
+from scrapers.ebay_au_fast import (
+    _challenge_in_html,
+    _parse_fast_html,
+    fast_scrape_enabled,
+)
 
 
 class TestFastScrapeEnabled(unittest.TestCase):
@@ -35,6 +39,17 @@ class TestParseFastHtml(unittest.TestCase):
         self.assertIsNotNone(out)
         self.assertEqual(out["price"], 9.99)
         self.assertEqual(out["stock"], 20)
+
+
+class TestChallengeDetection(unittest.TestCase):
+    def test_challenge_in_html_detects_captcha(self):
+        html = "<html><body><h1>Pardon our interruption</h1></body></html>"
+        self.assertTrue(_challenge_in_html(html))
+
+    def test_parse_fast_html_marks_challenge(self):
+        html = "<html><body>checking your browser before you access ebay</body></html>"
+        out = _parse_fast_html(html, "https://www.ebay.com.au/itm/1")
+        self.assertIsNone(out)
 
 
 if __name__ == "__main__":

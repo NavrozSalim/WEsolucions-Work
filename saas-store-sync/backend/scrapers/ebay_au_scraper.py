@@ -7,6 +7,7 @@ import time
 
 from bs4 import BeautifulSoup
 
+from .ebay_au_proxies import proxies_configured
 from .ebay_au_fast import (
     _AU_BLOCKED_KEY,
     _AU_LAST_HTML_KEY,
@@ -72,17 +73,45 @@ def _http_first_disabled() -> bool:
     return os.environ.get("EBAY_AU_DISABLE_HTTP_FIRST", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _should_skip_fast_selenium(session: dict) -> bool:
+    """Skip fast Selenium when HTTP already saw a block/challenge on datacenter IP.
+
+    With residential proxies, HTTP and Selenium use a different IP so fast Selenium
+    is still worth trying.
+    """
+    if proxies_configured():
+        return False
+    if not session.get(_AU_BLOCKED_KEY):
+        return False
+    if os.environ.get("EBAY_AU_FORCE_FAST_SELENIUM", "").strip().lower() in ("1", "true", "yes", "on"):
+        return False
+    return True
+
+
+def _full_engine_max_attempts(session: dict) -> int | None:
+    """Full US-style retry count when proxies are on; otherwise cap after blocks."""
+    if proxies_configured():
+        return None
+    if session.get(_AU_BLOCKED_KEY):
+        raw = (os.environ.get("EBAY_AU_FULL_ENGINE_ATTEMPTS") or "1").strip()
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 1
+    return None
+
+
 def _note_au_html(session: dict, html: str | None, err: str | None = None) -> None:
     if html:
         session[_AU_LAST_HTML_KEY] = html
-        if _looks_like_product_html(html):
+        blocked, reason = _is_challenge_or_blocked(html)
+        if blocked:
+            session[_AU_BLOCKED_KEY] = reason
+            session.pop(_AU_PRODUCT_HTML_KEY, None)
+        elif _looks_like_product_html(html):
             session[_AU_PRODUCT_HTML_KEY] = True
             session.pop(_AU_BLOCKED_KEY, None)
-        else:
-            blocked, reason = _is_challenge_or_blocked(html)
-            if blocked:
-                session[_AU_BLOCKED_KEY] = reason
-    if err and (err.startswith("http_") or err in ("challenge", "blocked")):
+    if err and (err.startswith("http_") or err in ("challenge", "blocked", "not_product_like")):
         session[_AU_BLOCKED_KEY] = session.get(_AU_BLOCKED_KEY) or err
 
 
@@ -105,7 +134,8 @@ def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
     on top for speed when cookies are healthy:
 
       1. **HTTP-first** with pre-loaded AU cookies (~1-2s typical hit).
-      2. **Cookie-based fast Selenium** (eager load + short DOM wait).
+      2. **Cookie-based fast Selenium** (eager load + short DOM wait) — skipped when
+         HTTP already saw a challenge (same IP/cookies → same block, ~45s wasted).
       3. **Full ``scrape_ebay_for_market`` engine** — the same proven HTTP +
          warm-Selenium + cookie-handoff retry loop the US scraper uses, so a
          single fast-path miss never causes an immediate failure.
@@ -137,8 +167,10 @@ def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
                     url[:70], parsed.get("price"), time.monotonic() - t_start,
                 )
                 return parsed
+            if not session.get(_AU_PRODUCT_HTML_KEY):
+                session[_AU_BLOCKED_KEY] = session.get(_AU_BLOCKED_KEY) or "not_product_like"
 
-    if fast_scrape_enabled():
+    if fast_scrape_enabled() and not _should_skip_fast_selenium(session):
         t0 = time.monotonic()
         fast = scrape_ebay_au_fast(vendor_url, region, session)
         logger.info(
@@ -153,11 +185,21 @@ def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
                 url[:70], fast.get("price"), time.monotonic() - t_start,
             )
             return fast
+    elif fast_scrape_enabled() and _should_skip_fast_selenium(session):
+        logger.info(
+            "eBay AU skip fast_selenium (HTTP blocked=%s) url=%s",
+            session.get(_AU_BLOCKED_KEY),
+            url[:70],
+        )
 
     _ensure_cookies_in_http_client(session)
     t0 = time.monotonic()
     result = scrape_ebay_for_market(
-        vendor_url, eff_region, session, market=EBAY_MARKET_AU,
+        vendor_url,
+        eff_region,
+        session,
+        market=EBAY_MARKET_AU,
+        max_attempts=_full_engine_max_attempts(session),
     )
     logger.info(
         "eBay AU step=full_engine url=%s dt=%.2fs got_price=%s total=%.2fs",

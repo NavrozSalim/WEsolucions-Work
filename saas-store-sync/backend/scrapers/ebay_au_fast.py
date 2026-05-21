@@ -34,6 +34,7 @@ logger = logging.getLogger("scrapers.ebay_au_fast")
 EBAY_AU_HOME = "https://www.ebay.com.au"
 
 _DRIVER_KEY = _ebay_sk(EBAY_MARKET_AU, "fast_driver")
+_DRIVER_PROXY_KEY = _ebay_sk(EBAY_MARKET_AU, "fast_proxy_url")
 _COOKIES_LOADED_KEY = _ebay_sk(EBAY_MARKET_AU, "fast_cookies_loaded")
 _AU_BLOCKED_KEY = _ebay_sk(EBAY_MARKET_AU, "blocked")
 _AU_LAST_HTML_KEY = _ebay_sk(EBAY_MARKET_AU, "last_html")
@@ -83,6 +84,30 @@ def _page_load_timeout() -> int:
         return 18
 
 
+def _item_pageload_timeout() -> int:
+    """Shorter timeout for the PDP navigation (challenge pages can be huge)."""
+    raw = (os.environ.get("EBAY_AU_ITEM_LOAD_TIMEOUT_SEC") or "10").strip()
+    try:
+        return max(4, int(raw))
+    except ValueError:
+        return 10
+
+
+def _challenge_in_html(html: str) -> bool:
+    if not html:
+        return True
+    blocked, _ = _is_challenge_or_blocked(html)
+    return blocked
+
+
+def _mark_blocked(session: dict | None, html: str, reason: str = "challenge") -> None:
+    if session is None:
+        return
+    session[_AU_LAST_HTML_KEY] = html
+    session[_AU_BLOCKED_KEY] = reason
+    session.pop(_AU_PRODUCT_HTML_KEY, None)
+
+
 def _load_cookie_list() -> list[dict[str, Any]]:
     inline = (os.environ.get("EBAY_AU_COOKIES_JSON") or "").strip()
     if inline:
@@ -117,7 +142,7 @@ def load_cookies_for_http() -> list[dict[str, Any]]:
         return []
 
 
-def _create_fast_driver():
+def _create_fast_driver(*, proxy_url: str | None = None):
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service
@@ -135,6 +160,10 @@ def _create_fast_driver():
     options.add_argument("--blink-settings=imagesEnabled=false")
     options.add_argument("--log-level=3")
     options.add_argument("--lang=en-AU,en")
+    if proxy_url:
+        from .ebay_au_proxies import proxy_chrome_arg
+
+        options.add_argument(f"--proxy-server={proxy_chrome_arg(proxy_url)}")
     options.add_experimental_option("excludeSwitches", ["enable-logging", "enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     prefs = {
@@ -159,6 +188,34 @@ def _create_fast_driver():
 
 
 def _get_driver(session: dict | None):
+    proxy_url = None
+    if session is not None:
+        try:
+            from .ebay_au_proxies import (
+                acquire_proxy,
+                get_ebay_au_pool,
+                proxies_configured,
+                remember_proxy,
+            )
+
+            if proxies_configured():
+                pool = get_ebay_au_pool()
+                assignment = acquire_proxy(session, force_rotate=False)
+                if assignment:
+                    pool.wait_for_gap(assignment)
+                    remember_proxy(session, assignment)
+                    proxy_url = assignment.url
+                    bound = session.get(_DRIVER_PROXY_KEY)
+                    if _DRIVER_KEY in session and bound != proxy_url:
+                        try:
+                            session[_DRIVER_KEY].quit()
+                        except Exception:
+                            pass
+                        session.pop(_DRIVER_KEY, None)
+                        session.pop(_COOKIES_LOADED_KEY, None)
+        except Exception as exc:
+            logger.debug("eBay AU fast proxy bind failed: %s", exc)
+
     if session is not None and _DRIVER_KEY in session:
         driver = session[_DRIVER_KEY]
         try:
@@ -172,9 +229,11 @@ def _get_driver(session: dict | None):
             session.pop(_DRIVER_KEY, None)
             session.pop(_COOKIES_LOADED_KEY, None)
 
-    driver = _create_fast_driver()
+    driver = _create_fast_driver(proxy_url=proxy_url)
     if session is not None:
         session[_DRIVER_KEY] = driver
+        if proxy_url:
+            session[_DRIVER_PROXY_KEY] = proxy_url
     return driver
 
 
@@ -264,12 +323,8 @@ def _clean_text(el) -> str:
     return el.get_text(" ", strip=True) if el else ""
 
 
-def _wait_for_price_dom(driver, max_wait_sec: float) -> None:
-    """Poll for any eBay price/title element rather than blindly sleeping.
-
-    Returns as soon as the primary price selector renders. Caps at
-    ``max_wait_sec`` and returns even on miss (parser may still find a fallback).
-    """
+def _wait_for_price_dom(driver, max_wait_sec: float, session: dict | None = None) -> bool:
+    """Poll for price/title DOM. Returns False when a challenge page is detected."""
     from selenium.webdriver.common.by import By
 
     deadline = time.monotonic() + max(0.4, max_wait_sec)
@@ -283,16 +338,20 @@ def _wait_for_price_dom(driver, max_wait_sec: float) -> None:
     )
     while time.monotonic() < deadline:
         try:
+            html = driver.page_source or ""
+            if _challenge_in_html(html[:150_000]):
+                _mark_blocked(session, html)
+                return False
             for by, sel in selectors:
                 els = driver.find_elements(by, sel)
                 for el in els:
                     txt = (el.text or "").strip()
                     if txt:
-                        return
+                        return True
         except Exception:
             pass
         time.sleep(0.15)
-    return
+    return True
 
 
 def _stock_from_text(text: str) -> Optional[int]:
@@ -381,8 +440,56 @@ def scrape_ebay_au_fast(vendor_url: str, region: str, session: dict | None = Non
 
         driver = _get_driver(session)
         _inject_cookies(driver, session)
-        driver.get(url)
-        _wait_for_price_dom(driver, _page_wait_seconds())
+
+        item_timeout = _item_pageload_timeout()
+        prev_timeout = None
+        try:
+            prev_timeout = driver.timeouts.page_load
+        except Exception:
+            pass
+        try:
+            driver.set_page_load_timeout(item_timeout)
+        except Exception:
+            pass
+
+        try:
+            driver.get(url)
+        except Exception:
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+
+        try:
+            if prev_timeout is not None:
+                driver.set_page_load_timeout(int(prev_timeout))
+            else:
+                driver.set_page_load_timeout(_page_load_timeout())
+        except Exception:
+            pass
+
+        html = driver.page_source or ""
+        if _challenge_in_html(html[:150_000]):
+            _mark_blocked(session, html)
+            try:
+                from .ebay_au_proxies import (
+                    mark_proxy_blocked,
+                    proxies_configured,
+                    session_proxy_assignment,
+                )
+
+                if proxies_configured():
+                    mark_proxy_blocked(session_proxy_assignment(session))
+            except Exception:
+                pass
+            logger.info("eBay AU fast: early challenge bail %s", url[:80])
+            return None
+
+        if not _wait_for_price_dom(driver, _page_wait_seconds(), session):
+            html = driver.page_source or ""
+            logger.info("eBay AU fast: challenge during DOM wait %s", url[:80])
+            return None
+
         html = driver.page_source or ""
         _note_au_html(session, html)
 
@@ -424,6 +531,7 @@ def close_ebay_au_fast_session(session: dict | None) -> None:
         return
     driver = session.pop(_DRIVER_KEY, None)
     session.pop(_COOKIES_LOADED_KEY, None)
+    session.pop(_DRIVER_PROXY_KEY, None)
     if driver:
         try:
             driver.quit()

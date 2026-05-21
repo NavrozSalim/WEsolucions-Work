@@ -1245,9 +1245,22 @@ class EbayParser:
 
 class EbayHTTP:
     @staticmethod
-    def _get_client(session_dict: dict, market: str):
+    def _get_client(session_dict: dict, market: str, *, proxy_url: str | None = None):
         _migrate_legacy_ebay_session(session_dict, market)
-        client = session_dict.get(_ebay_sk(market, "http_client")) if session_dict else None
+        proxy_key = _ebay_sk(market, "http_proxy_url")
+        client_key = _ebay_sk(market, "http_client")
+        bound_proxy = (session_dict or {}).get(proxy_key)
+        if proxy_url is not None and bound_proxy != proxy_url:
+            old = (session_dict or {}).pop(client_key, None)
+            if old:
+                try:
+                    old.close()
+                except Exception:
+                    pass
+            if session_dict is not None:
+                session_dict[proxy_key] = proxy_url
+
+        client = session_dict.get(client_key) if session_dict else None
         if client:
             return client
 
@@ -1256,7 +1269,7 @@ class EbayHTTP:
 
             client = curl_requests.Session()
             if session_dict is not None:
-                session_dict[_ebay_sk(market, "http_client")] = client
+                session_dict[client_key] = client
             return client
         except Exception:
             logger.debug("curl_cffi unavailable for eBay HTTP session")
@@ -1283,7 +1296,100 @@ class EbayHTTP:
         }
 
     @classmethod
+    def _fetch_au_via_proxies(
+        cls,
+        url: str,
+        region: str,
+        session_dict: dict,
+        market: str,
+        headers: Dict[str, str],
+    ) -> Tuple[Optional[str], Optional[int], str]:
+        from .ebay_au_proxies import (
+            acquire_proxy,
+            bind_curl_client,
+            http_retry_limit,
+            mark_proxy_blocked,
+            mark_proxy_success,
+            proxies_configured,
+            remember_proxy,
+        )
+        from .ebay_au_proxies import get_ebay_au_pool
+
+        if not proxies_configured():
+            return None, None, ""
+
+        pool = get_ebay_au_pool()
+        last_err = "proxy_exhausted"
+        attempts = http_retry_limit()
+
+        for attempt in range(attempts):
+            assignment = acquire_proxy(session_dict, force_rotate=attempt > 0)
+            if assignment is None:
+                break
+            pool.wait_for_gap(assignment)
+            remember_proxy(session_dict, assignment)
+
+            client = cls._get_client(session_dict, market, proxy_url=assignment.url)
+            if client is None:
+                return None, None, "curl_cffi_not_installed"
+            bind_curl_client(client, assignment)
+
+            try:
+                resp = client.get(
+                    url,
+                    headers=headers,
+                    timeout=_ebay_http_timeout_sec(),
+                    allow_redirects=True,
+                    impersonate="chrome131",
+                )
+            except Exception as exc:
+                last_err = f"http_error: {exc}"
+                mark_proxy_blocked(assignment)
+                continue
+
+            html = getattr(resp, "text", "") or ""
+            status = getattr(resp, "status_code", None)
+
+            if session_dict is not None:
+                session_dict[_ebay_sk(market, "last_http_url")] = getattr(resp, "url", url)
+
+            if status != 200:
+                last_err = f"http_{status}"
+                mark_proxy_blocked(assignment)
+                continue
+
+            blocked, reason = _is_challenge_or_blocked(html)
+            if blocked:
+                last_err = reason
+                mark_proxy_blocked(assignment)
+                continue
+
+            if not _looks_like_product_html(html):
+                last_err = "not_product_like"
+                mark_proxy_blocked(assignment)
+                continue
+
+            mark_proxy_success(assignment)
+            logger.info(
+                "eBay AU HTTP via proxy OK proxy=%s url=%s",
+                assignment.label,
+                url[:70],
+            )
+            return html, status, ""
+
+        return None, None, last_err
+
+    @classmethod
     def fetch(cls, url: str, region: str, session_dict: dict, market: str) -> Tuple[Optional[str], Optional[int], str]:
+        headers = cls._get_headers(url, region, session_dict, market)
+
+        if market == EBAY_MARKET_AU:
+            html, status, err = cls._fetch_au_via_proxies(
+                url, region, session_dict or {}, market, headers,
+            )
+            if html is not None or err not in ("", "proxy_exhausted"):
+                return html, status, err
+
         client = cls._get_client(session_dict, market)
         if client is None:
             return None, None, "curl_cffi_not_installed"
@@ -1353,7 +1459,7 @@ class EbayHTTP:
 
 class EbayDriver:
     @staticmethod
-    def _create_driver():
+    def _create_driver(*, proxy_url: str | None = None):
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
         from selenium.webdriver.chrome.service import Service
@@ -1375,6 +1481,11 @@ class EbayDriver:
 
         ua = _random_user_agent()
         options.add_argument(f"--user-agent={ua}")
+
+        if proxy_url:
+            from .ebay_au_proxies import proxy_chrome_arg
+
+            options.add_argument(f"--proxy-server={proxy_chrome_arg(proxy_url)}")
 
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
@@ -1407,24 +1518,74 @@ class EbayDriver:
         return driver
 
     @staticmethod
-    def get_or_create(session_dict: dict, market: str):
+    def _au_proxy_url(session_dict: dict | None, *, force_rotate: bool = False) -> str | None:
+        if session_dict is None:
+            return None
+        from .ebay_au_proxies import (
+            acquire_proxy,
+            get_ebay_au_pool,
+            proxies_configured,
+            remember_proxy,
+        )
+
+        if not proxies_configured():
+            return None
+        pool = get_ebay_au_pool()
+        assignment = acquire_proxy(session_dict, force_rotate=force_rotate)
+        if assignment is None:
+            return None
+        pool.wait_for_gap(assignment)
+        remember_proxy(session_dict, assignment)
+        return assignment.url
+
+    @staticmethod
+    def get_or_create(session_dict: dict, market: str, *, force_proxy_rotate: bool = False):
         _migrate_legacy_ebay_session(session_dict, market)
         key = _ebay_sk(market, "selenium_driver")
+        proxy_key = _ebay_sk(market, "selenium_proxy_url")
+
+        proxy_url = None
+        if market == EBAY_MARKET_AU:
+            proxy_url = EbayDriver._au_proxy_url(session_dict, force_rotate=force_proxy_rotate)
+
         if session_dict is not None and key in session_dict:
             driver = session_dict[key]
-            try:
-                _ = driver.title
-                return driver
-            except Exception:
+            bound_proxy = session_dict.get(proxy_key)
+            if proxy_url and bound_proxy != proxy_url:
                 try:
                     driver.quit()
                 except Exception:
                     pass
+                session_dict.pop(key, None)
+            else:
+                try:
+                    _ = driver.title
+                    return driver
+                except Exception:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                    session_dict.pop(key, None)
 
-        driver = EbayDriver._create_driver()
+        driver = EbayDriver._create_driver(proxy_url=proxy_url)
         if session_dict is not None:
             session_dict[key] = driver
+            if proxy_url:
+                session_dict[proxy_key] = proxy_url
         return driver
+
+    @staticmethod
+    def invalidate_au_proxy(session_dict: dict | None) -> None:
+        """Close Selenium and force the next AU fetch onto a fresh proxy."""
+        if session_dict is None:
+            return
+        EbayDriver.close(session_dict, EBAY_MARKET_AU)
+        session_dict.pop(_ebay_sk(EBAY_MARKET_AU, "selenium_proxy_url"), None)
+        session_dict.pop(_ebay_sk(EBAY_MARKET_AU, "http_proxy_url"), None)
+        from .ebay_au_proxies import rotate_proxy
+
+        rotate_proxy(session_dict)
 
     @staticmethod
     def close(session_dict: dict, market: str):
@@ -1690,9 +1851,19 @@ class EbayBrowserSession:
         return last_html
 
     @classmethod
-    def warm_and_fetch(cls, url: str, region: str, session_dict: dict, market: str) -> Tuple[Optional[str], str]:
+    def warm_and_fetch(
+        cls,
+        url: str,
+        region: str,
+        session_dict: dict,
+        market: str,
+        *,
+        force_proxy_rotate: bool = False,
+    ) -> Tuple[Optional[str], str]:
         try:
-            driver = EbayDriver.get_or_create(session_dict, market)
+            driver = EbayDriver.get_or_create(
+                session_dict, market, force_proxy_rotate=force_proxy_rotate,
+            )
         except Exception as exc:
             return None, f"selenium_init: {exc}"
 
@@ -1745,7 +1916,19 @@ class EbayBrowserSession:
                 return None, "empty_browser_html"
 
             blocked, reason = _is_challenge_or_blocked(html)
-            if blocked and "splashui/challenge" in current_url.lower():
+            if blocked:
+                if market == EBAY_MARKET_AU:
+                    from .ebay_au_proxies import (
+                        mark_proxy_blocked,
+                        proxies_configured,
+                        session_proxy_assignment,
+                    )
+
+                    if proxies_configured():
+                        mark_proxy_blocked(session_proxy_assignment(session_dict))
+                        EbayDriver.invalidate_au_proxy(session_dict)
+                if "splashui/challenge" in current_url.lower():
+                    return html, f"browser_{reason}"
                 return html, f"browser_{reason}"
 
             return html, ""
@@ -1829,6 +2012,11 @@ def scrape_ebay_for_market(
     for attempt in range(attempts):
         if attempt > 0:
             backoff_delay(attempt, base=2.0, jitter=1.5)
+            if market == EBAY_MARKET_AU:
+                from .ebay_au_proxies import proxies_configured
+
+                if proxies_configured():
+                    EbayDriver.invalidate_au_proxy(session)
 
         try_urls = candidate_urls if attempt % 2 == 0 else list(reversed(candidate_urls))
 
@@ -1847,7 +2035,13 @@ def scrape_ebay_for_market(
                     _ebay_debug_write_html(session, html, "http_cold", candidate)
                     return parsed
 
-            browser_html, browser_err = EbayBrowserSession.warm_and_fetch(candidate, eff_region, session, market)
+            browser_html, browser_err = EbayBrowserSession.warm_and_fetch(
+                candidate,
+                eff_region,
+                session,
+                market,
+                force_proxy_rotate=attempt > 0,
+            )
             if browser_html:
                 last_browser_html = browser_html
                 parsed = _parse_html_to_result(browser_html, candidate)

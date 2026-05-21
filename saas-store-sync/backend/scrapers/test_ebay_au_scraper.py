@@ -20,8 +20,13 @@ class TestScrapeEbayAuOrchestration(unittest.TestCase):
             au, "fast_scrape_enabled", return_value=True,
         )
         self.cookies_patch.start()
+        self.proxy_patch = patch.object(
+            au, "proxies_configured", return_value=False,
+        )
+        self.proxy_patch.start()
 
     def tearDown(self):
+        self.proxy_patch.stop()
         self.cookies_patch.stop()
 
     def test_http_first_hit_returns_immediately(self):
@@ -48,17 +53,40 @@ class TestScrapeEbayAuOrchestration(unittest.TestCase):
         fast_mock.assert_not_called()
         full_mock.assert_not_called()
 
-    def test_http_blocked_falls_through_to_fast_selenium(self):
-        hit = {"price": 22.5, "stock": 3, "title": "T"}
-        with patch.object(au.EbayHTTP, "fetch", return_value=("", None, "challenge")), \
-             patch.object(au, "_parse_html_to_result") as parse_mock, \
-             patch.object(au, "scrape_ebay_au_fast", return_value=hit) as fast_mock, \
-             patch.object(au, "scrape_ebay_for_market") as full_mock:
-            result = au.scrape_ebay_au(_TEST_URL, "AU", {})
-        self.assertEqual(result, hit)
-        parse_mock.assert_not_called()
+    def test_http_blocked_skips_fast_selenium_goes_to_full_engine(self):
+        full_hit = {"price": 22.5, "stock": 3, "title": "T"}
+        session = {}
+        with patch.object(au, "proxies_configured", return_value=False), \
+             patch.object(au.EbayHTTP, "fetch", return_value=("", None, "challenge")), \
+             patch.object(au, "scrape_ebay_au_fast") as fast_mock, \
+             patch.object(au, "scrape_ebay_for_market", return_value=full_hit) as full_mock:
+            result = au.scrape_ebay_au(_TEST_URL, "AU", session)
+        self.assertEqual(result, full_hit)
+        fast_mock.assert_not_called()
+        full_mock.assert_called_once()
+        self.assertEqual(session.get(au._AU_BLOCKED_KEY), "challenge")
+
+    def test_proxies_enabled_keeps_fast_selenium_after_http_block(self):
+        full_hit = {"price": 22.5, "stock": 3, "title": "T"}
+        fast_hit = {"price": 19.0, "stock": 2, "title": "Fast"}
+        session = {}
+        with patch.object(au, "proxies_configured", return_value=True), \
+             patch.object(au.EbayHTTP, "fetch", return_value=("", None, "challenge")), \
+             patch.object(au, "scrape_ebay_au_fast", return_value=fast_hit) as fast_mock, \
+             patch.object(au, "scrape_ebay_for_market", return_value=full_hit) as full_mock:
+            result = au.scrape_ebay_au(_TEST_URL, "AU", session)
+        self.assertEqual(result, fast_hit)
         fast_mock.assert_called_once()
         full_mock.assert_not_called()
+
+    def test_proxies_enabled_uses_full_retry_count(self):
+        with patch.object(au, "proxies_configured", return_value=True), \
+             patch.object(au.EbayHTTP, "fetch", return_value=("", None, "challenge")), \
+             patch.object(au, "scrape_ebay_au_fast", return_value=None), \
+             patch.object(au, "scrape_ebay_for_market", return_value={"price": 1.0}) as full_mock:
+            au.scrape_ebay_au(_TEST_URL, "AU", {})
+        _, kwargs = full_mock.call_args
+        self.assertIsNone(kwargs.get("max_attempts"))
 
     def test_both_fast_paths_miss_runs_full_engine(self):
         full_hit = {"price": 99.0, "stock": 7, "title": "T"}
