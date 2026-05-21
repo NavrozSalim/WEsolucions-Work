@@ -331,9 +331,15 @@ def _ebay_http_first_enabled(region: Optional[str]) -> bool:
     return (os.environ.get("EBAY_HTTP_FIRST", "1") or "1").strip().lower() in trueish
 
 
+_CHROME_131_WIN_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
 def _random_user_agent() -> str:
     agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        _CHROME_131_WIN_UA,
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edg/131.0.0.0 Safari/537.36",
@@ -1276,18 +1282,30 @@ class EbayHTTP:
 
     @staticmethod
     def _get_headers(url: str, region: str, session_dict: dict, market: str) -> Dict[str, str]:
+        is_au = (market == EBAY_MARKET_AU) or (region or "").upper() == "AU"
+
         ua = None
         if session_dict is not None:
             ua = session_dict.get(_ebay_sk(market, "last_user_agent"))
         if not ua:
-            ua = _random_user_agent()
+            # For AU pin a UA that matches curl_cffi ``impersonate="chrome131"``; mixing
+            # Edge / Chrome 132 UAs with Chrome 131 TLS fingerprint is a strong bot signal
+            # and was correlated with the ``http_403`` cascade we hit in production logs.
+            ua = _CHROME_131_WIN_UA if is_au else _random_user_agent()
             if session_dict is not None:
                 session_dict[_ebay_sk(market, "last_user_agent")] = ua
+
+        # AU PDPs respond differently when the client advertises en-AU. We were sending
+        # ``en-US,en;q=0.9`` to ``ebay.com.au`` which trips bot heuristics; Costco AU
+        # on the same proxy pool works fine because it sends ``en-AU,en;q=0.9``.
+        accept_language = (
+            "en-AU,en;q=0.9,en-US;q=0.8" if is_au else "en-US,en;q=0.9"
+        )
 
         return {
             "User-Agent": ua,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Language": accept_language,
             "Referer": _ebay_region_referer(region),
             "Cache-Control": "max-age=0",
             "Pragma": "no-cache",

@@ -82,6 +82,18 @@ def _http_first_warm_retries() -> int:
         return 1
 
 
+def _bail_on_http_block_when_proxied() -> bool:
+    """When HTTP-first already exhausted the proxy pool with ``http_403``/``blocked``,
+    repeating the same HTTP call inside the full engine just burns 20-40s per item
+    (proxies are still in cooldown and we can't auth Chrome --proxy-server). Default on.
+    """
+    raw = (os.environ.get("EBAY_AU_BAIL_ON_HTTP_BLOCK") or "1").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+_PROXY_BLOCK_ERRORS = {"http_403", "http_401", "http_429", "blocked", "challenge"}
+
+
 def _should_skip_fast_selenium(session: dict) -> bool:
     """Skip fast Selenium when proxies are on or HTTP already saw a block.
 
@@ -99,10 +111,15 @@ def _should_skip_fast_selenium(session: dict) -> bool:
 
 
 def _full_engine_max_attempts(session: dict) -> int | None:
-    """Full US-style retry count when proxies are on; otherwise cap after blocks."""
-    if proxies_configured():
-        return None
-    if session.get(_AU_BLOCKED_KEY):
+    """Cap full-engine retries.
+
+    When proxies are on AND we already saw an HTTP block, repeating the full engine
+    (which just calls ``EbayHTTP.fetch`` again on the same cooled-down proxies) is
+    pure waste. Cap at 1 attempt in that case. Otherwise let the engine pick its
+    default (``RETRY_LIMIT``).
+    """
+    blocked = bool(session.get(_AU_BLOCKED_KEY))
+    if blocked:
         raw = (os.environ.get("EBAY_AU_FULL_ENGINE_ATTEMPTS") or "1").strip()
         try:
             return max(1, int(raw))
@@ -160,6 +177,8 @@ def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
     url = _normalize_url(vendor_url, eff_region)
     t_start = time.monotonic()
 
+    http_block_err: str | None = None
+
     if _ebay_http_first_enabled(eff_region) and not _http_first_disabled():
         _ensure_cookies_in_http_client(session)
         http_attempts = 1 + _http_first_warm_retries()
@@ -188,7 +207,24 @@ def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
                     session[_AU_BLOCKED_KEY] = session.get(_AU_BLOCKED_KEY) or "not_product_like"
             if err and err not in ("not_product_like",):
                 # Hard error (block, http_4xx/5xx) — break out and let next stage retry/rotate.
+                if err in _PROXY_BLOCK_ERRORS:
+                    http_block_err = err
                 break
+
+    # When proxies are on and HTTP-first exhausted the pool with a hard block
+    # (403/401/429/challenge), the full engine will just repeat the same blocked
+    # HTTP fetch on the same cooled-down proxies and waste 20-40s per item. Bail
+    # now so the catalog scrape moves on to the next URL quickly.
+    if (
+        http_block_err
+        and proxies_configured()
+        and _bail_on_http_block_when_proxied()
+    ):
+        logger.warning(
+            "eBay AU HTTP block (%s) under proxies — skipping full engine url=%s total=%.2fs",
+            http_block_err, url[:70], time.monotonic() - t_start,
+        )
+        return {"price": None, "stock": None, "title": _title_from_session_html(session)}
 
     if fast_scrape_enabled() and not _should_skip_fast_selenium(session):
         t0 = time.monotonic()
