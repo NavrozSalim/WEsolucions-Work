@@ -461,8 +461,32 @@ _AU_SHIPPING_JSON_ONLY = """
 """
 
 
+_AU_PRICE_5597 = """
+<section data-testid="x-item-price">
+  <div data-testid="x-price-primary">
+    <span class="ux-textspans">AU $55.97</span>
+  </div>
+</section>
+"""
+
+
+_AU_FREE_DELIVERY_BLOCK = """
+<div class="ux-labels-values ux-labels-values--shipping">
+  <div class="ux-labels-values__values-content">
+    <div>Free delivery in 1-2 days</div>
+    <div>Get it between Tue, 26 May and Wed, 27 May to 2762</div>
+  </div>
+</div>
+"""
+
+
 _AU_SHIPPING_GRAPHQL_SNIPPET = """
 <script>,\"converted\":null,\"original\":{\"__typename\":\"Price\",\"amount\":12.99,\"currency\":\"AUD\"}},\"shipToLocations\":[\"AUS\"],\"shippingServiceName\":\"Standard\"</script>
+"""
+
+
+_AU_PAID_GRAPHQL_599 = """
+<script>,\"converted\":null,\"original\":{\"__typename\":\"Price\",\"amount\":5.99,\"currency\":\"AUD\"}},\"shipToLocations\":[\"AUS\"],\"shippingServiceName\":\"Standard\"</script>
 """
 
 
@@ -605,6 +629,17 @@ class TestEbayAuShippingAddOn(unittest.TestCase):
         )
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
         self.assertEqual(result["price"], 62.99)
+
+    def test_free_delivery_ignores_graphql_paid_tier(self):
+        """Free delivery listing must not add a paid tier from embedded JSON."""
+        html = _au_html(
+            _AU_PRICE_5597,
+            _AU_QTY_BLOCK,
+            _AU_FREE_DELIVERY_BLOCK,
+            _AU_PAID_GRAPHQL_599,
+        )
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result["price"], 55.97)
 
 
 if __name__ == "__main__":

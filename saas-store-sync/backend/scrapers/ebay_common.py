@@ -576,6 +576,12 @@ class EbayParser:
         "returns.",
     )
 
+    _AU_FREE_SHIPPING_PHRASES = (
+        "free delivery",
+        "free postage",
+        "free shipping",
+    )
+
     TITLE_SELECTORS = [
         ".x-item-title__mainTitle span.ux-textspans",
         ".x-item-title__mainTitle span",
@@ -1339,6 +1345,23 @@ class EbayParser:
         return False
 
     @classmethod
+    def _au_shipping_indicates_free(cls, soup: BeautifulSoup, html: str = "") -> bool:
+        """True when the postage section says delivery is free."""
+        block = soup.select_one(cls.AU_SHIPPING_BLOCK_SELECTOR)
+        if block:
+            lower = block.get_text(" ", strip=True).lower()
+            if any(p in lower for p in cls._AU_FREE_SHIPPING_PHRASES):
+                return True
+        if html:
+            lower_html = html.lower()
+            pos = lower_html.find("ux-labels-values--shipping")
+            if pos >= 0:
+                window = lower_html[pos : pos + 5000]
+                if any(p in window for p in cls._AU_FREE_SHIPPING_PHRASES):
+                    return True
+        return False
+
+    @classmethod
     def _au_shipping_line_is_noise(cls, text: str) -> bool:
         lower = (text or "").lower()
         if not lower or len(lower) > 200:
@@ -1366,6 +1389,10 @@ class EbayParser:
         block = soup.select_one(cls.AU_SHIPPING_BLOCK_SELECTOR)
         if not block:
             return None
+
+        block_lower = block.get_text(" ", strip=True).lower()
+        if any(p in block_lower for p in cls._AU_FREE_SHIPPING_PHRASES):
+            return 0.0
 
         amounts: list[float] = []
         for node in block.select("div, span, p, li"):
@@ -1425,6 +1452,9 @@ class EbayParser:
         from_block = cls._extract_au_shipping_from_shipping_block(soup)
         if from_block is not None:
             return from_block
+
+        if cls._au_shipping_indicates_free(soup, html):
+            return 0.0
 
         if html:
             return cls._extract_au_shipping_from_embedded_html(html)
