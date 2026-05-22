@@ -57,14 +57,24 @@ PAGE_TIMEOUT = _env_int("HEB_PAGE_TIMEOUT_SEC", 15)
 PRICE_WAIT_TIMEOUT = _env_int("HEB_PRICE_WAIT_TIMEOUT_SEC", 6)
 PDP_READY_TIMEOUT = _env_int("HEB_PDP_READY_TIMEOUT_SEC", 10)
 HTTP_TIMEOUT_SEC = _env_int("HEB_HTTP_TIMEOUT_SEC", 12)
-HTTP_RETRIES = _env_int("HEB_HTTP_RETRIES", 1)
+HTTP_RETRIES = _env_int("HEB_HTTP_RETRIES", 0)
 HEB_HTTP_FIRST = _env_bool("HEB_HTTP_FIRST", True)
 SELENIUM_FALLBACK = _env_bool("HEB_SELENIUM_FALLBACK", True)
-BLOCK_COOLDOWN_SEC = _env_float("HEB_BLOCK_COOLDOWN_SEC", 300.0)
+BLOCK_COOLDOWN_SEC = _env_float("HEB_BLOCK_COOLDOWN_SEC", 600.0)
 HEB_HOME_WARMUP = _env_bool("HEB_HOME_WARMUP", False)
 HEB_HTTP_BOOTSTRAP_SELENIUM = _env_bool("HEB_HTTP_BOOTSTRAP_SELENIUM", True)
 _SESSION_BOOTSTRAPPED_KEY = "heb_us_http_bootstrapped"
 _SESSION_HTTP_WARMED_KEY = "heb_us_http_warmed"
+_GLOBAL_BOOTSTRAP_LOCK = threading.Lock()
+_PROXY_COOKIE_CACHE_LOCK = threading.Lock()
+_PROXY_COOKIE_CACHE: dict[int, tuple[float, list[dict]]] = {}
+HEB_PROXY_COOKIE_TTL_SEC = _env_float("HEB_PROXY_COOKIE_TTL_SEC", 1200.0)
+logger.info(
+    "HEB scraper config: http_first=%s selenium_fallback=%s bootstrap=%s "
+    "http_retries=%s block_cooldown=%ss proxy_ttl=%ss",
+    HEB_HTTP_FIRST, SELENIUM_FALLBACK, HEB_HTTP_BOOTSTRAP_SELENIUM,
+    HTTP_RETRIES, int(BLOCK_COOLDOWN_SEC), int(HEB_PROXY_COOKIE_TTL_SEC),
+)
 
 _HTTP_SESSION_KEY = "heb_us_http_client"
 _HTTP_PROXY_KEY = "heb_us_http_proxy"
@@ -208,6 +218,60 @@ def load_heb_cookies() -> list[dict]:
     return out
 
 
+
+
+def reset_proxy_cookie_cache_for_tests() -> None:
+    with _PROXY_COOKIE_CACHE_LOCK:
+        _PROXY_COOKIE_CACHE.clear()
+
+
+def _global_proxy_cookies(assignment: ProxyAssignment) -> Optional[list[dict]]:
+    if assignment is None:
+        return None
+    now = time.monotonic()
+    with _PROXY_COOKIE_CACHE_LOCK:
+        entry = _PROXY_COOKIE_CACHE.get(assignment.index)
+        if not entry:
+            return None
+        expires, cookies = entry
+        if now > expires:
+            _PROXY_COOKIE_CACHE.pop(assignment.index, None)
+            return None
+        return list(cookies)
+
+
+def _store_global_proxy_cookies(assignment: ProxyAssignment, cookies: list[dict]) -> None:
+    if assignment is None or not cookies:
+        return
+    with _PROXY_COOKIE_CACHE_LOCK:
+        _PROXY_COOKIE_CACHE[assignment.index] = (
+            time.monotonic() + max(60.0, float(HEB_PROXY_COOKIE_TTL_SEC)),
+            list(cookies),
+        )
+
+
+def _apply_proxy_cookies(session: dict, cookies: list[dict]) -> None:
+    session[_HTTP_COOKIES_CACHE_KEY] = list(cookies)
+    _clear_http_client(session)
+
+
+def _resolve_cookies_for_proxy(session: dict, assignment: ProxyAssignment) -> list[dict]:
+    """Cookies for HTTP on this proxy — prefer worker-shared bootstrap cache."""
+    global_c = _global_proxy_cookies(assignment)
+    if global_c:
+        session[_HTTP_COOKIES_CACHE_KEY] = global_c
+        return global_c
+    cached = session.get(_HTTP_COOKIES_CACHE_KEY)
+    if cached is not None:
+        return cached
+    if _env_bool("HEB_HTTP_USE_FILE_COOKIES", False) or not HEB_HTTP_BOOTSTRAP_SELENIUM:
+        parsed = load_heb_cookies()
+        session[_HTTP_COOKIES_CACHE_KEY] = parsed
+        return parsed
+    session[_HTTP_COOKIES_CACHE_KEY] = []
+    return []
+
+
 def _cookies_for_session(session: dict) -> list[dict]:
     if session is None:
         session = {}
@@ -219,8 +283,8 @@ def _cookies_for_session(session: dict) -> list[dict]:
     return parsed
 
 
-def _inject_http_cookies(session: dict, client) -> int:
-    cookies = _cookies_for_session(session)
+def _inject_http_cookies(session: dict, client, assignment: Optional[ProxyAssignment] = None) -> int:
+    cookies = _resolve_cookies_for_proxy(session, assignment) if assignment else _cookies_for_session(session)
     loaded = 0
     pairs: list[str] = []
     for c in cookies:
@@ -239,7 +303,9 @@ def _inject_http_cookies(session: dict, client) -> int:
         client.headers["Cookie"] = "; ".join(pairs)
     if loaded:
         logger.info("HEB HTTP: injected %d cookies into client", loaded)
-    elif cookies_configured():
+    elif cookies_configured() and (
+        _env_bool("HEB_HTTP_USE_FILE_COOKIES", False) or not HEB_HTTP_BOOTSTRAP_SELENIUM
+    ):
         logger.warning(
             "HEB HTTP: HEB_COOKIES_FILE/JSON is set but 0 usable cookies (expired or invalid format?)"
         )
@@ -285,41 +351,96 @@ def _selenium_cookies_to_heb_format(raw: list) -> list[dict]:
     return out
 
 
+_HEB_BOOTSTRAP_HOME_DWELL_SEC = _env_float("HEB_BOOTSTRAP_HOME_DWELL_SEC", 5.0)
+_HEB_BOOTSTRAP_CHALLENGE_WAIT_SEC = _env_float("HEB_BOOTSTRAP_CHALLENGE_WAIT_SEC", 8.0)
+
+
+def _selenium_page_is_challenged(driver) -> bool:
+    """True when current page is an Akamai/Cloudflare interstitial."""
+    try:
+        title = (driver.title or "").strip()
+    except Exception:
+        title = ""
+    if _heb_challenge_in_text(title):
+        return True
+    try:
+        body_snip = driver.execute_script(
+            "return (document.body && document.body.innerText || '').slice(0, 400);"
+        ) or ""
+    except Exception:
+        body_snip = ""
+    return _heb_challenge_in_text(body_snip)
+
+
 def _bootstrap_cookies_via_selenium(
     session: dict,
     assignment: ProxyAssignment,
     vendor_url: str,
 ) -> bool:
-    """Visit HEB through the same proxy in Chrome and capture fresh Akamai cookies."""
+    """Visit HEB homepage via the same proxy and capture fresh Akamai cookies.
+
+    Homepage-only by design: visiting ``vendor_url`` triggers a more aggressive
+    Akamai challenge and pollutes the captured jar with challenge-only cookies.
+    We also refuse to cache cookies if the homepage is still on the challenge
+    page after the dwell window, since those cookies will not bridge to HTTP.
+    """
+    existing = _global_proxy_cookies(assignment)
+    if existing:
+        _apply_proxy_cookies(session, existing)
+        logger.info(
+            "HEB bootstrap: reusing cached cookies for proxy %s (%d cookies)",
+            assignment.label,
+            len(existing),
+        )
+        return True
+
     proxy_conf = _url_to_proxy_conf(assignment.url)
     driver = None
     try:
         logger.info("HEB bootstrapping cookies via Selenium on proxy %s", assignment.label)
         driver = HebDriver.create(proxy_conf=proxy_conf)
         driver.get(HEB_HOME)
-        time.sleep(0.8)
-        _load_cookies(driver)
-        driver.get(HEB_HOME)
-        time.sleep(1.0)
-        try:
-            driver.get(vendor_url)
-            time.sleep(0.8)
-        except Exception:
-            pass
+        time.sleep(max(0.5, _HEB_BOOTSTRAP_HOME_DWELL_SEC))
+
+        if _env_bool("HEB_HTTP_USE_FILE_COOKIES", False):
+            try:
+                _load_cookies(driver)
+                driver.get(HEB_HOME)
+                time.sleep(1.5)
+            except Exception:
+                pass
+
+        deadline = time.monotonic() + max(0.0, _HEB_BOOTSTRAP_CHALLENGE_WAIT_SEC)
+        while time.monotonic() < deadline and _selenium_page_is_challenged(driver):
+            time.sleep(1.0)
+
+        if _selenium_page_is_challenged(driver):
+            logger.warning(
+                "HEB bootstrap: homepage still on Akamai challenge after %.1fs (proxy=%s) - skipping cache",
+                _HEB_BOOTSTRAP_CHALLENGE_WAIT_SEC,
+                assignment.label,
+            )
+            return False
+
         parsed = _selenium_cookies_to_heb_format(driver.get_cookies() or [])
         if not parsed:
             logger.warning("HEB bootstrap: no cookies captured from Selenium")
             return False
-        session[_HTTP_COOKIES_CACHE_KEY] = parsed
-        _clear_http_client(session)
         has_reese = any(c.get("name") == "reese84" for c in parsed)
+        if not has_reese:
+            logger.warning(
+                "HEB bootstrap: no reese84 cookie captured (proxy=%s) - skipping cache",
+                assignment.label,
+            )
+            return False
+        _store_global_proxy_cookies(assignment, parsed)
+        _apply_proxy_cookies(session, parsed)
         logger.info(
-            "HEB bootstrap: captured %d cookies from Selenium (reese84=%s proxy=%s)",
+            "HEB bootstrap: captured %d cookies from Selenium (reese84=True proxy=%s)",
             len(parsed),
-            has_reese,
             assignment.label,
         )
-        return has_reese or len(parsed) >= 4
+        return True
     except Exception as exc:
         logger.warning("HEB Selenium cookie bootstrap failed: %s", exc)
         return False
@@ -334,11 +455,27 @@ def _maybe_bootstrap_http_cookies(
 ) -> bool:
     if not HEB_HTTP_BOOTSTRAP_SELENIUM:
         return False
+
+    cached = _global_proxy_cookies(assignment)
+    if cached:
+        _apply_proxy_cookies(session, cached)
+        return True
+
     booted = session.setdefault(_SESSION_BOOTSTRAPPED_KEY, set())
     if assignment.label in booted:
         return False
-    booted.add(assignment.label)
-    return _bootstrap_cookies_via_selenium(session, assignment, vendor_url)
+
+    with _GLOBAL_BOOTSTRAP_LOCK:
+        cached = _global_proxy_cookies(assignment)
+        if cached:
+            _apply_proxy_cookies(session, cached)
+            booted.add(assignment.label)
+            return True
+        booted.add(assignment.label)
+        ok = _bootstrap_cookies_via_selenium(session, assignment, vendor_url)
+        if not ok:
+            booted.discard(assignment.label)
+        return ok
 
 
 def _http_warm_homepage(session: dict, assignment: ProxyAssignment) -> None:
@@ -1409,8 +1546,8 @@ def _get_http_client(session: dict, assignment: ProxyAssignment):
         client.headers.update(_HTTP_HEADERS)
         client._heb_use_impersonate = False  # type: ignore[attr-defined]
 
-    if cookies_configured():
-        _inject_http_cookies(session, client)
+    if cookies_configured() or HEB_HTTP_BOOTSTRAP_SELENIUM:
+        _inject_http_cookies(session, client, assignment)
 
     session[_HTTP_SESSION_KEY] = client
     session[_HTTP_PROXY_KEY] = assignment.url
@@ -1538,15 +1675,16 @@ def _scrape_heb_http(vendor_url: str, session: dict) -> Optional[dict]:
         return None
 
     if cookies_configured():
-        n = len(_cookies_for_session(session))
-        logger.info("HEB HTTP using %d configured cookie(s)", n)
-    else:
         logger.info(
-            "HEB HTTP: no HEB_COOKIES_FILE/JSON — will bootstrap via Selenium on block if enabled"
+            "HEB HTTP: cookie file configured (%d on disk); HTTP uses bootstrap cache per proxy",
+            len(load_heb_cookies()),
         )
+    elif HEB_HTTP_BOOTSTRAP_SELENIUM:
+        logger.info("HEB HTTP: will bootstrap Akamai cookies per proxy via Selenium on block")
 
     attempts = max(1, HTTP_RETRIES + 1)
     last_error: Optional[str] = None
+    bootstrap_attempted = session.get("_heb_bootstrap_attempted", False)
 
     for attempt in range(attempts):
         assignment = pool.acquire(force_rotate=attempt > 0)
@@ -1555,12 +1693,18 @@ def _scrape_heb_http(vendor_url: str, session: dict) -> Optional[dict]:
             break
 
         pool.wait_for_gap(assignment)
+
+        cached = _global_proxy_cookies(assignment)
+        if cached:
+            _apply_proxy_cookies(session, cached)
+
         logger.info(
-            "HEB HTTP GET %s (proxy=%s attempt=%d/%d)",
+            "HEB HTTP GET %s (proxy=%s attempt=%d/%d cookies=%s)",
             vendor_url[:120],
             assignment.label,
             attempt + 1,
             attempts,
+            "cached" if cached else "none",
         )
         hit, err = _http_attempt_parse(vendor_url, session, assignment)
         if hit is not None:
@@ -1576,16 +1720,23 @@ def _scrape_heb_http(vendor_url: str, session: dict) -> Optional[dict]:
             (last_error or "").startswith("blocked_")
             or last_error == "invalid_or_blocked_pdp"
         )
-        if blocked and _maybe_bootstrap_http_cookies(session, assignment, vendor_url):
-            logger.info(
-                "HEB HTTP retry after Selenium bootstrap %s (proxy=%s)",
-                vendor_url[:80],
-                assignment.label,
-            )
-            hit, err = _http_attempt_parse(vendor_url, session, assignment)
-            if hit is not None:
-                return hit
-            last_error = err or last_error
+
+        # One bootstrap per task; if HTTP retry still fails, give up on HTTP and
+        # let the caller fall to the full Selenium PDP path.
+        if blocked and not bootstrap_attempted:
+            bootstrap_attempted = True
+            session["_heb_bootstrap_attempted"] = True
+            if _maybe_bootstrap_http_cookies(session, assignment, vendor_url):
+                logger.info(
+                    "HEB HTTP retry after Selenium bootstrap %s (proxy=%s)",
+                    vendor_url[:80],
+                    assignment.label,
+                )
+                time.sleep(0.5)
+                hit, err = _http_attempt_parse(vendor_url, session, assignment)
+                if hit is not None:
+                    return hit
+                last_error = err or last_error
 
         if (last_error or "").startswith("blocked_"):
             pool.mark_blocked(assignment, cooldown_sec=BLOCK_COOLDOWN_SEC)

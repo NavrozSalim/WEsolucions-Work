@@ -146,7 +146,8 @@ class HebHttpFirstTests(SimpleTestCase):
 
 class HebCookieTests(SimpleTestCase):
     def tearDown(self):
-        for key in ("HEB_COOKIES_JSON", "HEB_COOKIES_FILE"):
+        heb_us_scraper.reset_proxy_cookie_cache_for_tests()
+        for key in ("HEB_COOKIES_JSON", "HEB_COOKIES_FILE", "HEB_HTTP_USE_FILE_COOKIES"):
             os.environ.pop(key, None)
 
     def test_parses_editthiscookie_export_format(self):
@@ -208,6 +209,7 @@ class HebCookieTests(SimpleTestCase):
                     "value": "abc",
                 }
             ]),
+            "HEB_HTTP_USE_FILE_COOKIES": "1",
         }
         assignment = heb_us_proxies.ProxyAssignment(
             index=0, url="http://u:p@a:1", label="a:1",
@@ -220,3 +222,53 @@ class HebCookieTests(SimpleTestCase):
         got = jar.get("reese84", domain=".heb.com")
         self.assertIsNotNone(got)
         self.assertEqual(getattr(got, "value", got), "abc")
+
+    def test_http_skips_file_cookies_until_bootstrap_by_default(self):
+        future = int(__import__("time").time()) + 86400
+        env = {
+            "HEB_COOKIES_JSON": json.dumps([
+                {
+                    "domain": ".heb.com",
+                    "expirationDate": future,
+                    "name": "reese84",
+                    "path": "/",
+                    "value": "abc",
+                }
+            ]),
+            "HEB_HTTP_BOOTSTRAP_SELENIUM": "1",
+            "HEB_HTTP_USE_FILE_COOKIES": "0",
+        }
+        heb_us_scraper.reset_proxy_cookie_cache_for_tests()
+        assignment = heb_us_proxies.ProxyAssignment(
+            index=0, url="http://u:p@a:1", label="a:1",
+        )
+        with patch.dict(os.environ, env, clear=False):
+            client = heb_us_scraper._get_http_client({}, assignment)
+        jar = getattr(client, "cookies", None)
+        self.assertIsNotNone(jar)
+        self.assertIsNone(jar.get("reese84", domain=".heb.com"))
+
+    def test_maybe_bootstrap_reuses_global_proxy_cache(self):
+        heb_us_scraper.reset_proxy_cookie_cache_for_tests()
+        assignment = heb_us_proxies.ProxyAssignment(
+            index=3, url="http://u:p@proxy:8080", label="proxy:8080",
+        )
+        cookies = [
+            {
+                "name": "reese84",
+                "value": "cached-token",
+                "domain": ".heb.com",
+                "path": "/",
+            }
+        ]
+        heb_us_scraper._store_global_proxy_cookies(assignment, cookies)
+        session: dict = {}
+        with patch.object(heb_us_scraper, "_bootstrap_cookies_via_selenium") as mock_boot:
+            ok = heb_us_scraper._maybe_bootstrap_http_cookies(
+                session,
+                assignment,
+                "https://www.heb.com/product-detail/377497",
+            )
+        self.assertTrue(ok)
+        mock_boot.assert_not_called()
+        self.assertEqual(session[heb_us_scraper._HTTP_COOKIES_CACHE_KEY], cookies)
