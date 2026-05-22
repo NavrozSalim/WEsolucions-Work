@@ -71,6 +71,7 @@ services:
       - HEB_USE_UNDETECTED=${HEB_USE_UNDETECTED:-0}
       - HEB_USE_APIFY=${HEB_USE_APIFY:-0}
       - HEB_COOKIES_FILE=${HEB_COOKIES_FILE:-}
+      - HEB_HTTP_BOOTSTRAP_SELENIUM=${HEB_HTTP_BOOTSTRAP_SELENIUM:-1}
     volumes:
       # Optional Akamai cookies: set HEB_COOKIES_FILE=/app/heb_cookies.json and uncomment:
       # - ./heb_cookies.json:/app/heb_cookies.json:ro

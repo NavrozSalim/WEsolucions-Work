@@ -12,6 +12,15 @@ from scrapers import get_price_and_stock, close_amazon_session
 from scrapers.ebay_scraper import SESSION_DEBUG_HTML_KEY
 
 
+def _close_scrape_session(session: dict) -> None:
+    close_amazon_session(session)
+    try:
+        from scrapers import close_heb_session
+        close_heb_session(session)
+    except Exception:
+        pass
+
+
 class Command(BaseCommand):
     help = "Call get_price_and_stock for one URL (eBay, Amazon) and print the result."
 
@@ -47,7 +56,7 @@ class Command(BaseCommand):
         try:
             result = get_price_and_stock(url, region, session)
         finally:
-            close_amazon_session(session)
+            _close_scrape_session(session)
 
         self.stdout.write(self.style.SUCCESS(f"Result: {result}"))
         if save_html:
