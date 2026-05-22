@@ -117,6 +117,8 @@ class HebHttpFirstTests(SimpleTestCase):
             heb_us_scraper, "_http_fetch",
             return_value=("<html>blocked</html>", self.URL, "http_403"),
         ), patch.object(
+            heb_us_scraper, "_maybe_bootstrap_http_cookies", return_value=False,
+        ), patch.object(
             heb_us_scraper, "_scrape_heb_selenium",
             return_value={"price": 9.99, "stock": 1, "title": "Fallback"},
         ) as mock_selenium:
@@ -135,12 +137,38 @@ class HebHttpFirstTests(SimpleTestCase):
             heb_us_scraper, "_http_fetch",
             return_value=("<html>blocked</html>", self.URL, "http_403"),
         ), patch.object(
+            heb_us_scraper, "_maybe_bootstrap_http_cookies", return_value=False,
+        ), patch.object(
             heb_us_scraper, "_scrape_heb_selenium",
         ) as mock_selenium:
             result = heb_us_scraper.scrape_heb(self.URL, "USA", session={})
 
         mock_selenium.assert_not_called()
         self.assertIsNone(result.get("price"))
+        self.assertEqual(result.get("error_code"), "http_exhausted")
+
+    def test_http_401_is_treated_as_blocked(self):
+        """An HTTP 401 must surface as blocked_http_401 (full cooldown + bootstrap)."""
+        with patch.dict(os.environ, self.env, clear=False), patch.object(
+            heb_us_scraper, "get_pool", return_value=self.pool,
+        ), patch.object(
+            heb_us_scraper, "_http_fetch",
+            return_value=("Unauthorized", self.URL, "http_401"),
+        ), patch.object(
+            heb_us_scraper, "_maybe_bootstrap_http_cookies", return_value=False,
+        ) as mock_bootstrap, patch.object(
+            self.pool, "mark_blocked",
+        ) as mock_mark, patch.object(
+            heb_us_scraper, "SELENIUM_FALLBACK", False,
+        ), patch.object(
+            heb_us_scraper, "_scrape_heb_selenium",
+        ):
+            result = heb_us_scraper.scrape_heb(self.URL, "USA", session={})
+
+        mock_bootstrap.assert_called_once()
+        self.assertTrue(mock_mark.called)
+        cooldown_used = mock_mark.call_args.kwargs.get("cooldown_sec")
+        self.assertEqual(cooldown_used, heb_us_scraper.BLOCK_COOLDOWN_SEC)
         self.assertEqual(result.get("error_code"), "http_exhausted")
 
 

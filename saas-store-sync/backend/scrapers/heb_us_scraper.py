@@ -1554,6 +1554,21 @@ def _get_http_client(session: dict, assignment: ProxyAssignment):
     return client
 
 
+_HTTP_BLOCK_STATUSES = {"http_401", "http_403", "http_407", "http_429"}
+
+
+def _short_body_excerpt(html: str, n: int = 200) -> str:
+    """Collapse whitespace and truncate so 4xx response bodies are loggable.
+
+    Useful for distinguishing a tiny proxy-side error ("Proxy Authentication
+    Required") from a full Akamai/HEB anti-bot page returned with the same
+    HTTP status.
+    """
+    if not html:
+        return ""
+    return " ".join(html.split())[:n]
+
+
 def _http_fetch(url: str, session: dict, assignment: ProxyAssignment) -> tuple[str, str, str]:
     if "heb.com" in (url or "") and url.rstrip("/") != HEB_HOME.rstrip("/"):
         _http_warm_homepage(session, assignment)
@@ -1648,6 +1663,24 @@ def _http_attempt_parse(
 ) -> tuple[Optional[dict], Optional[str]]:
     html, final_url, http_err = _http_fetch(vendor_url, session, assignment)
     if http_err:
+        # Anti-bot status codes (401/403/407/429) need to flow through the
+        # blocked_* branch so the proxy cooldown and Selenium-bootstrap retry
+        # both engage. Log the body excerpt so we can tell whether the 4xx
+        # came from the proxy (tiny text) or from Akamai/HEB (HTML challenge).
+        if http_err in _HTTP_BLOCK_STATUSES:
+            excerpt = _short_body_excerpt(html)
+            logger.warning(
+                "HEB HTTP anti-bot %s url=%s proxy=%s final=%s body=%r",
+                http_err, vendor_url[:120], assignment.label, final_url[:120], excerpt,
+            )
+            if http_err == "http_407":
+                logger.error(
+                    "HEB HTTP 407 (Proxy Authentication Required) from %s "
+                    "- proxy credentials are rejected. Re-check PROXY_USER/"
+                    "PROXY_PASS or the auth embedded in HEB_US_PROXY_URLS.",
+                    assignment.label,
+                )
+            return None, f"blocked_{http_err}"
         return None, http_err
 
     page_title = _page_title_from_html(html)
