@@ -12,6 +12,9 @@
 secrets/
 backend/scrapers/ebay_au_cookies.json
 .ebay_au_cookies.json
+heb_cookies.json
+backend/scrapers/heb_cookies.json
+cookies.json
 
 # Python
 __pycache__/

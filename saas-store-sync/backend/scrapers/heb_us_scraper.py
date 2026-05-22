@@ -78,6 +78,163 @@ _HTTP_HEADERS = {
 DEBUG_DUMP_DIR = os.environ.get("HEB_DEBUG_DIR", "/tmp/heb_debug")
 HEB_HOME = os.environ.get("HEB_HOME_URL", "https://www.heb.com/")
 COOKIES_FILE = os.environ.get("HEB_COOKIES_FILE", "cookies.json")
+
+_HTTP_COOKIES_CACHE_KEY = "heb_us_parsed_cookies"
+
+_COOKIE_NOISE_PREFIXES = (
+    "_ga",
+    "_gcl_",
+    "AMP_",
+    "AMP_MKTG_",
+    "Optanon",
+)
+
+
+def cookies_configured() -> bool:
+    """True when ``HEB_COOKIES_FILE`` or ``HEB_COOKIES_JSON`` is set."""
+    if (os.environ.get("HEB_COOKIES_JSON") or "").strip():
+        return True
+    return bool((os.environ.get("HEB_COOKIES_FILE") or "").strip())
+
+
+def _load_cookie_list_raw() -> list:
+    inline = (os.environ.get("HEB_COOKIES_JSON") or "").strip()
+    if inline:
+        data = json.loads(inline)
+        if not isinstance(data, list):
+            raise ValueError("HEB_COOKIES_JSON must be a JSON array")
+        return data
+
+    path = (os.environ.get("HEB_COOKIES_FILE") or "").strip()
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise ValueError(f"{path}: cookie file must be a JSON array")
+    return data
+
+
+def _cookie_expiry_ts(cookie: dict) -> Optional[int]:
+    for key in ("expiry", "expirationDate"):
+        val = cookie.get(key)
+        if isinstance(val, (int, float)):
+            return int(val)
+    if cookie.get("session"):
+        return None
+    return None
+
+
+def _normalize_samesite(raw) -> Optional[str]:
+    if raw is None or raw == "":
+        return None
+    s = str(raw).strip().lower()
+    if s in ("null", "unspecified"):
+        return None
+    if s in ("no_restriction", "none"):
+        return "None"
+    if s == "lax":
+        return "Lax"
+    if s == "strict":
+        return "Strict"
+    return None
+
+
+def load_heb_cookies() -> list[dict]:
+    """Parse configured HEB cookies (Chrome / EditThisCookie export format)."""
+    try:
+        raw_list = _load_cookie_list_raw()
+    except Exception as exc:
+        logger.warning("HEB cookie parse failed: %s", exc)
+        return []
+
+    now_ts = int(time.time())
+    out: list[dict] = []
+    skipped_expired = 0
+    skipped_non_heb = 0
+    skipped_noise = 0
+
+    for cookie in raw_list:
+        if not isinstance(cookie, dict):
+            continue
+        name = str(cookie.get("name") or "").strip()
+        value = cookie.get("value")
+        if not name or value is None:
+            continue
+
+        dom = str(cookie.get("domain") or "").lower()
+        if dom and "heb.com" not in dom:
+            skipped_non_heb += 1
+            continue
+
+        low_name = name.lower()
+        if low_name.startswith(tuple(p.lower() for p in _COOKIE_NOISE_PREFIXES)):
+            skipped_noise += 1
+            continue
+
+        exp = _cookie_expiry_ts(cookie)
+        if exp is not None and exp <= now_ts:
+            skipped_expired += 1
+            continue
+
+        entry = {
+            "name": name,
+            "value": str(value),
+            "domain": cookie.get("domain") or ".heb.com",
+            "path": cookie.get("path") or "/",
+        }
+        if exp is not None:
+            entry["expiry"] = exp
+        if cookie.get("secure"):
+            entry["secure"] = True
+        if cookie.get("httpOnly"):
+            entry["httpOnly"] = True
+        ss = _normalize_samesite(cookie.get("sameSite"))
+        if ss:
+            entry["sameSite"] = ss
+        out.append(entry)
+
+    if raw_list:
+        logger.info(
+            "HEB cookies parsed: kept=%d skipped_expired=%d skipped_non_heb=%d skipped_noise=%d",
+            len(out),
+            skipped_expired,
+            skipped_non_heb,
+            skipped_noise,
+        )
+    return out
+
+
+def _cookies_for_session(session: dict) -> list[dict]:
+    if session is None:
+        session = {}
+    cached = session.get(_HTTP_COOKIES_CACHE_KEY)
+    if cached is not None:
+        return cached
+    parsed = load_heb_cookies()
+    session[_HTTP_COOKIES_CACHE_KEY] = parsed
+    return parsed
+
+
+def _inject_http_cookies(session: dict, client) -> int:
+    cookies = _cookies_for_session(session)
+    loaded = 0
+    for c in cookies:
+        try:
+            client.cookies.set(
+                c["name"],
+                c["value"],
+                domain=c.get("domain"),
+                path=c.get("path") or "/",
+            )
+            loaded += 1
+        except Exception:
+            continue
+    if loaded:
+        logger.info("HEB HTTP: injected %d cookies into client", loaded)
+    return loaded
+
+
 HEB_HEADLESS = os.environ.get("HEB_HEADLESS", "1").strip().lower() not in ("0", "false", "no")
 HEB_USE_UNDETECTED = os.environ.get("HEB_USE_UNDETECTED", "0").strip().lower() not in ("0", "false", "no")
 HEB_USE_APIFY = os.environ.get("HEB_USE_APIFY", "0").strip().lower() in ("1", "true", "yes")
@@ -524,64 +681,25 @@ chrome.webRequest.onAuthRequired.addListener(
 
 
 def _load_cookies(driver, cookies_file: str = COOKIES_FILE):
-    """
-    Load persisted cookies for heb.com to reduce store-gate/challenge frequency.
-    Safe no-op when file is absent or invalid.
-    """
-    if not cookies_file or not os.path.exists(cookies_file):
+    """Load HEB cookies into a Selenium driver (must already be on heb.com)."""
+    if not cookies_configured():
         return
-    try:
-        with open(cookies_file, "r", encoding="utf-8") as f:
-            cookies = json.load(f)
-        added = 0
-        skipped_expired = 0
-        skipped_non_heb = 0
-        skipped_noise = 0
-        now_ts = int(time.time())
-        # Keep high-signal cookies only; ignore telemetry/noise cookies.
-        ignore_prefixes = (
-            "_ga",
-            "_gcl_",
-            "AMP_",
-            "AMP_MKTG_",
-            "Optanon",
-        )
-        for cookie in cookies if isinstance(cookies, list) else []:
-            try:
-                allowed = {
-                    "name", "value", "domain", "path",
-                    "expiry", "secure", "httpOnly", "sameSite"
-                }
-                c = {k: v for k, v in cookie.items() if k in allowed}
-                dom = str(c.get("domain", "")).lower()
-                if dom and "heb.com" not in dom:
-                    skipped_non_heb += 1
-                    continue
-
-                exp = c.get("expiry")
-                if isinstance(exp, (int, float)) and int(exp) <= now_ts:
-                    skipped_expired += 1
-                    continue
-
-                name = str(c.get("name", ""))
-                low_name = name.lower()
-                if low_name.startswith(tuple(p.lower() for p in ignore_prefixes)):
-                    skipped_noise += 1
-                    continue
-                driver.add_cookie(c)
-                added += 1
-            except Exception:
-                continue
-        logger.info(
-            "HEB cookies: loaded=%d skipped_expired=%d skipped_non_heb=%d skipped_noise=%d file=%s",
-            added,
-            skipped_expired,
-            skipped_non_heb,
-            skipped_noise,
-            cookies_file,
-        )
-    except Exception as exc:
-        logger.warning("HEB cookie load failed (%s): %s", cookies_file, exc)
+    cookies = load_heb_cookies()
+    if not cookies:
+        return
+    added = 0
+    for c in cookies:
+        try:
+            sel = {
+                k: c[k]
+                for k in ("name", "value", "domain", "path", "expiry", "secure", "httpOnly", "sameSite")
+                if k in c
+            }
+            driver.add_cookie(sel)
+            added += 1
+        except Exception:
+            continue
+    logger.info("HEB Selenium: loaded %d cookies into driver", added)
 
 
 def _safe_quit_and_recreate_driver(driver, session: dict):
@@ -1019,10 +1137,10 @@ class HebDriver:
         except Exception:
             pass
 
-        if HEB_HOME_WARMUP:
+        if HEB_HOME_WARMUP or cookies_configured():
             try:
                 driver.get(HEB_HOME)
-                time.sleep(0.4)
+                time.sleep(0.3)
                 _load_cookies(driver)
             except Exception:
                 pass
@@ -1168,6 +1286,9 @@ def _get_http_client(session: dict, assignment: ProxyAssignment):
         client.proxies = assignment.as_requests_proxy()
         client.headers.update(_HTTP_HEADERS)
         client._heb_use_impersonate = False  # type: ignore[attr-defined]
+
+    if cookies_configured():
+        _inject_http_cookies(session, client)
 
     session[_HTTP_SESSION_KEY] = client
     session[_HTTP_PROXY_KEY] = assignment.url
@@ -1591,5 +1712,6 @@ def close_heb_session(session):
         except Exception:
             pass
     session.pop(_HTTP_PROXY_KEY, None)
+    session.pop(_HTTP_COOKIES_CACHE_KEY, None)
     drv = session.pop("heb_driver", None)
     HebDriver.quit_safe(drv)

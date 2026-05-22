@@ -142,3 +142,81 @@ class HebHttpFirstTests(SimpleTestCase):
         mock_selenium.assert_not_called()
         self.assertIsNone(result.get("price"))
         self.assertEqual(result.get("error_code"), "http_exhausted")
+
+
+class HebCookieTests(SimpleTestCase):
+    def tearDown(self):
+        for key in ("HEB_COOKIES_JSON", "HEB_COOKIES_FILE"):
+            os.environ.pop(key, None)
+
+    def test_parses_editthiscookie_export_format(self):
+        future = int(__import__("time").time()) + 86400 * 365
+        cookies = [
+            {
+                "domain": ".heb.com",
+                "expirationDate": future,
+                "name": "reese84",
+                "path": "/",
+                "sameSite": "no_restriction",
+                "secure": True,
+                "session": False,
+                "value": "token-value",
+            },
+            {
+                "domain": "www.heb.com",
+                "name": "CURR_SESSION_STORE",
+                "path": "/",
+                "sameSite": None,
+                "secure": True,
+                "session": True,
+                "value": "92",
+            },
+            {
+                "domain": ".heb.com",
+                "expirationDate": 1,
+                "name": "expired",
+                "path": "/",
+                "value": "old",
+            },
+            {
+                "domain": ".heb.com",
+                "expirationDate": future,
+                "name": "_ga",
+                "path": "/",
+                "value": "noise",
+            },
+        ]
+        with patch.dict(os.environ, {"HEB_COOKIES_JSON": json.dumps(cookies)}, clear=False):
+            parsed = heb_us_scraper.load_heb_cookies()
+        names = {c["name"] for c in parsed}
+        self.assertIn("reese84", names)
+        self.assertIn("CURR_SESSION_STORE", names)
+        self.assertNotIn("expired", names)
+        self.assertNotIn("_ga", names)
+        reese = next(c for c in parsed if c["name"] == "reese84")
+        self.assertEqual(reese["sameSite"], "None")
+
+    def test_http_client_gets_cookies_when_configured(self):
+        future = int(__import__("time").time()) + 86400
+        env = {
+            "HEB_COOKIES_JSON": json.dumps([
+                {
+                    "domain": ".heb.com",
+                    "expirationDate": future,
+                    "name": "reese84",
+                    "path": "/",
+                    "value": "abc",
+                }
+            ]),
+        }
+        assignment = heb_us_proxies.ProxyAssignment(
+            index=0, url="http://u:p@a:1", label="a:1",
+        )
+        session: dict = {}
+        with patch.dict(os.environ, env, clear=False):
+            client = heb_us_scraper._get_http_client(session, assignment)
+        jar = getattr(client, "cookies", None)
+        self.assertIsNotNone(jar)
+        got = jar.get("reese84", domain=".heb.com")
+        self.assertIsNotNone(got)
+        self.assertEqual(getattr(got, "value", got), "abc")
