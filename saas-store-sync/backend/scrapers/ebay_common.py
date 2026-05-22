@@ -556,6 +556,9 @@ class EbayParser:
 
     # AU postage row. Paid postage is added on top of the scraped item price.
     AU_SHIPPING_BLOCK_SELECTOR = ".ux-labels-values--shipping"
+    AU_SHIPPING_VALUES_SELECTOR = (
+        ".ux-labels-values--shipping div.ux-labels-values__values-content"
+    )
     AU_SHIPPING_SELECTOR = (
         ".ux-labels-values--shipping .ux-labels-values__values-content div:nth-of-type(1)"
     )
@@ -1422,6 +1425,12 @@ class EbayParser:
         Falls back to shipping-specific JSON / ``AU $X delivery`` snippets
         embedded in the raw HTML.
         """
+        values_el = soup.select_one(cls.AU_SHIPPING_VALUES_SELECTOR)
+        if values_el:
+            values_text = values_el.get_text(" ", strip=True)
+            if values_text and "free" in values_text.lower():
+                return 0.0
+
         from_block = cls._extract_au_shipping_from_shipping_block(soup)
         if from_block is not None:
             return from_block
