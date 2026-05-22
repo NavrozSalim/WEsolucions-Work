@@ -721,7 +721,10 @@ class IngestOnlyToggleTests(SimpleTestCase):
 
             self.assertFalse(_is_ingest_only_product(FakeProduct()))
 
-    def test_heb_and_vevor_remain_ingest_only_regardless(self):
+    def test_heb_and_vevor_remain_ingest_only_without_heb_proxies(self):
+        import os
+        for k in ("HEB_US_PROXY_URLS", "HEB_US_PROXY_URL", "PROXY_URLS", "PROXY_URL"):
+            os.environ.pop(k, None)
         with patch.dict("os.environ", {"COSTCO_AU_PROXY_URLS": "http://u:p@a:1"}, clear=False):
             from catalog.tasks import _is_ingest_only_product
 
@@ -735,3 +738,54 @@ class IngestOnlyToggleTests(SimpleTestCase):
 
             self.assertTrue(_is_ingest_only_product(FakeProduct("heb")))
             self.assertTrue(_is_ingest_only_product(FakeProduct("vevorau")))
+
+    def test_heb_is_live_when_proxies_set(self):
+        with patch.dict("os.environ", {"HEB_US_PROXY_URLS": "http://u:p@a:1"}, clear=False):
+            from catalog.tasks import _is_ingest_only_product
+
+            class FakeVendor:
+                code = "hebus"
+
+            class FakeProduct:
+                vendor = FakeVendor()
+
+            self.assertFalse(_is_ingest_only_product(FakeProduct()))
+
+
+class HebDispatcherTests(SimpleTestCase):
+    """``get_price_and_stock`` routes HEB based on ``HEB_US_PROXY_URLS``."""
+
+    def setUp(self):
+        from scrapers import heb_us_proxies
+        heb_us_proxies.reset_pool_for_tests()
+
+    def tearDown(self):
+        from scrapers import heb_us_proxies
+        heb_us_proxies.reset_pool_for_tests()
+
+    def test_heb_url_returns_ingest_only_when_no_proxies(self):
+        import os
+        with patch.dict("os.environ", {}, clear=False):
+            for k in ("HEB_US_PROXY_URLS", "HEB_US_PROXY_URL", "PROXY_URLS", "PROXY_URL"):
+                os.environ.pop(k, None)
+
+            from scrapers import get_price_and_stock
+            result = get_price_and_stock(
+                "https://www.heb.com/product-detail/377497", "USA", {},
+            )
+            self.assertEqual(result.get("error_code"), "heb_ingest_only")
+            self.assertIsNone(result.get("price"))
+
+    def test_heb_url_routes_to_scraper_when_proxies_configured(self):
+        env = {"HEB_US_PROXY_URLS": "http://u:p@a:1"}
+        with patch.dict("os.environ", env, clear=False):
+            with patch(
+                "scrapers.heb_us_scraper.scrape_heb",
+                return_value={"price": 4.98, "stock": 3, "title": "Test Item"},
+            ):
+                from scrapers import get_price_and_stock
+                result = get_price_and_stock(
+                    "https://www.heb.com/product-detail/377497", "USA", {},
+                )
+        self.assertEqual(result["price"], 4.98)
+        self.assertEqual(result["inventory"], 3)

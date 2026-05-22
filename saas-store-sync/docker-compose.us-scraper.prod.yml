@@ -1,6 +1,8 @@
 # US browser-scrape worker only — run on a US-region VPS (e.g. Contabo US).
 # AU counterpart: docker-compose.au-scraper.prod.yml (-Q heavy-au).
 #
+# Consumes Celery queue ``heavy-us``: Amazon US, eBay US, HEB US (when proxies set).
+#
 # Requirements:
 # - Same codebase image as main (build or pull BACKEND_IMAGE).
 # - DATABASE_URL and REDIS_URL must reach the main stack (private network or TLS tunnel).
@@ -55,6 +57,12 @@ services:
       - PROXY_USER=${PROXY_USER:-}
       - PROXY_PASS=${PROXY_PASS:-}
       - PROXY_SCHEME=${PROXY_SCHEME:-http}
+      - HEB_US_PROXY_URL=${HEB_US_PROXY_URL:-}
+      - HEB_US_PROXY_URLS=${HEB_US_PROXY_URLS:-}
+      - HEB_US_MIN_REQUEST_GAP_SEC=${HEB_US_MIN_REQUEST_GAP_SEC:-3}
+      - HEB_HEADLESS=${HEB_HEADLESS:-1}
+      - HEB_USE_UNDETECTED=${HEB_USE_UNDETECTED:-0}
+      - HEB_USE_APIFY=${HEB_USE_APIFY:-0}
     volumes:
       - catalog_media_us_worker:/app/media
     restart: always

@@ -251,6 +251,13 @@ def build_scrape_progress_payload(store) -> dict[str, Any]:
                     runner_kind = 'live'
             except Exception:
                 pass
+        if vendor_code == 'heb' and runner_kind == 'desktop':
+            try:
+                from scrapers.heb_us_proxies import load_proxy_urls
+                if load_proxy_urls():
+                    runner_kind = 'live'
+            except Exception:
+                pass
         if runner_kind == 'live':
             v_job_payload = None
             v_queue_payload = None

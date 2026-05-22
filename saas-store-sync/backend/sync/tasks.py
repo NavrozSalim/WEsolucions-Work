@@ -17,33 +17,45 @@ from vendor.models import VendorPrice
 from sync.models import StoreSyncRun
 from scrapers import get_price_and_stock, close_amazon_session
 
+def _heb_us_runs_on_server() -> bool:
+    try:
+        from scrapers.heb_us_proxies import load_proxy_urls
+        return bool(load_proxy_urls())
+    except Exception:
+        return False
+
+
 def _is_heb_product(product) -> bool:
     """Return True when ``product`` belongs to the HEB vendor.
 
-    HEB is ingest-only: prices are POSTed from a desktop runner to
-    ``/api/v1/ingest/heb/``. Server-side scrape loops must skip HEB rows so
-    the listing is not marked ``failed`` / ``needs_attention`` just because
-    there was no live scrape.
+    When ``HEB_US_PROXY_URLS`` is unset, HEB is ingest-only and server-side
+    scrape loops skip HEB rows. When proxies are configured on the US worker,
+    HEB is scraped live like Amazon/eBay US.
     """
     vendor = getattr(product, 'vendor', None)
     code = (getattr(vendor, 'code', '') or '').lower()
-    return code in ('heb', 'hebus') or code.startswith('heb_')
+    if not (code in ('heb', 'hebus') or code.startswith('heb_')):
+        return False
+    return not _heb_us_runs_on_server()
 
 
 def _is_ingest_only_product(product) -> bool:
     """Vendors whose price/stock comes from a desktop runner or S3 feed.
 
-    HEB and Vevor AU are always ingest-only. Costco AU is ingest-only **only
-    when** the AU worker has no residential proxies configured — once
-    ``COSTCO_AU_PROXY_URLS`` is set, Costco runs through the live server
-    scraper (``scrapers.costco_au_scraper``).
+    HEB is ingest-only **only when** the US worker has no residential proxies.
+    Vevor AU is always ingest-only. Costco AU is ingest-only **only when** the
+    AU worker has no residential proxies configured — once ``COSTCO_AU_PROXY_URLS``
+    is set, Costco runs through the live server scraper.
     """
     vendor = getattr(product, 'vendor', None)
     code = (getattr(vendor, 'code', '') or '').lower()
-    if code in ('heb', 'hebus', 'vevor', 'vevorau'):
+    if code in ('vevor', 'vevorau'):
         return True
-    if code.startswith('heb_') or code.startswith('vevor_'):
+    if code.startswith('vevor_'):
         return True
+    is_heb = code in ('heb', 'hebus') or code.startswith('heb_')
+    if is_heb:
+        return not _heb_us_runs_on_server()
     is_costco = (
         code in ('costcoau', 'costco_au', 'costco-au')
         or code.startswith('costco_')

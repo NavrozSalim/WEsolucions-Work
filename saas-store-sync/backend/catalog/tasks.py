@@ -41,6 +41,16 @@ from products.models import Product
 from vendor.models import Vendor
 
 
+def _heb_us_runs_on_server() -> bool:
+    """Return True when the US worker is configured to scrape HEB directly."""
+    try:
+        from scrapers.heb_us_proxies import load_proxy_urls
+        return bool(load_proxy_urls())
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("Failed to determine HEB US server-scrape mode; defaulting to ingest-only")
+        return False
+
+
 def _costco_au_runs_on_server() -> bool:
     """Return True when the AU worker is configured to scrape Costco AU directly.
 
@@ -62,17 +72,22 @@ def _costco_au_runs_on_server() -> bool:
 def _is_ingest_only_product(product) -> bool:
     """True when the vendor has no live server-side scraper for this deployment.
 
-    HEB and Vevor AU are always ingest-only (HEB is desktop runner, Vevor uses
-    a feed). Costco AU is ingest-only **only when** residential proxies are not
-    configured — set ``COSTCO_AU_PROXY_URLS`` on the AU worker and Costco moves
-    into the live server-scrape path.
+    HEB is ingest-only **only when** residential proxies are not configured —
+    set ``HEB_US_PROXY_URLS`` on the US worker and HEB moves into the live
+    server-scrape path. Vevor AU is always ingest-only (feed). Costco AU is
+    ingest-only **only when** residential proxies are not configured — set
+    ``COSTCO_AU_PROXY_URLS`` on the AU worker and Costco moves into the live
+    server-scrape path.
     """
     vendor = getattr(product, 'vendor', None)
     code = (getattr(vendor, 'code', '') or '').lower()
-    if code in ('heb', 'hebus', 'vevor', 'vevorau'):
+    if code in ('vevor', 'vevorau'):
         return True
-    if code.startswith('heb_') or code.startswith('vevor_'):
+    if code.startswith('vevor_'):
         return True
+    is_heb = code in ('heb', 'hebus') or code.startswith('heb_')
+    if is_heb:
+        return not _heb_us_runs_on_server()
     is_costco = (
         code in ('costcoau', 'costco_au', 'costco-au')
         or code.startswith('costco_')
@@ -86,10 +101,14 @@ def _ingest_only_vendor_ids() -> list:
     """Primary keys for vendors handled by feed/desktop ingest (not browser scrape).
 
     Costco AU joins this set only when proxies aren't configured (see
-    ``_costco_au_runs_on_server``).
+    ``_costco_au_runs_on_server``). HEB joins only when ``HEB_US_PROXY_URLS``
+    is unset (see ``_heb_us_runs_on_server``).
     """
-    codes = ['heb', 'hebus', 'vevor', 'vevorau']
-    prefix_q = Q(code__istartswith='heb_') | Q(code__istartswith='vevor_')
+    codes = ['vevor', 'vevorau']
+    prefix_q = Q(code__istartswith='vevor_')
+    if not _heb_us_runs_on_server():
+        codes.extend(['heb', 'hebus'])
+        prefix_q = prefix_q | Q(code__istartswith='heb_')
     if not _costco_au_runs_on_server():
         codes.extend(['costcoau', 'costco_au', 'costco-au'])
         prefix_q = prefix_q | Q(code__istartswith='costco_')

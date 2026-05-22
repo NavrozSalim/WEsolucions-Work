@@ -4,7 +4,7 @@ Dynamic Celery routes for catalog browser scrapes.
 ``Store.region`` is ``USA`` or ``AU`` (see ``stores.models.Store``). All
 server-side Amazon/eBay scrape tasks are routed to:
 
-- ``heavy-us`` — US marketplace scrapers (Amazon US, eBay US).
+- ``heavy-us`` — US marketplace scrapers (Amazon US, eBay US, HEB US).
 - ``heavy-au`` — AU marketplace scrapers (Amazon AU, eBay AU).
 
 Chord finalizers (aggregate chunk results, update ``ScrapeRun``, activity log)

@@ -13,10 +13,15 @@ Server-side vendors (scraped from this dispatcher):
   (set ``COSTCO_AU_PROXY_URLS`` on the worker; without proxies the dispatcher
   returns an ``ingest_only`` sentinel so the catalog task keeps the existing
   ``ProductMapping`` row untouched.)
+* **HEB US**         — Selenium through residential US proxies on the US worker
+  (set ``HEB_US_PROXY_URLS``; without proxies the dispatcher returns
+  ``heb_ingest_only`` / ``heb_no_proxy`` and the task keeps the latest
+  ``VendorPrice`` row.)
 
-Ingest-only vendors (NOT scraped server-side):
+Ingest-only vendors (NOT scraped server-side unless proxies are configured):
 
-* **HEB**       — pushed by the desktop runner via ``/api/v1/ingest/heb/``
+* **HEB**       — desktop runner via ``/api/v1/ingest/heb/`` when
+  ``HEB_US_PROXY_URLS`` is unset; live server scrape when set on the US worker
 * **Vevor AU**  — refreshed from the public S3 XLSX feed via
   ``catalog.tasks.run_vevor_au_ingest``
 
@@ -51,6 +56,22 @@ _scrape_ebay_au = None
 _close_ebay_au = None
 _scrape_costco_au = None
 _close_costco_au = None
+_scrape_heb_us = None
+_close_heb_us = None
+
+
+def _get_heb_us_scraper():
+    global _scrape_heb_us, _close_heb_us
+    if _scrape_heb_us is None:
+        try:
+            from .heb_us_scraper import scrape_heb, close_heb_session
+            _scrape_heb_us = scrape_heb
+            _close_heb_us = close_heb_session
+        except ImportError:
+            logger.exception("Failed to import HEB US scraper")
+            _scrape_heb_us = _placeholder_scrape
+            _close_heb_us = lambda s: None
+    return _scrape_heb_us, _close_heb_us
 
 
 def _get_costco_au_scraper():
@@ -149,16 +170,22 @@ def _rewrite_url_for_region(vendor_url: str, region: str) -> str:
     return vendor_url
 
 
+def _heb_us_server_scrape_enabled() -> bool:
+    """True when residential proxies are configured for server-side HEB scraping."""
+    from .heb_us_proxies import load_proxy_urls
+    return bool(load_proxy_urls())
+
+
 def _heb_ingest_only_result() -> dict:
-    """HEB has no server-side scraper; data comes from the /api/v1/ingest/heb/ endpoint."""
+    """Sentinel when HEB server scraping is not enabled (no ``HEB_US_PROXY_URLS``)."""
     return {
         "price": None,
         "inventory": None,
         "title": None,
         "error_code": "heb_ingest_only",
         "error_message": (
-            "HEB is ingest-only on the server; the desktop runner POSTs prices to "
-            "/api/v1/ingest/heb/. The task will fall back to the latest VendorPrice."
+            "HEB server scraping disabled (no HEB_US_PROXY_URLS configured); "
+            "the task will keep the latest VendorPrice and skip this row."
         ),
     }
 
@@ -205,9 +232,10 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
     Routing uses the **URL host/path only** (Amazon, eBay, Costco AU, …). It does not
     depend on which marketplace the listing is sold on (Reverb, Walmart, Sears, etc.).
 
-    HEB URLs are intentionally **not** scraped here: Akamai blocks datacenter IPs,
-    so HEB prices arrive via the ingest API instead. We return a sentinel result
-    so the catalog task falls back to the latest ``VendorPrice`` row.
+    HEB URLs are **not** scraped server-side unless ``HEB_US_PROXY_URLS`` is set
+    on the US worker (Akamai blocks datacenter IPs). Without proxies, HEB prices
+    arrive via the ingest API and we return a sentinel so the catalog task falls
+    back to the latest ``VendorPrice`` row.
 
     Parameters
     ----------
@@ -246,7 +274,11 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
         return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
 
     if "heb.com" in url_lower:
-        logger.info("HEB URL skipped server-side (ingest-only): %s", vendor_url[:80])
+        if _heb_us_server_scrape_enabled():
+            scrape_fn, _ = _get_heb_us_scraper()
+            logger.info("Routing to HEB US scraper: %s", vendor_url[:80])
+            return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
+        logger.info("HEB URL skipped server-side (no proxies configured): %s", vendor_url[:80])
         return _normalize_scrape_payload(_heb_ingest_only_result())
 
     if "costco.com.au" in url_lower:
@@ -297,9 +329,9 @@ def _normalize_scrape_payload(result: dict | None) -> dict:
 def close_amazon_session(session):
     """Close all browser/HTTP sessions held in ``session``.
 
-    Despite the legacy name, this closes Amazon US/AU, eBay US/AU, and Costco AU
-    sessions — callers pass a single shared session dict per Celery task and
-    this function is the one cleanup hook.
+    Despite the legacy name, this closes Amazon US/AU, eBay US/AU, Costco AU,
+    and HEB US sessions — callers pass a single shared session dict per Celery
+    task and this function is the one cleanup hook.
     """
     if session is None:
         return
@@ -313,6 +345,8 @@ def close_amazon_session(session):
     close_ebay_au(session)
     _, close_costco = _get_costco_au_scraper()
     close_costco(session)
+    _, close_heb = _get_heb_us_scraper()
+    close_heb(session)
 
 
 __all__ = ["get_price_and_stock", "close_amazon_session"]
