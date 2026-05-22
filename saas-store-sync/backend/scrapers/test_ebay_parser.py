@@ -480,11 +480,6 @@ _AU_FREE_DELIVERY_BLOCK = """
 """
 
 
-_AU_SHIPPING_GRAPHQL_SNIPPET = """
-<script>,\"converted\":null,\"original\":{\"__typename\":\"Price\",\"amount\":12.99,\"currency\":\"AUD\"}},\"shipToLocations\":[\"AUS\"],\"shippingServiceName\":\"Standard\"</script>
-"""
-
-
 _AU_PAID_GRAPHQL_599 = """
 <script>,\"converted\":null,\"original\":{\"__typename\":\"Price\",\"amount\":5.99,\"currency\":\"AUD\"}},\"shipToLocations\":[\"AUS\"],\"shippingServiceName\":\"Standard\"</script>
 """
@@ -584,54 +579,13 @@ class TestEbayAuShippingAddOn(unittest.TestCase):
         self.assertEqual(EbayParser.extract_au_shipping_amount(soup), 0.0)
 
     def test_doesnt_post_first_div_still_finds_delivery_in_later_div(self):
-        """Production HTML: div[0] is 'Item doesn't post to you', div[1] has postage."""
+        """Values-content combines all lines; paid postage in a later div is included."""
         html = _au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK, _AU_SHIPPING_BLOCK_DOESNT_POST)
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
         self.assertEqual(result["price"], 62.99)
 
-    def test_shipping_from_embedded_json_when_dom_has_no_amount(self):
-        html = _au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK, _AU_SHIPPING_JSON_ONLY)
-        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
-        self.assertEqual(result["price"], 62.99)
-
-    def test_shipping_json_fallback_in_raw_html_only(self):
-        html = _au_html(
-            _AU_PRICE_BLOCK,
-            _AU_QTY_BLOCK,
-            '<div class="ux-labels-values ux-labels-values--shipping">'
-            '<div class="ux-labels-values__values-content">'
-            "<div>Item doesn't post to you</div></div></div>",
-            _AU_SHIPPING_JSON_ONLY,
-        )
-        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
-        self.assertEqual(result["price"], 62.99)
-
-    def test_delivery_price_line_regex_in_embedded_html(self):
-        html = _au_html(
-            _AU_PRICE_BLOCK,
-            _AU_QTY_BLOCK,
-            '<div class="ux-labels-values ux-labels-values--shipping">'
-            '<div>Item doesn\'t post to you</div></div>'
-            '<span>AU $12.99 delivery in 2-4 days</span>',
-        )
-        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
-        self.assertEqual(result["price"], 62.99)
-
-    def test_graphql_shipping_price_near_ship_to_locations(self):
-        """Production HTTP embed: amount is numeric JSON before shipToLocations."""
-        html = _au_html(
-            _AU_PRICE_BLOCK,
-            _AU_QTY_BLOCK,
-            '<div class="ux-labels-values ux-labels-values--shipping">'
-            '<div class="ux-labels-values__values-content">'
-            "<div>Item doesn't post to you</div></div></div>",
-            _AU_SHIPPING_GRAPHQL_SNIPPET,
-        )
-        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
-        self.assertEqual(result["price"], 62.99)
-
     def test_free_delivery_ignores_graphql_paid_tier(self):
-        """Free delivery listing must not add a paid tier from embedded JSON."""
+        """Free delivery in values-content must not add shipping."""
         html = _au_html(
             _AU_PRICE_5597,
             _AU_QTY_BLOCK,
@@ -640,6 +594,11 @@ class TestEbayAuShippingAddOn(unittest.TestCase):
         )
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
         self.assertEqual(result["price"], 55.97)
+
+    def test_no_values_content_leaves_price_unchanged(self):
+        html = _au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK, _AU_SHIPPING_JSON_ONLY)
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result["price"], 50.0)
 
 
 if __name__ == "__main__":
