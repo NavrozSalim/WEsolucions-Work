@@ -10,6 +10,12 @@ git pull --ff-only origin main
 echo "==> Stop accidental main stack if present"
 docker compose -f docker-compose.prod.yml --env-file .env.prod down 2>/dev/null || true
 
+if [ ! -f heb_cookies.json ]; then
+  echo "WARNING: heb_cookies.json not found — creating empty placeholder."
+  echo "         Export cookies from Chrome (heb.com) and replace this file, then redeploy."
+  echo '[]' > heb_cookies.json
+fi
+
 echo "==> Build US scraper worker"
 docker compose -f docker-compose.us-scraper.prod.yml --env-file .env.prod build celery_worker_us
 
@@ -22,6 +28,14 @@ docker compose -f docker-compose.us-scraper.prod.yml --env-file .env.prod exec -
     urls = load_proxy_urls(); \
     print(f'HEB US proxies loaded: {len(urls)}'); \
     [print(f'  - {u.split(\"@\")[-1]}') for u in urls]" || true
+
+echo "==> Verify HEB cookies (optional, for Akamai)"
+docker compose -f docker-compose.us-scraper.prod.yml --env-file .env.prod exec -T celery_worker_us \
+  python -c "from scrapers.heb_us_scraper import load_heb_cookies; \
+    n = len(load_heb_cookies()); \
+    print(f'HEB cookies loaded: {n}'); \
+    import sys; sys.exit(0 if n else 1)" || \
+  echo "  (no cookies yet — export from Chrome into heb_cookies.json on the host)"
 
 echo "==> Done. US worker listens on queue: heavy-us"
 docker compose -f docker-compose.us-scraper.prod.yml --env-file .env.prod ps celery_worker_us

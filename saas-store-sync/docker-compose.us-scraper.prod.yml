@@ -70,11 +70,11 @@ services:
       - HEB_HOME_WARMUP=${HEB_HOME_WARMUP:-0}
       - HEB_USE_UNDETECTED=${HEB_USE_UNDETECTED:-0}
       - HEB_USE_APIFY=${HEB_USE_APIFY:-0}
-      - HEB_COOKIES_FILE=${HEB_COOKIES_FILE:-}
+      - HEB_COOKIES_FILE=${HEB_COOKIES_FILE:-/app/heb_cookies.json}
       - HEB_HTTP_BOOTSTRAP_SELENIUM=${HEB_HTTP_BOOTSTRAP_SELENIUM:-1}
     volumes:
-      # Optional Akamai cookies: set HEB_COOKIES_FILE=/app/heb_cookies.json and uncomment:
-      # - ./heb_cookies.json:/app/heb_cookies.json:ro
+      # Akamai session cookies — create heb_cookies.json on the host (Chrome export JSON array).
+      - ./heb_cookies.json:/app/heb_cookies.json:ro
       - catalog_media_us_worker:/app/media
     restart: always
     stop_grace_period: 60s
