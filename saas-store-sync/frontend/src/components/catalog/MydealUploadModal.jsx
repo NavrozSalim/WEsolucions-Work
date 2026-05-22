@@ -15,7 +15,7 @@ const STEPS = [
     {
         key: 'inventory',
         title: 'Inventory template',
-        hint: 'CSV with StockOnHand, Discontinued, MyDealApproved, … Uploading replaces any previous inventory template for this store.',
+        hint: 'CSV with StockOnHand, Discontinued, WMPApproved, … Uploading replaces any previous inventory template for this store.',
     },
 ];
 

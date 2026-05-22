@@ -38,7 +38,7 @@ MYDEAL_INVENTORY_HEADERS = [
     'DealTitle',
     'StockOnHand',
     'Discontinued',
-    'MyDealApproved',
+    'WMPApproved',
 ]
 
 
@@ -165,7 +165,7 @@ def ingest_mydeal_template(store: Store, kind: str, file_obj) -> dict[str, Any]:
                 options=row.get('Options', ''),
                 deal_title=row.get('DealTitle', ''),
                 discontinued=row.get('Discontinued', ''),
-                mydeal_approved=row.get('MyDealApproved', ''),
+                mydeal_approved=row.get('WMPApproved', ''),
             )
         )
     MydealTemplateRow.objects.bulk_create(bulk, batch_size=500)
@@ -222,7 +222,7 @@ def ingest_mydeal_template_csv_bytes(
                 options=row.get('Options', ''),
                 deal_title=row.get('DealTitle', ''),
                 discontinued=row.get('Discontinued', ''),
-                mydeal_approved=row.get('MyDealApproved', ''),
+                mydeal_approved=row.get('WMPApproved', ''),
             )
         )
     MydealTemplateRow.objects.bulk_create(bulk, batch_size=500)
