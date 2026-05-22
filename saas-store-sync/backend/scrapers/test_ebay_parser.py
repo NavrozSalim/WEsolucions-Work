@@ -461,6 +461,16 @@ _AU_SHIPPING_JSON_ONLY = """
 """
 
 
+_AU_SHIPPING_BLOCK_UNHYDRATED = """
+<div class="ux-labels-values ux-labels-values--shipping">
+  <div class="ux-labels-values__values-content">
+    <div>Get it between Wed, 27 May and Thu, 28 May to 2762</div>
+    <div>Located in: Sunshine VIC, Australia</div>
+  </div>
+</div>
+"""
+
+
 _AU_PRICE_5597 = """
 <section data-testid="x-item-price">
   <div data-testid="x-price-primary">
@@ -599,6 +609,21 @@ class TestEbayAuShippingAddOn(unittest.TestCase):
         html = _au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK, _AU_SHIPPING_JSON_ONLY)
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
         self.assertEqual(result["price"], 50.0)
+
+    def test_au_http_shipping_resolved_when_no_postage_block(self):
+        soup = BeautifulSoup(_au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK), "lxml")
+        self.assertTrue(EbayParser.au_http_shipping_resolved(soup))
+
+    def test_au_http_shipping_resolved_when_free_or_paid_in_values(self):
+        soup = BeautifulSoup(_AU_SHIPPING_BLOCK, "lxml")
+        self.assertTrue(EbayParser.au_http_shipping_resolved(soup))
+        soup = BeautifulSoup(_AU_FREE_SHIPPING_BLOCK, "lxml")
+        self.assertTrue(EbayParser.au_http_shipping_resolved(soup))
+
+    def test_au_http_shipping_unresolved_when_block_has_no_price_or_free(self):
+        soup = BeautifulSoup(_AU_SHIPPING_BLOCK_UNHYDRATED, "lxml")
+        self.assertFalse(EbayParser.au_http_shipping_resolved(soup))
+        self.assertIsNone(EbayParser.extract_au_shipping_amount(soup))
 
 
 if __name__ == "__main__":

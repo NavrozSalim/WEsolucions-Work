@@ -60,6 +60,7 @@ class TestScrapeEbayAuOrchestration(unittest.TestCase):
         hit = {"price": 35.0, "stock": 1, "title": "T"}
         with patch.object(au.EbayHTTP, "fetch", return_value=("<html>x</html>", 200, "")), \
              patch.object(au, "_parse_html_to_result_au", return_value=hit), \
+             patch.object(au, "_au_http_shipping_resolved", return_value=True), \
              patch.object(au, "_ensure_cookies_in_http_client") as cookies_mock, \
              patch.object(au, "scrape_ebay_au_fast") as fast_mock, \
              patch.object(au, "scrape_ebay_for_market") as full_mock:
@@ -68,6 +69,19 @@ class TestScrapeEbayAuOrchestration(unittest.TestCase):
         fast_mock.assert_not_called()
         full_mock.assert_not_called()
         cookies_mock.assert_called_once()
+
+    def test_http_first_unhydrated_shipping_falls_through_to_fast_selenium(self):
+        http_hit = {"price": 32.0, "stock": 5, "title": "Logitech"}
+        selenium_hit = {"price": 44.99, "stock": 5, "title": "Logitech"}
+        with patch.object(au.EbayHTTP, "fetch", return_value=("<html>partial</html>", 200, "")), \
+             patch.object(au, "_parse_html_to_result_au", return_value=http_hit), \
+             patch.object(au, "_au_http_shipping_resolved", return_value=False), \
+             patch.object(au, "scrape_ebay_au_fast", return_value=selenium_hit) as fast_mock, \
+             patch.object(au, "scrape_ebay_for_market") as full_mock:
+            result = au.scrape_ebay_au(_TEST_URL, "AU", {})
+        self.assertEqual(result, selenium_hit)
+        fast_mock.assert_called_once()
+        full_mock.assert_not_called()
 
     def test_http_first_ended_listing_is_terminal(self):
         ended = {"price": None, "stock": 0, "title": "Ended item"}
@@ -167,6 +181,7 @@ class TestScrapeEbayAuOrchestration(unittest.TestCase):
 
         with patch.object(au.EbayHTTP, "fetch", side_effect=fetch_side) as fetch_mock, \
              patch.object(au, "_parse_html_to_result_au", side_effect=parse_side), \
+             patch.object(au, "_au_http_shipping_resolved", return_value=True), \
              patch.object(au, "scrape_ebay_au_fast") as fast_mock, \
              patch.object(au, "scrape_ebay_for_market") as full_mock:
             result = au.scrape_ebay_au(_TEST_URL, "AU", {})
