@@ -27,7 +27,6 @@ from .ebay_common import (
     _ebay_sk,
     _is_challenge_or_blocked,
     _looks_like_product_html,
-    _au_http_shipping_resolved,
     _normalize_url,
     _parse_html_to_result_au,
     close_ebay_market_session,
@@ -193,18 +192,12 @@ def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
             )
             if html and not err:
                 parsed = _parse_html_to_result_au(html, url)
-                if parsed is not None and _au_http_shipping_resolved(html):
+                if parsed is not None:
                     logger.info(
                         "eBay AU HTTP-first OK %s price=%s total=%.2fs",
                         url[:70], parsed.get("price"), time.monotonic() - t_start,
                     )
                     return parsed
-                if parsed is not None:
-                    logger.info(
-                        "eBay AU HTTP-first skip (postage not hydrated) url=%s price=%s",
-                        url[:70], parsed.get("price"),
-                    )
-                    break
                 # HTML looked like a product but parser found no price.
                 # Retry once: eBay BIN hydration often needs a warm session.
                 if http_attempt + 1 < http_attempts:

@@ -424,7 +424,7 @@ def _parse_fast_html(html: str, url: str) -> Optional[dict]:
         return None
 
     final_price = float(price)
-    shipping = EbayParser.extract_au_shipping_amount(soup, html)
+    shipping = EbayParser.extract_au_shipping_amount(soup)
     if shipping is not None and shipping > 0:
         try:
             final_price = round(final_price + float(shipping), 2)

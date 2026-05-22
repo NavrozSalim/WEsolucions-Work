@@ -445,56 +445,6 @@ _AU_QTY_BLOCK = """
 """
 
 
-_AU_SHIPPING_BLOCK_DOESNT_POST = """
-<div class="ux-labels-values ux-labels-values--shipping">
-  <div class="ux-labels-values__values-content">
-    <div>Item doesn't post to you</div>
-    <div>AU $12.99 delivery in 2-4 days</div>
-    <div>Get it between Tue, 26 May and Thu, 28 May to 2762</div>
-  </div>
-</div>
-"""
-
-
-_AU_SHIPPING_JSON_ONLY = """
-<script type="application/json">{"shippingCost":{"value":"12.99","currency":"AUD"}}</script>
-"""
-
-
-_AU_SHIPPING_BLOCK_UNHYDRATED = """
-<div class="ux-labels-values ux-labels-values--shipping">
-  <div class="ux-labels-values__values-content">
-    <div>Get it between Wed, 27 May and Thu, 28 May to 2762</div>
-    <div>Located in: Sunshine VIC, Australia</div>
-  </div>
-</div>
-"""
-
-
-_AU_PRICE_5597 = """
-<section data-testid="x-item-price">
-  <div data-testid="x-price-primary">
-    <span class="ux-textspans">AU $55.97</span>
-  </div>
-</section>
-"""
-
-
-_AU_FREE_DELIVERY_BLOCK = """
-<div class="ux-labels-values ux-labels-values--shipping">
-  <div class="ux-labels-values__values-content">
-    <div>Free delivery in 1-2 days</div>
-    <div>Get it between Tue, 26 May and Wed, 27 May to 2762</div>
-  </div>
-</div>
-"""
-
-
-_AU_PAID_GRAPHQL_599 = """
-<script>,\"converted\":null,\"original\":{\"__typename\":\"Price\",\"amount\":5.99,\"currency\":\"AUD\"}},\"shipToLocations\":[\"AUS\"],\"shippingServiceName\":\"Standard\"</script>
-"""
-
-
 def _au_html(*blocks: str) -> str:
     return f"<html><body><h1 class='x-item-title'><span>Test title</span></h1>{''.join(blocks)}</body></html>"
 
@@ -587,43 +537,6 @@ class TestEbayAuShippingAddOn(unittest.TestCase):
     def test_shipping_amount_helper_returns_zero_for_free(self):
         soup = BeautifulSoup(_AU_FREE_SHIPPING_BLOCK, "lxml")
         self.assertEqual(EbayParser.extract_au_shipping_amount(soup), 0.0)
-
-    def test_doesnt_post_first_div_still_finds_delivery_in_later_div(self):
-        """Values-content combines all lines; paid postage in a later div is included."""
-        html = _au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK, _AU_SHIPPING_BLOCK_DOESNT_POST)
-        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
-        self.assertEqual(result["price"], 62.99)
-
-    def test_free_delivery_ignores_graphql_paid_tier(self):
-        """Free delivery in values-content must not add shipping."""
-        html = _au_html(
-            _AU_PRICE_5597,
-            _AU_QTY_BLOCK,
-            _AU_FREE_DELIVERY_BLOCK,
-            _AU_PAID_GRAPHQL_599,
-        )
-        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
-        self.assertEqual(result["price"], 55.97)
-
-    def test_no_values_content_leaves_price_unchanged(self):
-        html = _au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK, _AU_SHIPPING_JSON_ONLY)
-        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
-        self.assertEqual(result["price"], 50.0)
-
-    def test_au_http_shipping_resolved_when_no_postage_block(self):
-        soup = BeautifulSoup(_au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK), "lxml")
-        self.assertTrue(EbayParser.au_http_shipping_resolved(soup))
-
-    def test_au_http_shipping_resolved_when_free_or_paid_in_values(self):
-        soup = BeautifulSoup(_AU_SHIPPING_BLOCK, "lxml")
-        self.assertTrue(EbayParser.au_http_shipping_resolved(soup))
-        soup = BeautifulSoup(_AU_FREE_SHIPPING_BLOCK, "lxml")
-        self.assertTrue(EbayParser.au_http_shipping_resolved(soup))
-
-    def test_au_http_shipping_unresolved_when_block_has_no_price_or_free(self):
-        soup = BeautifulSoup(_AU_SHIPPING_BLOCK_UNHYDRATED, "lxml")
-        self.assertFalse(EbayParser.au_http_shipping_resolved(soup))
-        self.assertIsNone(EbayParser.extract_au_shipping_amount(soup))
 
 
 if __name__ == "__main__":

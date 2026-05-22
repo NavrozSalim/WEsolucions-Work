@@ -280,29 +280,6 @@ def _parse_ebay_display_price_text(text: str) -> Optional[float]:
     return parse_price_text(stripped)
 
 
-def _parse_au_shipping_price_text(text: str) -> Optional[float]:
-    """Parse postage from the AU shipping values row (currency marker required).
-
-    Avoids treating delivery-date numbers (e.g. ``27 May``) as postage.
-    """
-    if not text:
-        return None
-    stripped = text.strip()
-    if not stripped or len(stripped) > 500:
-        return None
-    amounts: list[float] = []
-    for m in _RE_CURRENCY_AMOUNT.finditer(stripped):
-        try:
-            val = float(m.group(1).replace(",", ""))
-        except ValueError:
-            continue
-        if 0.01 <= val < 999_999:
-            amounts.append(val)
-    if amounts:
-        return min(amounts)
-    return None
-
-
 def _ebay_home_origin_for_item_url(item_url: str) -> str:
     u = (item_url or "").lower()
     if "ebay.ca" in u:
@@ -534,9 +511,8 @@ class EbayParser:
     )
 
     # AU postage row. Paid postage is added on top of the scraped item price.
-    AU_SHIPPING_BLOCK_SELECTOR = ".ux-labels-values--shipping"
-    AU_SHIPPING_VALUES_SELECTOR = (
-        ".ux-labels-values--shipping div.ux-labels-values__values-content"
+    AU_SHIPPING_SELECTOR = (
+        ".ux-labels-values--shipping .ux-labels-values__values-content div:nth-of-type(1)"
     )
 
     TITLE_SELECTORS = [
@@ -1302,36 +1278,23 @@ class EbayParser:
         return False
 
     @classmethod
-    def extract_au_shipping_amount(cls, soup: BeautifulSoup, html: str = "") -> Optional[float]:
-        """Return postage from the AU shipping values row, or ``None``.
+    def extract_au_shipping_amount(cls, soup: BeautifulSoup) -> Optional[float]:
+        """Return the paid postage amount from the AU shipping row, or ``None``.
 
-        Uses ``AU_SHIPPING_VALUES_SELECTOR`` only: if the text contains
-        ``free`` (any case) shipping is zero; otherwise parse a currency
-        amount from that node and add it to the item price upstream.
+        Returns ``0.0`` when the row says free postage, so callers can choose
+        to short-circuit. Returns ``None`` when the selector is absent or the
+        text has no parsable currency amount.
         """
-        del html  # selector-only rule; raw HTML / JSON is intentionally ignored
-        el = soup.select_one(cls.AU_SHIPPING_VALUES_SELECTOR)
+        el = soup.select_one(cls.AU_SHIPPING_SELECTOR)
         if not el:
             return None
         text = el.get_text(" ", strip=True)
         if not text:
             return None
-        if "free" in text.lower():
+        lower = text.lower()
+        if "free" in lower and "$" not in text:
             return 0.0
-        return _parse_au_shipping_price_text(text)
-
-    @classmethod
-    def au_http_shipping_resolved(cls, soup: BeautifulSoup) -> bool:
-        """True when HTTP HTML already has enough postage detail to trust the price.
-
-        eBay AU often hydrates paid postage client-side. When the shipping block
-        exists but ``extract_au_shipping_amount`` returns ``None``, HTTP-first
-        must fall through to Selenium instead of returning item-only price.
-        """
-        block = soup.select_one(cls.AU_SHIPPING_BLOCK_SELECTOR)
-        if not block:
-            return True
-        return cls.extract_au_shipping_amount(soup) is not None
+        return _parse_ebay_display_price_text(text)
 
 
 class EbayHTTP:
@@ -2122,7 +2085,7 @@ def _parse_html_to_result_au(html: str, url: str) -> Optional[dict]:
     if parsed is None or parsed.get("price") is None:
         return parsed
 
-    shipping = EbayParser.extract_au_shipping_amount(soup, html)
+    shipping = EbayParser.extract_au_shipping_amount(soup)
     if shipping is not None and shipping > 0:
         try:
             new_price = round(float(parsed["price"]) + float(shipping), 2)
@@ -2132,17 +2095,6 @@ def _parse_html_to_result_au(html: str, url: str) -> Optional[dict]:
             pass
 
     return parsed
-
-
-def _au_http_shipping_resolved(html: str) -> bool:
-    """Whether AU HTTP HTML has complete postage info (see ``au_http_shipping_resolved``)."""
-    if not html:
-        return False
-    try:
-        soup = BeautifulSoup(html, "lxml")
-    except Exception:
-        soup = BeautifulSoup(html, "html.parser")
-    return EbayParser.au_http_shipping_resolved(soup)
 
 
 def scrape_ebay_for_market(
@@ -2203,12 +2155,6 @@ def scrape_ebay_for_market(
             if html and not err:
                 if market == EBAY_MARKET_AU:
                     parsed = _parse_html_to_result_au(html, candidate)
-                    if parsed is not None and not _au_http_shipping_resolved(html):
-                        logger.info(
-                            "eBay AU HTTP postage not hydrated for %s — trying browser",
-                            candidate,
-                        )
-                        parsed = None
                 else:
                     parsed = _parse_html_to_result(html, candidate)
                 if parsed is not None:
