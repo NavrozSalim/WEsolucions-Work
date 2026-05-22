@@ -1,11 +1,11 @@
 """
-HEB product scraper (optimized Selenium flow).
+HEB US product scraper (HTTP-first via curl_cffi, Selenium fallback).
 
 Goals:
-- Fast page load and extraction (minimal sleeps, explicit waits)
-- Reuse one driver across rows in the same sync run
-- Early block/captcha detection
-- Return the same shape used by the app: {"price": float|None, "stock": int|None, "title": str|None}
+- HTTP-first through residential proxies (~2-5s typical hit)
+- Selenium fallback only when HTTP is blocked (HEB_SELENIUM_FALLBACK=1)
+- Reuse HTTP client + browser driver across rows in one sync run
+- Return {"price", "stock", "title"} (+ optional error_code)
 """
 import logging
 import importlib
@@ -25,13 +25,56 @@ from bs4 import BeautifulSoup
 import requests
 
 from .core import ScrapeResult, detect_block, parse_price_text, random_delay
+from .heb_us_proxies import ProxyAssignment, get_pool
 
 logger = logging.getLogger("scrapers.heb")
 
-RETRY_LIMIT = 3
-PAGE_TIMEOUT = 25
-PRICE_WAIT_TIMEOUT = 10
-PDP_READY_TIMEOUT = 24
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(float(os.environ.get(name, "") or default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = (os.environ.get(name, "") or "").strip().lower()
+    if raw in ("1", "true", "yes", "y", "on"):
+        return True
+    if raw in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
+RETRY_LIMIT = _env_int("HEB_SELENIUM_RETRIES", 2)
+PAGE_TIMEOUT = _env_int("HEB_PAGE_TIMEOUT_SEC", 15)
+PRICE_WAIT_TIMEOUT = _env_int("HEB_PRICE_WAIT_TIMEOUT_SEC", 6)
+PDP_READY_TIMEOUT = _env_int("HEB_PDP_READY_TIMEOUT_SEC", 10)
+HTTP_TIMEOUT_SEC = _env_int("HEB_HTTP_TIMEOUT_SEC", 12)
+HTTP_RETRIES = _env_int("HEB_HTTP_RETRIES", 1)
+HEB_HTTP_FIRST = _env_bool("HEB_HTTP_FIRST", True)
+SELENIUM_FALLBACK = _env_bool("HEB_SELENIUM_FALLBACK", True)
+BLOCK_COOLDOWN_SEC = _env_float("HEB_BLOCK_COOLDOWN_SEC", 300.0)
+HEB_HOME_WARMUP = _env_bool("HEB_HOME_WARMUP", False)
+
+_HTTP_SESSION_KEY = "heb_us_http_client"
+_HTTP_PROXY_KEY = "heb_us_http_proxy"
+_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+}
 DEBUG_DUMP_DIR = os.environ.get("HEB_DEBUG_DIR", "/tmp/heb_debug")
 HEB_HOME = os.environ.get("HEB_HOME_URL", "https://www.heb.com/")
 COOKIES_FILE = os.environ.get("HEB_COOKIES_FILE", "cookies.json")
@@ -875,6 +918,11 @@ class HebDriver:
 
         use_uc = bool(HEB_USE_UNDETECTED and uc_module is not None)
         opts = uc_module.ChromeOptions() if use_uc else Options()
+        if not use_uc:
+            try:
+                opts.page_load_strategy = "eager"
+            except Exception:
+                pass
         if HEB_HEADLESS:
             opts.add_argument("--headless=new")
         opts.add_argument("--no-sandbox")
@@ -971,15 +1019,13 @@ class HebDriver:
         except Exception:
             pass
 
-        # Optional warm-up + cookie injection. Helps bypass store selector/challenges.
-        try:
-            driver.get(HEB_HOME)
-            time.sleep(0.8)
-            _load_cookies(driver)
-            driver.get(HEB_HOME)
-            time.sleep(0.6)
-        except Exception:
-            pass
+        if HEB_HOME_WARMUP:
+            try:
+                driver.get(HEB_HOME)
+                time.sleep(0.4)
+                _load_cookies(driver)
+            except Exception:
+                pass
         return driver
 
     @staticmethod
@@ -1028,13 +1074,11 @@ def _fetch_html(driver, url: str) -> str:
 
     try:
         driver.execute_script("window.scrollTo(0, 400);")
-        time.sleep(0.35)
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.35);")
     except Exception:
         pass
 
     try:
-        WebDriverWait(driver, 10).until(
+        WebDriverWait(driver, 4).until(
             lambda d: d.execute_script("return document.readyState") == "complete"
         )
     except Exception:
@@ -1069,11 +1113,9 @@ def _fetch_html(driver, url: str) -> str:
                 continue
 
     if waited_pdp:
-        time.sleep(0.45)
+        time.sleep(0.15)
     elif waited:
-        time.sleep(0.65)
-    else:
-        time.sleep(1.0)
+        time.sleep(0.25)
 
     return driver.page_source or ""
 
@@ -1098,6 +1140,176 @@ def _fetch_runtime_json(driver) -> tuple[str, dict]:
             continue
 
     return "\n".join(payloads), next_data
+
+
+
+
+def _get_http_client(session: dict, assignment: ProxyAssignment):
+    existing = session.get(_HTTP_SESSION_KEY)
+    existing_proxy = session.get(_HTTP_PROXY_KEY)
+    if existing is not None and existing_proxy == assignment.url:
+        return existing
+    if existing is not None:
+        try:
+            existing.close()
+        except Exception:
+            pass
+
+    client = None
+    try:
+        from curl_cffi import requests as curl_requests
+
+        client = curl_requests.Session()
+        client.proxies = assignment.as_requests_proxy()
+        client.headers.update(_HTTP_HEADERS)
+        client._heb_use_impersonate = True  # type: ignore[attr-defined]
+    except Exception:
+        client = requests.Session()
+        client.proxies = assignment.as_requests_proxy()
+        client.headers.update(_HTTP_HEADERS)
+        client._heb_use_impersonate = False  # type: ignore[attr-defined]
+
+    session[_HTTP_SESSION_KEY] = client
+    session[_HTTP_PROXY_KEY] = assignment.url
+    return client
+
+
+def _http_fetch(url: str, session: dict, assignment: ProxyAssignment) -> tuple[str, str, str]:
+    client = _get_http_client(session, assignment)
+    kwargs = {"timeout": HTTP_TIMEOUT_SEC, "allow_redirects": True}
+    if getattr(client, "_heb_use_impersonate", False):
+        kwargs["impersonate"] = "chrome131"
+    try:
+        resp = client.get(url, **kwargs)
+    except Exception as exc:
+        return "", "", f"request_error: {type(exc).__name__}: {str(exc)[:200]}"
+    final_url = getattr(resp, "url", url) or url
+    status = getattr(resp, "status_code", None)
+    html = getattr(resp, "text", "") or ""
+    if status != 200:
+        return html, str(final_url), f"http_{status}"
+    return html, str(final_url), ""
+
+
+def _page_title_from_html(html: str) -> str:
+    try:
+        soup = BeautifulSoup(html[:80_000], "lxml")
+        if soup.title and soup.title.string:
+            return (soup.title.string or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _parse_heb_page(
+    vendor_url: str,
+    html: str,
+    *,
+    page_title: str = "",
+    current_url: str = "",
+    next_data: Optional[dict] = None,
+    base_html_len: Optional[int] = None,
+) -> ScrapeResult:
+    current_url = current_url or vendor_url
+    base_html_len = base_html_len if base_html_len is not None else len(html or "")
+
+    if _heb_challenge_in_text(page_title):
+        return ScrapeResult.fail(
+            "blocked_title_challenge",
+            f"Blocked (title): {page_title}",
+            html,
+            "heb",
+            vendor_url,
+        )
+
+    blocked, reason = _is_block(html)
+    if blocked:
+        return ScrapeResult.fail(
+            f"blocked_{reason}",
+            f"Blocked: {reason}",
+            html,
+            "heb",
+            vendor_url,
+        )
+
+    soup = BeautifulSoup(html, "lxml")
+    merged_nd = _merge_next_data(next_data, soup)
+    title = HebParser.extract_title(soup, merged_nd, page_title=page_title)
+
+    if _is_tiny_invalid_pdp(next_data, merged_nd, page_title, title, base_html_len):
+        return ScrapeResult.fail(
+            "invalid_or_blocked_pdp",
+            "HEB empty or non-product page (tiny HTML, no PDP payload)",
+            html,
+            "heb",
+            vendor_url,
+        )
+
+    price = HebParser.extract_price(soup, html, merged_nd)
+    stock = HebParser.extract_stock(soup, html)
+    if price is None:
+        return ScrapeResult.fail(
+            "no_price", "Price not found on HEB page", html, "heb", vendor_url
+        )
+    return ScrapeResult.ok(price=price, stock=stock, title=title)
+
+
+def _scrape_heb_http(vendor_url: str, session: dict) -> Optional[dict]:
+    pool = get_pool()
+    if pool is None or pool.size == 0:
+        return None
+
+    attempts = max(1, HTTP_RETRIES + 1)
+    last_error: Optional[str] = None
+
+    for attempt in range(attempts):
+        assignment = pool.acquire(force_rotate=attempt > 0)
+        if assignment is None:
+            last_error = "no_proxy_available"
+            break
+
+        pool.wait_for_gap(assignment)
+        logger.info(
+            "HEB HTTP GET %s (proxy=%s attempt=%d/%d)",
+            vendor_url[:120],
+            assignment.label,
+            attempt + 1,
+            attempts,
+        )
+        html, final_url, http_err = _http_fetch(vendor_url, session, assignment)
+        if http_err:
+            last_error = http_err
+            pool.mark_blocked(assignment, cooldown_sec=BLOCK_COOLDOWN_SEC / 6)
+            continue
+
+        page_title = _page_title_from_html(html)
+        result = _parse_heb_page(
+            vendor_url,
+            html,
+            page_title=page_title,
+            current_url=final_url,
+        )
+        if result.success:
+            logger.info(
+                "HEB HTTP OK url=%s price=%s stock=%s proxy=%s",
+                vendor_url[:80],
+                result.price,
+                result.stock,
+                assignment.label,
+            )
+            return result.to_legacy()
+
+        last_error = result.error_code or "parse_failed"
+        if result.error_code == "no_price":
+            return result.to_legacy()
+        if result.error_code and str(result.error_code).startswith("blocked_"):
+            pool.mark_blocked(assignment, cooldown_sec=BLOCK_COOLDOWN_SEC)
+        else:
+            pool.mark_blocked(assignment, cooldown_sec=BLOCK_COOLDOWN_SEC / 6)
+
+    if last_error:
+        logger.warning("HEB HTTP failed url=%s last=%s", vendor_url[:80], last_error)
+    return None
 
 
 def _heb_challenge_in_text(*texts: str) -> bool:
@@ -1189,7 +1401,7 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
     if apify_result is not None:
         return apify_result
 
-    if not _proxy_pool():
+    if get_pool() is None:
         logger.warning(
             "HEB server scrape skipped (no HEB_US_PROXY_URLS): %s",
             (vendor_url or "")[:80],
@@ -1206,6 +1418,25 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
 
     if session is None:
         session = {}
+
+    if HEB_HTTP_FIRST:
+        http_result = _scrape_heb_http(vendor_url, session)
+        if http_result is not None:
+            return http_result
+        if not SELENIUM_FALLBACK:
+            return ScrapeResult.fail(
+                "http_exhausted",
+                "HEB HTTP scrape failed and Selenium fallback is disabled",
+                "",
+                "heb",
+                vendor_url,
+            ).to_legacy()
+        logger.info("HEB HTTP miss — falling back to Selenium for %s", vendor_url[:80])
+
+    return _scrape_heb_selenium(vendor_url, session)
+
+
+def _scrape_heb_selenium(vendor_url: str, session: dict) -> dict:
 
     driver = session.get("heb_driver")
     created = False
@@ -1353,5 +1584,12 @@ def scrape_heb(vendor_url: str, region: str, session: dict = None) -> dict:
 def close_heb_session(session):
     if session is None:
         return
+    client = session.pop(_HTTP_SESSION_KEY, None)
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
+    session.pop(_HTTP_PROXY_KEY, None)
     drv = session.pop("heb_driver", None)
     HebDriver.quit_safe(drv)
