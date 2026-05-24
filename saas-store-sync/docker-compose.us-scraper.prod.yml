@@ -70,7 +70,9 @@ services:
       - HEB_HOME_WARMUP=${HEB_HOME_WARMUP:-0}
       - HEB_USE_UNDETECTED=${HEB_USE_UNDETECTED:-0}
       - HEB_USE_APIFY=${HEB_USE_APIFY:-0}
-      - HEB_COOKIES_FILE=${HEB_COOKIES_FILE:-/app/heb_cookies.json}
+      # Leave unset for proxy-only HEB (no cookie file). Set in .env.prod when using cookies.
+      - HEB_COOKIES_FILE=${HEB_COOKIES_FILE:-}
+      - HEB_COOKIES_JSON=${HEB_COOKIES_JSON:-}
       - HEB_COOKIES_ONLY=${HEB_COOKIES_ONLY:-0}
       - HEB_HTTP_BOOTSTRAP_SELENIUM=${HEB_HTTP_BOOTSTRAP_SELENIUM:-1}
       - HEB_HTTP_USE_FILE_COOKIES=${HEB_HTTP_USE_FILE_COOKIES:-0}
@@ -79,8 +81,8 @@ services:
       - HEB_BOOTSTRAP_CHALLENGE_WAIT_SEC=${HEB_BOOTSTRAP_CHALLENGE_WAIT_SEC:-8}
       - HEB_PROXY_COOKIE_TTL_SEC=${HEB_PROXY_COOKIE_TTL_SEC:-1200}
     volumes:
-      # Akamai session cookies — create heb_cookies.json on the host (Chrome export JSON array).
-      - ./heb_cookies.json:/app/heb_cookies.json:ro
+      # Optional cookies-only / cookie-seed mode — uncomment when HEB_COOKIES_FILE=/app/heb_cookies.json:
+      # - ./heb_cookies.json:/app/heb_cookies.json:ro
       - catalog_media_us_worker:/app/media
     restart: always
     stop_grace_period: 60s
