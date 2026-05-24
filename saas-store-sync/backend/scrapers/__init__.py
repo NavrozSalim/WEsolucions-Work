@@ -13,15 +13,14 @@ Server-side vendors (scraped from this dispatcher):
   (set ``COSTCO_AU_PROXY_URLS`` on the worker; without proxies the dispatcher
   returns an ``ingest_only`` sentinel so the catalog task keeps the existing
   ``ProductMapping`` row untouched.)
-* **HEB US**         — Selenium through residential US proxies on the US worker
-  (set ``HEB_US_PROXY_URLS``; without proxies the dispatcher returns
-  ``heb_ingest_only`` / ``heb_no_proxy`` and the task keeps the latest
-  ``VendorPrice`` row.)
+* **HEB US**         — desktop runner (``desktop-runners/heb/``) with Chrome + cookies,
+  or server scrape when ``HEB_US_PROXY_URLS`` / ``HEB_COOKIES_ONLY`` is set on the US worker
 
 Ingest-only vendors (NOT scraped server-side unless proxies are configured):
 
-* **HEB**       — desktop runner via ``/api/v1/ingest/heb/`` when
-  ``HEB_US_PROXY_URLS`` is unset; live server scrape when set on the US worker
+* **HEB**       — desktop runner via ``desktop-runners/heb/`` (cookies + Chrome) or
+  ``/api/v1/ingest/heb/`` when server scrape is disabled; live server scrape when
+  ``HEB_US_PROXY_URLS`` or ``HEB_COOKIES_ONLY`` is set on the US worker
 * **Vevor AU**  — refreshed from the public S3 XLSX feed via
   ``catalog.tasks.run_vevor_au_ingest``
 

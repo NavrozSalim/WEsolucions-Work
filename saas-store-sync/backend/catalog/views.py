@@ -774,8 +774,8 @@ class CatalogScrapeTriggerView(APIView):
                 return False
         if vendor_code == 'heb':
             try:
-                from scrapers.heb_us_proxies import load_proxy_urls
-                return bool(load_proxy_urls())
+                from scrapers import _heb_us_server_scrape_enabled
+                return _heb_us_server_scrape_enabled()
             except Exception:
                 return False
         return False
