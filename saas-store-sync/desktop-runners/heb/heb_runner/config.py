@@ -9,6 +9,23 @@ _ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(_ROOT / ".env")
 
 
+def _ensure_ssl_env() -> None:
+    """Use certifi CA bundle when SSL_CERT_FILE is unset (common on Windows VPS)."""
+    if os.environ.get("SSL_CERT_FILE") and os.environ.get("REQUESTS_CA_BUNDLE"):
+        return
+    try:
+        import certifi
+
+        ca = certifi.where()
+        os.environ.setdefault("SSL_CERT_FILE", ca)
+        os.environ.setdefault("REQUESTS_CA_BUNDLE", ca)
+    except Exception:
+        pass
+
+
+_ensure_ssl_env()
+
+
 def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
 

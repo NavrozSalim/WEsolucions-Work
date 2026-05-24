@@ -571,13 +571,17 @@ class VendorIngestNextJobView(APIView):
         token = _authenticate(request, required_scope=cfg['scope'])
 
         with transaction.atomic():
-            job = (
+            job_qs = (
                 HebScrapeJob.objects
                 .select_for_update(skip_locked=True)
                 .filter(status=HebScrapeJob.Status.PENDING, vendor_code=vendor)
-                .order_by('requested_at')
-                .first()
             )
+            if token.created_by_id:
+                job_qs = job_qs.filter(
+                    Q(store__user_id=token.created_by_id)
+                    | Q(store__isnull=True, requested_by_id=token.created_by_id)
+                )
+            job = job_qs.order_by('requested_at').first()
             if job is None:
                 return Response({'job_id': None, 'checked_at': timezone.now().isoformat()})
 
@@ -592,6 +596,14 @@ class VendorIngestNextJobView(APIView):
             job.claimed_by_ip = _client_ip(request)
             job.url_count = len(urls)
             job.save(update_fields=['status', 'claimed_at', 'claimed_by_token', 'claimed_by_ip', 'url_count'])
+            if not urls:
+                logger.warning(
+                    'Desktop runner claimed %s job %s with 0 URLs (store=%s token_user=%s)',
+                    vendor,
+                    job.id,
+                    job.store_id,
+                    token.created_by_id,
+                )
 
         return Response({
             'job_id': str(job.id),

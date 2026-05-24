@@ -839,8 +839,20 @@ class CatalogScrapeTriggerView(APIView):
             user_id=request.user.id,
         )
 
-        def log_desktop_vendor_jobs():
-            """HEB/Costco/Vevor desktop runner jobs — can be slow on large stores."""
+        desktop_jobs_payload: list[dict] = []
+
+        def _serialize_desktop_jobs(jobs: list) -> list[dict]:
+            return [
+                {
+                    'vendor': vendor_code,
+                    'job_id': str(vendor_job.id),
+                    'status': vendor_job.status,
+                }
+                for vendor_code, vendor_job in jobs
+            ]
+
+        def log_desktop_vendor_jobs() -> list:
+            """HEB/Costco desktop runner jobs — fast DB inserts only."""
             desktop_jobs = self._maybe_enqueue_desktop_jobs(store, request.user)
             for vendor_code, vendor_job in desktop_jobs:
                 append_catalog_log(
@@ -850,25 +862,24 @@ class CatalogScrapeTriggerView(APIView):
                     user_id=request.user.id,
                     metadata={'job_id': str(vendor_job.id), 'vendor': vendor_code},
                 )
+            return desktop_jobs
 
-        import threading
         from django.db import close_old_connections
 
         def schedule_desktop_jobs_after_commit():
-            """Return 202 before desktop work: avoids nginx/proxy timeouts on big stores."""
+            """Enqueue desktop jobs on commit (sync) so progress API sees them immediately."""
 
             def run_desktop():
                 close_old_connections()
                 try:
-                    log_desktop_vendor_jobs()
+                    jobs = log_desktop_vendor_jobs()
+                    desktop_jobs_payload.extend(_serialize_desktop_jobs(jobs))
                 except Exception:
                     logger.exception('Catalog scrape: enqueue desktop runner jobs failed after commit')
                 finally:
                     close_old_connections()
 
-            transaction.on_commit(
-                lambda: threading.Thread(target=run_desktop, daemon=True).start()
-            )
+            transaction.on_commit(run_desktop)
 
         upload_id = request.data.get('upload_id')
         scope_upload = (request.data.get('scope') or '').strip().lower() == 'upload'
@@ -878,13 +889,14 @@ class CatalogScrapeTriggerView(APIView):
         if upload_id:
             upload = get_object_or_404(CatalogUpload, id=upload_id, store=store)
             if run_inline:
-                log_desktop_vendor_jobs()
+                inline_jobs = log_desktop_vendor_jobs()
                 result = run_catalog_scrape(str(upload.id))
                 if result.get('error'):
                     return Response(
                         {'detail': result['error'], **result},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     )
+                result['desktop_jobs'] = _serialize_desktop_jobs(inline_jobs)
                 return Response(result, status=status.HTTP_200_OK)
             celery_task_id = str(uuid.uuid4())
             with transaction.atomic():
@@ -909,6 +921,7 @@ class CatalogScrapeTriggerView(APIView):
                 "upload_id": str(upload.id),
                 "scope": "upload",
                 "status": "accepted",
+                "desktop_jobs": desktop_jobs_payload,
             }, status=status.HTTP_202_ACCEPTED)
 
         if scope_upload:
@@ -926,13 +939,14 @@ class CatalogScrapeTriggerView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             if run_inline:
-                log_desktop_vendor_jobs()
+                inline_jobs = log_desktop_vendor_jobs()
                 result = run_catalog_scrape(str(upload.id))
                 if result.get('error'):
                     return Response(
                         {'detail': result['error'], **result},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     )
+                result['desktop_jobs'] = _serialize_desktop_jobs(inline_jobs)
                 return Response(result, status=status.HTTP_200_OK)
             celery_task_id = str(uuid.uuid4())
             with transaction.atomic():
@@ -957,6 +971,7 @@ class CatalogScrapeTriggerView(APIView):
                 "upload_id": str(upload.id),
                 "scope": "upload",
                 "status": "accepted",
+                "desktop_jobs": desktop_jobs_payload,
             }, status=status.HTTP_202_ACCEPTED)
 
         # Default: all active ProductMappings (same scrape path as scheduled store update)
@@ -972,13 +987,14 @@ class CatalogScrapeTriggerView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if run_inline:
-            log_desktop_vendor_jobs()
+            inline_jobs = log_desktop_vendor_jobs()
             result = run_store_wide_catalog_scrape(str(store.id))
             if result.get('error'):
                 return Response(
                     {'detail': result['error'], **result},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
+            result['desktop_jobs'] = _serialize_desktop_jobs(inline_jobs)
             return Response(result, status=status.HTTP_200_OK)
         celery_task_id = str(uuid.uuid4())
         has_browser_scrape = store_has_scrapeable_pending_mappings(store)
@@ -1006,6 +1022,7 @@ class CatalogScrapeTriggerView(APIView):
                 "scope": "store",
                 "status": "accepted",
                 "browser_scrape": False,
+                "desktop_jobs": desktop_jobs_payload,
                 "message": "Feed/desktop vendors queued; no browser scrape needed.",
             }, status=status.HTTP_202_ACCEPTED)
         try:
@@ -1020,6 +1037,7 @@ class CatalogScrapeTriggerView(APIView):
             "job_id": celery_task_id,
             "scope": "store",
             "status": "accepted",
+            "desktop_jobs": desktop_jobs_payload,
         }, status=status.HTTP_202_ACCEPTED)
 
 

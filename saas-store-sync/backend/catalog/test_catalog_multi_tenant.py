@@ -9,7 +9,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 
 from catalog.ingest_views import _apply_to_mappings
-from catalog.models import CatalogUpload, CatalogUploadRow, HebScrapeJob, ProductMapping
+from catalog.models import CatalogUpload, CatalogUploadRow, HebScrapeJob, IngestToken, ProductMapping
 from catalog.scrape_progress import build_scrape_progress_payload, heal_stale_server_vendor_job
 from catalog.tasks import (
     run_catalog_sync,
@@ -394,3 +394,95 @@ class CostcoServerScrapeRoutingTests(TestCase):
         # Live vendors never carry a desktop job/queue payload.
         self.assertIsNone(costco.get('job'))
         self.assertIsNone(costco.get('queue'))
+
+
+@override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+class HebNextJobTenantTests(TestCase):
+    """Desktop poller only claims jobs for stores owned by the token user."""
+
+    def setUp(self):
+        import hashlib
+
+        self.mp, _ = Marketplace.objects.get_or_create(
+            code='kogan_heb_job',
+            defaults={'name': 'Kogan HEB Job'},
+        )
+        self.vendor = Vendor.objects.get(code='hebus')
+        self.user_a = User.objects.create_user(
+            username='heb_ja', email='heb_ja@example.com', password='pass12345',
+        )
+        self.user_b = User.objects.create_user(
+            username='heb_jb', email='heb_jb@example.com', password='pass12345',
+        )
+        self.store_a = Store.objects.create(
+            user=self.user_a, name='HEB A', region='USA', api_token='ha', marketplace=self.mp,
+        )
+        self.store_b = Store.objects.create(
+            user=self.user_b, name='HEB B', region='USA', api_token='hb', marketplace=self.mp,
+        )
+        product_a = Product.objects.create(
+            vendor=self.vendor,
+            owner=self.user_a,
+            vendor_sku='HEB-JOB-1',
+            vendor_url='https://www.heb.com/product-detail/111',
+        )
+        product_b = Product.objects.create(
+            vendor=self.vendor,
+            owner=self.user_b,
+            vendor_sku='HEB-JOB-2',
+            vendor_url='https://www.heb.com/product-detail/222',
+        )
+        ProductMapping.objects.create(
+            store=self.store_a, product=product_a, marketplace_id='HA-1', is_active=True,
+        )
+        ProductMapping.objects.create(
+            store=self.store_b, product=product_b, marketplace_id='HB-1', is_active=True,
+        )
+        raw_a = 'test-token-user-a-' + ('x' * 24)
+        raw_b = 'test-token-user-b-' + ('y' * 24)
+        self.token_a = IngestToken.objects.create(
+            label='heb-a',
+            token_hash=hashlib.sha256(raw_a.encode()).hexdigest(),
+            token_prefix=raw_a[:8],
+            scopes=['heb'],
+            created_by=self.user_a,
+        )
+        self.token_b = IngestToken.objects.create(
+            label='heb-b',
+            token_hash=hashlib.sha256(raw_b.encode()).hexdigest(),
+            token_prefix=raw_b[:8],
+            scopes=['heb'],
+            created_by=self.user_b,
+        )
+        self.raw_a = raw_a
+        self.raw_b = raw_b
+        # User B's job is older — without tenant filter, poller A would steal it with 0 URLs.
+        self.job_b = HebScrapeJob.objects.create(
+            store=self.store_b,
+            requested_by=self.user_b,
+            vendor_code='heb',
+            status=HebScrapeJob.Status.PENDING,
+        )
+        self.job_a = HebScrapeJob.objects.create(
+            store=self.store_a,
+            requested_by=self.user_a,
+            vendor_code='heb',
+            status=HebScrapeJob.Status.PENDING,
+        )
+
+    def test_next_job_scoped_to_token_owner(self):
+        from rest_framework.test import APIClient
+
+        client = APIClient()
+        resp = client.get(
+            '/api/v1/ingest/heb/next-job/',
+            HTTP_AUTHORIZATION=f'Bearer {self.raw_a}',
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['job_id'], str(self.job_a.id))
+        self.assertEqual(data['url_count'], 1)
+        self.assertIn('heb.com', data['urls'][0])
+
+        self.job_b.refresh_from_db()
+        self.assertEqual(self.job_b.status, HebScrapeJob.Status.PENDING)

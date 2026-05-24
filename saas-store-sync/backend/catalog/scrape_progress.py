@@ -253,8 +253,8 @@ def build_scrape_progress_payload(store) -> dict[str, Any]:
                 pass
         if vendor_code == 'heb' and runner_kind == 'desktop':
             try:
-                from scrapers.heb_us_proxies import load_proxy_urls
-                if load_proxy_urls():
+                from scrapers import _heb_us_server_scrape_enabled
+                if _heb_us_server_scrape_enabled():
                     runner_kind = 'live'
             except Exception:
                 pass

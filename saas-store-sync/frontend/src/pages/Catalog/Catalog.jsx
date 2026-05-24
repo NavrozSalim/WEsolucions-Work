@@ -1055,8 +1055,17 @@ export default function Catalog() {
     useEffect(() => {
         if (!trackingScrape || !scrapeProgress) return;
         const vendors = getVendorSummaries(scrapeProgress);
-        if (vendors.length === 0) {
+        const rawVendors = scrapeProgress?.vendors || {};
+        const hasActiveDesktopJob = Object.values(rawVendors).some((v) => {
+            const st = v?.job?.status;
+            return st === 'pending' || st === 'claimed';
+        }) || ['pending', 'claimed'].includes(scrapeProgress?.heb_job?.status);
+
+        if (vendors.length === 0 && !hasActiveDesktopJob) {
             setTrackingScrape(false);
+            return;
+        }
+        if (vendors.length === 0) {
             return;
         }
         const active = getActiveVendor(vendors);
@@ -1391,56 +1400,89 @@ export default function Catalog() {
         const MAX_RETRIES = 1;
         let attempt = 0;
 
-        const finishKickoffAndSyncProgress = (ok, proc) => {
+        const finishKickoffAndSyncProgress = (ok, proc, scrapeResponse = null) => {
             finishProgress(true);
-            return getScrapeProgress(storeId)
-                .then((p) => {
-                    const progress = p?.data || null;
-                    if (progress?.store_id && progress.store_id !== storeId) return;
-                    setScrapeProgress(progress);
-                    const serverOn = Boolean(progress?.server_celery_scrape?.active);
-                    if (serverOn) {
-                        trackingServerScrapeRef.current = true;
-                        setTrackingServerScrape(true);
-                    } else {
-                        trackingServerScrapeRef.current = false;
-                        setTrackingServerScrape(false);
-                    }
-                    const vendors = getVendorSummaries(progress);
-                    const pendingVendors = vendors.filter(
-                        (v) => vendorSyncPending(v) > 0 || vendorIngestIsRunning(v),
+            const desktopJobsFromApi = Array.isArray(scrapeResponse?.data?.desktop_jobs)
+                ? scrapeResponse.data.desktop_jobs
+                : [];
+            const hasQueuedDesktop = desktopJobsFromApi.length > 0;
+
+            const applyProgress = (progress, retriesLeft = 0) => {
+                if (progress?.store_id && progress.store_id !== storeId) return;
+                setScrapeProgress(progress);
+                const serverOn = Boolean(progress?.server_celery_scrape?.active);
+                if (serverOn) {
+                    trackingServerScrapeRef.current = true;
+                    setTrackingServerScrape(true);
+                } else {
+                    trackingServerScrapeRef.current = false;
+                    setTrackingServerScrape(false);
+                }
+                const vendors = getVendorSummaries(progress);
+                const pendingVendors = vendors.filter(
+                    (v) => vendorSyncPending(v) > 0 || vendorIngestIsRunning(v),
+                );
+                const shouldTrack = !uploadId && (pendingVendors.length > 0 || hasQueuedDesktop);
+                if (shouldTrack && vendors.length === 0 && hasQueuedDesktop && retriesLeft > 0) {
+                    return new Promise((resolve) => setTimeout(resolve, 400)).then(() =>
+                        getScrapeProgress(storeId).then((p) =>
+                            applyProgress(p?.data || null, retriesLeft - 1),
+                        ),
                     );
-                    const shouldTrack = !uploadId && pendingVendors.length > 0;
-                    if (shouldTrack) {
-                        setTrackingScrape(true);
-                        setFlowStatus('scraping');
-                        const parts = pendingVendors.map((v) => {
+                }
+                if (shouldTrack) {
+                    setTrackingScrape(true);
+                    setFlowStatus('scraping');
+                    const parts = pendingVendors.length > 0
+                        ? pendingVendors.map((v) => {
                             const lbl = v.label || (v.code || '').toUpperCase();
                             return `${lbl}: ${v.scraped || 0}/${v.total || 0} populated (${vendorSyncPending(v)} remaining)`;
-                        });
-                        if (serverOn) {
-                            setMessage(
-                                `${parts.join(' · ')} (your computer) — we are also fetching prices on our servers. Watch the blue bar above.`,
-                            );
-                        } else {
-                            setMessage(
-                                `${parts.join(' · ')} — waiting for your computer to finish uploading. This updates as it goes.`,
-                            );
-                        }
-                    } else if (serverOn) {
-                        setFlowStatus('scraping');
+                        })
+                        : desktopJobsFromApi.map((j) =>
+                            `${(j.vendor || 'desktop').toUpperCase()}: queued (waiting for your computer)`,
+                        );
+                    if (serverOn) {
                         setMessage(
-                            'We are fetching vendor prices on our servers. You can leave this page; the blue bar and table update as we go.',
+                            `${parts.join(' · ')} (your computer) — we are also fetching prices on our servers. Watch the blue bar above.`,
                         );
                     } else {
-                        setFlowStatus('success');
                         setMessage(
-                            `Done. ${ok} of ${proc} product(s) now have the latest vendor price and stock. `
-                            + 'If you use a marketplace, updates there may follow shortly.',
+                            `${parts.join(' · ')} — waiting for your computer to finish uploading. This updates as it goes.`,
                         );
                     }
-                })
+                } else if (serverOn) {
+                    setFlowStatus('scraping');
+                    setMessage(
+                        'We are fetching vendor prices on our servers. You can leave this page; the blue bar and table update as we go.',
+                    );
+                } else if (hasQueuedDesktop) {
+                    setTrackingScrape(true);
+                    setFlowStatus('scraping');
+                    setMessage(
+                        'Desktop scrape job queued — waiting for your HEB runner to pick it up. '
+                        + 'Make sure python run_poller.py is running on your Windows machine.',
+                    );
+                } else {
+                    setFlowStatus('success');
+                    setMessage(
+                        `Done. ${ok} of ${proc} product(s) now have the latest vendor price and stock. `
+                        + 'If you use a marketplace, updates there may follow shortly.',
+                    );
+                }
+            };
+
+            return getScrapeProgress(storeId)
+                .then((p) => applyProgress(p?.data || null, 5))
                 .catch(() => {
+                    if (hasQueuedDesktop) {
+                        setTrackingScrape(true);
+                        setFlowStatus('scraping');
+                        setMessage(
+                            'Desktop scrape job queued — waiting for your HEB runner. '
+                            + 'Make sure python run_poller.py is running on your Windows machine.',
+                        );
+                        return;
+                    }
                     setFlowStatus('success');
                     setMessage(
                         `Done. ${ok} of ${proc} product(s) now have the latest vendor price and stock. `
@@ -1466,7 +1508,7 @@ export default function Catalog() {
                 .then((res) => {
                     const ok = res?.data?.rows_succeeded ?? 0;
                     const proc = res?.data?.rows_processed ?? 0;
-                    return finishKickoffAndSyncProgress(ok, proc);
+                    return finishKickoffAndSyncProgress(ok, proc, res);
                 })
                 .catch((err) => {
                     if (err.response?.status === 409) {
