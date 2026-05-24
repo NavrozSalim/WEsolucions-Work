@@ -36,3 +36,9 @@ HEADLESS = _env_bool("HEADLESS", False)
 CHROME_VERSION_MAIN = _env("CHROME_VERSION_MAIN")
 HEB_HOME = "https://www.heb.com/"
 INGEST_BATCH_SIZE = max(1, _env_int("INGEST_BATCH_SIZE", 50))
+
+# Parallel chunk-pool poller (legacy ingest.env names supported)
+POLLER_WORKERS = max(1, _env_int("POLLER_WORKERS", _env_int("POLLER_FOLDERS", 10)))
+POLLER_CHUNK_SIZE = _env_int("POLLER_CHUNK_SIZE", 25)
+POLLER_UPLOAD_EVERY = max(30, _env_int("POLLER_UPLOAD_EVERY", 120))
+POLLER_CANCEL_CHECK_EVERY = max(0, _env_int("POLLER_CANCEL_CHECK_EVERY", 5))

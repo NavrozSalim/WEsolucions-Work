@@ -25,21 +25,33 @@ from .cookies import inject_cookies, load_cookies
 
 HEB_TITLE_SELECTORS = [
     "h1",
-    "h1[data-testid*='title']",
-    "[data-testid='product-title']",
 ]
+HEB_PRICE_WRAP_SELECTORS = [
+    ".ProductPrice_wrap__bp_Iq",
+    "[class*='ProductPrice_wrap']",
+]
+HEB_PRICE_IN_WRAP = "span[data-component='product-price-sale-price']"
 HEB_PRICE_SELECTORS = [
-    "[data-component='product-price-sale-price']",
-    "span.sc-659eeebc-1.ljptds",
-    "[data-testid*='price']",
-    "span[class*='price' i]",
-    "meta[itemprop='price']",
+    ".ProductPrice_wrap__bp_Iq span[data-component='product-price-sale-price']",
+    "[class*='ProductPrice_wrap'] span[data-component='product-price-sale-price']",
 ]
 HEB_ADD_TO_CART_SELECTORS = [
-    "div.AddToCartButton_layout__XhhQg",
-    "[class*='AddToCartButton_layout']",
-    "button[data-testid*='cart']",
+    ".eTxoqw [data-testid='logged-out-add-to-cart'] span[data-component='button-label']",
+    "[data-testid='logged-out-add-to-cart'] span[data-component='button-label']",
+    "[data-testid*='add-to-cart'] span[data-component='button-label']",
 ]
+HEB_ADD_TO_CART_LABEL = "add to cart"
+
+HEB_MODAL_CLOSE_SELECTORS = [
+    "button[data-qe-id='modalClose']",
+    "button[aria-label='Close Modal']",
+    "[class*='ModalClose_button']",
+    "[class*='WhatsNewModal'] button[aria-label='Close Modal']",
+    "[data-component='modal-content'] button[data-component='button']",
+]
+
+# PDP price hydrates after h1; __NEXT_DATA__ sale price is often stale vs the UI.
+DOM_WAIT_SEC = 10.0
 
 BLOCK_INDICATORS = (
     "pardon our interruption",
@@ -109,9 +121,10 @@ def create_driver():
     driver.set_page_load_timeout(URL_TIMEOUT_SEC)
     try:
         driver.execute_cdp_cmd("Network.enable", {})
+        # Block images/fonts only — blocking CSS breaks React price hydration on PDP.
         driver.execute_cdp_cmd(
             "Network.setBlockedURLs",
-            {"urls": ["*.css", "*.jpg", "*.jpeg", "*.png", "*.gif", "*.woff", "*.woff2"]},
+            {"urls": ["*.jpg", "*.jpeg", "*.png", "*.gif", "*.webp", "*.woff", "*.woff2"]},
         )
     except Exception:
         pass
@@ -128,6 +141,35 @@ def warm_session(driver) -> None:
     driver.get(HEB_HOME)
     time.sleep(1.5)
     print(f"Session warmed with {n} cookies")
+    _dismiss_overlays(driver)
+
+
+def _dismiss_overlays(driver) -> None:
+    """Close HEB promo / what's-new modals that block the PDP."""
+    time.sleep(0.5)
+    for sel in HEB_MODAL_CLOSE_SELECTORS:
+        try:
+            for btn in driver.find_elements(By.CSS_SELECTOR, sel):
+                if not btn.is_displayed():
+                    continue
+                aria = (btn.get_attribute("aria-label") or "").lower()
+                qe_id = btn.get_attribute("data-qe-id") or ""
+                if qe_id == "modalClose" or "close" in aria:
+                    btn.click()
+                    time.sleep(0.6)
+                    return
+        except Exception:
+            continue
+    # Escape key fallback for dialog role modals
+    try:
+        from selenium.webdriver.common.keys import Keys
+
+        body = driver.find_element(By.TAG_NAME, "body")
+        if "modal-open" in (body.get_attribute("class") or ""):
+            body.send_keys(Keys.ESCAPE)
+            time.sleep(0.4)
+    except Exception:
+        pass
 
 
 def _page_blocked(driver) -> tuple[bool, str]:
@@ -162,21 +204,6 @@ def _parse_next_data(html: str) -> Optional[dict]:
         return None
 
 
-def _dig_price(data: dict) -> Optional[float]:
-    paths = [
-        lambda d: d["props"]["pageProps"]["pdpData"]["product"]["price"]["value"],
-        lambda d: d["props"]["pageProps"]["product"]["price"]["value"],
-    ]
-    for fn in paths:
-        try:
-            val = fn(data)
-            if val is not None:
-                return float(val)
-        except (KeyError, TypeError, ValueError):
-            continue
-    return None
-
-
 def _dig_title(data: dict) -> Optional[str]:
     paths = [
         lambda d: d["props"]["pageProps"]["pdpData"]["product"]["name"],
@@ -192,26 +219,122 @@ def _dig_title(data: dict) -> Optional[str]:
     return None
 
 
-def _first_text(driver, selectors: list[str], wait: float = 2.0) -> str:
+def _first_visible_text(driver, selectors: list[str], wait: float = DOM_WAIT_SEC) -> str:
     for sel in selectors:
         try:
             WebDriverWait(driver, wait).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, sel))
+                EC.visibility_of_element_located((By.CSS_SELECTOR, sel))
             )
-            el = driver.find_element(By.CSS_SELECTOR, sel)
-            text = (el.get_attribute("textContent") or el.text or "").strip()
-            if text:
-                return text
+            for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                if not el.is_displayed():
+                    continue
+                text = (el.get_attribute("textContent") or el.text or "").strip()
+                if text:
+                    return text
         except Exception:
             continue
     return ""
 
 
+def _parse_price_text(raw: str) -> Optional[float]:
+    if not raw:
+        return None
+    m = re.search(r"\$?\s*(\d+\.\d{2})", raw.replace(",", ""))
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def _read_price_in_wrap(driver) -> Optional[float]:
+    """Read sale price only inside the ProductPrice_wrap block (matches PDP UI)."""
+    for wrap_sel in HEB_PRICE_WRAP_SELECTORS:
+        try:
+            wraps = driver.find_elements(By.CSS_SELECTOR, wrap_sel)
+        except Exception:
+            continue
+        for wrap in wraps:
+            try:
+                if not wrap.is_displayed():
+                    continue
+                spans = wrap.find_elements(By.CSS_SELECTOR, HEB_PRICE_IN_WRAP)
+                for span in spans:
+                    if not span.is_displayed():
+                        continue
+                    text = (span.get_attribute("textContent") or span.text or "").strip()
+                    price = _parse_price_text(text)
+                    if price is not None:
+                        return price
+            except Exception:
+                continue
+    return None
+
+
+def _price_from_html(html: str) -> Optional[float]:
+    if not html:
+        return None
+    wrap_match = re.search(
+        r'<div[^>]*class=["\'][^"\']*ProductPrice_wrap[^"\']*["\'][^>]*>(.*?)</div>',
+        html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    chunk = wrap_match.group(1) if wrap_match else ""
+    if not chunk:
+        return None
+    for m in re.finditer(
+        r'<span[^>]*data-component=["\']product-price-sale-price["\'][^>]*>(.*?)</span>',
+        chunk,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        inner = re.sub(r"<[^>]+>", " ", m.group(1))
+        price = _parse_price_text(inner)
+        if price is not None:
+            return price
+    return None
+
+
+def _price_from_dom(driver, html: str) -> Optional[float]:
+    """Poll until React hydrates — stale SSR price can differ from final UI price."""
+    try:
+        WebDriverWait(driver, DOM_WAIT_SEC).until(
+            EC.visibility_of_element_located(
+                (By.CSS_SELECTOR, HEB_PRICE_WRAP_SELECTORS[0])
+            )
+        )
+    except Exception:
+        try:
+            WebDriverWait(driver, 3).until(
+                EC.visibility_of_element_located(
+                    (By.CSS_SELECTOR, HEB_PRICE_WRAP_SELECTORS[1])
+                )
+            )
+        except Exception:
+            pass
+
+    deadline = time.time() + DOM_WAIT_SEC
+    last_seen: Optional[float] = None
+    while time.time() < deadline:
+        current = _read_price_in_wrap(driver)
+        if current is not None:
+            last_seen = current
+        time.sleep(0.5)
+
+    if last_seen is not None:
+        return last_seen
+    return _price_from_html(html)
+
+
 def _add_to_cart_visible(driver) -> bool:
+    needle = HEB_ADD_TO_CART_LABEL
     for sel in HEB_ADD_TO_CART_SELECTORS:
         try:
             for el in driver.find_elements(By.CSS_SELECTOR, sel):
-                if el.is_displayed():
+                if not el.is_displayed():
+                    continue
+                text = (el.get_attribute("textContent") or el.text or "").strip().lower()
+                if needle in text:
                     return True
         except Exception:
             continue
@@ -229,18 +352,6 @@ def _stock_from_page(driver, price: Optional[float]) -> int:
     return 3 if price is not None else 0
 
 
-def _parse_price_text(raw: str) -> Optional[float]:
-    if not raw:
-        return None
-    m = re.search(r"\$?\s*(\d+\.\d{2})", raw.replace(",", ""))
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except ValueError:
-        return None
-
-
 def scrape_url(driver, url: str) -> dict[str, Any]:
     last_err = "unknown"
     for attempt in range(MAX_RETRIES):
@@ -248,7 +359,9 @@ def scrape_url(driver, url: str) -> dict[str, Any]:
             if attempt:
                 time.sleep(random.uniform(1.0, 2.5))
             driver.get(url)
-            time.sleep(random.uniform(0.8, 1.5))
+            time.sleep(random.uniform(1.0, 1.5))
+            _dismiss_overlays(driver)
+            time.sleep(random.uniform(0.5, 1.0))
 
             blocked, reason = _page_blocked(driver)
             if blocked:
@@ -257,14 +370,17 @@ def scrape_url(driver, url: str) -> dict[str, Any]:
 
             html = driver.page_source or ""
             nd = _parse_next_data(html)
-            title = _dig_title(nd) if nd else ""
-            price = _dig_price(nd) if nd else None
 
-            if not title:
-                title = _first_text(driver, HEB_TITLE_SELECTORS)
+            title = _first_visible_text(driver, HEB_TITLE_SELECTORS, wait=DOM_WAIT_SEC)
+            if not title and nd:
+                title = _dig_title(nd) or ""
+
+            # Sale price from visible PDP UI only — never __NEXT_DATA__ (often wrong).
+            price = _price_from_dom(driver, html)
             if price is None:
-                raw = _first_text(driver, HEB_PRICE_SELECTORS)
-                price = _parse_price_text(raw)
+                time.sleep(1.5)
+                html = driver.page_source or ""
+                price = _price_from_dom(driver, html)
 
             if not title or price is None:
                 blocked, reason = _page_blocked(driver)
