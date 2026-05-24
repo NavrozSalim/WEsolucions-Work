@@ -44,8 +44,9 @@ from vendor.models import Vendor
 def _heb_us_runs_on_server() -> bool:
     """Return True when the US worker is configured to scrape HEB directly."""
     try:
-        from scrapers.heb_us_proxies import load_proxy_urls
-        return bool(load_proxy_urls())
+        from scrapers import _heb_us_server_scrape_enabled
+
+        return _heb_us_server_scrape_enabled()
     except Exception:  # pragma: no cover - defensive
         logger.exception("Failed to determine HEB US server-scrape mode; defaulting to ingest-only")
         return False
@@ -72,9 +73,10 @@ def _costco_au_runs_on_server() -> bool:
 def _is_ingest_only_product(product) -> bool:
     """True when the vendor has no live server-side scraper for this deployment.
 
-    HEB is ingest-only **only when** residential proxies are not configured —
-    set ``HEB_US_PROXY_URLS`` on the US worker and HEB moves into the live
-    server-scrape path. Vevor AU is always ingest-only (feed). Costco AU is
+    HEB is ingest-only when neither proxies nor cookies-only mode is configured —
+    set ``HEB_US_PROXY_URLS`` or ``HEB_COOKIES_ONLY=1`` with ``HEB_COOKIES_FILE``
+    on the US worker for live server scrape. Vevor AU is always ingest-only (feed).
+    Costco AU is
     ingest-only **only when** residential proxies are not configured — set
     ``COSTCO_AU_PROXY_URLS`` on the AU worker and Costco moves into the live
     server-scrape path.

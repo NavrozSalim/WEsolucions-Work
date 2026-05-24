@@ -19,8 +19,9 @@ from scrapers import get_price_and_stock, close_amazon_session
 
 def _heb_us_runs_on_server() -> bool:
     try:
-        from scrapers.heb_us_proxies import load_proxy_urls
-        return bool(load_proxy_urls())
+        from scrapers import _heb_us_server_scrape_enabled
+
+        return _heb_us_server_scrape_enabled()
     except Exception:
         return False
 

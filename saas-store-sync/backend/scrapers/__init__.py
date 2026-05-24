@@ -171,20 +171,26 @@ def _rewrite_url_for_region(vendor_url: str, region: str) -> str:
 
 
 def _heb_us_server_scrape_enabled() -> bool:
-    """True when residential proxies are configured for server-side HEB scraping."""
+    """True when HEB should be scraped on the US worker (proxies or cookies-only)."""
     from .heb_us_proxies import load_proxy_urls
-    return bool(load_proxy_urls())
+
+    if load_proxy_urls():
+        return True
+    from .heb_us_scraper import _cookies_only_mode
+
+    return _cookies_only_mode()
 
 
 def _heb_ingest_only_result() -> dict:
-    """Sentinel when HEB server scraping is not enabled (no ``HEB_US_PROXY_URLS``)."""
+    """Sentinel when HEB server scraping is not enabled (no proxies or cookies-only)."""
     return {
         "price": None,
         "inventory": None,
         "title": None,
         "error_code": "heb_ingest_only",
         "error_message": (
-            "HEB server scraping disabled (no HEB_US_PROXY_URLS configured); "
+            "HEB server scraping disabled (set HEB_US_PROXY_URLS or "
+            "HEB_COOKIES_ONLY=1 with HEB_COOKIES_FILE); "
             "the task will keep the latest VendorPrice and skip this row."
         ),
     }
@@ -232,10 +238,10 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
     Routing uses the **URL host/path only** (Amazon, eBay, Costco AU, …). It does not
     depend on which marketplace the listing is sold on (Reverb, Walmart, Sears, etc.).
 
-    HEB URLs are **not** scraped server-side unless ``HEB_US_PROXY_URLS`` is set
-    on the US worker (Akamai blocks datacenter IPs). Without proxies, HEB prices
-    arrive via the ingest API and we return a sentinel so the catalog task falls
-    back to the latest ``VendorPrice`` row.
+    HEB URLs are scraped server-side when ``HEB_US_PROXY_URLS`` is set or when
+    cookies-only mode is enabled (``HEB_COOKIES_ONLY=1`` with ``HEB_COOKIES_FILE``).
+    Otherwise HEB prices arrive via the ingest API and we return a sentinel so the
+    catalog task falls back to the latest ``VendorPrice`` row.
 
     Parameters
     ----------
@@ -278,7 +284,10 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
             scrape_fn, _ = _get_heb_us_scraper()
             logger.info("Routing to HEB US scraper: %s", vendor_url[:80])
             return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
-        logger.info("HEB URL skipped server-side (no proxies configured): %s", vendor_url[:80])
+        logger.info(
+            "HEB URL skipped server-side (no proxies or cookies-only): %s",
+            vendor_url[:80],
+        )
         return _normalize_scrape_payload(_heb_ingest_only_result())
 
     if "costco.com.au" in url_lower:

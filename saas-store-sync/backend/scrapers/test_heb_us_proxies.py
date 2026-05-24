@@ -10,6 +10,12 @@ from django.test import SimpleTestCase
 from scrapers import heb_us_proxies, heb_us_scraper
 
 
+def _reset_heb_test_state() -> None:
+    heb_us_proxies.reset_pool_for_tests()
+    heb_us_scraper.reset_proxy_pool_cache_for_tests()
+    heb_us_scraper.reset_proxy_cookie_cache_for_tests()
+
+
 def _heb_pdp_html(*, price: float = 4.98, title: str = "HEB Test Milk", stock_qty: int = 12) -> str:
     next_data = {
         "props": {
@@ -36,10 +42,10 @@ def _heb_pdp_html(*, price: float = 4.98, title: str = "HEB Test Milk", stock_qt
 
 class HebUsProxyLoadTests(SimpleTestCase):
     def setUp(self):
-        heb_us_proxies.reset_pool_for_tests()
+        _reset_heb_test_state()
 
     def tearDown(self):
-        heb_us_proxies.reset_pool_for_tests()
+        _reset_heb_test_state()
 
     def test_loads_heb_us_proxy_urls(self):
         env = {
@@ -71,7 +77,7 @@ class HebHttpFirstTests(SimpleTestCase):
     URL = "https://www.heb.com/product-detail/377497"
 
     def setUp(self):
-        heb_us_proxies.reset_pool_for_tests()
+        _reset_heb_test_state()
         self.pool = heb_us_proxies.HebUsProxyPool(
             ["http://u:p@a:1", "http://u:p@b:2"], min_gap_sec=0.0,
         )
@@ -83,7 +89,7 @@ class HebHttpFirstTests(SimpleTestCase):
         }
 
     def tearDown(self):
-        heb_us_proxies.reset_pool_for_tests()
+        _reset_heb_test_state()
         for key in (
             "HEB_US_PROXY_URLS",
             "HEB_USE_APIFY",
@@ -132,8 +138,6 @@ class HebHttpFirstTests(SimpleTestCase):
         with patch.dict(os.environ, env, clear=False), patch.object(
             heb_us_scraper, "get_pool", return_value=self.pool,
         ), patch.object(
-            heb_us_scraper, "SELENIUM_FALLBACK", False,
-        ), patch.object(
             heb_us_scraper, "_http_fetch",
             return_value=("<html>blocked</html>", self.URL, "http_403"),
         ), patch.object(
@@ -149,7 +153,8 @@ class HebHttpFirstTests(SimpleTestCase):
 
     def test_http_401_is_treated_as_blocked(self):
         """An HTTP 401 must surface as blocked_http_401 (full cooldown + bootstrap)."""
-        with patch.dict(os.environ, self.env, clear=False), patch.object(
+        env = {**self.env, "HEB_SELENIUM_FALLBACK": "0"}
+        with patch.dict(os.environ, env, clear=False), patch.object(
             heb_us_scraper, "get_pool", return_value=self.pool,
         ), patch.object(
             heb_us_scraper, "_http_fetch",
@@ -159,8 +164,6 @@ class HebHttpFirstTests(SimpleTestCase):
         ) as mock_bootstrap, patch.object(
             self.pool, "mark_blocked",
         ) as mock_mark, patch.object(
-            heb_us_scraper, "SELENIUM_FALLBACK", False,
-        ), patch.object(
             heb_us_scraper, "_scrape_heb_selenium",
         ):
             result = heb_us_scraper.scrape_heb(self.URL, "USA", session={})
@@ -172,9 +175,147 @@ class HebHttpFirstTests(SimpleTestCase):
         self.assertEqual(result.get("error_code"), "http_exhausted")
 
 
-class HebCookieTests(SimpleTestCase):
+class HebCookiesOnlyTests(SimpleTestCase):
+    URL = "https://www.heb.com/product-detail/377497"
+
+    def setUp(self):
+        _reset_heb_test_state()
+
     def tearDown(self):
-        heb_us_scraper.reset_proxy_cookie_cache_for_tests()
+        _reset_heb_test_state()
+        for key in (
+            "HEB_US_PROXY_URLS",
+            "HEB_USE_APIFY",
+            "HEB_HTTP_FIRST",
+            "HEB_SELENIUM_FALLBACK",
+            "HEB_COOKIES_ONLY",
+            "HEB_COOKIES_JSON",
+            "HEB_HTTP_USE_FILE_COOKIES",
+            "HEB_HTTP_BOOTSTRAP_SELENIUM",
+        ):
+            os.environ.pop(key, None)
+
+    def test_cookies_only_scrapes_without_proxy_pool(self):
+        future = int(__import__("time").time()) + 86400
+        env = {
+            "HEB_USE_APIFY": "0",
+            "HEB_HTTP_FIRST": "1",
+            "HEB_SELENIUM_FALLBACK": "0",
+            "HEB_COOKIES_ONLY": "1",
+            "HEB_HTTP_USE_FILE_COOKIES": "1",
+            "HEB_HTTP_BOOTSTRAP_SELENIUM": "0",
+            "HEB_COOKIES_JSON": json.dumps([
+                {
+                    "domain": ".heb.com",
+                    "expirationDate": future,
+                    "name": "reese84",
+                    "path": "/",
+                    "value": "abc",
+                }
+            ]),
+        }
+        html = _heb_pdp_html()
+        with patch.dict(os.environ, env, clear=False), patch.object(
+            heb_us_scraper, "get_pool", return_value=None,
+        ), patch.object(
+            heb_us_scraper, "_http_fetch",
+            return_value=(html, self.URL, ""),
+        ) as mock_fetch, patch.object(
+            heb_us_scraper, "_scrape_heb_selenium",
+        ) as mock_selenium:
+            result = heb_us_scraper.scrape_heb(self.URL, "USA", session={})
+
+        mock_fetch.assert_called_once()
+        mock_selenium.assert_not_called()
+        self.assertEqual(result["price"], 4.98)
+
+    def test_cookies_only_without_cookies_returns_heb_no_cookies(self):
+        env = {
+            "HEB_USE_APIFY": "0",
+            "HEB_COOKIES_ONLY": "1",
+        }
+        with patch.dict(os.environ, env, clear=False), patch.object(
+            heb_us_scraper, "get_pool", return_value=None,
+        ), patch.object(
+            heb_us_scraper, "cookies_configured", return_value=False,
+        ):
+            result = heb_us_scraper.scrape_heb(self.URL, "USA", session={})
+
+        self.assertEqual(result.get("error_code"), "heb_no_cookies")
+
+    def test_auto_cookies_only_when_no_proxies_but_cookies_configured(self):
+        future = int(__import__("time").time()) + 86400
+        env = {
+            "HEB_USE_APIFY": "0",
+            "HEB_HTTP_FIRST": "1",
+            "HEB_SELENIUM_FALLBACK": "0",
+            "HEB_HTTP_USE_FILE_COOKIES": "1",
+            "HEB_COOKIES_JSON": json.dumps([
+                {
+                    "domain": ".heb.com",
+                    "expirationDate": future,
+                    "name": "reese84",
+                    "path": "/",
+                    "value": "abc",
+                }
+            ]),
+        }
+        html = _heb_pdp_html()
+        with patch.dict(os.environ, env, clear=False), patch.object(
+            heb_us_scraper, "get_pool", return_value=None,
+        ), patch.object(
+            heb_us_scraper, "proxies_configured", return_value=False,
+        ), patch.object(
+            heb_us_scraper, "_http_fetch",
+            return_value=(html, self.URL, ""),
+        ) as mock_fetch:
+            result = heb_us_scraper.scrape_heb(self.URL, "USA", session={})
+
+        mock_fetch.assert_called_once()
+        self.assertEqual(result["price"], 4.98)
+
+
+class HebRoutingTests(SimpleTestCase):
+    def test_server_scrape_enabled_with_cookies_only(self):
+        future = int(__import__("time").time()) + 86400
+        env = {
+            "HEB_COOKIES_ONLY": "1",
+            "HEB_COOKIES_JSON": json.dumps([
+                {
+                    "domain": ".heb.com",
+                    "expirationDate": future,
+                    "name": "reese84",
+                    "path": "/",
+                    "value": "abc",
+                }
+            ]),
+        }
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("HEB_US_PROXY_URLS", None)
+            from scrapers import _heb_us_server_scrape_enabled
+
+            self.assertTrue(_heb_us_server_scrape_enabled())
+
+    def test_server_scrape_disabled_without_proxies_or_cookies(self):
+        with patch.dict(os.environ, {}, clear=False):
+            for key in (
+                "HEB_US_PROXY_URLS",
+                "HEB_COOKIES_ONLY",
+                "HEB_COOKIES_JSON",
+                "HEB_COOKIES_FILE",
+            ):
+                os.environ.pop(key, None)
+            from scrapers import _heb_us_server_scrape_enabled
+
+            self.assertFalse(_heb_us_server_scrape_enabled())
+
+
+class HebCookieTests(SimpleTestCase):
+    def setUp(self):
+        _reset_heb_test_state()
+
+    def tearDown(self):
+        _reset_heb_test_state()
         for key in ("HEB_COOKIES_JSON", "HEB_COOKIES_FILE", "HEB_HTTP_USE_FILE_COOKIES"):
             os.environ.pop(key, None)
 
@@ -270,7 +411,9 @@ class HebCookieTests(SimpleTestCase):
         assignment = heb_us_proxies.ProxyAssignment(
             index=0, url="http://u:p@a:1", label="a:1",
         )
-        with patch.dict(os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=False), patch.object(
+            heb_us_scraper, "proxies_configured", return_value=True,
+        ):
             client = heb_us_scraper._get_http_client({}, assignment)
         jar = getattr(client, "cookies", None)
         self.assertIsNotNone(jar)
