@@ -61,7 +61,11 @@ class ProductMappingSerializer(serializers.ModelSerializer):
             if not obj.product:
                 return None
             u = obj.product.vendor_url
-            return u if u else None
+            if u:
+                return u
+            from catalog.vendor_url_resolve import resolve_heb_product_url
+
+            return resolve_heb_product_url(obj.product, store=obj.store)
         except Exception:
             return None
 

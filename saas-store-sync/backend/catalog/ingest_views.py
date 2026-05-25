@@ -470,13 +470,6 @@ class VendorIngestUrlsView(APIView):
         if not vendor_ids:
             return Response({'count': 0, 'urls': [], 'fetched_at': timezone.now().isoformat()})
 
-        qs = (
-            ProductMapping.objects
-            .filter(is_active=True, product__vendor_id__in=vendor_ids)
-            .exclude(product__vendor_url__isnull=True)
-            .exclude(product__vendor_url='')
-        )
-
         store_id = (request.query_params.get('store_id') or '').strip()
         if store_id:
             st = Store.objects.filter(id=store_id).only('user_id').first()
@@ -484,16 +477,13 @@ class VendorIngestUrlsView(APIView):
                 return Response({'count': 0, 'urls': [], 'fetched_at': timezone.now().isoformat()})
             if tok.created_by_id and st.user_id != tok.created_by_id:
                 raise PermissionDenied('store_id does not belong to this ingest token owner.')
-            qs = qs.filter(store_id=store_id)
-        elif tok.created_by_id:
-            qs = qs.filter(store__user_id=tok.created_by_id)
-        else:
+        elif not tok.created_by_id:
             return Response({'count': 0, 'urls': [], 'fetched_at': timezone.now().isoformat()})
 
-        urls_iter = (
-            qs.order_by('product__vendor_url')
-            .values_list('product__vendor_url', flat=True)
-            .distinct()
+        urls = _collect_vendor_urls(
+            store_id or None,
+            vendor=vendor,
+            restrict_to_user_id=tok.created_by_id,
         )
 
         try:
@@ -501,9 +491,7 @@ class VendorIngestUrlsView(APIView):
         except (TypeError, ValueError):
             limit = 0
         if limit > 0:
-            urls_iter = urls_iter[:limit]
-
-        urls = [u for u in urls_iter if u]
+            urls = urls[:limit]
         return Response({
             'count': len(urls),
             'fetched_at': timezone.now().isoformat(),
@@ -518,38 +506,100 @@ class HebIngestUrlsView(VendorIngestUrlsView):
         return super().get(request, vendor='heb', *args, **kwargs)
 
 
-def _collect_vendor_urls(
+def _ingest_mapping_qs(
+    vendor: str,
     store_id: str | None,
-    vendor: str = 'heb',
-    *,
-    restrict_to_user_id: int | None = None,
-) -> list[str]:
-    """Return distinct vendor_url values for ``vendor``.
-
-    Requires either ``store_id`` or ``restrict_to_user_id`` so we never list every tenant's URLs.
-    """
+    restrict_to_user_id: int | None,
+):
+    """Active ``ProductMapping`` rows for a desktop-runner vendor (ingest scope)."""
     vendor_ids = _vendor_db_ids(vendor)
     if not vendor_ids:
-        return []
+        return ProductMapping.objects.none()
     if not store_id and restrict_to_user_id is None:
-        return []
-    qs = (
-        ProductMapping.objects
-        .filter(is_active=True, product__vendor_id__in=vendor_ids)
-        .exclude(product__vendor_url__isnull=True)
-        .exclude(product__vendor_url='')
-    )
+        return ProductMapping.objects.none()
+    qs = ProductMapping.objects.filter(is_active=True, product__vendor_id__in=vendor_ids)
     if store_id:
         qs = qs.filter(store_id=store_id)
         if restrict_to_user_id is not None:
             qs = qs.filter(store__user_id=restrict_to_user_id)
     else:
         qs = qs.filter(store__user_id=restrict_to_user_id)
-    return list(
-        qs.order_by('product__vendor_url')
-        .values_list('product__vendor_url', flat=True)
-        .distinct()
+    return qs
+
+
+def _collect_vendor_urls(
+    store_id: str | None,
+    vendor: str = 'heb',
+    *,
+    restrict_to_user_id: int | None = None,
+    backfill_missing: bool = True,
+) -> list[str]:
+    """Return distinct vendor_url values for ``vendor``.
+
+    Requires either ``store_id`` or ``restrict_to_user_id`` so we never list every tenant's URLs.
+
+    For HEB, resolves URLs from ``Product.vendor_url``, catalog Vendor URL / Vendor ID,
+    or composite SKU (e.g. ``AHJH-150275-...``) and optionally backfills ``Product.vendor_url``.
+    """
+    qs = _ingest_mapping_qs(vendor, store_id, restrict_to_user_id)
+    if not qs.exists():
+        return []
+
+    if vendor != 'heb':
+        qs = qs.exclude(product__vendor_url__isnull=True).exclude(product__vendor_url='')
+        return list(
+            qs.order_by('product__vendor_url')
+            .values_list('product__vendor_url', flat=True)
+            .distinct()
+        )
+
+    from catalog.vendor_url_resolve import resolve_heb_product_url
+    from products.models import Product
+
+    urls: set[str] = set()
+    to_update: list[Product] = []
+    for pm in qs.select_related('product', 'product__vendor', 'store'):
+        product = pm.product
+        if not product:
+            continue
+        url = resolve_heb_product_url(product, store=pm.store)
+        if not url:
+            continue
+        urls.add(url)
+        if backfill_missing and (product.vendor_url or '').strip() != url:
+            product.vendor_url = url
+            to_update.append(product)
+
+    if to_update:
+        Product.objects.bulk_update(to_update, ['vendor_url'], batch_size=500)
+        logger.info(
+            'Backfilled vendor_url on %s HEB product(s) (store=%s user=%s)',
+            len(to_update),
+            store_id or '*',
+            restrict_to_user_id,
+        )
+
+    return sorted(urls)
+
+
+def _pick_pending_desktop_job(vendor: str, token: IngestToken) -> HebScrapeJob | None:
+    """Claimable pending job for ``vendor``, scoped to the ingest token owner.
+
+    PostgreSQL rejects ``SELECT FOR UPDATE`` on queries that OR-together a join to
+    ``store`` with a nullable FK (outer join). Use two separate locked queries instead.
+    """
+    base = HebScrapeJob.objects.select_for_update(skip_locked=True).filter(
+        status=HebScrapeJob.Status.PENDING,
+        vendor_code=vendor,
     )
+    if not token.created_by_id:
+        return base.order_by('requested_at').first()
+
+    uid = token.created_by_id
+    job = base.filter(store__user_id=uid).order_by('requested_at').first()
+    if job is not None:
+        return job
+    return base.filter(store__isnull=True, requested_by_id=uid).order_by('requested_at').first()
 
 
 class VendorIngestNextJobView(APIView):
@@ -570,40 +620,41 @@ class VendorIngestNextJobView(APIView):
         cfg = _vendor_cfg(vendor)
         token = _authenticate(request, required_scope=cfg['scope'])
 
+        job = None
+        urls: list[str] = []
         with transaction.atomic():
-            job_qs = (
-                HebScrapeJob.objects
-                .select_for_update(skip_locked=True)
-                .filter(status=HebScrapeJob.Status.PENDING, vendor_code=vendor)
-            )
-            if token.created_by_id:
-                job_qs = job_qs.filter(
-                    Q(store__user_id=token.created_by_id)
-                    | Q(store__isnull=True, requested_by_id=token.created_by_id)
+            job = _pick_pending_desktop_job(vendor, token)
+            if job is not None:
+                urls = _collect_vendor_urls(
+                    str(job.store_id) if job.store_id else None,
+                    vendor=vendor,
+                    restrict_to_user_id=token.created_by_id,
                 )
-            job = job_qs.order_by('requested_at').first()
-            if job is None:
-                return Response({'job_id': None, 'checked_at': timezone.now().isoformat()})
+                job.status = HebScrapeJob.Status.CLAIMED
+                job.claimed_at = timezone.now()
+                job.claimed_by_token = token
+                job.claimed_by_ip = _client_ip(request)
+                job.url_count = len(urls)
+                job.save(
+                    update_fields=[
+                        'status',
+                        'claimed_at',
+                        'claimed_by_token',
+                        'claimed_by_ip',
+                        'url_count',
+                    ]
+                )
+                if not urls:
+                    logger.warning(
+                        'Desktop runner claimed %s job %s with 0 URLs (store=%s token_user=%s)',
+                        vendor,
+                        job.id,
+                        job.store_id,
+                        token.created_by_id,
+                    )
 
-            urls = _collect_vendor_urls(
-                str(job.store_id) if job.store_id else None,
-                vendor=vendor,
-                restrict_to_user_id=token.created_by_id,
-            )
-            job.status = HebScrapeJob.Status.CLAIMED
-            job.claimed_at = timezone.now()
-            job.claimed_by_token = token
-            job.claimed_by_ip = _client_ip(request)
-            job.url_count = len(urls)
-            job.save(update_fields=['status', 'claimed_at', 'claimed_by_token', 'claimed_by_ip', 'url_count'])
-            if not urls:
-                logger.warning(
-                    'Desktop runner claimed %s job %s with 0 URLs (store=%s token_user=%s)',
-                    vendor,
-                    job.id,
-                    job.store_id,
-                    token.created_by_id,
-                )
+        if job is None:
+            return Response({'job_id': None, 'checked_at': timezone.now().isoformat()})
 
         return Response({
             'job_id': str(job.id),

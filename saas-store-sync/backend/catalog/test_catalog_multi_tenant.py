@@ -471,13 +471,15 @@ class HebNextJobTenantTests(TestCase):
         )
 
     def test_next_job_scoped_to_token_owner(self):
+        from django.db import transaction
         from rest_framework.test import APIClient
 
         client = APIClient()
-        resp = client.get(
-            '/api/v1/ingest/heb/next-job/',
-            HTTP_AUTHORIZATION=f'Bearer {self.raw_a}',
-        )
+        with transaction.atomic():
+            resp = client.get(
+                '/api/v1/ingest/heb/next-job/',
+                HTTP_AUTHORIZATION=f'Bearer {self.raw_a}',
+            )
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(data['job_id'], str(self.job_a.id))

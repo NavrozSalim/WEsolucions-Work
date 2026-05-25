@@ -315,6 +315,34 @@ def _find_product_mapping(
     return None
 
 
+def _resolve_heb_url_for_row(
+    vendor: Vendor,
+    row: CatalogUploadRow,
+    product=None,
+    *,
+    vendor_sku: str | None = None,
+) -> str | None:
+    from catalog.vendor_url_resolve import is_heb_vendor_code, resolve_heb_product_url
+
+    vcode = (vendor.code or '').strip().lower()
+    if not is_heb_vendor_code(vcode):
+        return None
+    if product is None and vendor_sku:
+        class _Stub:
+            pass
+
+        stub = _Stub()
+        stub.vendor = vendor
+        stub.vendor_url = None
+        stub.vendor_sku = vendor_sku
+        product = stub
+    return resolve_heb_product_url(
+        product,
+        vendor_url_raw=row.vendor_url_raw,
+        vendor_id_raw=row.vendor_id_raw,
+    )
+
+
 def _get_or_create_product(vendor: Vendor, row: CatalogUploadRow, *, store) -> Product:
     """Get or create Product from row."""
     vendor_code = (vendor.code or "").strip().lower()
@@ -347,7 +375,7 @@ def _get_or_create_product(vendor: Vendor, row: CatalogUploadRow, *, store) -> P
             or _normalize(row.marketplace_parent_sku_raw)
         )
     vid = _normalize(row.variation_id_raw) or ''
-    url = _normalize(row.vendor_url_raw)
+    url = _normalize(row.vendor_url_raw) or _resolve_heb_url_for_row(vendor, row, vendor_sku=vsku)
     product, created = Product.objects.get_or_create(
         vendor=vendor,
         vendor_sku=vsku,
@@ -355,7 +383,7 @@ def _get_or_create_product(vendor: Vendor, row: CatalogUploadRow, *, store) -> P
         owner_id=store.user_id,
         defaults={'vendor_url': url or None},
     )
-    if url and not product.vendor_url:
+    if url and (not product.vendor_url or product.vendor_url != url):
         product.vendor_url = url
         product.save(update_fields=['vendor_url'])
     return product
@@ -377,6 +405,8 @@ def _update_product_mapping(pm: ProductMapping, row: CatalogUploadRow) -> None:
     updates['prep_fees'] = _to_decimal_or_none(row.prep_fees_raw)
     updates['shipping_fees'] = _to_decimal_or_none(row.shipping_fees_raw)
     url = _normalize(row.vendor_url_raw)
+    if not url and pm.product and pm.product.vendor:
+        url = _resolve_heb_url_for_row(pm.product.vendor, row, pm.product)
     if url and pm.product:
         pm.product.vendor_url = url
         pm.product.save(update_fields=['vendor_url'])
