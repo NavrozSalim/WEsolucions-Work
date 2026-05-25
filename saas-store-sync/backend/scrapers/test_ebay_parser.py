@@ -516,6 +516,14 @@ class TestEbayAuTerminalStatus(unittest.TestCase):
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
         self.assertEqual(result, {"price": 99.99, "stock": 0, "title": "Test title"})
 
+    def test_dp_error_banner_with_no_price_returns_99_99(self):
+        html = _au_html(
+            "<h2 data-testid='dp-error-banner-container-title-undefined'>"
+            "This listing isn't available</h2>"
+        )
+        result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
+        self.assertEqual(result, {"price": 99.99, "stock": 0, "title": "Test title"})
+
     def test_valid_price_and_stock_without_terminal_selector_unchanged(self):
         html = _au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK)
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")

@@ -552,6 +552,7 @@ class EbayParser:
         "[data-testid='ux-hotness-signal-text'] span.signal--time-sensitive",
         ".ux-layout-section__textual-display--statusMessage span",
         ".page-notice__title span",
+        "h2[data-testid='dp-error-banner-container-title-undefined']",
     )
 
     # AU postage row. Paid postage is added on top of the scraped item price.
