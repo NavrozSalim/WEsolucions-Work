@@ -251,13 +251,6 @@ def build_scrape_progress_payload(store) -> dict[str, Any]:
                     runner_kind = 'live'
             except Exception:
                 pass
-        if vendor_code == 'heb' and runner_kind == 'desktop':
-            try:
-                from scrapers import _heb_us_server_scrape_enabled
-                if _heb_us_server_scrape_enabled():
-                    runner_kind = 'live'
-            except Exception:
-                pass
         if runner_kind == 'live':
             v_job_payload = None
             v_queue_payload = None

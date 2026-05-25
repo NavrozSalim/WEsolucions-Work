@@ -1,9 +1,7 @@
-import logging
 import os
 
 from celery import Celery
 from celery.schedules import crontab
-from celery.signals import worker_ready
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'core.settings')
 
@@ -20,35 +18,6 @@ app.conf.task_reject_on_worker_lost = True
 app.conf.worker_prefetch_multiplier = 1
 
 app.autodiscover_tasks()
-
-_logger = logging.getLogger(__name__)
-
-
-def _heb_scraper_should_preload() -> bool:
-    if os.environ.get("HEB_US_PROXY_URLS") or os.environ.get("HEB_US_PROXY_URL"):
-        return True
-    if os.environ.get("HEB_COOKIES_ONLY", "").strip().lower() in ("1", "true", "yes", "on"):
-        return True
-    if os.environ.get("HEB_COOKIES_FILE") or os.environ.get("HEB_COOKIES_JSON"):
-        return True
-    return False
-
-
-@worker_ready.connect
-def _preload_heb_scraper_on_worker_start(**kwargs):
-    """Import HEB scraper at worker boot when proxies or cookies-only mode is configured.
-
-    The scraper is lazy-loaded during tasks otherwise, so the ``HEB scraper
-    config`` banner would not appear in ``docker compose logs`` until the first
-    HEB job runs. Preloading here makes deploy verification greppable.
-    """
-    if not _heb_scraper_should_preload():
-        return
-    try:
-        import scrapers.heb_us_scraper  # noqa: F401
-    except Exception as exc:
-        _logger.warning("HEB scraper preload failed: %s", exc)
-
 
 app.conf.beat_schedule = {
     'check-store-schedules': {

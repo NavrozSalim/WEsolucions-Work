@@ -14,11 +14,6 @@ from scrapers.ebay_scraper import SESSION_DEBUG_HTML_KEY
 
 def _close_scrape_session(session: dict) -> None:
     close_amazon_session(session)
-    try:
-        from scrapers import close_heb_session
-        close_heb_session(session)
-    except Exception:
-        pass
 
 
 class Command(BaseCommand):

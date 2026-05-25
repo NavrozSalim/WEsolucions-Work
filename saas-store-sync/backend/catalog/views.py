@@ -760,8 +760,8 @@ class CatalogScrapeTriggerView(APIView):
         """True when a vendor is currently routed through the live server-scrape path.
 
         Static ``runner='live'`` always counts. ``runner='desktop'`` for Costco
-        or HEB also counts when residential proxies are configured, because the
-        server scrape path takes over and a desktop job would never get claimed.
+        also counts when residential proxies are configured, because the server
+        scrape path takes over and a desktop job would never get claimed.
         """
         runner = (cfg or {}).get('runner', 'desktop')
         if runner == 'live':
@@ -770,12 +770,6 @@ class CatalogScrapeTriggerView(APIView):
             try:
                 from scrapers.costco_au_proxies import load_proxy_urls
                 return bool(load_proxy_urls())
-            except Exception:
-                return False
-        if vendor_code == 'heb':
-            try:
-                from scrapers import _heb_us_server_scrape_enabled
-                return _heb_us_server_scrape_enabled()
             except Exception:
                 return False
         return False

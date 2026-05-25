@@ -1460,7 +1460,7 @@ export default function Catalog() {
                     setFlowStatus('scraping');
                     setMessage(
                         'Desktop scrape job queued — waiting for your HEB runner to pick it up. '
-                        + 'Make sure python run_poller.py is running on your Windows machine.',
+                        + 'Make sure the HEB desktop runner is running on your Windows machine.',
                     );
                 } else {
                     setFlowStatus('success');
@@ -1479,7 +1479,7 @@ export default function Catalog() {
                         setFlowStatus('scraping');
                         setMessage(
                             'Desktop scrape job queued — waiting for your HEB runner. '
-                            + 'Make sure python run_poller.py is running on your Windows machine.',
+                            + 'Make sure the HEB desktop runner is running on your Windows machine.',
                         );
                         return;
                     }

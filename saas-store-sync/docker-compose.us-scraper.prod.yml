@@ -2,7 +2,7 @@
 # AU counterpart: docker-compose.au-scraper.prod.yml (-Q heavy-au).
 #
 # Consumes Celery queue ``heavy-us``: Amazon US, eBay US.
-# HEB: use desktop-runners/heb/ on Windows (cookies only) unless HEB_US_PROXY_URLS is set.
+# HEB is handled by a separate Windows desktop runner, not this worker.
 #
 # Requirements:
 # - Same codebase image as main (build or pull BACKEND_IMAGE).
@@ -58,32 +58,7 @@ services:
       - PROXY_USER=${PROXY_USER:-}
       - PROXY_PASS=${PROXY_PASS:-}
       - PROXY_SCHEME=${PROXY_SCHEME:-http}
-      - HEB_US_PROXY_URL=${HEB_US_PROXY_URL:-}
-      - HEB_US_PROXY_URLS=${HEB_US_PROXY_URLS:-}
-      - HEB_US_MIN_REQUEST_GAP_SEC=${HEB_US_MIN_REQUEST_GAP_SEC:-3}
-      - HEB_HTTP_FIRST=${HEB_HTTP_FIRST:-1}
-      - HEB_HTTP_TIMEOUT_SEC=${HEB_HTTP_TIMEOUT_SEC:-12}
-      - HEB_HTTP_RETRIES=${HEB_HTTP_RETRIES:-0}
-      - HEB_SELENIUM_FALLBACK=${HEB_SELENIUM_FALLBACK:-1}
-      - HEB_SELENIUM_RETRIES=${HEB_SELENIUM_RETRIES:-2}
-      - HEB_PAGE_TIMEOUT_SEC=${HEB_PAGE_TIMEOUT_SEC:-15}
-      - HEB_HEADLESS=${HEB_HEADLESS:-1}
-      - HEB_HOME_WARMUP=${HEB_HOME_WARMUP:-0}
-      - HEB_USE_UNDETECTED=${HEB_USE_UNDETECTED:-0}
-      - HEB_USE_APIFY=${HEB_USE_APIFY:-0}
-      # Leave unset for proxy-only HEB (no cookie file). Set in .env.prod when using cookies.
-      - HEB_COOKIES_FILE=${HEB_COOKIES_FILE:-}
-      - HEB_COOKIES_JSON=${HEB_COOKIES_JSON:-}
-      - HEB_COOKIES_ONLY=${HEB_COOKIES_ONLY:-0}
-      - HEB_HTTP_BOOTSTRAP_SELENIUM=${HEB_HTTP_BOOTSTRAP_SELENIUM:-1}
-      - HEB_HTTP_USE_FILE_COOKIES=${HEB_HTTP_USE_FILE_COOKIES:-0}
-      - HEB_BLOCK_COOLDOWN_SEC=${HEB_BLOCK_COOLDOWN_SEC:-600}
-      - HEB_BOOTSTRAP_HOME_DWELL_SEC=${HEB_BOOTSTRAP_HOME_DWELL_SEC:-5}
-      - HEB_BOOTSTRAP_CHALLENGE_WAIT_SEC=${HEB_BOOTSTRAP_CHALLENGE_WAIT_SEC:-8}
-      - HEB_PROXY_COOKIE_TTL_SEC=${HEB_PROXY_COOKIE_TTL_SEC:-1200}
     volumes:
-      # Optional cookies-only / cookie-seed mode — uncomment when HEB_COOKIES_FILE=/app/heb_cookies.json:
-      # - ./heb_cookies.json:/app/heb_cookies.json:ro
       - catalog_media_us_worker:/app/media
     restart: always
     stop_grace_period: 60s

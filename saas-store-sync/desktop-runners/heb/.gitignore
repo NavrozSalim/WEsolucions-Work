@@ -1,6 +1,0 @@
-.env
-cookies.json
-*.csv
-chrome_profile/
-__pycache__/
-*.pyc

@@ -478,7 +478,16 @@ class VendorIngestUrlsView(APIView):
             if tok.created_by_id and st.user_id != tok.created_by_id:
                 raise PermissionDenied('store_id does not belong to this ingest token owner.')
         elif not tok.created_by_id:
-            return Response({'count': 0, 'urls': [], 'fetched_at': timezone.now().isoformat()})
+            return Response({
+                'count': 0,
+                'urls': [],
+                'hint': (
+                    'Ingest token has no Created by user. In Django admin set Created by '
+                    'to the store owner, or recreate the token with '
+                    'create_ingest_token --owner-email YOUR_EMAIL.'
+                ),
+                'fetched_at': timezone.now().isoformat(),
+            })
 
         urls = _collect_vendor_urls(
             store_id or None,
