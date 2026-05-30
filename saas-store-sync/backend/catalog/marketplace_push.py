@@ -45,7 +45,10 @@ def push_product_mapping_to_marketplace(
     Push ``pm.store_price`` / ``pm.store_stock`` to the marketplace adapter.
 
     Sears: sale price = posted, standard price = computed RRP (when RRP discount % set).
-    Returns ``(success, error_message)``.
+    Returns ``(success, error_or_warning)``.
+
+    On partial Sears success (price OK, inventory blocked), returns
+    ``(True, warning_message)``.
     """
     from store_adapters import get_adapter
     from sync.tasks import _resolve_listing_id_for_pm
@@ -77,7 +80,15 @@ def push_product_mapping_to_marketplace(
 
     try:
         adapter.update_product(listing_id, **kwargs)
-        return True, None
+        warning = getattr(adapter, 'last_inventory_warning', None)
+        if warning:
+            logger.warning(
+                'Marketplace push partial success pm=%s sku=%s: %s',
+                pm.id,
+                getattr(pm, 'marketplace_child_sku', None),
+                warning,
+            )
+        return True, warning
     except Exception as exc:
         logger.warning(
             'Marketplace push failed pm=%s sku=%s: %s',
@@ -113,7 +124,7 @@ def apply_post_scrape_marketplace_push(
     if ok:
         pm.sync_status = 'synced'
         pm.last_sync_time = timezone.now()
-        pm.scrape_error = None
+        pm.scrape_error = (err or '')[:500] if err else None
         pm.save(update_fields=['sync_status', 'last_sync_time', 'scrape_error'])
     else:
         pm.scrape_error = (err or 'marketplace_push_failed')[:500]

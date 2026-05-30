@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from xml.sax.saxutils import escape
@@ -29,6 +30,8 @@ SEARS_API_BASE = "https://seller.marketplace.sears.com/SellerPortal/api"
 PRICING_NS = "http://seller.marketplace.sears.com/pricing/v6"
 INVENTORY_NS = "http://seller.marketplace.sears.com/inventory/v7"
 DEFAULT_SALE_DAYS = 365
+
+logger = logging.getLogger(__name__)
 
 
 class SearsAPIError(Exception):
@@ -208,13 +211,18 @@ class SearsAdapter(BaseStoreAdapter):
             price: posted/sale price (``store_price``)
             rrp: standard price for strike-through (computed RRP)
             stock: inventory quantity
+
+        When pricing succeeds but inventory API fails (e.g. 403), pricing is kept
+        and ``last_inventory_warning`` is set — push still returns True.
         """
+        self.last_inventory_warning = None
         sku = str(external_id or "").strip()
         if not sku:
             raise SearsAPIError("Missing Sears Child SKU (item-id) for update_product")
         price = kwargs.get("price")
         rrp = kwargs.get("rrp")
         stock = kwargs.get("stock")
+        price_updated = False
 
         if price is not None:
             posted = _format_amount(price)
@@ -230,8 +238,17 @@ class SearsAdapter(BaseStoreAdapter):
                     self.update_pricing(sku, standard_price=posted)
             else:
                 self.update_pricing(sku, standard_price=posted)
+            price_updated = True
+
         if stock is not None:
-            self.update_inventory(sku, stock)
+            try:
+                self.update_inventory(sku, stock)
+            except SearsAPIError as exc:
+                if not price_updated:
+                    raise
+                warn = f'Price updated on Sears; inventory not updated ({exc})'
+                self.last_inventory_warning = warn
+                logger.warning('Sears inventory push failed for %s after pricing OK: %s', sku, exc)
         return True
 
     def update_pricing(

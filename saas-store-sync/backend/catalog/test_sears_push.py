@@ -10,6 +10,7 @@ from django.test import SimpleTestCase
 from catalog.marketplace_rrp import adapter_push_kwargs, compute_marketplace_rrp
 from catalog.reverb_catalog import store_is_sears
 from store_adapters.sears_adapter import (
+    SearsAPIError,
     SearsAdapter,
     build_inventory_feed_xml,
     build_pricing_feed_xml,
@@ -136,6 +137,35 @@ class SearsAdapterPushTests(SimpleTestCase):
         price_xml = mock_request.call_args_list[0].kwargs['data']
         self.assertIn('<standard-price>59.99</standard-price>', price_xml)
         self.assertNotIn('<sale>', price_xml)
+
+    @patch.object(SearsAdapter, '_request')
+    def test_update_product_succeeds_when_inventory_fails_after_pricing(self, mock_request):
+        def side_effect(method, path, **kwargs):
+            if path == '/inventory/fbm/v7':
+                raise SearsAPIError('Sears API PUT /inventory/fbm/v7: 403', status_code=403)
+            return ''
+
+        mock_request.side_effect = side_effect
+        adapter = self._adapter()
+        result = adapter.update_product(
+            'CHILD-101',
+            price=Decimal('143.98'),
+            rrp=Decimal('194.57'),
+            stock=2,
+        )
+        self.assertTrue(result)
+        self.assertIsNotNone(adapter.last_inventory_warning)
+        self.assertIn('inventory not updated', adapter.last_inventory_warning.lower())
+        self.assertEqual(mock_request.call_count, 2)
+        price_call = mock_request.call_args_list[0]
+        self.assertEqual(price_call.args[1], '/pricing/fbm/v6')
+
+    @patch.object(SearsAdapter, '_request')
+    def test_update_product_raises_when_inventory_fails_without_pricing(self, mock_request):
+        mock_request.side_effect = SearsAPIError('Sears API PUT /inventory/fbm/v7: 403', status_code=403)
+        adapter = self._adapter()
+        with self.assertRaises(SearsAPIError):
+            adapter.update_product('CHILD-102', stock=1)
 
     def test_lookup_uses_child_sku(self):
         adapter = self._adapter()

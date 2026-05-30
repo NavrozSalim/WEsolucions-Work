@@ -1178,14 +1178,14 @@ def run_store_push_listings_only(store_id, disable_schedule=False):
         try:
             from catalog.marketplace_push import push_product_mapping_to_marketplace
 
-            ok, err = push_product_mapping_to_marketplace(
+            ok, err_or_warn = push_product_mapping_to_marketplace(
                 pm,
                 store,
                 price_by_vendor_id=price_by_vid,
                 price_fallback=price_fb,
             )
             if not ok:
-                raise ValueError(err or 'marketplace_push_failed')
+                raise ValueError(err_or_warn or 'marketplace_push_failed')
             now_ok = timezone.now()
             pm.sync_status = 'synced'
             pm.last_sync_time = now_ok
@@ -1195,6 +1195,7 @@ def run_store_push_listings_only(store_id, disable_schedule=False):
                 status=ReverbUpdateLog.Status.SUCCESS,
                 pushed_price=pm.store_price,
                 pushed_stock=pm.store_stock,
+                error_message=(err_or_warn or '')[:500] if err_or_warn else None,
             )
             succeeded += 1
         except (ReverbAPIError, SearsAPIError) as e:
