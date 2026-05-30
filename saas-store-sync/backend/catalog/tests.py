@@ -12,8 +12,11 @@ from catalog.celery_routing import (
 from catalog.marketplace_templates import (
     build_field_indices,
     col_index,
+    sample_template_rows_for_kind,
+    upload_row_to_cells,
     validate_marketplace_headers,
 )
+from catalog.reverb_catalog import listing_sku_lookup_order, store_is_sears
 from store_adapters import _resolve_adapter_class
 from store_adapters.walmart_adapter import WalmartAdapter
 from scrapers.core import parse_price_text, classify_failure
@@ -178,3 +181,95 @@ class MarketplaceTemplateTests(SimpleTestCase):
         idx = build_field_indices(header, _store('walmart'))
         err = validate_marketplace_headers(idx, _store('walmart'))
         self.assertIn('Pack QTY', err or '')
+
+    def test_sears_sample_template_excludes_vendor_sku(self):
+        headers, rows = sample_template_rows_for_kind('sears')
+        self.assertNotIn('Vendor SKU', headers)
+        self.assertEqual(headers.index('Marketplace Child SKU'), 7)
+        self.assertEqual(len(headers), 11)
+        self.assertEqual(len(rows[0]), 11)
+
+    def test_sears_headers_valid_without_vendor_sku(self):
+        headers = [
+            'Vendor Name',
+            'Vendor ID',
+            'Is Variation',
+            'Variation ID',
+            'Marketplace Name',
+            'Store Name',
+            'Marketplace Parent SKU',
+            'Marketplace Child SKU',
+            'Marketplace ID',
+            'Vendor URL',
+            'Action',
+        ]
+        idx = build_field_indices(headers, _store('sears'))
+        self.assertIsNone(validate_marketplace_headers(idx, _store('sears')))
+
+    def test_sears_headers_require_marketplace_child_sku(self):
+        headers = [
+            'Vendor Name',
+            'Vendor ID',
+            'Is Variation',
+            'Variation ID',
+            'Marketplace Name',
+            'Store Name',
+            'Marketplace Parent SKU',
+            'Marketplace ID',
+            'Vendor URL',
+            'Action',
+        ]
+        idx = build_field_indices(headers, _store('sears'))
+        err = validate_marketplace_headers(idx, _store('sears'))
+        self.assertIn('Marketplace Child SKU', err or '')
+
+    def test_sears_sku_alias_maps_to_child_sku(self):
+        header = [
+            'Vendor Name',
+            'Store Name',
+            'SKU',
+            'Vendor URL',
+            'Action',
+            'Vendor ID',
+            'Is Variation',
+            'Variation ID',
+            'Marketplace Name',
+            'Marketplace Parent SKU',
+            'Marketplace ID',
+        ]
+        idx = build_field_indices(header, _store('sears'))
+        self.assertEqual(idx['marketplace child sku'], 2)
+
+    def test_sears_export_row_omits_vendor_sku(self):
+        row = MagicMock()
+        row.vendor_name_raw = 'Amazon'
+        row.vendor_id_raw = 'B0TEST'
+        row.is_variation_raw = 'No'
+        row.variation_id_raw = ''
+        row.marketplace_name_raw = 'Sears'
+        row.store_name_raw = 'My Store'
+        row.marketplace_parent_sku_raw = 'PARENT-1'
+        row.marketplace_child_sku_raw = 'CHILD-1'
+        row.marketplace_id_raw = ''
+        row.vendor_sku_raw = 'SHOULD-NOT-EXPORT'
+        row.vendor_url_raw = 'https://example.com'
+        row.action_raw = 'Add'
+        cells = upload_row_to_cells(row, _store('sears'))
+        self.assertNotIn('SHOULD-NOT-EXPORT', cells)
+        self.assertEqual(cells[7], 'CHILD-1')
+        self.assertEqual(len(cells), 11)
+
+
+class SearsCatalogRulesTests(SimpleTestCase):
+    def test_store_is_sears(self):
+        self.assertTrue(store_is_sears(_store('sears')))
+        self.assertFalse(store_is_sears(_store('reverb')))
+
+    def test_listing_sku_lookup_order_sears_uses_child_sku_only(self):
+        pm = MagicMock()
+        pm.marketplace_child_sku = 'CHILD-99'
+        pm.marketplace_parent_sku = 'PARENT-99'
+        pm.product = MagicMock()
+        pm.product.vendor_sku = 'VENDOR-99'
+        store = _store('sears')
+        self.assertEqual(listing_sku_lookup_order(pm, store), ['CHILD-99'])

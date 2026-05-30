@@ -35,7 +35,7 @@ from .models import (
     ProductMapping,
     StoreCatalogCeleryScrapeState,
 )
-from .reverb_catalog import listing_sku_lookup_order, store_is_reverb, vendor_is_ebay
+from .reverb_catalog import listing_sku_lookup_order, store_is_reverb, store_is_sears, vendor_is_ebay
 from .services import _normalize
 from products.models import Product
 from vendor.models import Vendor
@@ -225,6 +225,7 @@ def _find_product_mapping(
     """Find ProductMapping by marketplace_id, marketplace SKUs, or vendor+product key."""
     vendor_early = row.vendor or _resolve_vendor(row.vendor_name_raw, index=vendor_index)
     reverb = store_is_reverb(store)
+    sears = store_is_sears(store)
     ebay_v = vendor_is_ebay(vendor_early, row.vendor_name_raw)
     mid = _normalize(row.marketplace_id_raw)
     sku = _normalize(row.marketplace_child_sku_raw)
@@ -268,6 +269,12 @@ def _find_product_mapping(
             _normalize(row.marketplace_parent_sku_raw)
             or _normalize(row.vendor_sku_raw)
             or _normalize(row.marketplace_child_sku_raw)
+        )
+    elif sears:
+        vsku = (
+            _normalize(row.marketplace_child_sku_raw)
+            or _normalize(row.marketplace_parent_sku_raw)
+            or _normalize(row.vendor_id_raw)
         )
     else:
         vsku = (
@@ -346,6 +353,12 @@ def _get_or_create_product(vendor: Vendor, row: CatalogUploadRow, *, store) -> P
             _normalize(row.marketplace_parent_sku_raw)
             or _normalize(row.vendor_sku_raw)
             or _normalize(row.marketplace_child_sku_raw)
+            or _normalize(row.vendor_id_raw)
+        )
+    elif store_is_sears(store):
+        vsku = (
+            _normalize(row.marketplace_child_sku_raw)
+            or _normalize(row.marketplace_parent_sku_raw)
             or _normalize(row.vendor_id_raw)
         )
     else:

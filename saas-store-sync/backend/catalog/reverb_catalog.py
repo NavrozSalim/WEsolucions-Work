@@ -27,6 +27,20 @@ def store_is_reverb(store) -> bool:
     return code == 'reverb'
 
 
+def store_is_sears(store) -> bool:
+    """True when the store's marketplace is Sears (code ``sears``)."""
+    m = getattr(store, 'marketplace', None)
+    if m is not None:
+        return getattr(m, 'code', None) == 'sears'
+    mk_id = getattr(store, 'marketplace_id', None)
+    if not mk_id:
+        return False
+    from marketplace.models import Marketplace
+
+    code = Marketplace.objects.filter(pk=mk_id).values_list('code', flat=True).first()
+    return code == 'sears'
+
+
 def listing_sku_lookup_order(pm, store):
     """
     SKUs to try for adapters that resolve listing id by SKU (e.g. Reverb).
@@ -36,6 +50,8 @@ def listing_sku_lookup_order(pm, store):
     ebay_source = bool(
         pm.product and pm.product.vendor and vendor_is_ebay(pm.product.vendor, '')
     )
+    if store_is_sears(store):
+        return [x for x in (pm.marketplace_child_sku,) if x]
     if store_is_reverb(store) or ebay_source:
         return [x for x in (pm.marketplace_parent_sku, pm.marketplace_child_sku, prod_sku) if x]
     return [x for x in (pm.marketplace_child_sku, pm.marketplace_parent_sku, prod_sku) if x]

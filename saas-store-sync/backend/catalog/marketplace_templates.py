@@ -118,8 +118,10 @@ def build_field_indices(header: list, store: Store) -> dict[str, int | None]:
             if idx['marketplace parent sku'] is None:
                 idx['marketplace parent sku'] = sku_i
         elif kind == 'sears':
-            if idx['vendor sku'] is None:
-                idx['vendor sku'] = sku_i
+            if idx['marketplace child sku'] is None:
+                idx['marketplace child sku'] = sku_i
+            if idx['marketplace parent sku'] is None:
+                idx['marketplace parent sku'] = sku_i
         else:
             if idx['marketplace parent sku'] is None:
                 idx['marketplace parent sku'] = sku_i
@@ -183,7 +185,6 @@ def validate_marketplace_headers(indices: dict[str, int | None], store: Store) -
             ('marketplace parent sku', 'Marketplace Parent SKU'),
             ('marketplace child sku', 'Marketplace Child SKU'),
             ('marketplace id', 'Marketplace ID'),
-            ('vendor sku', 'Vendor SKU'),
             ('vendor url', 'Vendor URL'),
         ]
         for key, label in required:
@@ -262,7 +263,6 @@ def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]
             'Marketplace Parent SKU',
             'Marketplace Child SKU',
             'Marketplace ID',
-            'Vendor SKU',
             'Vendor URL',
             'Action',
         ]
@@ -277,7 +277,6 @@ def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]
                 'PARENT-1',
                 'CHILD-1',
                 '',
-                'V-SKU-1',
                 'https://www.amazon.com/dp/B0TEST123',
                 'Add',
             ],
@@ -433,7 +432,6 @@ def upload_row_to_cells(
             r.marketplace_parent_sku_raw or '',
             r.marketplace_child_sku_raw or '',
             r.marketplace_id_raw or '',
-            r.vendor_sku_raw or '',
             r.vendor_url_raw or '',
             r.action_raw or 'Add',
         ]

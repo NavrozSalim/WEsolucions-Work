@@ -15,7 +15,7 @@ from django.db import transaction
 
 from .models import CatalogUpload, CatalogUploadRow
 from .marketplace_templates import INTERNAL_FIELDS, build_field_indices, validate_marketplace_headers
-from .reverb_catalog import store_is_reverb, vendor_is_ebay
+from .reverb_catalog import store_is_reverb, store_is_sears, vendor_is_ebay
 from stores.models import Store
 from vendor.models import Vendor
 
@@ -228,6 +228,12 @@ def build_catalog_row_instance(
                     f"Row {row_num}: Reverb stores require SKU (or Marketplace Parent SKU) for Add "
                     f"(Reverb listing SKU; other marketplace columns may be N/A)"
                 )
+        elif store_is_sears(store):
+            if _normalize(marketplace_child_sku_raw) is None:
+                return None, (
+                    f"Row {row_num}: Sears stores require Marketplace Child SKU for Add "
+                    f"(price and inventory updates use the child SKU on Sears)"
+                )
         else:
             sku_val = (
                 _normalize(vendor_sku_raw)
@@ -256,18 +262,31 @@ def build_catalog_row_instance(
                 f"(store uses a fixed pricing tier)"
             )
     elif action_norm == 'delete':
-        id_val = (
-            _normalize(marketplace_id_raw)
-            or _normalize(vendor_sku_raw)
-            or _normalize(vendor_id_raw)
-            or _normalize(marketplace_child_sku_raw)
-            or _normalize(marketplace_parent_sku_raw)
-        )
-        if not id_val:
-            return None, (
-                f"Row {row_num}: Delete requires Marketplace ID, Vendor SKU, Vendor ID, "
-                f"Marketplace Child SKU, or Marketplace Parent SKU to find the product"
+        if store_is_sears(store):
+            id_val = (
+                _normalize(marketplace_id_raw)
+                or _normalize(marketplace_child_sku_raw)
+                or _normalize(vendor_id_raw)
+                or _normalize(marketplace_parent_sku_raw)
             )
+            if not id_val:
+                return None, (
+                    f"Row {row_num}: Delete requires Marketplace ID, Marketplace Child SKU, "
+                    f"Vendor ID, or Marketplace Parent SKU to find the product"
+                )
+        else:
+            id_val = (
+                _normalize(marketplace_id_raw)
+                or _normalize(vendor_sku_raw)
+                or _normalize(vendor_id_raw)
+                or _normalize(marketplace_child_sku_raw)
+                or _normalize(marketplace_parent_sku_raw)
+            )
+            if not id_val:
+                return None, (
+                    f"Row {row_num}: Delete requires Marketplace ID, Vendor SKU, Vendor ID, "
+                    f"Marketplace Child SKU, or Marketplace Parent SKU to find the product"
+                )
 
     inst = CatalogUploadRow(
         catalog_upload=upload,

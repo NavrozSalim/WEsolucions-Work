@@ -488,3 +488,92 @@ class HebNextJobTenantTests(TestCase):
 
         self.job_b.refresh_from_db()
         self.assertEqual(self.job_b.status, HebScrapeJob.Status.PENDING)
+
+
+@override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+class SearsTemplateIngestTests(TestCase):
+    """Sears catalog upload: Child SKU is required; internal product key derives from it."""
+
+    def setUp(self):
+        self.mp, _ = Marketplace.objects.get_or_create(
+            code='sears',
+            defaults={'name': 'Sears'},
+        )
+        self.vendor = Vendor.objects.get(code='amazonus')
+        self.user = User.objects.create_user(
+            username='sears_u', email='sears_u@example.com', password='pass12345',
+        )
+        self.store = Store.objects.create(
+            user=self.user,
+            name='Sears Store',
+            region='USA',
+            api_token='tok-sears',
+            marketplace=self.mp,
+        )
+
+    def _sears_row(self, *, child_sku: str, vendor_sku: str = '') -> list:
+        return [
+            'AmazonUS',
+            'B0TEST123',
+            'No',
+            '',
+            'Sears',
+            self.store.name,
+            'PARENT-1',
+            child_sku,
+            '',
+            'https://www.amazon.com/dp/B0TEST123',
+            'Add',
+        ]
+
+    @patch('catalog.tasks._chunked_reset_store_active_listings_pending_scrape', side_effect=_noop_reset)
+    def test_sync_uses_marketplace_child_sku_as_product_key(self, _mock_reset):
+        up = CatalogUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            original_filename='sears.csv',
+            status=CatalogUpload.Status.VALIDATED,
+            total_rows=1,
+        )
+        from catalog.services import _make_row_ingest_context, build_catalog_row_instance
+
+        header = [
+            'Vendor Name', 'Vendor ID', 'Is Variation', 'Variation ID',
+            'Marketplace Name', 'Store Name', 'Marketplace Parent SKU',
+            'Marketplace Child SKU', 'Marketplace ID', 'Vendor URL', 'Action',
+        ]
+        ctx = _make_row_ingest_context(self.store, header)
+        inst, err = build_catalog_row_instance(up, 2, self._sears_row(child_sku='CHILD-SEARS-1'), ctx)
+        self.assertIsNone(err, err)
+        self.assertEqual(inst.marketplace_child_sku_raw, 'CHILD-SEARS-1')
+        inst.save()
+
+        result = run_catalog_sync(str(up.id))
+        self.assertEqual(result.get('errors', 0), 0, result)
+        self.assertEqual(result.get('added'), 1, result)
+
+        pm = ProductMapping.objects.get(store=self.store)
+        self.assertEqual(pm.marketplace_child_sku, 'CHILD-SEARS-1')
+        self.assertEqual(pm.product.vendor_sku, 'CHILD-SEARS-1')
+
+    def test_add_rejected_without_marketplace_child_sku(self):
+        up = CatalogUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            original_filename='sears.csv',
+            status=CatalogUpload.Status.VALIDATED,
+            total_rows=1,
+        )
+        from catalog.services import _make_row_ingest_context, build_catalog_row_instance
+
+        header = [
+            'Vendor Name', 'Vendor ID', 'Is Variation', 'Variation ID',
+            'Marketplace Name', 'Store Name', 'Marketplace Parent SKU',
+            'Marketplace Child SKU', 'Marketplace ID', 'Vendor URL', 'Action',
+        ]
+        ctx = _make_row_ingest_context(self.store, header)
+        row = self._sears_row(child_sku='')
+        row[7] = ''
+        inst, err = build_catalog_row_instance(up, 2, row, ctx)
+        self.assertIsNone(inst)
+        self.assertIn('Marketplace Child SKU', err or '')
