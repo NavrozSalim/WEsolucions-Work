@@ -300,9 +300,10 @@ def _get_inventory_for_vendor_from_cache(vendor_id, inv_by_vendor_id, inv_fallba
 
 
 def _adapter_push_kwargs(store, pm, price, stock, price_by_vendor_id, price_fallback):
+    from catalog.marketplace_push import ensure_sears_rrp_configured
     from catalog.marketplace_rrp import adapter_push_kwargs
 
-    return adapter_push_kwargs(
+    kwargs = adapter_push_kwargs(
         store,
         pm,
         price,
@@ -310,6 +311,8 @@ def _adapter_push_kwargs(store, pm, price, stock, price_by_vendor_id, price_fall
         price_by_vendor_id=price_by_vendor_id,
         price_fallback=price_fallback,
     )
+    ensure_sears_rrp_configured(store, kwargs)
+    return kwargs
 
 
 def _apply_pricing(
@@ -722,7 +725,7 @@ def run_store_update(self, store_id, source='beat'):
                     try:
                         if bulk_supported:
                             bulk_queue.append(
-                                (pm, listing_id, float(pm.store_price), int(pm.store_stock or 0))
+                                (pm, listing_id, pm.store_price, int(pm.store_stock or 0))
                             )
                         else:
                             adapter.update_product(
@@ -730,7 +733,7 @@ def run_store_update(self, store_id, source='beat'):
                                 **_adapter_push_kwargs(
                                     store,
                                     pm,
-                                    float(pm.store_price),
+                                    pm.store_price,
                                     int(pm.store_stock or 0),
                                     price_by_vid,
                                     price_fb,
@@ -872,14 +875,14 @@ def run_store_update(self, store_id, source='beat'):
             if should_push:
                 try:
                     if bulk_supported:
-                        bulk_queue.append((pm, listing_id, float(new_price), int(new_stock or 0)))
+                        bulk_queue.append((pm, listing_id, new_price, int(new_stock or 0)))
                     else:
                         adapter.update_product(
                             listing_id,
                             **_adapter_push_kwargs(
                                 store,
                                 pm,
-                                float(new_price),
+                                new_price,
                                 int(new_stock or 0),
                                 price_by_vid,
                                 price_fb,
@@ -1173,17 +1176,16 @@ def run_store_push_listings_only(store_id, disable_schedule=False):
             )
             continue
         try:
-            adapter.update_product(
-                listing_id,
-                **_adapter_push_kwargs(
-                    store,
-                    pm,
-                    float(pm.store_price),
-                    int(pm.store_stock or 0),
-                    price_by_vid,
-                    price_fb,
-                ),
+            from catalog.marketplace_push import push_product_mapping_to_marketplace
+
+            ok, err = push_product_mapping_to_marketplace(
+                pm,
+                store,
+                price_by_vendor_id=price_by_vid,
+                price_fallback=price_fb,
             )
+            if not ok:
+                raise ValueError(err or 'marketplace_push_failed')
             now_ok = timezone.now()
             pm.sync_status = 'synced'
             pm.last_sync_time = now_ok
@@ -1260,8 +1262,14 @@ def run_store_critical_zero_inventory(store_id):
         if not listing_id:
             continue
         try:
+            from catalog.marketplace_push import quantize_posted_price
+
             if pm.store_price is not None:
-                adapter.update_product(listing_id, price=float(pm.store_price), stock=0)
+                adapter.update_product(
+                    listing_id,
+                    price=quantize_posted_price(pm.store_price) or pm.store_price,
+                    stock=0,
+                )
             else:
                 adapter.update_product(listing_id, stock=0)
             pushed += 1

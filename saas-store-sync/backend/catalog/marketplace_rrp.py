@@ -6,6 +6,17 @@ from typing import Any
 
 from catalog.reverb_catalog import store_is_sears
 
+_TWOPL = Decimal('0.01')
+
+
+def quantize_money(amount) -> Decimal | None:
+    if amount is None:
+        return None
+    try:
+        return Decimal(str(amount)).quantize(_TWOPL, rounding=ROUND_HALF_UP)
+    except Exception:
+        return None
+
 
 def compute_marketplace_rrp(price: Decimal | float | None, margin_pct: Decimal | float | None) -> Decimal | None:
     """
@@ -16,10 +27,10 @@ def compute_marketplace_rrp(price: Decimal | float | None, margin_pct: Decimal |
 
     Example: price 74, discount 26 → RRP 100 (price is 74% of RRP).
     """
-    if price is None or margin_pct is None:
+    posted = quantize_money(price)
+    if posted is None or margin_pct is None:
         return None
     try:
-        p = Decimal(str(price))
         m = Decimal(str(margin_pct))
     except Exception:
         return None
@@ -28,7 +39,7 @@ def compute_marketplace_rrp(price: Decimal | float | None, margin_pct: Decimal |
     divisor = (Decimal('100') - m) / Decimal('100')
     if divisor <= 0:
         return None
-    return (p / divisor).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    return (posted / divisor).quantize(_TWOPL, rounding=ROUND_HALF_UP)
 
 
 def rrp_discount_pct_for_pm(
@@ -38,8 +49,6 @@ def rrp_discount_pct_for_pm(
     price_fallback: Any = None,
 ) -> Decimal | None:
     """Per-vendor RRP discount % from store pricing settings (Mydeal + Sears)."""
-    if not store_is_sears(store):
-        return None
     if pm is None or not getattr(pm, 'product_id', None):
         return None
     vendor_id = pm.product.vendor_id
@@ -54,37 +63,39 @@ def rrp_discount_pct_for_pm(
     if m is None:
         return None
     try:
-        return Decimal(str(m))
+        val = Decimal(str(m))
     except Exception:
         return None
+    if val <= 0 or val >= Decimal('100'):
+        return None
+    return val
 
 
 def adapter_push_kwargs(
     store,
     pm,
-    price: float | None,
+    price: Decimal | float | None,
     stock: int | None,
     *,
     price_by_vendor_id: dict | None = None,
     price_fallback: Any = None,
 ) -> dict[str, Any]:
     """
-    kwargs for ``adapter.update_product`` — adds ``rrp`` for Sears when configured.
+    kwargs for ``adapter.update_product`` — adds ``rrp`` (Decimal) for Sears when configured.
 
-    ``price`` = posted/sale price (``store_price``).
+    ``price`` = posted/sale price (``store_price``), quantized to cents.
     ``stock`` = ``store_stock``.
     """
     kwargs: dict[str, Any] = {}
-    if price is not None:
-        kwargs['price'] = price
+    posted = quantize_money(price)
+    if posted is not None:
+        kwargs['price'] = posted
     if stock is not None:
-        kwargs['stock'] = stock
-    if not store_is_sears(store) or price is None or pm is None:
+        kwargs['stock'] = int(stock)
+    if not store_is_sears(store) or posted is None or pm is None:
         return kwargs
     pct = rrp_discount_pct_for_pm(store, pm, price_by_vendor_id, price_fallback)
-    rrp = compute_marketplace_rrp(Decimal(str(price)), pct)
-    if rrp is not None:
-        posted = Decimal(str(price)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        if rrp > posted:
-            kwargs['rrp'] = float(rrp)
+    rrp = compute_marketplace_rrp(posted, pct)
+    if rrp is not None and rrp > posted:
+        kwargs['rrp'] = rrp
     return kwargs

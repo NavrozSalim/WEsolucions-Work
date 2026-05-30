@@ -927,6 +927,14 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                     pm.title = scrape_title
                     save_fields.append('title')
                 pm.save(update_fields=save_fields)
+                from catalog.marketplace_push import apply_post_scrape_marketplace_push
+
+                apply_post_scrape_marketplace_push(
+                    pm,
+                    store,
+                    price_by_vendor_id=price_by_vid,
+                    price_fallback=price_fb,
+                )
                 succeeded += 1
                 last_progress_at = timezone.now()
             except Exception as apply_err:
@@ -1456,6 +1464,14 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
                     pm.title = scrape_title
                     save_fields.append('title')
                 pm.save(update_fields=save_fields)
+                from catalog.marketplace_push import apply_post_scrape_marketplace_push
+
+                apply_post_scrape_marketplace_push(
+                    pm,
+                    store,
+                    price_by_vendor_id=price_by_vid,
+                    price_fallback=price_fb,
+                )
                 succeeded += 1
                 last_progress_at = timezone.now()
             except Exception as apply_err:

@@ -31,6 +31,28 @@ class MarketplaceRrpTests(SimpleTestCase):
     def test_compute_rrp_returns_none_without_discount(self):
         self.assertIsNone(compute_marketplace_rrp(Decimal('50'), None))
 
+    def test_compute_rrp_for_catalog_posted_price(self):
+        """Posted $143.98 with ~28.72% RRP discount → Standard $201.99 on Sears."""
+        rrp = compute_marketplace_rrp(Decimal('143.98'), Decimal('28.72'))
+        self.assertEqual(rrp, Decimal('201.99'))
+
+    def test_adapter_push_kwargs_quantizes_posted_price(self):
+        store = _store('sears')
+        pm = MagicMock()
+        pm.product_id = 1
+        pm.product.vendor_id = 'vid-1'
+        ps = MagicMock()
+        ps.mydeal_rrp_margin_percentage = Decimal('28.72')
+        kwargs = adapter_push_kwargs(
+            store,
+            pm,
+            Decimal('143.98'),
+            3,
+            price_by_vendor_id={'vid-1': ps},
+        )
+        self.assertEqual(kwargs['price'], Decimal('143.98'))
+        self.assertEqual(kwargs['rrp'], Decimal('201.99'))
+
     def test_adapter_push_kwargs_adds_rrp_for_sears(self):
         store = _store('sears')
         pm = MagicMock()
@@ -46,15 +68,15 @@ class MarketplaceRrpTests(SimpleTestCase):
             price_by_vendor_id={'vid-1': ps},
             price_fallback=None,
         )
-        self.assertEqual(kwargs['price'], 74.0)
+        self.assertEqual(kwargs['price'], Decimal('74.00'))
         self.assertEqual(kwargs['stock'], 5)
-        self.assertEqual(kwargs['rrp'], 100.0)
+        self.assertEqual(kwargs['rrp'], Decimal('100.00'))
 
     def test_adapter_push_kwargs_skips_rrp_for_reverb(self):
         store = _store('reverb')
         pm = MagicMock()
         kwargs = adapter_push_kwargs(store, pm, 99.0, 1)
-        self.assertEqual(kwargs, {'price': 99.0, 'stock': 1})
+        self.assertEqual(kwargs, {'price': Decimal('99.00'), 'stock': 1})
         self.assertNotIn('rrp', kwargs)
 
 
@@ -96,7 +118,7 @@ class SearsAdapterPushTests(SimpleTestCase):
     @patch.object(SearsAdapter, '_request')
     def test_update_product_sends_price_and_inventory(self, mock_request):
         adapter = self._adapter()
-        adapter.update_product('CHILD-99', price=74.0, rrp=100.0, stock=8)
+        adapter.update_product('CHILD-99', price=Decimal('74.00'), rrp=Decimal('100.00'), stock=8)
         self.assertEqual(mock_request.call_count, 2)
         price_call = mock_request.call_args_list[0]
         inv_call = mock_request.call_args_list[1]
@@ -110,7 +132,7 @@ class SearsAdapterPushTests(SimpleTestCase):
     @patch.object(SearsAdapter, '_request')
     def test_update_product_posted_only_without_rrp(self, mock_request):
         adapter = self._adapter()
-        adapter.update_product('CHILD-100', price=59.99, stock=0)
+        adapter.update_product('CHILD-100', price=Decimal('59.99'), stock=0)
         price_xml = mock_request.call_args_list[0].kwargs['data']
         self.assertIn('<standard-price>59.99</standard-price>', price_xml)
         self.assertNotIn('<sale>', price_xml)

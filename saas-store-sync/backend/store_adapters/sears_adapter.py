@@ -18,7 +18,7 @@ import hashlib
 import hmac
 import json
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from xml.sax.saxutils import escape
 
 import requests
@@ -41,7 +41,9 @@ class SearsAPIError(Exception):
 
 
 def _format_amount(amount) -> str:
-    return str(Decimal(str(amount)).quantize(Decimal("0.01")))
+    return str(
+        Decimal(str(amount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    )
 
 
 def _xml_item_id(item_id: str) -> str:
