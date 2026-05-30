@@ -8,17 +8,27 @@ Expected Store.api_token format (JSON):
   "secret_key": "base64-or-plain-secret",
   "base_url": "https://seller.marketplace.sears.com/SellerPortal/api"
 }
+
+Pricing: PUT /pricing/fbm/v6 (XML v6 — standard-price + optional sale block)
+Inventory: PUT /inventory/fbm/v7 (XML v7 — quantity per item-id / Child SKU)
 """
+from __future__ import annotations
+
 import hashlib
 import hmac
 import json
+from datetime import date, timedelta
 from decimal import Decimal
+from xml.sax.saxutils import escape
 
 import requests
 
 from .base import BaseStoreAdapter
 
 SEARS_API_BASE = "https://seller.marketplace.sears.com/SellerPortal/api"
+PRICING_NS = "http://seller.marketplace.sears.com/pricing/v6"
+INVENTORY_NS = "http://seller.marketplace.sears.com/inventory/v7"
+DEFAULT_SALE_DAYS = 365
 
 
 class SearsAPIError(Exception):
@@ -30,8 +40,78 @@ class SearsAPIError(Exception):
         self.response_body = response_body
 
 
+def _format_amount(amount) -> str:
+    return str(Decimal(str(amount)).quantize(Decimal("0.01")))
+
+
+def _xml_item_id(item_id: str) -> str:
+    return escape(str(item_id).strip(), {'"': '&quot;', "'": '&apos;'})
+
+
+def build_pricing_feed_xml(
+    item_id: str,
+    *,
+    standard_price,
+    sale_price=None,
+    sale_start_date: date | None = None,
+    sale_end_date: date | None = None,
+) -> str:
+    """
+    Sears pricing v6 XML for one Child SKU (``item-id``).
+
+    When ``sale_price`` is set and below ``standard_price``, includes a ``<sale>`` block
+    (posted price + RRP strike-through on Sears). Otherwise only ``standard-price``.
+    """
+    std = _format_amount(standard_price)
+    iid = _xml_item_id(item_id)
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        f'<pricing-feed xmlns="{PRICING_NS}">',
+        '  <fbm-pricing>',
+        f'    <item item-id="{iid}">',
+        f'      <standard-price>{std}</standard-price>',
+    ]
+    use_sale = sale_price is not None
+    if use_sale:
+        posted = Decimal(std)
+        sale_dec = Decimal(_format_amount(sale_price))
+        use_sale = sale_dec < posted
+    if use_sale:
+        start = sale_start_date or date.today()
+        end = sale_end_date or (start + timedelta(days=DEFAULT_SALE_DAYS))
+        parts.extend([
+            '      <sale>',
+            f'        <sale-price>{_format_amount(sale_price)}</sale-price>',
+            f'        <sale-start-date>{start.isoformat()}</sale-start-date>',
+            f'        <sale-end-date>{end.isoformat()}</sale-end-date>',
+            '      </sale>',
+        ])
+    parts.extend([
+        '    </item>',
+        '  </fbm-pricing>',
+        '</pricing-feed>',
+    ])
+    return '\n'.join(parts)
+
+
+def build_inventory_feed_xml(item_id: str, quantity: int) -> str:
+    """Sears inventory v7 XML for one Child SKU."""
+    iid = _xml_item_id(item_id)
+    qty = max(0, int(quantity))
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<inventory-feed xmlns="{INVENTORY_NS}">\n'
+        '  <fbm-inventory>\n'
+        f'    <item item-id="{iid}">\n'
+        f'      <quantity>{qty}</quantity>\n'
+        '    </item>\n'
+        '  </fbm-inventory>\n'
+        '</inventory-feed>'
+    )
+
+
 class SearsAdapter(BaseStoreAdapter):
-    """Sears API adapter for validating credentials and updating price/inventory."""
+    """Sears API adapter: price (standard + sale/RRP) and inventory by Child SKU."""
 
     def __init__(self, store):
         super().__init__(store)
@@ -97,9 +177,6 @@ class SearsAdapter(BaseStoreAdapter):
         return resp.text or ""
 
     def validate_connection(self):
-        """
-        Validate Sears credentials by calling purchaseorder endpoint with a valid status.
-        """
         if not self._has_minimum_creds():
             return False
         try:
@@ -113,11 +190,8 @@ class SearsAdapter(BaseStoreAdapter):
             return False
 
     def lookup_listing_by_sku(self, sku: str):
-        """
-        Sears SKU lookup endpoint isn't wired yet in v1.
-        Use marketplace_id from catalog mapping when available.
-        """
-        return str(sku) if sku else None
+        """Child SKU is the Sears ``item-id`` for price/inventory feeds."""
+        return str(sku).strip() if sku else None
 
     def create_product(self, sku, title, price, stock, **kwargs):
         raise NotImplementedError(
@@ -125,21 +199,54 @@ class SearsAdapter(BaseStoreAdapter):
         )
 
     def update_product(self, external_id, **kwargs):
-        if not external_id:
-            raise SearsAPIError("Missing Sears external_id/SKU for update_product")
+        """
+        Update listing by Marketplace Child SKU (``item-id``).
+
+        kwargs:
+            price: posted/sale price (``store_price``)
+            rrp: standard price for strike-through (computed RRP)
+            stock: inventory quantity
+        """
+        sku = str(external_id or "").strip()
+        if not sku:
+            raise SearsAPIError("Missing Sears Child SKU (item-id) for update_product")
         price = kwargs.get("price")
+        rrp = kwargs.get("rrp")
         stock = kwargs.get("stock")
+
         if price is not None:
-            amt = str(Decimal(str(price)).quantize(Decimal("0.01")))
-            self.update_price(str(external_id), amt, kwargs.get("currency", "USD"))
+            posted = _format_amount(price)
+            if rrp is not None:
+                std = _format_amount(rrp)
+                if Decimal(std) > Decimal(posted):
+                    self.update_pricing(
+                        sku,
+                        standard_price=std,
+                        sale_price=posted,
+                    )
+                else:
+                    self.update_pricing(sku, standard_price=posted)
+            else:
+                self.update_pricing(sku, standard_price=posted)
         if stock is not None:
-            self.update_inventory(str(external_id), stock)
+            self.update_inventory(sku, stock)
         return True
 
-    def update_price(self, sku, price, currency="USD"):
-        xml = (
-            f"<priceFeed><sku>{sku}</sku><price currency=\"{currency}\">{price}</price>"
-            "</priceFeed>"
+    def update_pricing(
+        self,
+        item_id: str,
+        *,
+        standard_price,
+        sale_price=None,
+        sale_start_date: date | None = None,
+        sale_end_date: date | None = None,
+    ):
+        xml = build_pricing_feed_xml(
+            item_id,
+            standard_price=standard_price,
+            sale_price=sale_price,
+            sale_start_date=sale_start_date,
+            sale_end_date=sale_end_date,
         )
         self._request(
             "PUT",
@@ -149,11 +256,23 @@ class SearsAdapter(BaseStoreAdapter):
         )
         return True
 
+    def update_price(self, sku, price, currency="USD"):
+        """Legacy single-price helper — sets standard-price only."""
+        del currency
+        return self.update_pricing(str(sku), standard_price=price)
+
     def update_inventory(self, external_id, stock):
-        # Inventory endpoint can vary by Sears account setup; keep explicit for later template step.
-        raise NotImplementedError(
-            "Sears inventory endpoint payload will be wired after you share your Sears inventory template."
+        sku = str(external_id or "").strip()
+        if not sku:
+            raise SearsAPIError("Missing Sears Child SKU (item-id) for update_inventory")
+        xml = build_inventory_feed_xml(sku, stock)
+        self._request(
+            "PUT",
+            "/inventory/fbm/v7",
+            params={"sellerId": self._seller_id},
+            data=xml,
         )
+        return True
 
     def delete_product(self, external_id):
         raise NotImplementedError("Sears delete_product not implemented yet.")

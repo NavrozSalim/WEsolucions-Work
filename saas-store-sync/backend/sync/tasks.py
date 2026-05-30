@@ -299,6 +299,19 @@ def _get_inventory_for_vendor_from_cache(vendor_id, inv_by_vendor_id, inv_fallba
     return inv_by_vendor_id.get(vendor_id) or inv_fallback
 
 
+def _adapter_push_kwargs(store, pm, price, stock, price_by_vendor_id, price_fallback):
+    from catalog.marketplace_rrp import adapter_push_kwargs
+
+    return adapter_push_kwargs(
+        store,
+        pm,
+        price,
+        stock,
+        price_by_vendor_id=price_by_vendor_id,
+        price_fallback=price_fallback,
+    )
+
+
 def _apply_pricing(
     vendor_price,
     pricing_settings,
@@ -714,8 +727,14 @@ def run_store_update(self, store_id, source='beat'):
                         else:
                             adapter.update_product(
                                 listing_id,
-                                price=float(pm.store_price),
-                                stock=int(pm.store_stock or 0),
+                                **_adapter_push_kwargs(
+                                    store,
+                                    pm,
+                                    float(pm.store_price),
+                                    int(pm.store_stock or 0),
+                                    price_by_vid,
+                                    price_fb,
+                                ),
                             )
                             push_ok += 1
                             pm.sync_status = 'synced'
@@ -855,7 +874,17 @@ def run_store_update(self, store_id, source='beat'):
                     if bulk_supported:
                         bulk_queue.append((pm, listing_id, float(new_price), int(new_stock or 0)))
                     else:
-                        adapter.update_product(listing_id, price=float(new_price), stock=new_stock or 0)
+                        adapter.update_product(
+                            listing_id,
+                            **_adapter_push_kwargs(
+                                store,
+                                pm,
+                                float(new_price),
+                                int(new_stock or 0),
+                                price_by_vid,
+                                price_fb,
+                            ),
+                        )
                         push_ok += 1
                         pm.sync_status = 'synced'
                         pm.last_sync_time = timezone.now()
@@ -1091,6 +1120,7 @@ def run_store_push_listings_only(store_id, disable_schedule=False):
     import logging
     from store_adapters import get_adapter
     from store_adapters.reverb_adapter import ReverbAPIError
+    from store_adapters.sears_adapter import SearsAPIError
     from catalog.models import ReverbUpdateLog
     from catalog.activity_log import append_catalog_log
     from sync.models import SyncSchedule
@@ -1123,6 +1153,7 @@ def run_store_push_listings_only(store_id, disable_schedule=False):
         )
 
     adapter = get_adapter(store)
+    price_by_vid, price_fb, _, _ = _build_store_vendor_pricing_inventory_caches(store)
     qs = ProductMapping.objects.filter(
         store=store,
         is_active=True,
@@ -1144,8 +1175,14 @@ def run_store_push_listings_only(store_id, disable_schedule=False):
         try:
             adapter.update_product(
                 listing_id,
-                price=float(pm.store_price),
-                stock=pm.store_stock or 0,
+                **_adapter_push_kwargs(
+                    store,
+                    pm,
+                    float(pm.store_price),
+                    int(pm.store_stock or 0),
+                    price_by_vid,
+                    price_fb,
+                ),
             )
             now_ok = timezone.now()
             pm.sync_status = 'synced'
@@ -1158,7 +1195,7 @@ def run_store_push_listings_only(store_id, disable_schedule=False):
                 pushed_stock=pm.store_stock,
             )
             succeeded += 1
-        except ReverbAPIError as e:
+        except (ReverbAPIError, SearsAPIError) as e:
             failed += 1
             logger.warning("Manual push failed for %s: %s", pm.id, e)
             ReverbUpdateLog.objects.create(

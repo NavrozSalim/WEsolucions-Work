@@ -278,6 +278,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const regionTimezones = TIMEZONE_OPTIONS[store?.region] || TIMEZONE_OPTIONS.USA;
     const isKogan = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'kogan';
     const isMydeal = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'mydeal';
+    const isSears = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'sears';
+    const showRrpDiscount = isMydeal || isSears;
     const mydealSetup = (form.mydeal_setup_method || 'upload') === 'api' ? 'api' : 'upload';
     const koganAuth = (form.kogan_auth_method || 'json') === 'token' ? 'token' : 'json';
 
@@ -294,7 +296,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                 marketplace_fees_percentage: allDirect ? 0 : (parseFloat(vp.marketplace_fees_percentage) || 0),
                 rounding_option: vp.rounding_option || 'none',
                 continuous_update: !!vp.continuous_update,
-                mydeal_rrp_margin_percentage: isMydeal
+                mydeal_rrp_margin_percentage: showRrpDiscount
                     ? (parseFloat(vp.mydeal_rrp_margin_percentage) || 0)
                     : undefined,
                 range_margins: ranges.map((r) => ({
@@ -692,7 +694,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                                 <Input label="Purchase Tax (%)" type="number" min={0} step="0.01" value={allDirect ? 0 : vp.purchase_tax_percentage} disabled={allDirect} onChange={(e) => { const v = e.target.value; if (v === '') { updateVendorPrice(i, 'purchase_tax_percentage', ''); return; } const n = parseFloat(v); updateVendorPrice(i, 'purchase_tax_percentage', Number.isFinite(n) ? Math.max(0, n) : ''); }} />
                                                 <Input label="Marketplace Fees (%)" type="number" min={0} step="0.01" value={allDirect ? 0 : vp.marketplace_fees_percentage} disabled={allDirect} onChange={(e) => { const v = e.target.value; if (v === '') { updateVendorPrice(i, 'marketplace_fees_percentage', ''); return; } const n = parseFloat(v); updateVendorPrice(i, 'marketplace_fees_percentage', Number.isFinite(n) ? Math.max(0, n) : ''); }} />
                                             </div>
-                                            {isMydeal && (
+                                            {(isMydeal || isSears) && (
                                                 <Input
                                                     label="RRP discount (%)"
                                                     type="number"

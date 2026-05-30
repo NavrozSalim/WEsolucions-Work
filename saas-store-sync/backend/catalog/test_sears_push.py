@@ -1,0 +1,123 @@
+"""Tests for Sears pricing/inventory XML and marketplace push helpers."""
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+from unittest.mock import MagicMock, patch
+
+from django.test import SimpleTestCase
+
+from catalog.marketplace_rrp import adapter_push_kwargs, compute_marketplace_rrp
+from catalog.reverb_catalog import store_is_sears
+from store_adapters.sears_adapter import (
+    SearsAdapter,
+    build_inventory_feed_xml,
+    build_pricing_feed_xml,
+)
+
+
+def _store(code: str):
+    st = MagicMock()
+    st.marketplace = MagicMock()
+    st.marketplace.code = code
+    st.marketplace.name = code.title()
+    return st
+
+
+class MarketplaceRrpTests(SimpleTestCase):
+    def test_compute_rrp_discount_formula(self):
+        self.assertEqual(compute_marketplace_rrp(Decimal('74'), Decimal('26')), Decimal('100.00'))
+
+    def test_compute_rrp_returns_none_without_discount(self):
+        self.assertIsNone(compute_marketplace_rrp(Decimal('50'), None))
+
+    def test_adapter_push_kwargs_adds_rrp_for_sears(self):
+        store = _store('sears')
+        pm = MagicMock()
+        pm.product_id = 1
+        pm.product.vendor_id = 'vid-1'
+        ps = MagicMock()
+        ps.mydeal_rrp_margin_percentage = Decimal('26')
+        kwargs = adapter_push_kwargs(
+            store,
+            pm,
+            74.0,
+            5,
+            price_by_vendor_id={'vid-1': ps},
+            price_fallback=None,
+        )
+        self.assertEqual(kwargs['price'], 74.0)
+        self.assertEqual(kwargs['stock'], 5)
+        self.assertEqual(kwargs['rrp'], 100.0)
+
+    def test_adapter_push_kwargs_skips_rrp_for_reverb(self):
+        store = _store('reverb')
+        pm = MagicMock()
+        kwargs = adapter_push_kwargs(store, pm, 99.0, 1)
+        self.assertEqual(kwargs, {'price': 99.0, 'stock': 1})
+        self.assertNotIn('rrp', kwargs)
+
+
+class SearsXmlTests(SimpleTestCase):
+    def test_pricing_xml_standard_and_sale(self):
+        xml = build_pricing_feed_xml(
+            'CHILD-1',
+            standard_price='100.00',
+            sale_price='74.00',
+            sale_start_date=date(2026, 1, 1),
+            sale_end_date=date(2027, 1, 1),
+        )
+        self.assertIn('item-id="CHILD-1"', xml)
+        self.assertIn('<standard-price>100.00</standard-price>', xml)
+        self.assertIn('<sale-price>74.00</sale-price>', xml)
+        self.assertIn('<sale-start-date>2026-01-01</sale-start-date>', xml)
+        self.assertIn('pricing-feed xmlns="http://seller.marketplace.sears.com/pricing/v6"', xml)
+
+    def test_pricing_xml_standard_only_when_no_sale(self):
+        xml = build_pricing_feed_xml('CHILD-2', standard_price='49.99')
+        self.assertIn('<standard-price>49.99</standard-price>', xml)
+        self.assertNotIn('<sale>', xml)
+
+    def test_inventory_xml_quantity(self):
+        xml = build_inventory_feed_xml('CHILD-3', 12)
+        self.assertIn('item-id="CHILD-3"', xml)
+        self.assertIn('<quantity>12</quantity>', xml)
+        self.assertIn('inventory-feed xmlns="http://seller.marketplace.sears.com/inventory/v7"', xml)
+
+
+class SearsAdapterPushTests(SimpleTestCase):
+    def _adapter(self):
+        store = MagicMock()
+        store.api_token = (
+            '{"seller_id":"123","email":"a@b.com","secret_key":"secretkeysecretkeysecretkey12"}'
+        )
+        return SearsAdapter(store)
+
+    @patch.object(SearsAdapter, '_request')
+    def test_update_product_sends_price_and_inventory(self, mock_request):
+        adapter = self._adapter()
+        adapter.update_product('CHILD-99', price=74.0, rrp=100.0, stock=8)
+        self.assertEqual(mock_request.call_count, 2)
+        price_call = mock_request.call_args_list[0]
+        inv_call = mock_request.call_args_list[1]
+        self.assertEqual(price_call.args[0], 'PUT')
+        self.assertEqual(price_call.args[1], '/pricing/fbm/v6')
+        self.assertIn('<standard-price>100.00</standard-price>', price_call.kwargs['data'])
+        self.assertIn('<sale-price>74.00</sale-price>', price_call.kwargs['data'])
+        self.assertEqual(inv_call.args[1], '/inventory/fbm/v7')
+        self.assertIn('<quantity>8</quantity>', inv_call.kwargs['data'])
+
+    @patch.object(SearsAdapter, '_request')
+    def test_update_product_posted_only_without_rrp(self, mock_request):
+        adapter = self._adapter()
+        adapter.update_product('CHILD-100', price=59.99, stock=0)
+        price_xml = mock_request.call_args_list[0].kwargs['data']
+        self.assertIn('<standard-price>59.99</standard-price>', price_xml)
+        self.assertNotIn('<sale>', price_xml)
+
+    def test_lookup_uses_child_sku(self):
+        adapter = self._adapter()
+        self.assertEqual(adapter.lookup_listing_by_sku('CHILD-ABC'), 'CHILD-ABC')
+
+    def test_store_is_sears(self):
+        self.assertTrue(store_is_sears(_store('sears')))

@@ -10,10 +10,10 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 
 from catalog.models import MydealTemplateRow, ProductMapping
+from catalog.marketplace_rrp import compute_marketplace_rrp
 from catalog.mydeal_templates import (
     MYDEAL_INVENTORY_HEADERS,
     MYDEAL_PRICE_HEADERS,
-    _compute_rrp,
     _export_price_csv,
     ingest_mydeal_template,
     ingest_mydeal_templates_zip,
@@ -72,11 +72,11 @@ class MydealTemplateTests(TestCase):
         )
 
     def test_compute_rrp_margin_formula(self):
-        rrp = _compute_rrp(Decimal('50.00'), Decimal('50'))
+        rrp = compute_marketplace_rrp(Decimal('50.00'), Decimal('50'))
         self.assertEqual(rrp, Decimal('100.00'))
 
     def test_compute_rrp_discount_off_rrp(self):
-        rrp = _compute_rrp(Decimal('74.00'), Decimal('26'))
+        rrp = compute_marketplace_rrp(Decimal('74.00'), Decimal('26'))
         self.assertEqual(rrp, Decimal('100.00'))
 
     def test_ingest_rejects_bad_headers(self):

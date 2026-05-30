@@ -15,6 +15,7 @@ from typing import Any
 from django.db import transaction
 from django.http import HttpResponse
 
+from catalog.marketplace_rrp import compute_marketplace_rrp
 from catalog.models import MydealTemplateRow, ProductMapping
 from stores.models import Store, StoreVendorPriceSettings
 
@@ -315,21 +316,6 @@ def _listing_data_by_sku(store: Store) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _compute_rrp(price: Decimal, margin_pct: Decimal | None) -> Decimal | None:
-    if price is None or margin_pct is None:
-        return None
-    try:
-        m = Decimal(str(margin_pct))
-    except Exception:
-        return None
-    if m <= 0 or m >= Decimal('100'):
-        return None
-    divisor = (Decimal('100') - m) / Decimal('100')
-    if divisor <= 0:
-        return None
-    return (price / divisor).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-
-
 def _export_price_csv(store: Store) -> bytes:
     rows = list(
         MydealTemplateRow.objects.filter(
@@ -354,7 +340,7 @@ def _export_price_csv(store: Store) -> bytes:
             try:
                 p = Decimal(str(price)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
                 price_str = f'{p:.2f}'
-                rrp = _compute_rrp(p, margin_pct)
+                rrp = compute_marketplace_rrp(p, margin_pct)
                 if rrp is not None:
                     rrp_str = f'{rrp:.2f}'
             except Exception:
