@@ -102,24 +102,40 @@ class SearsXmlTests(SimpleTestCase):
         self.assertNotIn('<sale>', xml)
 
     def test_inventory_xml_lmp_quantity(self):
-        xml = build_inventory_feed_xml('CHILD-3', 12, lmp=True)
+        xml = build_inventory_feed_xml(
+            'CHILD-3',
+            12,
+            lmp=True,
+            location_id='LOC-99',
+            pick_up_now_eligible=False,
+            inventory_timestamp='2026-05-30T12:00:00',
+        )
         self.assertIn('item-id="CHILD-3"', xml)
         self.assertIn('<quantity>12</quantity>', xml)
-        self.assertIn('<store-inventory>', xml)
+        self.assertIn('location-id="LOC-99"', xml)
+        self.assertIn('<pick-up-now-eligible>false</pick-up-now-eligible>', xml)
+        self.assertIn('<inventory-timestamp>2026-05-30T12:00:00</inventory-timestamp>', xml)
+        self.assertIn('<store-inventory xmlns="http://seller.marketplace.sears.com/catalog/v7"', xml)
+        self.assertNotIn('<inventory-feed', xml)
         self.assertNotIn('<fbm-inventory>', xml)
-        self.assertIn('inventory-feed xmlns="http://seller.marketplace.sears.com/inventory/v7"', xml)
+
+    def test_inventory_xml_lmp_requires_location_id(self):
+        with self.assertRaises(SearsAPIError):
+            build_inventory_feed_xml('CHILD-3', 1, lmp=True)
 
     def test_inventory_xml_legacy_fbm(self):
         xml = build_inventory_feed_xml('CHILD-4', 5, lmp=False)
         self.assertIn('<fbm-inventory>', xml)
-        self.assertNotIn('<store-inventory>', xml)
+        self.assertIn('inventory-feed xmlns="http://seller.marketplace.sears.com/inventory/v7"', xml)
+        self.assertNotIn('<store-inventory', xml)
 
 
 class SearsAdapterPushTests(SimpleTestCase):
     def _adapter(self):
         store = MagicMock()
         store.api_token = (
-            '{"seller_id":"123","email":"a@b.com","secret_key":"secretkeysecretkeysecretkey12"}'
+            '{"seller_id":"123","email":"a@b.com","secret_key":"secretkeysecretkeysecretkey12",'
+            '"location_id":"WH-1"}'
         )
         return SearsAdapter(store)
 
@@ -135,7 +151,8 @@ class SearsAdapterPushTests(SimpleTestCase):
         self.assertIn('<standard-price>100.00</standard-price>', price_call.kwargs['data'])
         self.assertIn('<sale-price>74.00</sale-price>', price_call.kwargs['data'])
         self.assertEqual(inv_call.args[1], '/inventory/fbm-lmp/v7')
-        self.assertIn('<store-inventory>', inv_call.kwargs['data'])
+        self.assertIn('<store-inventory xmlns="http://seller.marketplace.sears.com/catalog/v7"', inv_call.kwargs['data'])
+        self.assertIn('location-id="WH-1"', inv_call.kwargs['data'])
         self.assertIn('<quantity>8</quantity>', inv_call.kwargs['data'])
 
     @patch.object(SearsAdapter, '_request')

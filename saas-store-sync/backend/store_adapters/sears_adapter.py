@@ -6,8 +6,11 @@ Expected Store.api_token format (JSON):
   "seller_id": "10673110",
   "email": "seller@example.com",
   "secret_key": "base64-or-plain-secret",
+  "location_id": "12345",
   "base_url": "https://seller.marketplace.sears.com/SellerPortal/api"
 }
+
+``location_id`` is required for FBM-LMP inventory (Seller Portal → Fulfillment Location).
 
 Pricing: PUT /pricing/fbm/v6 (XML v6 — standard-price + optional sale block)
 Inventory: PUT /inventory/fbm-lmp/v7 (FBM-LMP, default) or /inventory/fbm/v7 (legacy FBM)
@@ -29,6 +32,16 @@ from .base import BaseStoreAdapter
 SEARS_API_BASE = "https://seller.marketplace.sears.com/SellerPortal/api"
 PRICING_NS = "http://seller.marketplace.sears.com/pricing/v6"
 INVENTORY_NS = "http://seller.marketplace.sears.com/inventory/v7"
+STORE_INVENTORY_NS = "http://seller.marketplace.sears.com/catalog/v7"
+XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
+INVENTORY_XSD = (
+    "https://seller.marketplace.sears.com/SellerPortal/s/schema/rest/"
+    "inventory/import/v7/inventory.xsd"
+)
+STORE_INVENTORY_XSD = (
+    "https://seller.marketplace.sears.com/SellerPortal/s/schema/rest/"
+    "inventory/import/v7/store-inventory.xsd"
+)
 INVENTORY_PATH_LMP = "/inventory/fbm-lmp/v7"
 INVENTORY_PATH_FBM = "/inventory/fbm/v7"
 DEFAULT_SALE_DAYS = 365
@@ -53,6 +66,10 @@ def _format_amount(amount) -> str:
 
 def _xml_item_id(item_id: str) -> str:
     return escape(str(item_id).strip(), {'"': '&quot;', "'": '&apos;'})
+
+
+def _xml_attr_value(value: str) -> str:
+    return escape(str(value).strip(), {'"': '&quot;', "'": '&apos;'})
 
 
 def build_pricing_feed_xml(
@@ -101,24 +118,64 @@ def build_pricing_feed_xml(
     return '\n'.join(parts)
 
 
-def build_inventory_feed_xml(item_id: str, quantity: int, *, lmp: bool = True) -> str:
+def build_inventory_feed_xml(
+    item_id: str,
+    quantity: int,
+    *,
+    lmp: bool = True,
+    location_id: str | None = None,
+    pick_up_now_eligible: bool = False,
+    inventory_timestamp: str | None = None,
+) -> str:
     """
     Sears inventory v7 XML for one Child SKU.
 
-    FBM-LMP (default for newer seller accounts): ``store-inventory`` block → fbm-lmp/v7.
-    Legacy FBM: ``fbm-inventory`` block → fbm/v7.
+    FBM-LMP (default): ``store-inventory`` root (``catalog/v7`` namespace) with per-location
+    quantity → PUT /inventory/fbm-lmp/v7. Requires ``location_id`` (Seller Portal fulfillment
+    location).
+
+    Legacy FBM: ``inventory-feed`` + ``fbm-inventory`` → PUT /inventory/fbm/v7.
     """
     iid = _xml_item_id(item_id)
     qty = max(0, int(quantity))
-    inner = 'store-inventory' if lmp else 'fbm-inventory'
+    if lmp:
+        loc = (location_id or "").strip()
+        if not loc:
+            raise SearsAPIError(
+                "Sears FBM-LMP inventory requires location_id in store API credentials "
+                "(Seller Portal → Account Settings → Fulfillment Location)."
+            )
+        loc_attr = _xml_attr_value(loc)
+        pick = "true" if pick_up_now_eligible else "false"
+        ts_line = ""
+        if inventory_timestamp:
+            ts_line = f"        <inventory-timestamp>{inventory_timestamp}</inventory-timestamp>\n"
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<store-inventory xmlns="{STORE_INVENTORY_NS}"\n'
+            f'    xmlns:xsi="{XSI_NS}"\n'
+            f'    xsi:schemaLocation="{STORE_INVENTORY_NS} {STORE_INVENTORY_XSD}">\n'
+            f'  <item item-id="{iid}">\n'
+            '    <locations>\n'
+            f'      <location location-id="{loc_attr}">\n'
+            f'        <quantity>{qty}</quantity>\n'
+            f'        <pick-up-now-eligible>{pick}</pick-up-now-eligible>\n'
+            f'{ts_line}'
+            '      </location>\n'
+            '    </locations>\n'
+            '  </item>\n'
+            '</store-inventory>'
+        )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
-        f'<inventory-feed xmlns="{INVENTORY_NS}">\n'
-        f'  <{inner}>\n'
+        f'<inventory-feed xmlns="{INVENTORY_NS}"\n'
+        f'    xmlns:xsi="{XSI_NS}"\n'
+        f'    xsi:schemaLocation="{INVENTORY_NS} {INVENTORY_XSD}">\n'
+        '  <fbm-inventory>\n'
         f'    <item item-id="{iid}">\n'
         f'      <quantity>{qty}</quantity>\n'
         '    </item>\n'
-        f'  </{inner}>\n'
+        '  </fbm-inventory>\n'
         '</inventory-feed>'
     )
 
@@ -135,6 +192,8 @@ class SearsAdapter(BaseStoreAdapter):
         self._secret_key = (self._creds.get("secret_key") or "").strip()
         self._base_url = (self._creds.get("base_url") or SEARS_API_BASE).rstrip("/")
         self._inventory_lmp = self._resolve_inventory_lmp()
+        self._location_id = self._resolve_location_id()
+        self._pick_up_now_eligible = self._resolve_pick_up_now_eligible()
 
     @staticmethod
     def _resolve_inventory_lmp_from_creds(creds: dict) -> bool:
@@ -153,6 +212,27 @@ class SearsAdapter(BaseStoreAdapter):
 
     def _resolve_inventory_lmp(self) -> bool:
         return self._resolve_inventory_lmp_from_creds(self._creds)
+
+    @staticmethod
+    def _resolve_location_id_from_creds(creds: dict) -> str:
+        for key in ("location_id", "sears_location_id", "warehouse_location_id"):
+            val = (creds.get(key) or "").strip()
+            if val:
+                return val
+        return ""
+
+    def _resolve_location_id(self) -> str:
+        return self._resolve_location_id_from_creds(self._creds)
+
+    @staticmethod
+    def _resolve_pick_up_now_eligible_from_creds(creds: dict) -> bool:
+        for key in ("pick_up_now_eligible", "pickup_now_eligible"):
+            if key in creds:
+                return bool(creds.get(key))
+        return False
+
+    def _resolve_pick_up_now_eligible(self) -> bool:
+        return self._resolve_pick_up_now_eligible_from_creds(self._creds)
 
     @staticmethod
     def _parse_credentials(raw_token):
@@ -308,11 +388,21 @@ class SearsAdapter(BaseStoreAdapter):
         return self.update_pricing(str(sku), standard_price=price)
 
     def update_inventory(self, external_id, stock):
+        from django.utils import timezone
+
         sku = str(external_id or "").strip()
         if not sku:
             raise SearsAPIError("Missing Sears Child SKU (item-id) for update_inventory")
         lmp = self._inventory_lmp
-        xml = build_inventory_feed_xml(sku, stock, lmp=lmp)
+        ts = timezone.now().strftime("%Y-%m-%dT%H:%M:%S")
+        xml = build_inventory_feed_xml(
+            sku,
+            stock,
+            lmp=lmp,
+            location_id=self._location_id if lmp else None,
+            pick_up_now_eligible=self._pick_up_now_eligible,
+            inventory_timestamp=ts if lmp else None,
+        )
         path = INVENTORY_PATH_LMP if lmp else INVENTORY_PATH_FBM
         self._request(
             "PUT",
