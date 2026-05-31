@@ -5,7 +5,7 @@ import logging
 from decimal import Decimal, ROUND_HALF_UP
 
 from catalog.marketplace_rrp import adapter_push_kwargs
-from catalog.reverb_catalog import store_is_sears
+from catalog.reverb_catalog import store_is_sears, store_is_walmart
 
 logger = logging.getLogger(__name__)
 
@@ -107,12 +107,12 @@ def apply_post_scrape_marketplace_push(
     price_fallback=None,
 ) -> None:
     """
-    After a successful vendor scrape, push to Sears immediately so live prices match
-    catalog Store price (sale) and computed RRP (standard).
+    After a successful vendor scrape, push to Sears or Walmart immediately so live
+    prices/inventory match catalog store_price / store_stock.
     """
     from django.utils import timezone
 
-    if not store_is_sears(store):
+    if not store_is_sears(store) and not store_is_walmart(store):
         return
 
     ok, err = push_product_mapping_to_marketplace(

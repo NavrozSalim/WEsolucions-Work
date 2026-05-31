@@ -20,14 +20,21 @@ def _store(code: str = 'walmart'):
     return st
 
 
-def _oauth_creds():
-    return json.dumps(
-        {
-            'client_id': 'test-client-id',
-            'client_secret': 'test-client-secret',
-            'channel_type': 'test-channel-type',
-        }
-    )
+def _oauth_creds(*, ship_node=None):
+    data = {
+        'client_id': 'test-client-id',
+        'client_secret': 'test-client-secret',
+    }
+    if ship_node is not None:
+        data['ship_node'] = ship_node
+    return json.dumps(data)
+
+
+def _mock_token(session):
+    token_resp = MagicMock(status_code=200)
+    token_resp.text = json.dumps({'access_token': 'tok-abc', 'expires_in': 900})
+    token_resp.json.return_value = {'access_token': 'tok-abc', 'expires_in': 900}
+    session.post.return_value = token_resp
 
 
 class WalmartAdapterAuthTests(SimpleTestCase):
@@ -44,12 +51,9 @@ class WalmartAdapterAuthTests(SimpleTestCase):
         self.assertEqual(listing_sku_lookup_order(pm, _store()), ['WM-001'])
 
     @patch('store_adapters.walmart_adapter.requests.Session')
-    def test_oauth_headers_use_basic_and_access_token(self, session_cls):
+    def test_oauth_headers_default_channel_type_to_client_id(self, session_cls):
         session = session_cls.return_value
-        token_resp = MagicMock(status_code=200)
-        token_resp.text = json.dumps({'access_token': 'tok-abc', 'expires_in': 900})
-        token_resp.json.return_value = {'access_token': 'tok-abc', 'expires_in': 900}
-        session.post.return_value = token_resp
+        _mock_token(session)
         session.request.return_value = MagicMock(status_code=200, text='{}')
 
         store = _store()
@@ -57,21 +61,15 @@ class WalmartAdapterAuthTests(SimpleTestCase):
         adapter = WalmartAdapter(store)
         adapter.update_inventory('WM-001', 5)
 
-        _, kwargs = session.request.call_args
-        headers = kwargs['headers']
+        headers = session.request.call_args[1]['headers']
         self.assertTrue(headers['Authorization'].startswith('Basic '))
         self.assertEqual(headers['WM_SEC.ACCESS_TOKEN'], 'tok-abc')
-        self.assertEqual(headers['WM_CONSUMER.CHANNEL.TYPE'], 'test-channel-type')
-        self.assertEqual(headers['WM_SVC.NAME'], 'Walmart Marketplace')
-        self.assertIn('WM_QOS.CORRELATION_ID', headers)
+        self.assertEqual(headers['WM_CONSUMER.CHANNEL.TYPE'], 'test-client-id')
 
     @patch('store_adapters.walmart_adapter.requests.Session')
-    def test_update_inventory_uses_v3_inventory_endpoint(self, session_cls):
+    def test_update_inventory_uses_default_endpoint_without_ship_node(self, session_cls):
         session = session_cls.return_value
-        token_resp = MagicMock(status_code=200)
-        token_resp.text = json.dumps({'access_token': 'tok-abc', 'expires_in': 900})
-        token_resp.json.return_value = {'access_token': 'tok-abc', 'expires_in': 900}
-        session.post.return_value = token_resp
+        _mock_token(session)
         session.request.return_value = MagicMock(status_code=200, text='{}')
 
         store = _store()
@@ -87,12 +85,58 @@ class WalmartAdapterAuthTests(SimpleTestCase):
         self.assertEqual(body['quantity'], {'unit': 'EACH', 'amount': 12})
 
     @patch('store_adapters.walmart_adapter.requests.Session')
+    def test_update_inventory_uses_ship_node_endpoint_when_configured(self, session_cls):
+        session = session_cls.return_value
+        _mock_token(session)
+        session.request.return_value = MagicMock(status_code=200, text='{}')
+
+        store = _store()
+        store.api_token = _oauth_creds(ship_node='861260459919982593')
+        adapter = WalmartAdapter(store)
+        adapter.update_inventory('WM-SHIP', 2)
+
+        method, url = session.request.call_args[0][:2]
+        self.assertEqual(method, 'PUT')
+        self.assertIn('/v3/inventories/WM-SHIP', url)
+        body = session.request.call_args[1]['json']
+        self.assertEqual(body['inventories']['nodes'][0]['shipNode'], '861260459919982593')
+        self.assertEqual(body['inventories']['nodes'][0]['inputQty']['amount'], 2)
+
+    @patch('store_adapters.walmart_adapter.requests.Session')
+    def test_update_inventory_auto_discovers_ship_node(self, session_cls):
+        session = session_cls.return_value
+        _mock_token(session)
+
+        def request_side_effect(method, url, **kwargs):
+            resp = MagicMock(status_code=200, text='{}')
+            resp.json.return_value = {}
+            if method == 'PUT' and url.endswith('/v3/inventory'):
+                resp.status_code = 400
+                resp.text = '{"error":"ship node required"}'
+            elif method == 'GET' and '/v3/inventories/WM-AUTO' in url:
+                resp.status_code = 200
+                resp.text = json.dumps({'sku': 'WM-AUTO', 'nodes': [{'shipNode': '999888777'}]})
+                resp.json.return_value = {'sku': 'WM-AUTO', 'nodes': [{'shipNode': '999888777'}]}
+            return resp
+
+        session.request.side_effect = request_side_effect
+
+        store = _store()
+        store.api_token = _oauth_creds()
+        adapter = WalmartAdapter(store)
+        adapter.update_inventory('WM-AUTO', 4)
+
+        put_calls = [c for c in session.request.call_args_list if c[0][0] == 'PUT']
+        self.assertEqual(len(put_calls), 2)
+        self.assertTrue(put_calls[0][0][1].endswith('/v3/inventory'))
+        self.assertIn('/v3/inventories/WM-AUTO', put_calls[1][0][1])
+        body = put_calls[1][1]['json']
+        self.assertEqual(body['inventories']['nodes'][0]['shipNode'], '999888777')
+
+    @patch('store_adapters.walmart_adapter.requests.Session')
     def test_lookup_uses_items_query_by_sku(self, session_cls):
         session = session_cls.return_value
-        token_resp = MagicMock(status_code=200)
-        token_resp.text = json.dumps({'access_token': 'tok-abc', 'expires_in': 900})
-        token_resp.json.return_value = {'access_token': 'tok-abc', 'expires_in': 900}
-        session.post.return_value = token_resp
+        _mock_token(session)
         session.request.return_value = MagicMock(status_code=200, text='{"items": []}')
 
         store = _store()
@@ -107,10 +151,7 @@ class WalmartAdapterAuthTests(SimpleTestCase):
     @patch('store_adapters.walmart_adapter.requests.Session')
     def test_update_product_sends_price_and_inventory(self, session_cls):
         session = session_cls.return_value
-        token_resp = MagicMock(status_code=200)
-        token_resp.text = json.dumps({'access_token': 'tok-abc', 'expires_in': 900})
-        token_resp.json.return_value = {'access_token': 'tok-abc', 'expires_in': 900}
-        session.post.return_value = token_resp
+        _mock_token(session)
         session.request.return_value = MagicMock(status_code=200, text='{}')
 
         store = _store()

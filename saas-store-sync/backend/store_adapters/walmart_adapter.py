@@ -1,22 +1,17 @@
 """
 Walmart Marketplace API (v3) adapter.
 
-OAuth (recommended): store ``client_id`` + ``client_secret`` from Seller Center.
-The adapter obtains a short-lived access token via ``POST /v3/token`` and sends it
-on every call as ``WM_SEC.ACCESS_TOKEN`` with ``Authorization: Basic …``.
+Only ``client_id`` and ``client_secret`` are required in Store.api_token JSON.
+The adapter obtains/refreshes OAuth tokens, sets channel headers automatically,
+and picks the correct inventory API (default node or ship-node) when needed.
 
-Expected Store.api_token JSON example:
-{
-  "client_id": "...",
-  "client_secret": "...",
-  "channel_type": "...",
-  "base_url": "https://marketplace.walmartapis.com"
-}
-
-Legacy signed auth (optional): ``consumer_id``, ``private_key_pem``.
+Optional overrides in api_token JSON:
+  ``ship_node`` — force a fulfillment center id
+  ``channel_type`` — override WM_CONSUMER.CHANNEL.TYPE (defaults to client_id)
 """
 import base64
 import json
+import logging
 import os
 import time
 import uuid
@@ -28,6 +23,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from .base import BaseStoreAdapter
+
+logger = logging.getLogger(__name__)
 
 WALMART_API_BASE = "https://marketplace.walmartapis.com"
 WALMART_SANDBOX_BASE = "https://sandbox.walmartapis.com"
@@ -56,6 +53,7 @@ class WalmartAdapter(BaseStoreAdapter):
         )
         self._access_token = self._creds.get("access_token") or None
         self._token_expires_at = 0
+        self._ship_node_by_sku: dict[str, str] = {}
 
     @staticmethod
     def _parse_credentials(raw_token):
@@ -87,7 +85,19 @@ class WalmartAdapter(BaseStoreAdapter):
         return self._creds.get("consumer_id") or os.getenv("WALMART_CONSUMER_ID")
 
     def _channel_type(self):
-        return self._creds.get("channel_type") or os.getenv("WALMART_CHANNEL_TYPE")
+        explicit = self._creds.get("channel_type") or os.getenv("WALMART_CHANNEL_TYPE")
+        if explicit:
+            return str(explicit).strip()
+        client_id, _ = self._client_credentials()
+        return str(client_id).strip() if client_id else None
+
+    def _configured_ship_node(self):
+        node = (
+            self._creds.get("ship_node")
+            or self._creds.get("shipNode")
+            or os.getenv("WALMART_SHIP_NODE")
+        )
+        return str(node).strip() if node else None
 
     def _private_key_pem(self):
         key = self._creds.get("private_key_pem") or os.getenv("WALMART_PRIVATE_KEY_PEM")
@@ -200,6 +210,70 @@ class WalmartAdapter(BaseStoreAdapter):
         except Exception:
             return {"raw": resp.text}
 
+    @staticmethod
+    def _extract_ship_nodes(payload) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        nodes = payload.get("nodes")
+        if isinstance(nodes, list):
+            out = [str(n.get("shipNode")).strip() for n in nodes if isinstance(n, dict) and n.get("shipNode")]
+            if out:
+                return out
+        inv = payload.get("inventories")
+        if isinstance(inv, dict):
+            inv_nodes = inv.get("nodes")
+            if isinstance(inv_nodes, list):
+                return [
+                    str(n.get("shipNode")).strip()
+                    for n in inv_nodes
+                    if isinstance(n, dict) and n.get("shipNode")
+                ]
+        return []
+
+    def _resolve_ship_node(self, sku: str) -> str | None:
+        sku_key = str(sku)
+        configured = self._configured_ship_node()
+        if configured:
+            return configured
+        cached = self._ship_node_by_sku.get(sku_key)
+        if cached:
+            return cached
+        sku_q = quote(sku_key, safe="")
+        try:
+            payload = self._request("GET", f"/v3/inventories/{sku_q}")
+        except WalmartAPIError as exc:
+            logger.debug("Walmart ship node lookup failed for %s: %s", sku_key, exc)
+            return None
+        nodes = self._extract_ship_nodes(payload)
+        if not nodes:
+            return None
+        self._ship_node_by_sku[sku_key] = nodes[0]
+        return nodes[0]
+
+    def _update_inventory_default_node(self, sku: str, qty: int):
+        self._request(
+            "PUT",
+            "/v3/inventory",
+            json_body={"sku": sku, "quantity": {"unit": "EACH", "amount": qty}},
+        )
+
+    def _update_inventory_ship_node(self, sku: str, qty: int, ship_node: str):
+        sku_q = quote(str(sku), safe="")
+        self._request(
+            "PUT",
+            f"/v3/inventories/{sku_q}",
+            json_body={
+                "inventories": {
+                    "nodes": [
+                        {
+                            "shipNode": str(ship_node),
+                            "inputQty": {"unit": "EACH", "amount": qty},
+                        }
+                    ]
+                }
+            },
+        )
+
     def validate_connection(self):
         """Validate OAuth credentials via a lightweight inventory list call."""
         try:
@@ -232,7 +306,7 @@ class WalmartAdapter(BaseStoreAdapter):
         """
         Update listing by seller SKU.
         - price: ``PUT /v3/price``
-        - stock: ``PUT /v3/inventory``
+        - stock: ship-node or default inventory API
         """
         if not external_id:
             raise WalmartAPIError("Missing Walmart external_id/SKU for update_product")
@@ -263,17 +337,24 @@ class WalmartAdapter(BaseStoreAdapter):
         return True
 
     def update_inventory(self, external_id, stock):
-        """Update Walmart inventory for a single SKU at the default ship node."""
+        """Update Walmart inventory — auto-selects default or ship-node API."""
         if not external_id:
             raise WalmartAPIError("Missing Walmart external_id/SKU for update_inventory")
         sku = str(external_id)
         qty = max(0, int(stock or 0))
-        self._request(
-            "PUT",
-            "/v3/inventory",
-            json_body={"sku": sku, "quantity": {"unit": "EACH", "amount": qty}},
-        )
-        return True
+        configured = self._configured_ship_node()
+        if configured:
+            self._update_inventory_ship_node(sku, qty, configured)
+            return True
+        try:
+            self._update_inventory_default_node(sku, qty)
+            return True
+        except WalmartAPIError:
+            ship_node = self._resolve_ship_node(sku)
+            if not ship_node:
+                raise
+            self._update_inventory_ship_node(sku, qty, ship_node)
+            return True
 
     def delete_product(self, external_id):
         """Retire/delete Walmart item by SKU."""
