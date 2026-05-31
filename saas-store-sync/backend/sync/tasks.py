@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 from stores.models import Store, StoreVendorPriceSettings, StoreVendorInventorySettings
 from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
 from catalog.models import ProductMapping
-from catalog.reverb_catalog import listing_sku_lookup_order
+from catalog.reverb_catalog import listing_sku_lookup_order, store_is_sears
 from vendor.models import VendorPrice
 from sync.models import StoreSyncRun
 from scrapers import get_price_and_stock, close_amazon_session
@@ -1092,10 +1092,16 @@ def _crontab_matches(sched, now_local):
 
 
 def _resolve_listing_id_for_pm(adapter, pm, store):
-    """Resolve Reverb listing id; persist marketplace_id when found via SKU lookup."""
-    listing_id = pm.marketplace_id
-    if listing_id:
-        return listing_id
+    """Resolve marketplace listing id; persist marketplace_id when found via SKU lookup."""
+    if store_is_sears(store):
+        child = (pm.marketplace_child_sku or '').strip()
+        if child:
+            return child
+    else:
+        listing_id = pm.marketplace_id
+        if listing_id:
+            return listing_id
+    listing_id = None
     lookup = getattr(adapter, 'lookup_listing_by_sku', None)
     if not lookup:
         return None

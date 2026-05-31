@@ -273,3 +273,25 @@ class SearsCatalogRulesTests(SimpleTestCase):
         pm.product.vendor_sku = 'VENDOR-99'
         store = _store('sears')
         self.assertEqual(listing_sku_lookup_order(pm, store), ['CHILD-99'])
+
+    def test_resolve_listing_id_sears_prefers_child_over_marketplace_id(self):
+        from sync.tasks import _resolve_listing_id_for_pm
+
+        pm = MagicMock()
+        pm.marketplace_id = 'B646498318'
+        pm.marketplace_child_sku = 'UTXY-123-New'
+        store = _store('sears')
+        adapter = MagicMock()
+        self.assertEqual(_resolve_listing_id_for_pm(adapter, pm, store), 'UTXY-123-New')
+        adapter.lookup_listing_by_sku.assert_not_called()
+
+    def test_resolve_listing_id_sears_ignores_stale_marketplace_id_without_child(self):
+        from sync.tasks import _resolve_listing_id_for_pm
+
+        pm = MagicMock()
+        pm.marketplace_id = 'B646498318'
+        pm.marketplace_child_sku = ''
+        store = _store('sears')
+        adapter = MagicMock()
+        self.assertIsNone(_resolve_listing_id_for_pm(adapter, pm, store))
+        adapter.lookup_listing_by_sku.assert_not_called()
