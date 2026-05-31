@@ -14,7 +14,29 @@ from store_adapters.sears_adapter import (
     SearsAdapter,
     build_inventory_feed_xml,
     build_pricing_feed_xml,
+    parse_document_id,
+    parse_processing_report_summary,
+    processing_report_pending,
 )
+
+
+def _accepted_report(doc_id: str = '123456789') -> str:
+    return (
+        f'<?xml version="1.0"?><processing-report>'
+        f'<document-id>{doc_id}</document-id>'
+        '<report><summary>'
+        '<records-accepted>1</records-accepted>'
+        '<records-with-errors>0</records-with-errors>'
+        '</summary></report></processing-report>'
+    )
+
+
+def _sears_request_side_effect(method, path, **kwargs):
+    if method == 'PUT':
+        return '<?xml version="1.0"?><document-id>123456789</document-id>'
+    if method == 'GET' and '/processing-report/' in path:
+        return _accepted_report()
+    return ''
 
 
 def _store(code: str):
@@ -130,6 +152,64 @@ class SearsXmlTests(SimpleTestCase):
         self.assertNotIn('<store-inventory', xml)
 
 
+class SearsProcessingReportTests(SimpleTestCase):
+    def test_parse_document_id(self):
+        body = '<?xml version="1.0"?><document-id>156721745210</document-id>'
+        self.assertEqual(parse_document_id(body), '156721745210')
+        self.assertIsNone(parse_document_id(''))
+
+    def test_processing_report_pending_submitted(self):
+        body = (
+            '<?xml version="1.0"?><processing-report>'
+            '<document-id>1</document-id><status>Submitted</status></processing-report>'
+        )
+        self.assertTrue(processing_report_pending(body))
+
+    def test_processing_report_not_pending_when_summary_present(self):
+        self.assertFalse(processing_report_pending(_accepted_report()))
+
+    def test_parse_processing_report_summary(self):
+        summary = parse_processing_report_summary(_accepted_report())
+        self.assertEqual(summary['accepted'], 1)
+        self.assertEqual(summary['errors'], 0)
+
+    def test_parse_processing_report_rejection(self):
+        body = (
+            '<?xml version="1.0"?><processing-report><report><summary>'
+            '<records-accepted>0</records-accepted>'
+            '<records-with-errors>1</records-with-errors>'
+            '</summary><detail><errors><error>'
+            '<error-info>Invalid XML</error-info>'
+            '</error></errors></detail></report></processing-report>'
+        )
+        summary = parse_processing_report_summary(body)
+        self.assertEqual(summary['accepted'], 0)
+        self.assertEqual(summary['errors'], 1)
+        self.assertEqual(summary['error_infos'], ['Invalid XML'])
+
+    @patch('store_adapters.sears_adapter.time.sleep')
+    @patch.object(SearsAdapter, '_request')
+    def test_wait_for_processing_report_polls_until_ready(self, mock_request, mock_sleep):
+        responses = [
+            '<?xml version="1.0"?><processing-report><document-id>1</document-id>'
+            '<status>Submitted</status></processing-report>',
+            _accepted_report('1'),
+        ]
+
+        def side_effect(method, path, **kwargs):
+            if method == 'GET':
+                return responses.pop(0)
+            return ''
+
+        mock_request.side_effect = side_effect
+        adapter = SearsAdapter(MagicMock(api_token=(
+            '{"seller_id":"123","email":"a@b.com","secret_key":"secretkeysecretkeysecretkey12"}'
+        )))
+        adapter._wait_for_processing_report('1')
+        self.assertEqual(mock_request.call_count, 2)
+        mock_sleep.assert_called_once()
+
+
 class SearsAdapterPushTests(SimpleTestCase):
     def _adapter(self):
         store = MagicMock()
@@ -141,22 +221,29 @@ class SearsAdapterPushTests(SimpleTestCase):
 
     @patch.object(SearsAdapter, '_request')
     def test_update_product_sends_price_and_inventory(self, mock_request):
+        mock_request.side_effect = _sears_request_side_effect
         adapter = self._adapter()
         adapter.update_product('CHILD-99', price=Decimal('74.00'), rrp=Decimal('100.00'), stock=8)
-        self.assertEqual(mock_request.call_count, 2)
-        price_call = mock_request.call_args_list[0]
-        inv_call = mock_request.call_args_list[1]
-        self.assertEqual(price_call.args[0], 'PUT')
-        self.assertEqual(price_call.args[1], '/pricing/fbm/v6')
-        self.assertIn('<standard-price>100.00</standard-price>', price_call.kwargs['data'])
-        self.assertIn('<sale-price>74.00</sale-price>', price_call.kwargs['data'])
-        self.assertEqual(inv_call.args[1], '/inventory/fbm-lmp/v7')
-        self.assertIn('<store-inventory xmlns="http://seller.marketplace.sears.com/catalog/v7"', inv_call.kwargs['data'])
-        self.assertIn('location-id="WH-1"', inv_call.kwargs['data'])
-        self.assertIn('<quantity>8</quantity>', inv_call.kwargs['data'])
+        self.assertEqual(mock_request.call_count, 4)
+        price_put = mock_request.call_args_list[0]
+        price_report = mock_request.call_args_list[1]
+        inv_put = mock_request.call_args_list[2]
+        inv_report = mock_request.call_args_list[3]
+        self.assertEqual(price_put.args[0], 'PUT')
+        self.assertEqual(price_put.args[1], '/pricing/fbm/v6')
+        self.assertIn('<standard-price>100.00</standard-price>', price_put.kwargs['data'])
+        self.assertIn('<sale-price>74.00</sale-price>', price_put.kwargs['data'])
+        self.assertEqual(price_report.args[0], 'GET')
+        self.assertIn('/processing-report/', price_report.args[1])
+        self.assertEqual(inv_put.args[1], '/inventory/fbm-lmp/v7')
+        self.assertIn('<store-inventory xmlns="http://seller.marketplace.sears.com/catalog/v7"', inv_put.kwargs['data'])
+        self.assertIn('location-id="WH-1"', inv_put.kwargs['data'])
+        self.assertIn('<quantity>8</quantity>', inv_put.kwargs['data'])
+        self.assertIn('/processing-report/', inv_report.args[1])
 
     @patch.object(SearsAdapter, '_request')
     def test_update_product_posted_only_without_rrp(self, mock_request):
+        mock_request.side_effect = _sears_request_side_effect
         adapter = self._adapter()
         adapter.update_product('CHILD-100', price=Decimal('59.99'), stock=0)
         price_xml = mock_request.call_args_list[0].kwargs['data']
@@ -166,9 +253,9 @@ class SearsAdapterPushTests(SimpleTestCase):
     @patch.object(SearsAdapter, '_request')
     def test_update_product_succeeds_when_inventory_fails_after_pricing(self, mock_request):
         def side_effect(method, path, **kwargs):
-            if path == '/inventory/fbm-lmp/v7':
+            if method == 'PUT' and path == '/inventory/fbm-lmp/v7':
                 raise SearsAPIError('Sears API PUT /inventory/fbm-lmp/v7: 403', status_code=403)
-            return ''
+            return _sears_request_side_effect(method, path, **kwargs)
 
         mock_request.side_effect = side_effect
         adapter = self._adapter()
@@ -181,9 +268,31 @@ class SearsAdapterPushTests(SimpleTestCase):
         self.assertTrue(result)
         self.assertIsNotNone(adapter.last_inventory_warning)
         self.assertIn('inventory not updated', adapter.last_inventory_warning.lower())
-        self.assertEqual(mock_request.call_count, 2)
-        price_call = mock_request.call_args_list[0]
-        self.assertEqual(price_call.args[1], '/pricing/fbm/v6')
+        self.assertEqual(mock_request.call_count, 3)
+        self.assertEqual(mock_request.call_args_list[0].args[1], '/pricing/fbm/v6')
+        self.assertIn('/processing-report/', mock_request.call_args_list[1].args[1])
+
+    @patch.object(SearsAdapter, '_request')
+    def test_update_pricing_raises_when_processing_report_rejects(self, mock_request):
+        def side_effect(method, path, **kwargs):
+            if method == 'PUT':
+                return '<?xml version="1.0"?><document-id>999</document-id>'
+            if method == 'GET':
+                return (
+                    '<?xml version="1.0"?><processing-report><report><summary>'
+                    '<records-accepted>0</records-accepted>'
+                    '<records-with-errors>1</records-with-errors>'
+                    '</summary><detail><errors><error>'
+                    '<error-info>Cannot update pricing</error-info>'
+                    '</error></errors></detail></report></processing-report>'
+                )
+            return ''
+
+        mock_request.side_effect = side_effect
+        adapter = self._adapter()
+        with self.assertRaises(SearsAPIError) as ctx:
+            adapter.update_pricing('CHILD-REJ', standard_price='10.00')
+        self.assertIn('feed rejected', str(ctx.exception).lower())
 
     @patch.object(SearsAdapter, '_request')
     def test_update_product_raises_when_inventory_fails_without_pricing(self, mock_request):
@@ -198,6 +307,7 @@ class SearsAdapterPushTests(SimpleTestCase):
 
     @patch.object(SearsAdapter, '_request')
     def test_legacy_fbm_inventory_uses_fbm_path(self, mock_request):
+        mock_request.side_effect = _sears_request_side_effect
         store = MagicMock()
         store.api_token = (
             '{"seller_id":"123","email":"a@b.com","secret_key":"secretkeysecretkeysecretkey12",'
@@ -205,9 +315,10 @@ class SearsAdapterPushTests(SimpleTestCase):
         )
         adapter = SearsAdapter(store)
         adapter.update_inventory('CHILD-LEG', 3)
-        mock_request.assert_called_once()
-        self.assertEqual(mock_request.call_args.args[1], '/inventory/fbm/v7')
-        self.assertIn('<fbm-inventory>', mock_request.call_args.kwargs['data'])
+        self.assertEqual(mock_request.call_count, 2)
+        self.assertEqual(mock_request.call_args_list[0].args[1], '/inventory/fbm/v7')
+        self.assertIn('<fbm-inventory>', mock_request.call_args_list[0].kwargs['data'])
+        self.assertIn('/processing-report/', mock_request.call_args_list[1].args[1])
 
     def test_store_is_sears(self):
         self.assertTrue(store_is_sears(_store('sears')))

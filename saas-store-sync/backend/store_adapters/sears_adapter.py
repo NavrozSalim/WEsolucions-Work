@@ -14,6 +14,8 @@ Expected Store.api_token format (JSON):
 
 Pricing: PUT /pricing/fbm/v6 (XML v6 — standard-price + optional sale block)
 Inventory: PUT /inventory/fbm-lmp/v7 (FBM-LMP, default) or /inventory/fbm/v7 (legacy FBM)
+
+After each feed PUT, polls the processing report until Sears accepts or rejects the feed.
 """
 from __future__ import annotations
 
@@ -21,6 +23,8 @@ import hashlib
 import hmac
 import json
 import logging
+import re
+import time
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from xml.sax.saxutils import escape
@@ -44,7 +48,10 @@ STORE_INVENTORY_XSD = (
 )
 INVENTORY_PATH_LMP = "/inventory/fbm-lmp/v7"
 INVENTORY_PATH_FBM = "/inventory/fbm/v7"
+PROCESSING_REPORT_PATH = "/reports/v1/processing-report"
 DEFAULT_SALE_DAYS = 365
+REPORT_POLL_INTERVAL_SEC = 2
+REPORT_POLL_MAX_ATTEMPTS = 15
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +77,36 @@ def _xml_item_id(item_id: str) -> str:
 
 def _xml_attr_value(value: str) -> str:
     return escape(str(value).strip(), {'"': '&quot;', "'": '&apos;'})
+
+
+def parse_document_id(response_body: str) -> str | None:
+    """Extract ``document-id`` from a Sears feed PUT response."""
+    if not response_body:
+        return None
+    match = re.search(r'<document-id>(\d+)</document-id>', response_body)
+    return match.group(1) if match else None
+
+
+def processing_report_pending(response_body: str) -> bool:
+    """True while Sears has accepted the feed but not finished processing."""
+    if not response_body:
+        return True
+    if '<records-accepted>' in response_body or '<records-with-errors>' in response_body:
+        return False
+    return '<status>Submitted</status>' in response_body or '<report>' not in response_body
+
+
+def parse_processing_report_summary(response_body: str) -> dict:
+    """Parse accepted/error counts and messages from a processing report."""
+    accepted = re.search(r'<records-accepted>(\d+)</records-accepted>', response_body or '')
+    errors = re.search(r'<records-with-errors>(\d+)</records-with-errors>', response_body or '')
+    status = re.search(r'<status>([^<]+)</status>', response_body or '')
+    return {
+        'status': status.group(1) if status else None,
+        'accepted': int(accepted.group(1)) if accepted else 0,
+        'errors': int(errors.group(1)) if errors else 0,
+        'error_infos': re.findall(r'<error-info>([^<]+)</error-info>', response_body or ''),
+    }
 
 
 def build_pricing_feed_xml(
@@ -288,6 +325,49 @@ class SearsAdapter(BaseStoreAdapter):
             )
         return resp.text or ""
 
+    def _wait_for_processing_report(self, document_id: str) -> str:
+        """Poll until Sears finishes async feed processing or raise."""
+        path = f"{PROCESSING_REPORT_PATH}/{document_id}"
+        params = {"sellerId": self._seller_id}
+        last_body = ""
+        for attempt in range(REPORT_POLL_MAX_ATTEMPTS):
+            if attempt:
+                time.sleep(REPORT_POLL_INTERVAL_SEC)
+            last_body = self._request("GET", path, params=params)
+            if not processing_report_pending(last_body):
+                break
+        else:
+            raise SearsAPIError(
+                f"Sears processing report timed out for document {document_id}",
+                response_body=last_body[:500] if last_body else None,
+            )
+
+        summary = parse_processing_report_summary(last_body)
+        if summary["errors"] > 0 or summary["accepted"] < 1:
+            detail = summary["error_infos"][0] if summary["error_infos"] else "feed rejected"
+            raise SearsAPIError(
+                f"Sears feed rejected (document {document_id}): {detail[:400]}",
+                response_body=last_body[:500] if last_body else None,
+            )
+        return last_body
+
+    def _put_feed_and_verify(self, path: str, xml: str, *, feed_label: str) -> str:
+        """PUT XML feed, then poll processing report until accepted or failed."""
+        resp = self._request(
+            "PUT",
+            path,
+            params={"sellerId": self._seller_id},
+            data=xml,
+        )
+        document_id = parse_document_id(resp)
+        if not document_id:
+            raise SearsAPIError(
+                f"Sears {feed_label} PUT did not return document-id",
+                response_body=resp[:500] if resp else None,
+            )
+        self._wait_for_processing_report(document_id)
+        return document_id
+
     def validate_connection(self):
         if not self._has_minimum_creds():
             return False
@@ -319,8 +399,12 @@ class SearsAdapter(BaseStoreAdapter):
             rrp: standard price for strike-through (computed RRP)
             stock: inventory quantity
 
-        When pricing succeeds but inventory API fails (e.g. 403), pricing is kept
-        and ``last_inventory_warning`` is set — push still returns True.
+        When pricing succeeds but inventory fails, pricing is kept and
+        ``last_inventory_warning`` is set — push still returns True.
+
+        Pricing and inventory PUTs wait for Sears processing reports; rejected feeds
+        raise ``SearsAPIError`` (inventory-only failure after successful pricing
+        becomes a warning, not a hard failure).
         """
         self.last_inventory_warning = None
         sku = str(external_id or "").strip()
@@ -374,12 +458,7 @@ class SearsAdapter(BaseStoreAdapter):
             sale_start_date=sale_start_date,
             sale_end_date=sale_end_date,
         )
-        self._request(
-            "PUT",
-            "/pricing/fbm/v6",
-            params={"sellerId": self._seller_id},
-            data=xml,
-        )
+        self._put_feed_and_verify("/pricing/fbm/v6", xml, feed_label="pricing")
         return True
 
     def update_price(self, sku, price, currency="USD"):
@@ -404,12 +483,7 @@ class SearsAdapter(BaseStoreAdapter):
             inventory_timestamp=ts if lmp else None,
         )
         path = INVENTORY_PATH_LMP if lmp else INVENTORY_PATH_FBM
-        self._request(
-            "PUT",
-            path,
-            params={"sellerId": self._seller_id},
-            data=xml,
-        )
+        self._put_feed_and_verify(path, xml, feed_label="inventory")
         return True
 
     def delete_product(self, external_id):
