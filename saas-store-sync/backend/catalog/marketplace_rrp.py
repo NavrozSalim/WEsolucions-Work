@@ -4,7 +4,7 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
-from catalog.reverb_catalog import store_is_sears
+from catalog.reverb_catalog import store_is_sears, store_is_walmart
 
 _TWOPL = Decimal('0.01')
 
@@ -92,10 +92,13 @@ def adapter_push_kwargs(
         kwargs['price'] = posted
     if stock is not None:
         kwargs['stock'] = int(stock)
-    if not store_is_sears(store) or posted is None or pm is None:
-        return kwargs
-    pct = rrp_discount_pct_for_pm(store, pm, price_by_vendor_id, price_fallback)
-    rrp = compute_marketplace_rrp(posted, pct)
-    if rrp is not None and rrp > posted:
-        kwargs['rrp'] = rrp
+    if store_is_walmart(store) and pm is not None:
+        fc = (getattr(pm, 'fulfillment_center_id', None) or '').strip()
+        if fc:
+            kwargs['ship_node'] = fc
+    if store_is_sears(store) and posted is not None and pm is not None:
+        pct = rrp_discount_pct_for_pm(store, pm, price_by_vendor_id, price_fallback)
+        rrp = compute_marketplace_rrp(posted, pct)
+        if rrp is not None and rrp > posted:
+            kwargs['rrp'] = rrp
     return kwargs

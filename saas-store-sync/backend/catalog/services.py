@@ -15,7 +15,7 @@ from django.db import transaction
 
 from .models import CatalogUpload, CatalogUploadRow
 from .marketplace_templates import INTERNAL_FIELDS, build_field_indices, validate_marketplace_headers
-from .reverb_catalog import store_is_reverb, store_is_sears, vendor_is_ebay
+from .reverb_catalog import store_is_reverb, store_is_sears, store_is_walmart, vendor_is_ebay
 from stores.models import Store
 from vendor.models import Vendor
 
@@ -183,6 +183,7 @@ def build_catalog_row_instance(
     pack_qty_raw = _val(row, 'pack qty')
     prep_fees_raw = _val(row, 'prep fees')
     shipping_fees_raw = _val(row, 'shipping fees')
+    fulfillment_center_id_raw = _val(row, 'fulfillment center id')
 
     action_norm = action_raw.lower() if action_raw else 'add'
     if action_norm not in ('add', 'update', 'delete'):
@@ -234,6 +235,11 @@ def build_catalog_row_instance(
                     f"Row {row_num}: Sears stores require Marketplace Child SKU for Add "
                     f"(price and inventory updates use the child SKU on Sears)"
                 )
+        elif store_is_walmart(store):
+            if _normalize(marketplace_child_sku_raw) is None and _normalize(marketplace_parent_sku_raw) is None:
+                return None, (
+                    f"Row {row_num}: Walmart stores require SKU (or Marketplace Child SKU) for Add"
+                )
         else:
             sku_val = (
                 _normalize(vendor_sku_raw)
@@ -260,6 +266,12 @@ def build_catalog_row_instance(
             return None, (
                 f"Row {row_num}: Shipping Fees required for {action_norm.title()} "
                 f"(store uses a fixed pricing tier)"
+            )
+    if store_is_walmart(store) and action_norm in ('add', 'update'):
+        if _normalize(fulfillment_center_id_raw) is None:
+            return None, (
+                f"Row {row_num}: Fulfillment Center ID required for Walmart {action_norm.title()} "
+                f"(inventory is pushed to that ship node)"
             )
     elif action_norm == 'delete':
         if store_is_sears(store):
@@ -306,6 +318,7 @@ def build_catalog_row_instance(
         pack_qty_raw=pack_qty_raw,
         prep_fees_raw=prep_fees_raw,
         shipping_fees_raw=shipping_fees_raw,
+        fulfillment_center_id_raw=fulfillment_center_id_raw,
         vendor=vendor,
         store=store,
     )

@@ -333,15 +333,19 @@ class WalmartAdapter(BaseStoreAdapter):
                 },
             )
         if stock is not None:
-            self.update_inventory(sku, stock)
+            self.update_inventory(sku, stock, ship_node=kwargs.get('ship_node'))
         return True
 
-    def update_inventory(self, external_id, stock):
-        """Update Walmart inventory — auto-selects default or ship-node API."""
+    def update_inventory(self, external_id, stock, *, ship_node=None):
+        """Update Walmart inventory — per-listing ship node, store default, or auto-fallback."""
         if not external_id:
             raise WalmartAPIError("Missing Walmart external_id/SKU for update_inventory")
         sku = str(external_id)
         qty = max(0, int(stock or 0))
+        listing_node = (str(ship_node).strip() if ship_node else '') or None
+        if listing_node:
+            self._update_inventory_ship_node(sku, qty, listing_node)
+            return True
         configured = self._configured_ship_node()
         if configured:
             self._update_inventory_ship_node(sku, qty, configured)

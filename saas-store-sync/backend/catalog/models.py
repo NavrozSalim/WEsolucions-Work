@@ -34,6 +34,12 @@ class ProductMapping(models.Model):
     pack_qty = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
     prep_fees = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
     shipping_fees = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    fulfillment_center_id = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        help_text='Walmart ship node / fulfillment center ID for inventory push',
+    )
 
     sync_status = models.CharField(max_length=50, default='pending', db_index=True)
     failed_sync_count = models.IntegerField(default=0)
@@ -204,6 +210,7 @@ class CatalogUploadRow(models.Model):
     pack_qty_raw = models.CharField(max_length=255, default='', blank=True)
     prep_fees_raw = models.CharField(max_length=255, default='', blank=True)
     shipping_fees_raw = models.CharField(max_length=255, default='', blank=True)
+    fulfillment_center_id_raw = models.CharField(max_length=255, default='', blank=True)
 
     # Resolved after validation
     vendor = models.ForeignKey(

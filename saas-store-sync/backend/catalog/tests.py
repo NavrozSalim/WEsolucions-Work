@@ -182,6 +182,27 @@ class MarketplaceTemplateTests(SimpleTestCase):
         err = validate_marketplace_headers(idx, _store('walmart'))
         self.assertIn('Pack QTY', err or '')
 
+    def test_walmart_requires_fulfillment_center_column(self):
+        header = [
+            'Vendor Name',
+            'Store Name',
+            'SKU',
+            'Vendor URL',
+            'Action',
+            'Pack QTY',
+            'Prep Fees',
+            'Shipping Fees',
+        ]
+        idx = build_field_indices(header, _store('walmart'))
+        err = validate_marketplace_headers(idx, _store('walmart'))
+        self.assertIn('Fulfillment Center ID', err or '')
+
+    def test_walmart_sample_template_includes_fulfillment_center(self):
+        headers, rows = sample_template_rows_for_kind('walmart')
+        self.assertIn('Fulfillment Center ID', headers)
+        self.assertEqual(len(headers), 11)
+        self.assertEqual(rows[0][headers.index('Fulfillment Center ID')], '861260459919982593')
+
     def test_sears_sample_template_excludes_vendor_sku(self):
         headers, rows = sample_template_rows_for_kind('sears')
         self.assertNotIn('Vendor SKU', headers)

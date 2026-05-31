@@ -398,6 +398,9 @@ def _update_product_mapping(pm: ProductMapping, row: CatalogUploadRow) -> None:
     updates['pack_qty'] = _to_decimal_or_none(row.pack_qty_raw)
     updates['prep_fees'] = _to_decimal_or_none(row.prep_fees_raw)
     updates['shipping_fees'] = _to_decimal_or_none(row.shipping_fees_raw)
+    fc_id = _normalize(row.fulfillment_center_id_raw)
+    if fc_id is not None:
+        updates['fulfillment_center_id'] = fc_id
     url = _normalize(row.vendor_url_raw)
     if not url and pm.product and pm.product.vendor:
         url = _resolve_heb_url_for_row(pm.product.vendor, row, pm.product)
@@ -582,6 +585,7 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
                                 'pack_qty': _to_decimal_or_none(row.pack_qty_raw),
                                 'prep_fees': _to_decimal_or_none(row.prep_fees_raw),
                                 'shipping_fees': _to_decimal_or_none(row.shipping_fees_raw),
+                                'fulfillment_center_id': _normalize(row.fulfillment_center_id_raw),
                                 'is_active': True,
                             },
                         )

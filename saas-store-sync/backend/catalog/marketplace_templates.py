@@ -27,6 +27,7 @@ INTERNAL_FIELDS = [
     'pack qty',
     'prep fees',
     'shipping fees',
+    'fulfillment center id',
 ]
 
 
@@ -130,6 +131,15 @@ def build_field_indices(header: list, store: Store) -> dict[str, int | None]:
             elif idx['vendor sku'] is None:
                 idx['vendor sku'] = sku_i
 
+    fc_i = col_index(header, 'fulfillment center id')
+    if fc_i is None:
+        for alt in ('ship node', 'fc id', 'fulfillment center'):
+            fc_i = col_index(header, alt)
+            if fc_i is not None:
+                break
+    if fc_i is not None and idx.get('fulfillment center id') is None:
+        idx['fulfillment center id'] = fc_i
+
     return idx
 
 
@@ -160,6 +170,7 @@ def validate_marketplace_headers(indices: dict[str, int | None], store: Store) -
             ('pack qty', 'Pack QTY'),
             ('prep fees', 'Prep Fees'),
             ('shipping fees', 'Shipping Fees'),
+            ('fulfillment center id', 'Fulfillment Center ID'),
         ):
             if not _req(col):
                 return f'Walmart uploads require column: {label}'
@@ -223,6 +234,7 @@ def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]
             'Pack QTY',
             'Prep Fees',
             'Shipping Fees',
+            'Fulfillment Center ID',
         ]
         rows = [
             [
@@ -236,6 +248,7 @@ def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]
                 '1',
                 '2.50',
                 '5.00',
+                '861260459919982593',
             ],
             [
                 'Amazon',
@@ -248,6 +261,7 @@ def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]
                 '2',
                 '1.00',
                 '3.75',
+                '861260459919982593',
             ],
         ]
         return headers, rows
@@ -420,6 +434,7 @@ def upload_row_to_cells(
             r.pack_qty_raw or '',
             r.prep_fees_raw or '',
             r.shipping_fees_raw or '',
+            r.fulfillment_center_id_raw or '',
         ]
     elif kind == 'sears':
         cells = [
