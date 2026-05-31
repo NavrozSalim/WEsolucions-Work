@@ -101,11 +101,18 @@ class SearsXmlTests(SimpleTestCase):
         self.assertIn('<standard-price>49.99</standard-price>', xml)
         self.assertNotIn('<sale>', xml)
 
-    def test_inventory_xml_quantity(self):
-        xml = build_inventory_feed_xml('CHILD-3', 12)
+    def test_inventory_xml_lmp_quantity(self):
+        xml = build_inventory_feed_xml('CHILD-3', 12, lmp=True)
         self.assertIn('item-id="CHILD-3"', xml)
         self.assertIn('<quantity>12</quantity>', xml)
+        self.assertIn('<store-inventory>', xml)
+        self.assertNotIn('<fbm-inventory>', xml)
         self.assertIn('inventory-feed xmlns="http://seller.marketplace.sears.com/inventory/v7"', xml)
+
+    def test_inventory_xml_legacy_fbm(self):
+        xml = build_inventory_feed_xml('CHILD-4', 5, lmp=False)
+        self.assertIn('<fbm-inventory>', xml)
+        self.assertNotIn('<store-inventory>', xml)
 
 
 class SearsAdapterPushTests(SimpleTestCase):
@@ -127,7 +134,8 @@ class SearsAdapterPushTests(SimpleTestCase):
         self.assertEqual(price_call.args[1], '/pricing/fbm/v6')
         self.assertIn('<standard-price>100.00</standard-price>', price_call.kwargs['data'])
         self.assertIn('<sale-price>74.00</sale-price>', price_call.kwargs['data'])
-        self.assertEqual(inv_call.args[1], '/inventory/fbm/v7')
+        self.assertEqual(inv_call.args[1], '/inventory/fbm-lmp/v7')
+        self.assertIn('<store-inventory>', inv_call.kwargs['data'])
         self.assertIn('<quantity>8</quantity>', inv_call.kwargs['data'])
 
     @patch.object(SearsAdapter, '_request')
@@ -141,8 +149,8 @@ class SearsAdapterPushTests(SimpleTestCase):
     @patch.object(SearsAdapter, '_request')
     def test_update_product_succeeds_when_inventory_fails_after_pricing(self, mock_request):
         def side_effect(method, path, **kwargs):
-            if path == '/inventory/fbm/v7':
-                raise SearsAPIError('Sears API PUT /inventory/fbm/v7: 403', status_code=403)
+            if path == '/inventory/fbm-lmp/v7':
+                raise SearsAPIError('Sears API PUT /inventory/fbm-lmp/v7: 403', status_code=403)
             return ''
 
         mock_request.side_effect = side_effect
@@ -162,7 +170,7 @@ class SearsAdapterPushTests(SimpleTestCase):
 
     @patch.object(SearsAdapter, '_request')
     def test_update_product_raises_when_inventory_fails_without_pricing(self, mock_request):
-        mock_request.side_effect = SearsAPIError('Sears API PUT /inventory/fbm/v7: 403', status_code=403)
+        mock_request.side_effect = SearsAPIError('Sears API PUT /inventory/fbm-lmp/v7: 403', status_code=403)
         adapter = self._adapter()
         with self.assertRaises(SearsAPIError):
             adapter.update_product('CHILD-102', stock=1)
@@ -170,6 +178,19 @@ class SearsAdapterPushTests(SimpleTestCase):
     def test_lookup_uses_child_sku(self):
         adapter = self._adapter()
         self.assertEqual(adapter.lookup_listing_by_sku('CHILD-ABC'), 'CHILD-ABC')
+
+    @patch.object(SearsAdapter, '_request')
+    def test_legacy_fbm_inventory_uses_fbm_path(self, mock_request):
+        store = MagicMock()
+        store.api_token = (
+            '{"seller_id":"123","email":"a@b.com","secret_key":"secretkeysecretkeysecretkey12",'
+            '"inventory_program":"fbm"}'
+        )
+        adapter = SearsAdapter(store)
+        adapter.update_inventory('CHILD-LEG', 3)
+        mock_request.assert_called_once()
+        self.assertEqual(mock_request.call_args.args[1], '/inventory/fbm/v7')
+        self.assertIn('<fbm-inventory>', mock_request.call_args.kwargs['data'])
 
     def test_store_is_sears(self):
         self.assertTrue(store_is_sears(_store('sears')))

@@ -10,7 +10,7 @@ Expected Store.api_token format (JSON):
 }
 
 Pricing: PUT /pricing/fbm/v6 (XML v6 — standard-price + optional sale block)
-Inventory: PUT /inventory/fbm/v7 (XML v7 — quantity per item-id / Child SKU)
+Inventory: PUT /inventory/fbm-lmp/v7 (FBM-LMP, default) or /inventory/fbm/v7 (legacy FBM)
 """
 from __future__ import annotations
 
@@ -29,6 +29,8 @@ from .base import BaseStoreAdapter
 SEARS_API_BASE = "https://seller.marketplace.sears.com/SellerPortal/api"
 PRICING_NS = "http://seller.marketplace.sears.com/pricing/v6"
 INVENTORY_NS = "http://seller.marketplace.sears.com/inventory/v7"
+INVENTORY_PATH_LMP = "/inventory/fbm-lmp/v7"
+INVENTORY_PATH_FBM = "/inventory/fbm/v7"
 DEFAULT_SALE_DAYS = 365
 
 logger = logging.getLogger(__name__)
@@ -99,18 +101,24 @@ def build_pricing_feed_xml(
     return '\n'.join(parts)
 
 
-def build_inventory_feed_xml(item_id: str, quantity: int) -> str:
-    """Sears inventory v7 XML for one Child SKU."""
+def build_inventory_feed_xml(item_id: str, quantity: int, *, lmp: bool = True) -> str:
+    """
+    Sears inventory v7 XML for one Child SKU.
+
+    FBM-LMP (default for newer seller accounts): ``store-inventory`` block → fbm-lmp/v7.
+    Legacy FBM: ``fbm-inventory`` block → fbm/v7.
+    """
     iid = _xml_item_id(item_id)
     qty = max(0, int(quantity))
+    inner = 'store-inventory' if lmp else 'fbm-inventory'
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         f'<inventory-feed xmlns="{INVENTORY_NS}">\n'
-        '  <fbm-inventory>\n'
+        f'  <{inner}>\n'
         f'    <item item-id="{iid}">\n'
         f'      <quantity>{qty}</quantity>\n'
         '    </item>\n'
-        '  </fbm-inventory>\n'
+        f'  </{inner}>\n'
         '</inventory-feed>'
     )
 
@@ -126,6 +134,25 @@ class SearsAdapter(BaseStoreAdapter):
         self._email = (self._creds.get("email") or "").strip()
         self._secret_key = (self._creds.get("secret_key") or "").strip()
         self._base_url = (self._creds.get("base_url") or SEARS_API_BASE).rstrip("/")
+        self._inventory_lmp = self._resolve_inventory_lmp()
+
+    @staticmethod
+    def _resolve_inventory_lmp_from_creds(creds: dict) -> bool:
+        """True = FBM-LMP inventory API (default for newer Sears seller accounts)."""
+        for key in ("inventory_program", "sears_inventory_program"):
+            val = (creds.get(key) or "").strip().lower()
+            if val in ("fbm", "legacy"):
+                return False
+            if val in ("fbm-lmp", "lmp", "fbm_lmp"):
+                return True
+        if creds.get("use_fbm_inventory") is True:
+            return False
+        if creds.get("use_lmp_inventory") is False:
+            return False
+        return True
+
+    def _resolve_inventory_lmp(self) -> bool:
+        return self._resolve_inventory_lmp_from_creds(self._creds)
 
     @staticmethod
     def _parse_credentials(raw_token):
@@ -284,10 +311,12 @@ class SearsAdapter(BaseStoreAdapter):
         sku = str(external_id or "").strip()
         if not sku:
             raise SearsAPIError("Missing Sears Child SKU (item-id) for update_inventory")
-        xml = build_inventory_feed_xml(sku, stock)
+        lmp = self._inventory_lmp
+        xml = build_inventory_feed_xml(sku, stock, lmp=lmp)
+        path = INVENTORY_PATH_LMP if lmp else INVENTORY_PATH_FBM
         self._request(
             "PUT",
-            "/inventory/fbm/v7",
+            path,
             params={"sellerId": self._seller_id},
             data=xml,
         )
