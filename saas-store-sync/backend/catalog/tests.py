@@ -16,7 +16,7 @@ from catalog.marketplace_templates import (
     upload_row_to_cells,
     validate_marketplace_headers,
 )
-from catalog.reverb_catalog import listing_sku_lookup_order, store_is_sears
+from catalog.reverb_catalog import listing_sku_lookup_order, store_is_sears, store_is_walmart
 from store_adapters import _resolve_adapter_class
 from store_adapters.walmart_adapter import WalmartAdapter
 from scrapers.core import parse_price_text, classify_failure
@@ -295,3 +295,18 @@ class SearsCatalogRulesTests(SimpleTestCase):
         adapter = MagicMock()
         self.assertIsNone(_resolve_listing_id_for_pm(adapter, pm, store))
         adapter.lookup_listing_by_sku.assert_not_called()
+
+
+class WalmartCatalogRulesTests(SimpleTestCase):
+    def test_store_is_walmart(self):
+        self.assertTrue(store_is_walmart(_store('walmart')))
+        self.assertFalse(store_is_walmart(_store('sears')))
+
+    def test_listing_sku_lookup_order_walmart_uses_child_sku_only(self):
+        pm = MagicMock()
+        pm.marketplace_child_sku = 'WM-99'
+        pm.marketplace_parent_sku = 'PARENT-99'
+        pm.product = MagicMock()
+        pm.product.vendor_sku = 'VENDOR-99'
+        store = _store('walmart')
+        self.assertEqual(listing_sku_lookup_order(pm, store), ['WM-99'])

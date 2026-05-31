@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 from stores.models import Store, StoreVendorPriceSettings, StoreVendorInventorySettings
 from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
 from catalog.models import ProductMapping
-from catalog.reverb_catalog import listing_sku_lookup_order, store_is_sears
+from catalog.reverb_catalog import listing_sku_lookup_order, store_is_sears, store_is_walmart
 from vendor.models import VendorPrice
 from sync.models import StoreSyncRun
 from scrapers import get_price_and_stock, close_amazon_session
@@ -1093,7 +1093,7 @@ def _crontab_matches(sched, now_local):
 
 def _resolve_listing_id_for_pm(adapter, pm, store):
     """Resolve marketplace listing id; persist marketplace_id when found via SKU lookup."""
-    if store_is_sears(store):
+    if store_is_sears(store) or store_is_walmart(store):
         child = (pm.marketplace_child_sku or '').strip()
         if child:
             return child
@@ -1130,6 +1130,7 @@ def run_store_push_listings_only(store_id, disable_schedule=False):
     from store_adapters import get_adapter
     from store_adapters.reverb_adapter import ReverbAPIError
     from store_adapters.sears_adapter import SearsAPIError
+    from store_adapters.walmart_adapter import WalmartAPIError
     from catalog.models import ReverbUpdateLog
     from catalog.activity_log import append_catalog_log
     from sync.models import SyncSchedule
@@ -1204,13 +1205,13 @@ def run_store_push_listings_only(store_id, disable_schedule=False):
                 error_message=(err_or_warn or '')[:500] if err_or_warn else None,
             )
             succeeded += 1
-        except (ReverbAPIError, SearsAPIError) as e:
+        except (ReverbAPIError, SearsAPIError, WalmartAPIError) as e:
             failed += 1
             logger.warning("Manual push failed for %s: %s", pm.id, e)
             ReverbUpdateLog.objects.create(
                 product_mapping=pm,
                 status=ReverbUpdateLog.Status.FAILED,
-                http_status=e.status_code,
+                http_status=getattr(e, 'status_code', None),
                 error_message=str(e),
             )
         except Exception as e:

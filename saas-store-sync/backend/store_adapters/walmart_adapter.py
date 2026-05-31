@@ -1,17 +1,19 @@
 """
 Walmart Marketplace API (v3) adapter.
 
-Expected Store.api_token for Walmart can be either:
-1) Access token string (quick/manual mode), or
-2) JSON credentials (recommended), example:
+OAuth (recommended): store ``client_id`` + ``client_secret`` from Seller Center.
+The adapter obtains a short-lived access token via ``POST /v3/token`` and sends it
+on every call as ``WM_SEC.ACCESS_TOKEN`` with ``Authorization: Basic …``.
+
+Expected Store.api_token JSON example:
 {
   "client_id": "...",
   "client_secret": "...",
-  "consumer_id": "...",
-  "private_key_pem": "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----",
   "channel_type": "...",
   "base_url": "https://marketplace.walmartapis.com"
 }
+
+Legacy signed auth (optional): ``consumer_id``, ``private_key_pem``.
 """
 import base64
 import json
@@ -19,6 +21,7 @@ import os
 import time
 import uuid
 from decimal import Decimal
+from urllib.parse import quote
 
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
@@ -66,8 +69,19 @@ class WalmartAdapter(BaseStoreAdapter):
                     return data
             except Exception:
                 pass
-        # Fallback: treat token as already-issued access token.
         return {"access_token": txt}
+
+    def _client_credentials(self):
+        client_id = self._creds.get("client_id") or os.getenv("WALMART_CLIENT_ID")
+        client_secret = self._creds.get("client_secret") or os.getenv("WALMART_CLIENT_SECRET")
+        return client_id, client_secret
+
+    def _basic_auth_header(self):
+        client_id, client_secret = self._client_credentials()
+        if not client_id or not client_secret:
+            return None
+        auth = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8")
+        return f"Basic {auth}"
 
     def _consumer_id(self):
         return self._creds.get("consumer_id") or os.getenv("WALMART_CONSUMER_ID")
@@ -82,8 +96,7 @@ class WalmartAdapter(BaseStoreAdapter):
         return str(key).replace("\\n", "\n")
 
     def _refresh_access_token(self):
-        client_id = self._creds.get("client_id") or os.getenv("WALMART_CLIENT_ID")
-        client_secret = self._creds.get("client_secret") or os.getenv("WALMART_CLIENT_SECRET")
+        client_id, client_secret = self._client_credentials()
         if not client_id or not client_secret:
             if self._access_token:
                 return self._access_token
@@ -94,6 +107,8 @@ class WalmartAdapter(BaseStoreAdapter):
             "Authorization": f"Basic {auth}",
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json",
+            "WM_QOS.CORRELATION_ID": str(uuid.uuid4()),
+            "WM_SVC.NAME": WALMART_SERVICE_NAME,
         }
         resp = self._session.post(
             f"{self._base_url}{WALMART_TOKEN_PATH}",
@@ -127,7 +142,6 @@ class WalmartAdapter(BaseStoreAdapter):
         private_key_pem = self._private_key_pem()
         if not consumer_id or not private_key_pem:
             return None
-        # Walmart signature payload convention.
         payload = f"{consumer_id}\n{full_url}\n{method.upper()}\n{timestamp_ms}\n".encode("utf-8")
         private_key = serialization.load_pem_private_key(private_key_pem.encode("utf-8"), password=None)
         sig = private_key.sign(payload, padding.PKCS1v15(), hashes.SHA256())
@@ -142,20 +156,28 @@ class WalmartAdapter(BaseStoreAdapter):
             "Content-Type": "application/json",
             "WM_SVC.NAME": WALMART_SERVICE_NAME,
             "WM_QOS.CORRELATION_ID": correlation_id,
-            "Authorization": f"Bearer {token}",
         }
-        consumer_id = self._consumer_id()
+        basic = self._basic_auth_header()
         channel_type = self._channel_type()
-        if consumer_id:
-            headers["WM_CONSUMER.ID"] = consumer_id
         if channel_type:
             headers["WM_CONSUMER.CHANNEL.TYPE"] = channel_type
 
-        signature = self._build_signature(full_url, method, timestamp_ms)
-        if signature:
-            headers["WM_SEC.TIMESTAMP"] = timestamp_ms
-            headers["WM_SEC.AUTH_SIGNATURE"] = signature
+        consumer_id = self._consumer_id()
+        if consumer_id:
+            headers["WM_CONSUMER.ID"] = consumer_id
+
+        if basic:
+            headers["Authorization"] = basic
             headers["WM_SEC.ACCESS_TOKEN"] = token
+        else:
+            signature = self._build_signature(full_url, method, timestamp_ms)
+            if signature:
+                headers["WM_SEC.TIMESTAMP"] = timestamp_ms
+                headers["WM_SEC.AUTH_SIGNATURE"] = signature
+                headers["WM_SEC.ACCESS_TOKEN"] = token
+            else:
+                headers["Authorization"] = f"Bearer {token}"
+                headers["WM_SEC.ACCESS_TOKEN"] = token
         return headers
 
     def _request(self, method, path, *, json_body=None, timeout=30):
@@ -179,56 +201,38 @@ class WalmartAdapter(BaseStoreAdapter):
             return {"raw": resp.text}
 
     def validate_connection(self):
-        """
-        Validate Walmart credentials.
-
-        Preferred path validates via a lightweight Marketplace API call.
-        For manual/token-only setups (no client credentials configured), keep
-        the connection usable if a bearer token exists so stores are not stuck
-        in "error" before first sync attempts.
-        """
+        """Validate OAuth credentials via a lightweight inventory list call."""
         try:
-            # Lightweight endpoint for auth/header verification.
             self._request("GET", "/v3/inventories?limit=1")
             return True
         except WalmartAPIError:
-            # Graceful fallback for token-only mode when merchants paste an
-            # already-issued access token instead of client credentials JSON.
-            has_client_creds = bool(
-                self._creds.get("client_id")
-                or os.getenv("WALMART_CLIENT_ID")
-                or self._creds.get("client_secret")
-                or os.getenv("WALMART_CLIENT_SECRET")
-            )
-            if not has_client_creds:
+            client_id, client_secret = self._client_credentials()
+            if not client_id or not client_secret:
                 token = (self._access_token or "").strip()
                 return len(token) > 20
             return False
 
     def lookup_listing_by_sku(self, sku: str):
-        """Use SKU as listing key and verify it exists in Walmart catalog."""
+        """Verify seller SKU exists in the Walmart catalog."""
         if not sku:
             return None
+        sku_q = quote(str(sku), safe="")
         try:
-            self._request("GET", f"/v3/items/{requests.utils.quote(str(sku))}")
+            self._request("GET", f"/v3/items?sku={sku_q}")
             return str(sku)
         except WalmartAPIError:
             return None
 
     def create_product(self, sku, title, price, stock, **kwargs):
-        """
-        Create product/listing on Walmart.
-        Requires catalog payload spec from your Walmart upload format, so intentionally deferred.
-        """
         raise NotImplementedError(
             "Walmart create_product requires your finalized Walmart item payload/upload format."
         )
 
     def update_product(self, external_id, **kwargs):
         """
-        Update listing by SKU/external id.
-        - price: updates /v3/price
-        - stock: updates /v3/inventories/{sku}
+        Update listing by seller SKU.
+        - price: ``PUT /v3/price``
+        - stock: ``PUT /v3/inventory``
         """
         if not external_id:
             raise WalmartAPIError("Missing Walmart external_id/SKU for update_product")
@@ -246,7 +250,10 @@ class WalmartAdapter(BaseStoreAdapter):
                     "pricing": [
                         {
                             "currentPriceType": "BASE",
-                            "currentPrice": {"currency": kwargs.get("currency", "USD"), "amount": amt},
+                            "currentPrice": {
+                                "currency": kwargs.get("currency", "USD"),
+                                "amount": amt,
+                            },
                         }
                     ],
                 },
@@ -256,14 +263,14 @@ class WalmartAdapter(BaseStoreAdapter):
         return True
 
     def update_inventory(self, external_id, stock):
-        """Update Walmart inventory by SKU."""
+        """Update Walmart inventory for a single SKU at the default ship node."""
         if not external_id:
             raise WalmartAPIError("Missing Walmart external_id/SKU for update_inventory")
         sku = str(external_id)
         qty = max(0, int(stock or 0))
         self._request(
             "PUT",
-            f"/v3/inventories/{requests.utils.quote(sku)}",
+            "/v3/inventory",
             json_body={"sku": sku, "quantity": {"unit": "EACH", "amount": qty}},
         )
         return True
@@ -273,5 +280,5 @@ class WalmartAdapter(BaseStoreAdapter):
         if not external_id:
             raise WalmartAPIError("Missing Walmart external_id/SKU for delete_product")
         sku = str(external_id)
-        self._request("DELETE", f"/v3/items/{requests.utils.quote(sku)}")
+        self._request("DELETE", f"/v3/items/{quote(sku, safe='')}")
         return True
