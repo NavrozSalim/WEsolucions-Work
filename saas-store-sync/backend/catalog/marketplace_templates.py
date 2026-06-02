@@ -72,6 +72,14 @@ def template_kind_from_store_adapter(store: Store) -> str:
     }.get(cls_name, 'other')
 
 
+def resolve_catalog_marketplace_kind(store: Store) -> str:
+    """Best-effort marketplace kind for catalog ingest/templates (adapter wins over FK code)."""
+    kind = template_kind_from_store_adapter(store)
+    if kind != 'other':
+        return kind
+    return store_marketplace_kind(store)
+
+
 def _norm_header_cell(h: Any) -> str:
     return (str(h) or '').strip().lower().replace('_', ' ')
 
@@ -97,6 +105,34 @@ def col_index(header: list, col_name: str) -> int | None:
     return None
 
 
+def _apply_header_alias(idx: dict[str, int | None], header: list, field_key: str, aliases: tuple[str, ...]) -> None:
+    if idx.get(field_key) is not None:
+        return
+    for alias in aliases:
+        i = col_index(header, alias)
+        if i is not None:
+            idx[field_key] = i
+            return
+
+
+def _apply_sears_header_aliases(idx: dict[str, int | None], header: list) -> None:
+    """Map common Sears export column names; Vendor SKU is never used for Sears listing identity."""
+    _apply_header_alias(
+        idx,
+        header,
+        'marketplace child sku',
+        ('child sku', 'sears child sku', 'item id', 'item-id', 'child item id', 'child item sku'),
+    )
+    _apply_header_alias(
+        idx,
+        header,
+        'marketplace parent sku',
+        ('parent sku', 'sears parent sku', 'parent item id'),
+    )
+    _apply_header_alias(idx, header, 'marketplace id', ('listing id', 'sears listing id'))
+    _apply_header_alias(idx, header, 'marketplace name', ('marketplace',))
+
+
 def build_field_indices(header: list, store: Store) -> dict[str, int | None]:
     """Map internal field keys to column indices (with marketplace-aware SKU alias)."""
     idx: dict[str, int | None] = {k: col_index(header, k) for k in INTERNAL_FIELDS}
@@ -109,7 +145,7 @@ def build_field_indices(header: list, store: Store) -> dict[str, int | None]:
             if sku_i is not None:
                 break
 
-    kind = store_marketplace_kind(store)
+    kind = resolve_catalog_marketplace_kind(store)
     if sku_i is not None:
         if kind in ('reverb', 'kogan'):
             if idx['marketplace parent sku'] is None:
@@ -150,6 +186,9 @@ def build_field_indices(header: list, store: Store) -> dict[str, int | None]:
     if lt_i is not None and idx.get('fulfillment lag time') is None:
         idx['fulfillment lag time'] = lt_i
 
+    if kind == 'sears':
+        _apply_sears_header_aliases(idx, header)
+
     return idx
 
 
@@ -162,7 +201,7 @@ def validate_marketplace_headers(indices: dict[str, int | None], store: Store) -
     if not _req('vendor name') or not _req('store name') or not _req('action'):
         return 'Required columns missing: Vendor Name, Store Name, and Action are required.'
 
-    kind = store_marketplace_kind(store)
+    kind = resolve_catalog_marketplace_kind(store)
 
     if kind in ('reverb', 'kogan'):
         label = 'Kogan' if kind == 'kogan' else 'Reverb'
@@ -199,25 +238,19 @@ def validate_marketplace_headers(indices: dict[str, int | None], store: Store) -
             return 'Walmart uploads require "Vendor URL" and/or "Vendor ID".'
 
     elif kind == 'sears':
-        required = [
-            ('vendor id', 'Vendor ID'),
-            ('is variation', 'Is Variation'),
-            ('variation id', 'Variation ID'),
-            ('marketplace name', 'Marketplace Name'),
-            ('marketplace parent sku', 'Marketplace Parent SKU'),
-            ('marketplace child sku', 'Marketplace Child SKU'),
-            ('marketplace id', 'Marketplace ID'),
-            ('vendor url', 'Vendor URL'),
-        ]
-        for key, label in required:
-            if not _req(key):
-                return f'Sears uploads require column: {label}'
+        if not _req('marketplace child sku'):
+            return (
+                'Sears uploads require Marketplace Child SKU (or Child SKU / SKU column). '
+                'Vendor SKU is not used for Sears — use Marketplace Child SKU.'
+            )
+        if not _req('vendor url') and not _req('vendor id'):
+            return 'Sears uploads require Vendor URL and/or Vendor ID.'
 
     return None
 
 
 def sample_template_filename(store: Store) -> str:
-    return sample_template_filename_for_kind(store_marketplace_kind(store))
+    return sample_template_filename_for_kind(resolve_catalog_marketplace_kind(store))
 
 
 def sample_template_filename_for_kind(kind: str) -> str:
@@ -228,7 +261,7 @@ def sample_template_filename_for_kind(kind: str) -> str:
 
 def sample_template_rows(store: Store) -> tuple[list[str], list[list[str]]]:
     """CSV header row + example data rows for the store's marketplace."""
-    return sample_template_rows_for_kind(store_marketplace_kind(store))
+    return sample_template_rows_for_kind(resolve_catalog_marketplace_kind(store))
 
 
 def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]]:
@@ -284,27 +317,19 @@ def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]
         headers = [
             'Vendor Name',
             'Vendor ID',
-            'Is Variation',
-            'Variation ID',
-            'Marketplace Name',
             'Store Name',
             'Marketplace Parent SKU',
             'Marketplace Child SKU',
-            'Marketplace ID',
             'Vendor URL',
             'Action',
         ]
         rows = [
             [
-                'Amazon',
+                'AmazonUS',
                 'B0TEST123',
-                'No',
-                '',
-                'Sears',
                 'My Store',
                 'PARENT-1',
                 'CHILD-1',
-                '',
                 'https://www.amazon.com/dp/B0TEST123',
                 'Add',
             ],

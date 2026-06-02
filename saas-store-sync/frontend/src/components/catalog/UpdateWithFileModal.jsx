@@ -90,7 +90,7 @@ export default function UpdateWithFileModal({
             return 'Walmart template: Vendor Name, Vendor ID, Marketplace Name, Store Name, SKU, Vendor URL, Action, Pack QTY, Prep Fees, Shipping Fees, Fulfillment Center ID, Lag Time.';
         }
         if (isSears) {
-            return 'Sears template: Parent/Child/Marketplace ID SKU columns, Vendor URL, and Action — price/inventory push uses Marketplace Child SKU (no Vendor SKU column).';
+            return 'Sears template: Vendor Name, Store Name, Marketplace Child SKU, Vendor URL, and Action (no Vendor SKU column). Optional: Parent SKU, Vendor ID.';
         }
         if (isReverb) {
             return 'Reverb template: Vendor Name, Vendor ID, Marketplace Name, Store Name, SKU, Vendor URL, Action.';

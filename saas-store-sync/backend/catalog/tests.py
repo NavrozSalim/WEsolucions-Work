@@ -224,11 +224,24 @@ class MarketplaceTemplateTests(SimpleTestCase):
     def test_sears_sample_template_excludes_vendor_sku(self):
         headers, rows = sample_template_rows_for_kind('sears')
         self.assertNotIn('Vendor SKU', headers)
-        self.assertEqual(headers.index('Marketplace Child SKU'), 7)
-        self.assertEqual(len(headers), 11)
-        self.assertEqual(len(rows[0]), 11)
+        self.assertEqual(headers.index('Marketplace Child SKU'), 4)
+        self.assertEqual(len(headers), 7)
+        self.assertEqual(len(rows[0]), 7)
 
-    def test_sears_headers_valid_without_vendor_sku(self):
+    def test_sears_minimal_headers_valid(self):
+        headers = [
+            'Vendor Name',
+            'Vendor ID',
+            'Store Name',
+            'Marketplace Parent SKU',
+            'Marketplace Child SKU',
+            'Vendor URL',
+            'Action',
+        ]
+        idx = build_field_indices(headers, _store('sears'))
+        self.assertIsNone(validate_marketplace_headers(idx, _store('sears')))
+
+    def test_sears_legacy_wide_headers_still_valid(self):
         headers = [
             'Vendor Name',
             'Vendor ID',
@@ -244,6 +257,26 @@ class MarketplaceTemplateTests(SimpleTestCase):
         ]
         idx = build_field_indices(headers, _store('sears'))
         self.assertIsNone(validate_marketplace_headers(idx, _store('sears')))
+
+    def test_sears_legacy_template_with_vendor_sku_column_still_valid(self):
+        headers = [
+            'Vendor Name',
+            'Vendor ID',
+            'Is Variation',
+            'Variation ID',
+            'Marketplace Name',
+            'Store Name',
+            'Marketplace Parent SKU',
+            'Marketplace Child SKU',
+            'Marketplace ID',
+            'Vendor SKU',
+            'Vendor URL',
+            'Action',
+        ]
+        idx = build_field_indices(headers, _store('sears'))
+        self.assertIsNone(validate_marketplace_headers(idx, _store('sears')))
+        self.assertIsNotNone(idx.get('vendor sku'))
+        self.assertIsNotNone(idx.get('marketplace child sku'))
 
     def test_sears_headers_require_marketplace_child_sku(self):
         headers = [

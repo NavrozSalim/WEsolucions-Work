@@ -577,3 +577,60 @@ class SearsTemplateIngestTests(TestCase):
         inst, err = build_catalog_row_instance(up, 2, row, ctx)
         self.assertIsNone(inst)
         self.assertIn('Marketplace Child SKU', err or '')
+
+    def test_ingest_minimal_sears_csv_without_vendor_sku(self):
+        from catalog.services import ingest_stored_catalog_file
+        from django.core.files.base import ContentFile
+
+        csv_content = (
+            'Vendor Name,Vendor ID,Store Name,Marketplace Parent SKU,'
+            'Marketplace Child SKU,Vendor URL,Action\n'
+            f'AmazonUS,B0TEST123,{self.store.name},PARENT-1,CHILD-MIN-1,'
+            'https://www.amazon.com/dp/B0TEST123,Add\n'
+        )
+        upload = CatalogUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            original_filename='sears_minimal.csv',
+            status=CatalogUpload.Status.INGESTING,
+        )
+        upload.source_file.save(
+            'sears_minimal.csv',
+            ContentFile(csv_content.encode('utf-8')),
+            save=True,
+        )
+        result = ingest_stored_catalog_file(str(upload.id))
+        upload.refresh_from_db()
+        self.assertEqual(result.get('total_rows'), 1, result)
+        self.assertEqual(upload.status, CatalogUpload.Status.VALIDATED)
+        self.assertEqual(upload.total_rows, 1)
+        row = upload.rows.get()
+        self.assertEqual(row.marketplace_child_sku_raw, 'CHILD-MIN-1')
+        self.assertEqual(row.vendor_sku_raw, '')
+
+    def test_ingest_legacy_sears_csv_without_vendor_sku_column(self):
+        from catalog.services import ingest_stored_catalog_file
+        from django.core.files.base import ContentFile
+
+        csv_content = (
+            'Vendor Name,Vendor ID,Is Variation,Variation ID,Marketplace Name,Store Name,'
+            'Marketplace Parent SKU,Marketplace Child SKU,Marketplace ID,Vendor URL,Action\n'
+            f'AmazonUS,B0TEST123,No,,Sears,{self.store.name},PARENT-1,CHILD-LEG-1,,'
+            'https://www.amazon.com/dp/B0TEST123,Add\n'
+        )
+        upload = CatalogUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            original_filename='sears_legacy.csv',
+            status=CatalogUpload.Status.INGESTING,
+        )
+        upload.source_file.save(
+            'sears_legacy.csv',
+            ContentFile(csv_content.encode('utf-8')),
+            save=True,
+        )
+        result = ingest_stored_catalog_file(str(upload.id))
+        upload.refresh_from_db()
+        self.assertEqual(result.get('total_rows'), 1, result)
+        self.assertEqual(upload.status, CatalogUpload.Status.VALIDATED)
+        self.assertEqual(upload.rows.get().marketplace_child_sku_raw, 'CHILD-LEG-1')
