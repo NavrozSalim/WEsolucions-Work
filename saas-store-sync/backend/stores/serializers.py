@@ -279,9 +279,11 @@ class StoreSerializer(serializers.ModelSerializer):
                 raise ValidationError({'kogan_sheet_id': 'Spreadsheet ID is required for Kogan.'})
             if 'kogan_tab_name' in req and not (req.get('kogan_tab_name') or '').strip():
                 raise ValidationError({'kogan_tab_name': 'Tab name is required for Kogan.'})
+        verify_new_credentials = False
         if is_structured and token_in_request:
             token_raw = (validated_data.get('api_token') or req.get('api_token') or '').strip()
             if token_raw:
+                verify_new_credentials = True
                 normalized = validate_api_token_shape(mkt_now, token_raw)
                 instance.api_token = normalized
                 validated_data['api_token'] = normalized
@@ -293,46 +295,54 @@ class StoreSerializer(serializers.ModelSerializer):
             raise ValidationError({
                 'name': f'A store named "{instance.name}" already exists for this marketplace.',
             })
-        try:
-            instance.save()
-        except IntegrityError as exc:
-            if 'uq_store_user_name_marketplace' in str(exc) or 'UNIQUE constraint failed' in str(exc):
-                raise ValidationError({
-                    'name': 'A store with this name and marketplace already exists.',
-                }) from None
-            raise
-        price_in = 'vendor_price_settings' in req
-        inv_in = 'vendor_inventory_settings' in req
-        if price_in and inv_in:
-            self._validate_inventory_covers_price_vendors(
-                req['vendor_price_settings'], req['vendor_inventory_settings'],
-            )
-        elif inv_in and not price_in:
-            price_snapshot = [
-                {'vendor_id': str(x.vendor_id)}
-                for x in instance.vendor_price_settings.all()
-            ]
-            self._validate_inventory_covers_price_vendors(price_snapshot, req['vendor_inventory_settings'])
-        elif price_in and not inv_in:
-            inv_snapshot = [
-                {'vendor_id': str(x.vendor_id)}
-                for x in instance.vendor_inventory_settings.all()
-            ]
-            self._validate_inventory_covers_price_vendors(req['vendor_price_settings'], inv_snapshot)
 
-        if price_in:
-            self._save_vendor_price_settings(instance, req['vendor_price_settings'], Vendor)
-        if inv_in:
-            self._save_vendor_inventory_settings(instance, req['vendor_inventory_settings'], Vendor)
-        if 'sync_schedule' in req:
-            self._save_sync_schedule(instance, req['sync_schedule'], SyncSchedule)
+        def _persist_store_changes():
+            try:
+                instance.save()
+            except IntegrityError as exc:
+                if 'uq_store_user_name_marketplace' in str(exc) or 'UNIQUE constraint failed' in str(exc):
+                    raise ValidationError({
+                        'name': 'A store with this name and marketplace already exists.',
+                    }) from None
+                raise
+            price_in = 'vendor_price_settings' in req
+            inv_in = 'vendor_inventory_settings' in req
+            if price_in and inv_in:
+                self._validate_inventory_covers_price_vendors(
+                    req['vendor_price_settings'], req['vendor_inventory_settings'],
+                )
+            elif inv_in and not price_in:
+                price_snapshot = [
+                    {'vendor_id': str(x.vendor_id)}
+                    for x in instance.vendor_price_settings.all()
+                ]
+                self._validate_inventory_covers_price_vendors(price_snapshot, req['vendor_inventory_settings'])
+            elif price_in and not inv_in:
+                inv_snapshot = [
+                    {'vendor_id': str(x.vendor_id)}
+                    for x in instance.vendor_inventory_settings.all()
+                ]
+                self._validate_inventory_covers_price_vendors(req['vendor_price_settings'], inv_snapshot)
 
-        if is_structured and token_in_request:
-            ok, err_msg = verify_store_connection(instance)
-            if not ok:
-                raise ValidationError({
-                    'api_token': err_msg or 'Marketplace rejected these credentials.',
-                })
+            if price_in:
+                self._save_vendor_price_settings(instance, req['vendor_price_settings'], Vendor)
+            if inv_in:
+                self._save_vendor_inventory_settings(instance, req['vendor_inventory_settings'], Vendor)
+            if 'sync_schedule' in req:
+                self._save_sync_schedule(instance, req['sync_schedule'], SyncSchedule)
+
+        if verify_new_credentials:
+            from django.db import transaction
+
+            with transaction.atomic():
+                _persist_store_changes()
+                ok, err_msg = verify_store_connection(instance)
+                if not ok:
+                    raise ValidationError({
+                        'api_token': err_msg or 'Marketplace rejected these credentials.',
+                    })
+        else:
+            _persist_store_changes()
 
         return instance
 

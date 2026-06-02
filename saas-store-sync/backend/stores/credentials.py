@@ -101,6 +101,7 @@ def verify_store_connection(store) -> tuple[bool, str | None]:
 
     try:
         adapter = get_adapter(store)
+        adapter._validate_using_store_json_only = True
         if getattr(adapter, 'validate_connection', lambda: False)():
             return True, None
         kind = marketplace_kind(marketplace)

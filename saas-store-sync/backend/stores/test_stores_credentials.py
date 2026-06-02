@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase
 from rest_framework.exceptions import ValidationError
+
+from store_adapters.sears_adapter import SearsAdapter
+from store_adapters.walmart_adapter import WalmartAdapter, WalmartAPIError
 
 from stores.credentials import (
     parse_credentials_json,
@@ -89,3 +93,84 @@ class VerifyConnectionTests(SimpleTestCase):
         ok, msg = verify_store_connection(store)
         self.assertFalse(ok)
         self.assertIn('Walmart', msg or '')
+
+
+class SearsValidateConnectionTests(SimpleTestCase):
+    def test_validate_connection_requires_location_id_for_lmp(self):
+        store = SimpleNamespace(
+            api_token=json.dumps({
+                'seller_id': '1',
+                'email': 'a@b.com',
+                'secret_key': 'key',
+            }),
+            marketplace=_mkt('sears'),
+        )
+        adapter = SearsAdapter(store)
+        self.assertFalse(adapter.validate_connection())
+
+
+class WalmartStoreOnlyCredentialTests(SimpleTestCase):
+    @patch.dict(
+        os.environ,
+        {'WALMART_CLIENT_ID': 'env-id', 'WALMART_CLIENT_SECRET': 'env-secret'},
+        clear=False,
+    )
+    def test_client_credentials_ignore_env_when_validating_store_json(self):
+        store = SimpleNamespace(
+            api_token=json.dumps({'client_id': 'store-id', 'client_secret': 'store-secret'}),
+            marketplace=_mkt('walmart'),
+            region='USA',
+            use_sandbox=False,
+        )
+        adapter = WalmartAdapter(store)
+        adapter._validate_using_store_json_only = True
+        cid, secret = adapter._client_credentials()
+        self.assertEqual(cid, 'store-id')
+        self.assertEqual(secret, 'store-secret')
+
+    @patch.dict(
+        os.environ,
+        {'WALMART_CLIENT_ID': 'env-id', 'WALMART_CLIENT_SECRET': 'env-secret'},
+        clear=False,
+    )
+    def test_client_credentials_use_env_during_normal_sync_when_store_empty(self):
+        store = SimpleNamespace(
+            api_token='{}',
+            marketplace=_mkt('walmart'),
+            region='USA',
+            use_sandbox=False,
+        )
+        adapter = WalmartAdapter(store)
+        cid, secret = adapter._client_credentials()
+        self.assertEqual(cid, 'env-id')
+        self.assertEqual(secret, 'env-secret')
+
+    def test_client_credentials_empty_when_validating_empty_store_json(self):
+        store = SimpleNamespace(
+            api_token='{}',
+            marketplace=_mkt('walmart'),
+            region='USA',
+            use_sandbox=False,
+        )
+        adapter = WalmartAdapter(store)
+        adapter._validate_using_store_json_only = True
+        cid, secret = adapter._client_credentials()
+        self.assertIsNone(cid)
+        self.assertIsNone(secret)
+
+    @patch.dict(
+        os.environ,
+        {'WALMART_CLIENT_ID': 'env-id', 'WALMART_CLIENT_SECRET': 'env-secret'},
+        clear=False,
+    )
+    @patch('store_adapters.walmart_adapter.WalmartAdapter._refresh_access_token')
+    def test_validate_connection_fails_when_store_secret_wrong(self, mock_refresh):
+        mock_refresh.side_effect = WalmartAPIError('Walmart token request failed: 401')
+        store = SimpleNamespace(
+            api_token=json.dumps({'client_id': 'bad', 'client_secret': 'bad'}),
+            marketplace=_mkt('walmart'),
+            region='USA',
+            use_sandbox=False,
+        )
+        adapter = WalmartAdapter(store)
+        self.assertFalse(adapter.validate_connection())

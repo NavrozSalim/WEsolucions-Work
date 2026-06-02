@@ -286,7 +286,26 @@ class SearsAdapter(BaseStoreAdapter):
         return {}
 
     def _has_minimum_creds(self):
-        return bool(self._seller_id and self._email and self._secret_key)
+        if not (self._seller_id and self._email and self._secret_key):
+            return False
+        if self._inventory_lmp and not self._location_id:
+            return False
+        return True
+
+    @staticmethod
+    def _response_indicates_auth_failure(body: str) -> bool:
+        if not body:
+            return False
+        lower = body.lower()
+        markers = (
+            'unauthorized',
+            'authentication failed',
+            'invalid signature',
+            'access denied',
+            'invalid credentials',
+            'forbidden',
+        )
+        return any(m in lower for m in markers)
 
     def _signature(self, timestamp):
         payload = f"{self._seller_id}:{self._email}:{timestamp}".encode("utf-8")
@@ -372,11 +391,13 @@ class SearsAdapter(BaseStoreAdapter):
         if not self._has_minimum_creds():
             return False
         try:
-            self._request(
+            body = self._request(
                 "GET",
                 "/oms/purchaseorder/v19",
                 params={"sellerId": self._seller_id, "status": "New"},
             )
+            if self._response_indicates_auth_failure(body):
+                return False
             return True
         except SearsAPIError:
             return False

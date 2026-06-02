@@ -70,7 +70,15 @@ class WalmartAdapter(BaseStoreAdapter):
                 pass
         return {"access_token": txt}
 
+    def _use_store_credentials_only(self) -> bool:
+        """True during store create/update validation — do not fall back to env vars."""
+        return bool(getattr(self, '_validate_using_store_json_only', False))
+
     def _client_credentials(self):
+        if self._use_store_credentials_only():
+            client_id = (self._creds.get("client_id") or "").strip() or None
+            client_secret = (self._creds.get("client_secret") or "").strip() or None
+            return client_id, client_secret
         client_id = self._creds.get("client_id") or os.getenv("WALMART_CLIENT_ID")
         client_secret = self._creds.get("client_secret") or os.getenv("WALMART_CLIENT_SECRET")
         return client_id, client_secret
@@ -83,9 +91,18 @@ class WalmartAdapter(BaseStoreAdapter):
         return f"Basic {auth}"
 
     def _consumer_id(self):
+        if self._use_store_credentials_only():
+            cid = self._creds.get("consumer_id")
+            return str(cid).strip() if cid else None
         return self._creds.get("consumer_id") or os.getenv("WALMART_CONSUMER_ID")
 
     def _channel_type(self):
+        if self._use_store_credentials_only():
+            explicit = self._creds.get("channel_type")
+            if explicit:
+                return str(explicit).strip()
+            client_id, _ = self._client_credentials()
+            return str(client_id).strip() if client_id else None
         explicit = self._creds.get("channel_type") or os.getenv("WALMART_CHANNEL_TYPE")
         if explicit:
             return str(explicit).strip()
@@ -277,6 +294,9 @@ class WalmartAdapter(BaseStoreAdapter):
 
     def validate_connection(self):
         """Validate OAuth credentials via token exchange and a lightweight inventory list call."""
+        self._validate_using_store_json_only = True
+        self._access_token = None
+        self._token_expires_at = 0
         client_id, client_secret = self._client_credentials()
         if not client_id or not client_secret:
             return False
