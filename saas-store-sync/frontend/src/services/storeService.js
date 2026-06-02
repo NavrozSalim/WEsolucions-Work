@@ -11,6 +11,12 @@ export const deleteStore = (id) => api.delete(`/stores/${id}/`);
 
 export const validateStore = (id) => api.post(`/stores/${id}/validate/`);
 
+/** Test Connection — same as validate; persists connection_status on saved stores. */
+export const testStoreConnection = (id) => api.post(`/stores/${id}/test-connection/`);
+
+/** Test Walmart JSON credentials before creating a store. */
+export const testWalmartConnection = (data) => api.post('/stores/test-walmart-connection/', data);
+
 export const getSyncSchedule = (storeId) => api.get(`/stores/${storeId}/sync/schedule/`);
 export const updateSyncSchedule = (storeId, data) => api.put(`/stores/${storeId}/sync/schedule/`, data);
 export const createSyncSchedule = (storeId, data) => api.post(`/stores/${storeId}/sync/schedule/`, data);

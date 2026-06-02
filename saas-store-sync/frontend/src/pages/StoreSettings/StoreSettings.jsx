@@ -8,7 +8,7 @@ import {
     deleteStore,
     getMarketplaces,
     updateStoreActive,
-    validateStore,
+    testStoreConnection,
     triggerStoreUpdate,
     pollStoreUpdateJob,
     formatStoreUpdateResult,
@@ -62,7 +62,7 @@ function ActionsDropdown({ store, conn, validatingId, updatingId, onValidate, on
 
     const items = [
         {
-            label: conn === 'connected' ? 'Re-verify' : 'Connect',
+            label: conn === 'connected' ? 'Re-test connection' : 'Test Connection',
             icon: <Wifi className={`h-4 w-4 shrink-0 ${validatingId === store.id ? 'animate-pulse' : ''}`} />,
             onClick: () => onValidate(store),
             disabled: validatingId === store.id,
@@ -222,9 +222,9 @@ export default function StoreSettings() {
 
     const handleValidate = (store) => {
         setValidatingId(store.id);
-        validateStore(store.id)
-            .then(() => {
-                showToast(`"${store.name}" connected successfully.`, 'success');
+        testStoreConnection(store.id)
+            .then((res) => {
+                showToast(res.data?.message || 'Connection successful.', 'success');
                 refresh();
             })
             .catch((err) => {

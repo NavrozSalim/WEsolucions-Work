@@ -10,7 +10,14 @@ from django.test import SimpleTestCase
 from rest_framework.exceptions import ValidationError
 
 from store_adapters.sears_adapter import SearsAdapter
-from store_adapters.walmart_adapter import WalmartAdapter, WalmartAPIError
+from store_adapters.walmart_adapter import (
+    MSG_WALMART_CONNECTED,
+    MSG_WALMART_FORBIDDEN,
+    MSG_WALMART_INVALID_CREDS,
+    WALMART_ITEMS_PROBE_PATH,
+    WalmartAdapter,
+    WalmartAPIError,
+)
 
 from stores.credentials import (
     parse_credentials_json,
@@ -70,8 +77,9 @@ class CredentialShapeTests(SimpleTestCase):
 
 
 class VerifyConnectionTests(SimpleTestCase):
-    @patch('store_adapters.walmart_adapter.WalmartAdapter.validate_connection', return_value=True)
-    def test_verify_walmart_success(self, _mock_val):
+    @patch('store_adapters.walmart_adapter.WalmartAdapter.test_walmart_connection')
+    def test_verify_walmart_success(self, mock_test):
+        mock_test.return_value = (True, MSG_WALMART_CONNECTED, 200)
         store = SimpleNamespace(
             api_token=json.dumps({'client_id': 'x', 'client_secret': 'y'}),
             marketplace=_mkt('walmart'),
@@ -82,8 +90,9 @@ class VerifyConnectionTests(SimpleTestCase):
         self.assertTrue(ok)
         self.assertIsNone(msg)
 
-    @patch('store_adapters.walmart_adapter.WalmartAdapter.validate_connection', return_value=False)
-    def test_verify_walmart_api_failure(self, _mock_val):
+    @patch('store_adapters.walmart_adapter.WalmartAdapter.test_walmart_connection')
+    def test_verify_walmart_api_failure(self, mock_test):
+        mock_test.return_value = (False, MSG_WALMART_INVALID_CREDS, 401)
         store = SimpleNamespace(
             api_token=json.dumps({'client_id': 'x', 'client_secret': 'y'}),
             marketplace=_mkt('walmart'),
@@ -92,7 +101,7 @@ class VerifyConnectionTests(SimpleTestCase):
         )
         ok, msg = verify_store_connection(store)
         self.assertFalse(ok)
-        self.assertIn('Walmart', msg or '')
+        self.assertEqual(msg, MSG_WALMART_INVALID_CREDS)
 
 
 class SearsValidateConnectionTests(SimpleTestCase):
@@ -165,7 +174,11 @@ class WalmartStoreOnlyCredentialTests(SimpleTestCase):
     )
     @patch('store_adapters.walmart_adapter.WalmartAdapter._refresh_access_token')
     def test_validate_connection_fails_when_store_secret_wrong(self, mock_refresh):
-        mock_refresh.side_effect = WalmartAPIError('Walmart token request failed: 401')
+        mock_refresh.side_effect = WalmartAPIError(
+            'Walmart token request failed: 401',
+            status_code=401,
+            response_body='Unauthorized',
+        )
         store = SimpleNamespace(
             api_token=json.dumps({'client_id': 'bad', 'client_secret': 'bad'}),
             marketplace=_mkt('walmart'),
@@ -173,4 +186,46 @@ class WalmartStoreOnlyCredentialTests(SimpleTestCase):
             use_sandbox=False,
         )
         adapter = WalmartAdapter(store)
-        self.assertFalse(adapter.validate_connection())
+        ok, msg, code = adapter.test_walmart_connection()
+        self.assertFalse(ok)
+        self.assertEqual(msg, MSG_WALMART_INVALID_CREDS)
+        self.assertEqual(code, 401)
+
+    @patch('store_adapters.walmart_adapter.WalmartAdapter._request')
+    @patch('store_adapters.walmart_adapter.WalmartAdapter._refresh_access_token')
+    def test_test_walmart_connection_uses_items_endpoint(self, mock_refresh, mock_request):
+        mock_refresh.return_value = 'token'
+        mock_request.return_value = {'items': []}
+        store = SimpleNamespace(
+            api_token=json.dumps({'client_id': 'a', 'client_secret': 'b'}),
+            marketplace=_mkt('walmart'),
+            region='USA',
+            use_sandbox=False,
+        )
+        adapter = WalmartAdapter(store)
+        ok, msg, code = adapter.test_walmart_connection()
+        self.assertTrue(ok)
+        self.assertEqual(msg, MSG_WALMART_CONNECTED)
+        self.assertEqual(code, 200)
+        mock_request.assert_called_once_with('GET', WALMART_ITEMS_PROBE_PATH)
+
+    @patch('store_adapters.walmart_adapter.WalmartAdapter._request')
+    @patch('store_adapters.walmart_adapter.WalmartAdapter._refresh_access_token')
+    def test_test_walmart_connection_403_message(self, mock_refresh, mock_request):
+        mock_refresh.return_value = 'token'
+        mock_request.side_effect = WalmartAPIError(
+            'Walmart API GET /v3/items: 403',
+            status_code=403,
+            response_body='Forbidden',
+        )
+        store = SimpleNamespace(
+            api_token=json.dumps({'client_id': 'a', 'client_secret': 'b'}),
+            marketplace=_mkt('walmart'),
+            region='USA',
+            use_sandbox=False,
+        )
+        adapter = WalmartAdapter(store)
+        ok, msg, code = adapter.test_walmart_connection()
+        self.assertFalse(ok)
+        self.assertEqual(msg, MSG_WALMART_FORBIDDEN)
+        self.assertEqual(code, 403)

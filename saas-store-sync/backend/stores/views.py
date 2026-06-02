@@ -227,23 +227,85 @@ class StoreViewSet(viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED,
         )
 
-    @action(detail=True, methods=['post'])
-    def validate(self, request, pk=None):
-        """Validate store API token / connection. Persists connection_status."""
-        store = self.get_object()
+    def _run_connection_test(self, store):
         from django.utils import timezone as tz
-        from stores.credentials import verify_store_connection
+        from stores.credentials import marketplace_kind, verify_store_connection
 
         valid, err_msg = verify_store_connection(store)
         store.last_validated_at = tz.now()
         if valid:
             store.connection_status = 'connected'
             store.save(update_fields=['connection_status', 'last_validated_at'])
-            return Response({'valid': True, 'message': 'Connection successful', 'connection_status': 'connected'})
+            message = err_msg or 'Connection successful'
+            if marketplace_kind(store.marketplace) == 'walmart':
+                from store_adapters.walmart_adapter import MSG_WALMART_CONNECTED
+                message = MSG_WALMART_CONNECTED
+            return Response({
+                'valid': True,
+                'message': message,
+                'connection_status': 'connected',
+            })
         store.connection_status = 'error'
         store.save(update_fields=['connection_status', 'last_validated_at'])
         message = err_msg or 'Invalid or missing credentials'
         return Response(
             {'valid': False, 'message': message, 'connection_status': 'error'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    @action(detail=True, methods=['post'])
+    def validate(self, request, pk=None):
+        """Validate store API token / connection. Persists connection_status."""
+        store = self.get_object()
+        return self._run_connection_test(store)
+
+    @action(detail=True, methods=['post'], url_path='test-connection')
+    def test_connection(self, request, pk=None):
+        """Alias for validate — Test Connection in the UI."""
+        store = self.get_object()
+        return self._run_connection_test(store)
+
+    @action(detail=False, methods=['post'], url_path='test-walmart-connection')
+    def test_walmart_connection(self, request):
+        """
+        Test Walmart credentials from JSON before saving a store (create flow).
+        Body: { "api_token": "{...}", "region": "USA" }.
+        """
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+        from stores.credentials import (
+            validate_api_token_shape,
+            verify_walmart_credentials_from_token,
+        )
+
+        api_token = (request.data.get('api_token') or '').strip()
+        if not api_token:
+            return Response(
+                {'valid': False, 'message': 'API credentials are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            mkt = type('M', (), {'code': 'walmart', 'name': 'Walmart'})()
+            normalized = validate_api_token_shape(mkt, api_token)
+        except DRFValidationError as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                msg = detail.get('api_token')
+                if isinstance(msg, list):
+                    msg = msg[0] if msg else str(detail)
+            else:
+                msg = str(detail)
+            return Response({'valid': False, 'message': str(msg)}, status=status.HTTP_400_BAD_REQUEST)
+
+        region = (request.data.get('region') or 'USA').strip() or 'USA'
+        valid, err_msg = verify_walmart_credentials_from_token(
+            normalized,
+            region=region,
+            use_sandbox=bool(request.data.get('use_sandbox')),
+        )
+        if valid:
+            from store_adapters.walmart_adapter import MSG_WALMART_CONNECTED
+            return Response({'valid': True, 'message': MSG_WALMART_CONNECTED})
+        return Response(
+            {'valid': False, 'message': err_msg or 'Invalid Walmart API credentials.'},
             status=status.HTTP_400_BAD_REQUEST,
         )

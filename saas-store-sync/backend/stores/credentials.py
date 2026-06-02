@@ -102,15 +102,42 @@ def verify_store_connection(store) -> tuple[bool, str | None]:
     try:
         adapter = get_adapter(store)
         adapter._validate_using_store_json_only = True
+        kind = marketplace_kind(marketplace)
+        if kind == 'walmart' and hasattr(adapter, 'test_walmart_connection'):
+            ok, msg, _code = adapter.test_walmart_connection()
+            return ok, None if ok else msg
         if getattr(adapter, 'validate_connection', lambda: False)():
             return True, None
-        kind = marketplace_kind(marketplace)
         if kind == 'sears':
             return False, (
                 'Sears rejected these credentials. Check seller_id, email, secret_key, and location_id.'
             )
         if kind == 'walmart':
-            return False, 'Walmart rejected these credentials. Check client_id and client_secret.'
+            from store_adapters.walmart_adapter import MSG_WALMART_INVALID_CREDS
+            return False, MSG_WALMART_INVALID_CREDS
         return False, 'Marketplace rejected these credentials.'
     except Exception as exc:
         return False, str(exc)[:500]
+
+
+def verify_walmart_credentials_from_token(
+    api_token: str,
+    *,
+    region: str = 'USA',
+    use_sandbox: bool = False,
+) -> tuple[bool, str | None]:
+    """Test Walmart JSON credentials before a store is saved (create flow)."""
+    from types import SimpleNamespace
+
+    from store_adapters.walmart_adapter import WalmartAdapter
+
+    store = SimpleNamespace(
+        api_token=api_token,
+        marketplace=SimpleNamespace(code='walmart', name='Walmart'),
+        region=region,
+        use_sandbox=use_sandbox,
+        id=None,
+    )
+    adapter = WalmartAdapter(store)
+    ok, msg, _code = adapter.test_walmart_connection()
+    return ok, None if ok else msg

@@ -3,7 +3,7 @@ import { X, Plus, Clock, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
-import { createStore, getMarketplaces, getVendors } from '../../services/storeService';
+import { createStore, getMarketplaces, getVendors, testWalmartConnection } from '../../services/storeService';
 import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
 import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
@@ -53,6 +53,9 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const [vendors, setVendors] = useState([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+    const [walmartTestLoading, setWalmartTestLoading] = useState(false);
+    const [walmartTestMessage, setWalmartTestMessage] = useState('');
+    const [walmartTestOk, setWalmartTestOk] = useState(null);
     const [selectedVendorPrice, setSelectedVendorPrice] = useState('');
     const [selectedVendorInventory, setSelectedVendorInventory] = useState('');
     const [mydealUploadOpen, setMydealUploadOpen] = useState(false);
@@ -101,8 +104,49 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             setSelectedVendorPrice('');
             setSelectedVendorInventory('');
             setError('');
+            setWalmartTestLoading(false);
+            setWalmartTestMessage('');
+            setWalmartTestOk(null);
         }
     }, [open, copyFromStore, isDuplicate, extMarketplaces.length]);
+
+    const handleTestWalmartConnection = () => {
+        const errs = [];
+        if (!form.api_token?.trim()) errs.push('Enter Walmart credentials JSON first.');
+        else {
+            try {
+                const data = JSON.parse(form.api_token.trim());
+                if (!data || typeof data !== 'object' || Array.isArray(data)) {
+                    errs.push('Credentials must be a JSON object');
+                } else {
+                    for (const k of ['client_id', 'client_secret']) {
+                        if (!String(data[k] ?? '').trim()) errs.push(`Walmart JSON must include ${k}`);
+                    }
+                }
+            } catch {
+                errs.push('Credentials must be valid JSON');
+            }
+        }
+        if (errs.length) {
+            setWalmartTestOk(false);
+            setWalmartTestMessage(errs.join('. '));
+            return;
+        }
+        setWalmartTestLoading(true);
+        setWalmartTestMessage('');
+        setWalmartTestOk(null);
+        testWalmartConnection({ api_token: form.api_token.trim(), region: form.region })
+            .then((res) => {
+                setWalmartTestOk(true);
+                setWalmartTestMessage(res.data?.message || 'Walmart account connected successfully.');
+            })
+            .catch((err) => {
+                setWalmartTestOk(false);
+                const d = err.response?.data;
+                setWalmartTestMessage(d?.message || d?.detail || 'Connection test failed.');
+            })
+            .finally(() => setWalmartTestLoading(false));
+    };
 
     const regionTimezones = TIMEZONE_OPTIONS[form.region] || TIMEZONE_OPTIONS.USA;
     const selectedMarketplace = marketplaces.find((m) => String(m.id) === String(form.marketplace_id));
@@ -628,8 +672,31 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                     <p className="text-xs text-gray-500 dark:text-gray-400">
                                                         {isSears
                                                             ? 'Required keys: seller_id, email, secret_key, location_id. Connection is verified with Sears before the store is saved.'
-                                                            : 'Required keys: client_id, client_secret. Connection is verified with Walmart before the store is saved.'}
+                                                            : 'Required keys: client_id, client_secret. Use Test Connection to verify with Walmart (GET /v3/items) before continuing.'}
                                                     </p>
+                                                )}
+                                                {isWalmart && (
+                                                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                        <Button
+                                                            type="button"
+                                                            variant="secondary"
+                                                            onClick={handleTestWalmartConnection}
+                                                            disabled={walmartTestLoading || !form.api_token?.trim()}
+                                                        >
+                                                            {walmartTestLoading ? 'Testing…' : 'Test Connection'}
+                                                        </Button>
+                                                        {walmartTestMessage && (
+                                                            <p
+                                                                className={`text-sm ${
+                                                                    walmartTestOk
+                                                                        ? 'text-emerald-600 dark:text-emerald-400'
+                                                                        : 'text-red-600 dark:text-red-400'
+                                                                }`}
+                                                            >
+                                                                {walmartTestMessage}
+                                                            </p>
+                                                        )}
+                                                    </div>
                                                 )}
                                             </div>
                                         ) : (

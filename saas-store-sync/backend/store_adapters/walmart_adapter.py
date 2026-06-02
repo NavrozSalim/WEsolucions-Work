@@ -31,6 +31,13 @@ WALMART_API_BASE = "https://marketplace.walmartapis.com"
 WALMART_SANDBOX_BASE = "https://sandbox.walmartapis.com"
 WALMART_TOKEN_PATH = "/v3/token"
 WALMART_SERVICE_NAME = "Walmart Marketplace"
+WALMART_ITEMS_PROBE_PATH = "/v3/items?limit=1"
+
+MSG_WALMART_CONNECTED = "Walmart account connected successfully."
+MSG_WALMART_INVALID_CREDS = "Invalid Walmart API credentials."
+MSG_WALMART_FORBIDDEN = (
+    "Walmart account does not have permission to access this resource."
+)
 
 
 class WalmartAPIError(Exception):
@@ -292,19 +299,73 @@ class WalmartAdapter(BaseStoreAdapter):
             },
         )
 
-    def validate_connection(self):
-        """Validate OAuth credentials via token exchange and a lightweight inventory list call."""
+    @staticmethod
+    def _connection_message_for_error(exc: WalmartAPIError) -> str:
+        code = exc.status_code
+        if code == 401:
+            return MSG_WALMART_INVALID_CREDS
+        if code == 403:
+            return MSG_WALMART_FORBIDDEN
+        if exc.response_body:
+            return str(exc.response_body)[:500]
+        return str(exc)[:500]
+
+    def test_walmart_connection(self) -> tuple[bool, str, int | None]:
+        """
+        Verify store JSON credentials against Walmart (OAuth + GET items).
+        Returns (ok, user_message, http_status).
+        """
         self._validate_using_store_json_only = True
         self._access_token = None
         self._token_expires_at = 0
+        store_id = getattr(self.store, "id", None)
+
         client_id, client_secret = self._client_credentials()
         if not client_id or not client_secret:
-            return False
+            logger.warning(
+                "Walmart connection verify store_id=%s status=missing_credentials",
+                store_id,
+            )
+            return False, MSG_WALMART_INVALID_CREDS, None
+
         try:
-            self._request("GET", "/v3/inventories?limit=1")
-            return True
-        except WalmartAPIError:
-            return False
+            self._refresh_access_token()
+        except WalmartAPIError as exc:
+            code = exc.status_code or 401
+            msg = self._connection_message_for_error(exc)
+            logger.warning(
+                "Walmart connection verify store_id=%s path=%s status=%s body=%s",
+                store_id,
+                WALMART_TOKEN_PATH,
+                code,
+                exc.response_body,
+            )
+            return False, msg, code
+
+        try:
+            self._request("GET", WALMART_ITEMS_PROBE_PATH)
+            logger.info(
+                "Walmart connection verify store_id=%s path=%s status=200",
+                store_id,
+                WALMART_ITEMS_PROBE_PATH,
+            )
+            return True, MSG_WALMART_CONNECTED, 200
+        except WalmartAPIError as exc:
+            code = exc.status_code
+            msg = self._connection_message_for_error(exc)
+            logger.warning(
+                "Walmart connection verify store_id=%s path=%s status=%s body=%s",
+                store_id,
+                WALMART_ITEMS_PROBE_PATH,
+                code,
+                exc.response_body,
+            )
+            return False, msg, code
+
+    def validate_connection(self):
+        """Boolean wrapper used by generic marketplace verify helpers."""
+        ok, _msg, _code = self.test_walmart_connection()
+        return ok
 
     def lookup_listing_by_sku(self, sku: str):
         """Verify seller SKU exists in the Walmart catalog."""
