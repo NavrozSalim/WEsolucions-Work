@@ -40,6 +40,11 @@ class ProductMapping(models.Model):
         blank=True,
         help_text='Walmart ship node / fulfillment center ID for inventory push',
     )
+    fulfillment_lag_time = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text='Walmart fulfillmentLagTime (days to ship); pushed via lagtime feed',
+    )
 
     sync_status = models.CharField(max_length=50, default='pending', db_index=True)
     failed_sync_count = models.IntegerField(default=0)
@@ -211,6 +216,7 @@ class CatalogUploadRow(models.Model):
     prep_fees_raw = models.CharField(max_length=255, default='', blank=True)
     shipping_fees_raw = models.CharField(max_length=255, default='', blank=True)
     fulfillment_center_id_raw = models.CharField(max_length=255, default='', blank=True)
+    fulfillment_lag_time_raw = models.CharField(max_length=32, default='', blank=True)
 
     # Resolved after validation
     vendor = models.ForeignKey(

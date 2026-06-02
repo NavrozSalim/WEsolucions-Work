@@ -108,7 +108,7 @@ def apply_post_scrape_marketplace_push(
 ) -> None:
     """
     After a successful vendor scrape, push to Sears or Walmart immediately so live
-    prices/inventory match catalog store_price / store_stock.
+    prices/inventory (and Walmart lag time) match catalog store_price / store_stock.
     """
     from django.utils import timezone
 

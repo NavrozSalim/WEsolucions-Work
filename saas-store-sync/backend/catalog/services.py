@@ -184,6 +184,7 @@ def build_catalog_row_instance(
     prep_fees_raw = _val(row, 'prep fees')
     shipping_fees_raw = _val(row, 'shipping fees')
     fulfillment_center_id_raw = _val(row, 'fulfillment center id')
+    fulfillment_lag_time_raw = _val(row, 'fulfillment lag time')
 
     action_norm = action_raw.lower() if action_raw else 'add'
     if action_norm not in ('add', 'update', 'delete'):
@@ -273,6 +274,19 @@ def build_catalog_row_instance(
                 f"Row {row_num}: Fulfillment Center ID required for Walmart {action_norm.title()} "
                 f"(inventory is pushed to that ship node)"
             )
+        if _normalize(fulfillment_lag_time_raw) is None:
+            return None, (
+                f"Row {row_num}: Lag Time required for Walmart {action_norm.title()} "
+                f"(days until ship; use 0 or 1 unless approved for more)"
+            )
+        try:
+            lt_val = int(str(fulfillment_lag_time_raw).strip())
+            if lt_val < 0 or lt_val > 30:
+                raise ValueError()
+        except ValueError:
+            return None, (
+                f"Row {row_num}: Lag Time must be a whole number 0–30 (typically 0 or 1)"
+            )
     elif action_norm == 'delete':
         if store_is_sears(store):
             id_val = (
@@ -319,6 +333,7 @@ def build_catalog_row_instance(
         prep_fees_raw=prep_fees_raw,
         shipping_fees_raw=shipping_fees_raw,
         fulfillment_center_id_raw=fulfillment_center_id_raw,
+        fulfillment_lag_time_raw=fulfillment_lag_time_raw,
         vendor=vendor,
         store=store,
     )

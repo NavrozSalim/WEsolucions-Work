@@ -4,6 +4,7 @@ Walmart Marketplace API (v3) adapter.
 Only ``client_id`` and ``client_secret`` are required in Store.api_token JSON.
 The adapter obtains/refreshes OAuth tokens, sets channel headers automatically,
 and picks the correct inventory API (default node or ship-node) when needed.
+Lag time (days to ship) is pushed via ``POST /v3/feeds?feedType=lagtime``.
 
 Optional overrides in api_token JSON:
   ``ship_node`` — force a fulfillment center id
@@ -302,17 +303,57 @@ class WalmartAdapter(BaseStoreAdapter):
             "Walmart create_product requires your finalized Walmart item payload/upload format."
         )
 
+    def get_lag_time(self, sku: str, *, ship_node: str | None = None) -> int | None:
+        """Return configured fulfillmentLagTime for a SKU (optional ship node)."""
+        if not sku:
+            return None
+        sku_q = quote(str(sku), safe="")
+        path = f"/v3/lagtime?sku={sku_q}"
+        node = (str(ship_node).strip() if ship_node else "") or self._configured_ship_node()
+        if node:
+            path += f"&shipNode={quote(node, safe='')}"
+        try:
+            payload = self._request("GET", path)
+        except WalmartAPIError:
+            return None
+        if isinstance(payload, dict):
+            val = payload.get("fulfillmentLagTime")
+            if val is not None:
+                return int(val)
+        return None
+
+    def update_lag_time(self, sku: str, days: int, *, ship_node: str | None = None) -> str | None:
+        """Submit lag-time feed for one SKU. Returns feedId when present."""
+        if not sku:
+            raise WalmartAPIError("Missing Walmart SKU for update_lag_time")
+        entry = {"sku": str(sku), "fulfillmentLagTime": max(0, int(days))}
+        listing_node = (str(ship_node).strip() if ship_node else "") or None
+        configured = self._configured_ship_node()
+        node = listing_node or configured
+        if node:
+            entry["shipNode"] = node
+        payload = self._request(
+            "POST",
+            "/v3/feeds?feedType=lagtime",
+            json_body={"lagTime": [entry]},
+        )
+        if isinstance(payload, dict):
+            return payload.get("feedId") or payload.get("feedID")
+        return None
+
     def update_product(self, external_id, **kwargs):
         """
         Update listing by seller SKU.
         - price: ``PUT /v3/price``
         - stock: ship-node or default inventory API
+        - lag_time: ``POST /v3/feeds?feedType=lagtime``
         """
         if not external_id:
             raise WalmartAPIError("Missing Walmart external_id/SKU for update_product")
         sku = str(external_id)
         price = kwargs.get("price")
         stock = kwargs.get("stock")
+        lag_time = kwargs.get("lag_time")
 
         if price is not None:
             amt = str(Decimal(str(price)).quantize(Decimal("0.01")))
@@ -334,6 +375,19 @@ class WalmartAdapter(BaseStoreAdapter):
             )
         if stock is not None:
             self.update_inventory(sku, stock, ship_node=kwargs.get('ship_node'))
+        if lag_time is not None:
+            feed_id = self.update_lag_time(
+                sku,
+                lag_time,
+                ship_node=kwargs.get('ship_node'),
+            )
+            if feed_id:
+                logger.info(
+                    "Walmart lag time feed submitted sku=%s days=%s feedId=%s",
+                    sku,
+                    lag_time,
+                    feed_id,
+                )
         return True
 
     def update_inventory(self, external_id, stock, *, ship_node=None):

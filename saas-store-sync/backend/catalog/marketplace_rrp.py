@@ -96,6 +96,9 @@ def adapter_push_kwargs(
         fc = (getattr(pm, 'fulfillment_center_id', None) or '').strip()
         if fc:
             kwargs['ship_node'] = fc
+        lt = getattr(pm, 'fulfillment_lag_time', None)
+        if lt is not None:
+            kwargs['lag_time'] = int(lt)
     if store_is_sears(store) and posted is not None and pm is not None:
         pct = rrp_discount_pct_for_pm(store, pm, price_by_vendor_id, price_fallback)
         rrp = compute_marketplace_rrp(posted, pct)

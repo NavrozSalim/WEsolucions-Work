@@ -87,7 +87,7 @@ export default function UpdateWithFileModal({
 
     const templateHint = (() => {
         if (isWalmart) {
-            return 'Walmart template: Vendor Name, Vendor ID, Marketplace Name, Store Name, SKU, Vendor URL, Action, Pack QTY, Prep Fees, Shipping Fees, Fulfillment Center ID.';
+            return 'Walmart template: Vendor Name, Vendor ID, Marketplace Name, Store Name, SKU, Vendor URL, Action, Pack QTY, Prep Fees, Shipping Fees, Fulfillment Center ID, Lag Time.';
         }
         if (isSears) {
             return 'Sears template: Parent/Child/Marketplace ID SKU columns, Vendor URL, and Action — price/inventory push uses Marketplace Child SKU (no Vendor SKU column).';

@@ -28,6 +28,7 @@ INTERNAL_FIELDS = [
     'prep fees',
     'shipping fees',
     'fulfillment center id',
+    'fulfillment lag time',
 ]
 
 
@@ -140,6 +141,15 @@ def build_field_indices(header: list, store: Store) -> dict[str, int | None]:
     if fc_i is not None and idx.get('fulfillment center id') is None:
         idx['fulfillment center id'] = fc_i
 
+    lt_i = col_index(header, 'fulfillment lag time')
+    if lt_i is None:
+        for alt in ('lag time', 'fulfillmentlagtime', 'lag days'):
+            lt_i = col_index(header, alt)
+            if lt_i is not None:
+                break
+    if lt_i is not None and idx.get('fulfillment lag time') is None:
+        idx['fulfillment lag time'] = lt_i
+
     return idx
 
 
@@ -171,6 +181,7 @@ def validate_marketplace_headers(indices: dict[str, int | None], store: Store) -
             ('prep fees', 'Prep Fees'),
             ('shipping fees', 'Shipping Fees'),
             ('fulfillment center id', 'Fulfillment Center ID'),
+            ('fulfillment lag time', 'Lag Time'),
         ):
             if not _req(col):
                 return f'Walmart uploads require column: {label}'
@@ -235,6 +246,7 @@ def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]
             'Prep Fees',
             'Shipping Fees',
             'Fulfillment Center ID',
+            'Lag Time',
         ]
         rows = [
             [
@@ -249,6 +261,7 @@ def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]
                 '2.50',
                 '5.00',
                 '861260459919982593',
+                '1',
             ],
             [
                 'Amazon',
@@ -262,6 +275,7 @@ def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]
                 '1.00',
                 '3.75',
                 '861260459919982593',
+                '1',
             ],
         ]
         return headers, rows
@@ -435,6 +449,7 @@ def upload_row_to_cells(
             r.prep_fees_raw or '',
             r.shipping_fees_raw or '',
             r.fulfillment_center_id_raw or '',
+            r.fulfillment_lag_time_raw or '',
         ]
     elif kind == 'sears':
         cells = [

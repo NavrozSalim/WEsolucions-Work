@@ -193,10 +193,48 @@ class WalmartAdapterAuthTests(SimpleTestCase):
 
         pm = MagicMock()
         pm.fulfillment_center_id = '861260459919982593'
+        pm.fulfillment_lag_time = 1
         pm.product_id = 1
         kwargs = adapter_push_kwargs(_store(), pm, Decimal('10.00'), 5)
         self.assertEqual(kwargs['ship_node'], '861260459919982593')
+        self.assertEqual(kwargs['lag_time'], 1)
         self.assertEqual(kwargs['stock'], 5)
+
+    @patch('store_adapters.walmart_adapter.requests.Session')
+    def test_update_product_sends_price_inventory_and_lag_time(self, session_cls):
+        session = session_cls.return_value
+        _mock_token(session)
+        session.request.return_value = MagicMock(
+            status_code=200,
+            text='{"feedId":"feed-lag-1"}',
+        )
+
+        store = _store()
+        store.api_token = _oauth_creds()
+        adapter = WalmartAdapter(store)
+        adapter.update_product(
+            'WM-004',
+            price=Decimal('19.99'),
+            stock=3,
+            lag_time=1,
+            ship_node='861260459919982593',
+        )
+
+        calls = session.request.call_args_list
+        self.assertEqual(len(calls), 3)
+        price_call = calls[0]
+        inv_call = calls[1]
+        lag_call = calls[2]
+        self.assertEqual(price_call[0][0], 'PUT')
+        self.assertTrue(price_call[0][1].endswith('/v3/price'))
+        self.assertEqual(inv_call[0][0], 'PUT')
+        self.assertIn('/v3/inventories/WM-004', inv_call[0][1])
+        self.assertEqual(lag_call[0][0], 'POST')
+        self.assertIn('feedType=lagtime', lag_call[0][1])
+        lag_body = lag_call[1]['json']
+        self.assertEqual(lag_body['lagTime'][0]['sku'], 'WM-004')
+        self.assertEqual(lag_body['lagTime'][0]['fulfillmentLagTime'], 1)
+        self.assertEqual(lag_body['lagTime'][0]['shipNode'], '861260459919982593')
 
     @patch('store_adapters.walmart_adapter.requests.Session')
     def test_update_product_sends_price_and_inventory(self, session_cls):
