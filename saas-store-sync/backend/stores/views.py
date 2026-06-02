@@ -237,9 +237,12 @@ class StoreViewSet(viewsets.ModelViewSet):
             store.connection_status = 'connected'
             store.save(update_fields=['connection_status', 'last_validated_at'])
             message = err_msg or 'Connection successful'
-            if marketplace_kind(store.marketplace) == 'walmart':
+            kind = marketplace_kind(store.marketplace)
+            if kind == 'walmart' and not err_msg:
                 from store_adapters.walmart_adapter import MSG_WALMART_CONNECTED
                 message = MSG_WALMART_CONNECTED
+            elif kind == 'sears' and err_msg:
+                message = err_msg
             return Response({
                 'valid': True,
                 'message': message,
@@ -307,5 +310,44 @@ class StoreViewSet(viewsets.ModelViewSet):
             return Response({'valid': True, 'message': MSG_WALMART_CONNECTED})
         return Response(
             {'valid': False, 'message': err_msg or 'Invalid Walmart API credentials.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    @action(detail=False, methods=['post'], url_path='test-sears-connection')
+    def test_sears_connection(self, request):
+        """
+        Test Sears credentials from JSON before saving a store (create flow).
+        Body: { "api_token": "{...}" }.
+        """
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+        from stores.credentials import (
+            validate_api_token_shape,
+            verify_sears_credentials_from_token,
+        )
+
+        api_token = (request.data.get('api_token') or '').strip()
+        if not api_token:
+            return Response(
+                {'valid': False, 'message': 'API credentials are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            mkt = type('M', (), {'code': 'sears', 'name': 'Sears'})()
+            normalized = validate_api_token_shape(mkt, api_token)
+        except DRFValidationError as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                msg = detail.get('api_token')
+                if isinstance(msg, list):
+                    msg = msg[0] if msg else str(detail)
+            else:
+                msg = str(detail)
+            return Response({'valid': False, 'message': str(msg)}, status=status.HTTP_400_BAD_REQUEST)
+
+        ok, msg = verify_sears_credentials_from_token(normalized)
+        if ok:
+            return Response({'valid': True, 'message': msg})
+        return Response(
+            {'valid': False, 'message': msg or 'Invalid Sears API credentials.'},
             status=status.HTTP_400_BAD_REQUEST,
         )

@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 from rest_framework.exceptions import ValidationError
 
-SEARS_REQUIRED_KEYS = ('seller_id', 'email', 'secret_key', 'location_id')
+SEARS_AUTH_KEYS = ('seller_id', 'email', 'secret_key')
+SEARS_REQUIRED_KEYS = SEARS_AUTH_KEYS  # location_id optional at connection time
 WALMART_REQUIRED_KEYS = ('client_id', 'client_secret')
 
 
@@ -59,13 +60,14 @@ def validate_api_token_shape(marketplace, api_token: str) -> str:
     kind = marketplace_kind(marketplace)
 
     if kind == 'sears':
-        missing = [k for k in SEARS_REQUIRED_KEYS if not str(data.get(k) or '').strip()]
+        missing = [k for k in SEARS_AUTH_KEYS if not str(data.get(k) or '').strip()]
         if missing:
             raise ValidationError({
                 'api_token': (
-                    'Sears credentials must include seller_id, email, secret_key, and location_id. '
+                    'Sears credentials must include seller_id, email, and secret_key. '
                     f'Missing: {", ".join(missing)}. '
-                    'Example: {"seller_id":"...","email":"...","secret_key":"...","location_id":"..."}'
+                    'Example: {"seller_id":"...","email":"...","secret_key":"...","location_id":"..."} '
+                    '(location_id is optional for connection but required for inventory sync).'
                 ),
             })
     elif kind == 'walmart':
@@ -106,12 +108,14 @@ def verify_store_connection(store) -> tuple[bool, str | None]:
         if kind == 'walmart' and hasattr(adapter, 'test_walmart_connection'):
             ok, msg, _code = adapter.test_walmart_connection()
             return ok, None if ok else msg
+        if kind == 'sears' and hasattr(adapter, 'test_sears_connection'):
+            ok, msg, _code, _loc = adapter.test_sears_connection()
+            return ok, msg
         if getattr(adapter, 'validate_connection', lambda: False)():
             return True, None
         if kind == 'sears':
-            return False, (
-                'Sears rejected these credentials. Check seller_id, email, secret_key, and location_id.'
-            )
+            from store_adapters.sears_adapter import MSG_SEARS_INVALID_CREDS
+            return False, MSG_SEARS_INVALID_CREDS
         if kind == 'walmart':
             from store_adapters.walmart_adapter import MSG_WALMART_INVALID_CREDS
             return False, MSG_WALMART_INVALID_CREDS
@@ -141,3 +145,19 @@ def verify_walmart_credentials_from_token(
     adapter = WalmartAdapter(store)
     ok, msg, _code = adapter.test_walmart_connection()
     return ok, None if ok else msg
+
+
+def verify_sears_credentials_from_token(api_token: str) -> tuple[bool, str | None]:
+    """Test Sears JSON credentials before a store is saved (create flow)."""
+    from types import SimpleNamespace
+
+    from store_adapters.sears_adapter import SearsAdapter
+
+    store = SimpleNamespace(
+        api_token=api_token,
+        marketplace=SimpleNamespace(code='sears', name='Sears'),
+        id=None,
+    )
+    adapter = SearsAdapter(store)
+    ok, msg, _code, _loc = adapter.test_sears_connection()
+    return ok, msg

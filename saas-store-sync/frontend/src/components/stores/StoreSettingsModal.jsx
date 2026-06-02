@@ -507,9 +507,11 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                                 onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))}
                                             />
                                             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                                                {isSears || isWalmart
-                                                    ? 'Leave empty to keep the current credentials. If you paste new JSON, it must include all required keys and will be verified with the marketplace.'
-                                                    : 'Leave empty to keep the existing token unchanged.'}
+                                                {isSears
+                                                    ? 'Leave empty to keep current credentials. Required for connection: seller_id, email, secret_key. location_id is optional for connection but required for inventory sync.'
+                                                    : isWalmart
+                                                        ? 'Leave empty to keep the current credentials. If you paste new JSON, it must include all required keys and will be verified with the marketplace.'
+                                                        : 'Leave empty to keep the existing token unchanged.'}
                                             </p>
                                         </>
                                     ) : (

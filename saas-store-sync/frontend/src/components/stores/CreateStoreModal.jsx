@@ -3,7 +3,7 @@ import { X, Plus, Clock, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
-import { createStore, getMarketplaces, getVendors, testWalmartConnection } from '../../services/storeService';
+import { createStore, getMarketplaces, getVendors, testSearsConnection, testWalmartConnection } from '../../services/storeService';
 import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
 import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
@@ -56,6 +56,9 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const [walmartTestLoading, setWalmartTestLoading] = useState(false);
     const [walmartTestMessage, setWalmartTestMessage] = useState('');
     const [walmartTestOk, setWalmartTestOk] = useState(null);
+    const [searsTestLoading, setSearsTestLoading] = useState(false);
+    const [searsTestMessage, setSearsTestMessage] = useState('');
+    const [searsTestOk, setSearsTestOk] = useState(null);
     const [selectedVendorPrice, setSelectedVendorPrice] = useState('');
     const [selectedVendorInventory, setSelectedVendorInventory] = useState('');
     const [mydealUploadOpen, setMydealUploadOpen] = useState(false);
@@ -107,8 +110,49 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             setWalmartTestLoading(false);
             setWalmartTestMessage('');
             setWalmartTestOk(null);
+            setSearsTestLoading(false);
+            setSearsTestMessage('');
+            setSearsTestOk(null);
         }
     }, [open, copyFromStore, isDuplicate, extMarketplaces.length]);
+
+    const handleTestSearsConnection = () => {
+        const errs = [];
+        if (!form.api_token?.trim()) errs.push('Enter Sears credentials JSON first.');
+        else {
+            try {
+                const data = JSON.parse(form.api_token.trim());
+                if (!data || typeof data !== 'object' || Array.isArray(data)) {
+                    errs.push('Credentials must be a JSON object');
+                } else {
+                    for (const k of ['seller_id', 'email', 'secret_key']) {
+                        if (!String(data[k] ?? '').trim()) errs.push(`Sears JSON must include ${k}`);
+                    }
+                }
+            } catch {
+                errs.push('Credentials must be valid JSON');
+            }
+        }
+        if (errs.length) {
+            setSearsTestOk(false);
+            setSearsTestMessage(errs.join('. '));
+            return;
+        }
+        setSearsTestLoading(true);
+        setSearsTestMessage('');
+        setSearsTestOk(null);
+        testSearsConnection({ api_token: form.api_token.trim() })
+            .then((res) => {
+                setSearsTestOk(true);
+                setSearsTestMessage(res.data?.message || 'Sears account connected successfully.');
+            })
+            .catch((err) => {
+                setSearsTestOk(false);
+                const d = err.response?.data;
+                setSearsTestMessage(d?.message || d?.detail || 'Connection test failed.');
+            })
+            .finally(() => setSearsTestLoading(false));
+    };
 
     const handleTestWalmartConnection = () => {
         const errs = [];
@@ -311,7 +355,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     if (!data || typeof data !== 'object' || Array.isArray(data)) {
                         errs.push('Credentials must be a JSON object');
                     } else if (isSears) {
-                        for (const k of ['seller_id', 'email', 'secret_key', 'location_id']) {
+                        for (const k of ['seller_id', 'email', 'secret_key']) {
                             if (!String(data[k] ?? '').trim()) errs.push(`Sears JSON must include ${k}`);
                         }
                     } else if (isWalmart) {
@@ -671,29 +715,34 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                 {(isSears || isWalmart) && (
                                                     <p className="text-xs text-gray-500 dark:text-gray-400">
                                                         {isSears
-                                                            ? 'Required keys: seller_id, email, secret_key, location_id. Connection is verified with Sears before the store is saved.'
+                                                            ? 'Required: seller_id, email, secret_key. Optional: location_id (needed for inventory sync). Use Test Connection before continuing.'
                                                             : 'Required keys: client_id, client_secret. Use Test Connection to verify with Walmart (GET /v3/items) before continuing.'}
                                                     </p>
                                                 )}
-                                                {isWalmart && (
+                                                {(isSears || isWalmart) && (
                                                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                                                         <Button
                                                             type="button"
                                                             variant="secondary"
-                                                            onClick={handleTestWalmartConnection}
-                                                            disabled={walmartTestLoading || !form.api_token?.trim()}
+                                                            onClick={isSears ? handleTestSearsConnection : handleTestWalmartConnection}
+                                                            disabled={
+                                                                (isSears ? searsTestLoading : walmartTestLoading)
+                                                                || !form.api_token?.trim()
+                                                            }
                                                         >
-                                                            {walmartTestLoading ? 'Testing…' : 'Test Connection'}
+                                                            {(isSears ? searsTestLoading : walmartTestLoading)
+                                                                ? 'Testing…'
+                                                                : 'Test Connection'}
                                                         </Button>
-                                                        {walmartTestMessage && (
+                                                        {(isSears ? searsTestMessage : walmartTestMessage) && (
                                                             <p
                                                                 className={`text-sm ${
-                                                                    walmartTestOk
+                                                                    (isSears ? searsTestOk : walmartTestOk)
                                                                         ? 'text-emerald-600 dark:text-emerald-400'
                                                                         : 'text-red-600 dark:text-red-400'
                                                                 }`}
                                                             >
-                                                                {walmartTestMessage}
+                                                                {isSears ? searsTestMessage : walmartTestMessage}
                                                             </p>
                                                         )}
                                                     </div>

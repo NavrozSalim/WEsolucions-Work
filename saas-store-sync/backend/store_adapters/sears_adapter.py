@@ -10,7 +10,7 @@ Expected Store.api_token format (JSON):
   "base_url": "https://seller.marketplace.sears.com/SellerPortal/api"
 }
 
-``location_id`` is required for FBM-LMP inventory (Seller Portal → Fulfillment Location).
+``location_id`` is optional for account connection verification but required for FBM-LMP inventory sync.
 
 Pricing: PUT /pricing/fbm/v6 (XML v6 — standard-price + optional sale block)
 Inventory: PUT /inventory/fbm-lmp/v7 (FBM-LMP, default) or /inventory/fbm/v7 (legacy FBM)
@@ -49,9 +49,17 @@ STORE_INVENTORY_XSD = (
 INVENTORY_PATH_LMP = "/inventory/fbm-lmp/v7"
 INVENTORY_PATH_FBM = "/inventory/fbm/v7"
 PROCESSING_REPORT_PATH = "/reports/v1/processing-report"
+SEARS_AUTH_PROBE_PATH = "/oms/purchaseorder/v19"
+SEARS_VALIDATE_PROBE_SKU = "0000000000"
 DEFAULT_SALE_DAYS = 365
 REPORT_POLL_INTERVAL_SEC = 2
 REPORT_POLL_MAX_ATTEMPTS = 15
+
+MSG_SEARS_CONNECTED = "Sears account connected successfully."
+MSG_SEARS_INVALID_CREDS = "Invalid Sears API credentials."
+MSG_SEARS_LOCATION_WARNING = (
+    "Connected, but location_id could not be verified for inventory sync."
+)
 
 logger = logging.getLogger(__name__)
 
@@ -285,8 +293,12 @@ class SearsAdapter(BaseStoreAdapter):
                 return {}
         return {}
 
+    def _has_auth_creds(self):
+        return bool(self._seller_id and self._email and self._secret_key)
+
     def _has_minimum_creds(self):
-        if not (self._seller_id and self._email and self._secret_key):
+        """Full creds for inventory push (includes location_id for FBM-LMP)."""
+        if not self._has_auth_creds():
             return False
         if self._inventory_lmp and not self._location_id:
             return False
@@ -306,6 +318,123 @@ class SearsAdapter(BaseStoreAdapter):
             'forbidden',
         )
         return any(m in lower for m in markers)
+
+    @staticmethod
+    def _location_error_in_body(body: str) -> bool:
+        if not body:
+            return False
+        lower = body.lower()
+        return any(
+            m in lower
+            for m in ('location', 'location-id', 'fulfillment location', 'invalid location')
+        )
+
+    def _log_verify(self, *, path: str, status_code, body: str | None, level: str = 'info'):
+        store_id = getattr(self.store, 'id', None)
+        snippet = (body or '')[:500]
+        log_fn = logger.warning if level == 'warning' else logger.info
+        log_fn(
+            "Sears connection verify store_id=%s path=%s status=%s body=%s",
+            store_id,
+            path,
+            status_code,
+            snippet,
+        )
+
+    def _verify_auth_credentials(self) -> tuple[bool, int | None, str]:
+        """Lightweight HMAC-authenticated GET to confirm seller credentials."""
+        path = SEARS_AUTH_PROBE_PATH
+        params = {"sellerId": self._seller_id, "status": "New"}
+        try:
+            body = self._request("GET", path, params=params)
+            if self._response_indicates_auth_failure(body):
+                self._log_verify(path=path, status_code=200, body=body, level='warning')
+                return False, 401, body
+            self._log_verify(path=path, status_code=200, body=body)
+            return True, 200, body
+        except SearsAPIError as exc:
+            code = exc.status_code or 401
+            self._log_verify(
+                path=path,
+                status_code=code,
+                body=exc.response_body,
+                level='warning',
+            )
+            return False, code, exc.response_body or ''
+
+    def _verify_location_id_optional(self) -> bool:
+        """
+        Optional probe: PUT FBM-LMP inventory feed with probe SKU.
+        Success when Sears accepts the feed (document-id), without waiting for SKU acceptance.
+        """
+        if not self._location_id:
+            return True
+        import os
+        from django.utils import timezone
+
+        probe_sku = (os.getenv("SEARS_VALIDATE_PROBE_SKU") or SEARS_VALIDATE_PROBE_SKU).strip()
+        path = INVENTORY_PATH_LMP
+        ts = timezone.now().strftime("%Y-%m-%dT%H:%M:%S")
+        xml = build_inventory_feed_xml(
+            probe_sku,
+            0,
+            lmp=True,
+            location_id=self._location_id,
+            pick_up_now_eligible=self._pick_up_now_eligible,
+            inventory_timestamp=ts,
+        )
+        try:
+            resp = self._request(
+                "PUT",
+                path,
+                params={"sellerId": self._seller_id},
+                data=xml,
+            )
+            document_id = parse_document_id(resp)
+            if document_id:
+                self._log_verify(path=path, status_code=200, body=resp)
+                return True
+            self._log_verify(path=path, status_code=200, body=resp, level='warning')
+            return False
+        except SearsAPIError as exc:
+            code = exc.status_code or 400
+            body = exc.response_body or ''
+            self._log_verify(path=path, status_code=code, body=body, level='warning')
+            if code in (401, 403) or self._location_error_in_body(body):
+                return False
+            return False
+
+    def test_sears_connection(self) -> tuple[bool, str, int | None, bool | None]:
+        """
+        Verify Sears credentials (HMAC auth) and optionally location_id.
+        Returns (ok, user_message, http_status, location_verified).
+        Never logs secret_key.
+        """
+        if not self._has_auth_creds():
+            self._log_verify(
+                path='credentials',
+                status_code=None,
+                body='missing seller_id, email, or secret_key',
+                level='warning',
+            )
+            return False, MSG_SEARS_INVALID_CREDS, None, None
+
+        auth_ok, status_code, _body = self._verify_auth_credentials()
+        if not auth_ok:
+            return False, MSG_SEARS_INVALID_CREDS, status_code, None
+
+        message = MSG_SEARS_CONNECTED
+        location_verified = None
+        if self._location_id:
+            location_verified = self._verify_location_id_optional()
+            if not location_verified:
+                message = f"{MSG_SEARS_CONNECTED} {MSG_SEARS_LOCATION_WARNING}"
+
+        return True, message, status_code, location_verified
+
+    def validate_connection(self):
+        ok, _msg, _code, _loc = self.test_sears_connection()
+        return ok
 
     def _signature(self, timestamp):
         payload = f"{self._seller_id}:{self._email}:{timestamp}".encode("utf-8")
@@ -386,21 +515,6 @@ class SearsAdapter(BaseStoreAdapter):
             )
         self._wait_for_processing_report(document_id)
         return document_id
-
-    def validate_connection(self):
-        if not self._has_minimum_creds():
-            return False
-        try:
-            body = self._request(
-                "GET",
-                "/oms/purchaseorder/v19",
-                params={"sellerId": self._seller_id, "status": "New"},
-            )
-            if self._response_indicates_auth_failure(body):
-                return False
-            return True
-        except SearsAPIError:
-            return False
 
     def lookup_listing_by_sku(self, sku: str):
         """Child SKU is the Sears ``item-id`` for price/inventory feeds."""

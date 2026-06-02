@@ -9,7 +9,13 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase
 from rest_framework.exceptions import ValidationError
 
-from store_adapters.sears_adapter import SearsAdapter
+from store_adapters.sears_adapter import (
+    MSG_SEARS_CONNECTED,
+    MSG_SEARS_INVALID_CREDS,
+    SEARS_AUTH_PROBE_PATH,
+    SearsAdapter,
+    SearsAPIError,
+)
 from store_adapters.walmart_adapter import (
     MSG_WALMART_CONNECTED,
     MSG_WALMART_FORBIDDEN,
@@ -43,11 +49,12 @@ class CredentialShapeTests(SimpleTestCase):
             validate_api_token_shape(_mkt('sears'), raw)
         self.assertIn('secret_key', str(ctx.exception.detail))
 
-    def test_sears_missing_location_id(self):
+    def test_sears_missing_location_id_allowed(self):
         raw = json.dumps({'seller_id': '1', 'email': 'a@b.com', 'secret_key': 'key'})
-        with self.assertRaises(ValidationError) as ctx:
-            validate_api_token_shape(_mkt('sears'), raw)
-        self.assertIn('location_id', str(ctx.exception.detail))
+        out = validate_api_token_shape(_mkt('sears'), raw)
+        data = json.loads(out)
+        self.assertEqual(data['secret_key'], 'key')
+        self.assertNotIn('location_id', data)
 
     def test_sears_valid_normalizes_json(self):
         raw = json.dumps({
@@ -105,7 +112,9 @@ class VerifyConnectionTests(SimpleTestCase):
 
 
 class SearsValidateConnectionTests(SimpleTestCase):
-    def test_validate_connection_requires_location_id_for_lmp(self):
+    @patch('store_adapters.sears_adapter.SearsAdapter._request')
+    def test_test_sears_connection_auth_without_location_id(self, mock_request):
+        mock_request.return_value = '<orders></orders>'
         store = SimpleNamespace(
             api_token=json.dumps({
                 'seller_id': '1',
@@ -113,9 +122,73 @@ class SearsValidateConnectionTests(SimpleTestCase):
                 'secret_key': 'key',
             }),
             marketplace=_mkt('sears'),
+            id=None,
         )
         adapter = SearsAdapter(store)
-        self.assertFalse(adapter.validate_connection())
+        ok, msg, code, loc = adapter.test_sears_connection()
+        self.assertTrue(ok)
+        self.assertEqual(msg, MSG_SEARS_CONNECTED)
+        self.assertEqual(code, 200)
+        self.assertIsNone(loc)
+        mock_request.assert_called_once()
+        args, kwargs = mock_request.call_args
+        self.assertEqual(args[0], 'GET')
+        self.assertEqual(args[1], SEARS_AUTH_PROBE_PATH)
+
+    @patch('store_adapters.sears_adapter.SearsAdapter._request')
+    def test_test_sears_connection_invalid_creds(self, mock_request):
+        mock_request.side_effect = SearsAPIError(
+            'Sears API GET: 401',
+            status_code=401,
+            response_body='Unauthorized',
+        )
+        store = SimpleNamespace(
+            api_token=json.dumps({
+                'seller_id': '1',
+                'email': 'a@b.com',
+                'secret_key': 'bad',
+            }),
+            marketplace=_mkt('sears'),
+            id=None,
+        )
+        adapter = SearsAdapter(store)
+        ok, msg, code, loc = adapter.test_sears_connection()
+        self.assertFalse(ok)
+        self.assertEqual(msg, MSG_SEARS_INVALID_CREDS)
+        self.assertEqual(code, 401)
+
+    @patch('store_adapters.sears_adapter.SearsAdapter._verify_location_id_optional')
+    @patch('store_adapters.sears_adapter.SearsAdapter._request')
+    def test_test_sears_connection_location_warning(self, mock_request, mock_loc):
+        mock_request.return_value = '<orders></orders>'
+        mock_loc.return_value = False
+        store = SimpleNamespace(
+            api_token=json.dumps({
+                'seller_id': '1',
+                'email': 'a@b.com',
+                'secret_key': 'key',
+                'location_id': '999',
+            }),
+            marketplace=_mkt('sears'),
+            id=None,
+        )
+        adapter = SearsAdapter(store)
+        ok, msg, code, loc = adapter.test_sears_connection()
+        self.assertTrue(ok)
+        self.assertIn(MSG_SEARS_CONNECTED, msg)
+        self.assertIn('location_id', msg)
+        self.assertFalse(loc)
+
+    @patch('store_adapters.sears_adapter.SearsAdapter.test_sears_connection')
+    def test_verify_sears_success(self, mock_test):
+        mock_test.return_value = (True, MSG_SEARS_CONNECTED, 200, None)
+        store = SimpleNamespace(
+            api_token=json.dumps({'seller_id': '1', 'email': 'a@b.com', 'secret_key': 'k'}),
+            marketplace=_mkt('sears'),
+        )
+        ok, msg = verify_store_connection(store)
+        self.assertTrue(ok)
+        self.assertEqual(msg, MSG_SEARS_CONNECTED)
 
 
 class WalmartStoreOnlyCredentialTests(SimpleTestCase):
