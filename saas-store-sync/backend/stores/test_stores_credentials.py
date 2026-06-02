@@ -27,16 +27,23 @@ class CredentialShapeTests(SimpleTestCase):
         self.assertFalse(requires_structured_credentials(_mkt('reverb')))
 
     def test_sears_missing_secret_key(self):
-        raw = json.dumps({'seller_id': '1', 'email': 'a@b.com'})
+        raw = json.dumps({'seller_id': '1', 'email': 'a@b.com', 'location_id': '931015916'})
         with self.assertRaises(ValidationError) as ctx:
             validate_api_token_shape(_mkt('sears'), raw)
         self.assertIn('secret_key', str(ctx.exception.detail))
+
+    def test_sears_missing_location_id(self):
+        raw = json.dumps({'seller_id': '1', 'email': 'a@b.com', 'secret_key': 'key'})
+        with self.assertRaises(ValidationError) as ctx:
+            validate_api_token_shape(_mkt('sears'), raw)
+        self.assertIn('location_id', str(ctx.exception.detail))
 
     def test_sears_valid_normalizes_json(self):
         raw = json.dumps({
             'seller_id': '10673110',
             'email': 'seller@example.com',
             'secret_key': 'abc123',
+            'location_id': '931015916',
         })
         out = validate_api_token_shape(_mkt('sears'), raw)
         data = json.loads(out)

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from rest_framework.exceptions import ValidationError
 
-SEARS_REQUIRED_KEYS = ('seller_id', 'email', 'secret_key')
+SEARS_REQUIRED_KEYS = ('seller_id', 'email', 'secret_key', 'location_id')
 WALMART_REQUIRED_KEYS = ('client_id', 'client_secret')
 
 
@@ -63,9 +63,9 @@ def validate_api_token_shape(marketplace, api_token: str) -> str:
         if missing:
             raise ValidationError({
                 'api_token': (
-                    'Sears credentials must include seller_id, email, and secret_key. '
+                    'Sears credentials must include seller_id, email, secret_key, and location_id. '
                     f'Missing: {", ".join(missing)}. '
-                    'Example: {"seller_id":"...","email":"...","secret_key":"..."}'
+                    'Example: {"seller_id":"...","email":"...","secret_key":"...","location_id":"..."}'
                 ),
             })
     elif kind == 'walmart':
@@ -105,7 +105,9 @@ def verify_store_connection(store) -> tuple[bool, str | None]:
             return True, None
         kind = marketplace_kind(marketplace)
         if kind == 'sears':
-            return False, 'Sears rejected these credentials. Check seller_id, email, and secret_key.'
+            return False, (
+                'Sears rejected these credentials. Check seller_id, email, secret_key, and location_id.'
+            )
         if kind == 'walmart':
             return False, 'Walmart rejected these credentials. Check client_id and client_secret.'
         return False, 'Marketplace rejected these credentials.'

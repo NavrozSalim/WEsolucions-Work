@@ -287,7 +287,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
             ? 'Walmart credentials (JSON)'
             : 'API Token / Credentials JSON';
     const credentialsPlaceholder = isSears
-        ? '{"seller_id":"...","email":"...","secret_key":"..."}'
+        ? '{"seller_id":"...","email":"...","secret_key":"...","location_id":"..."}'
         : isWalmart
             ? '{"client_id":"...","client_secret":"..."}'
             : 'Leave blank to keep current token';

@@ -117,7 +117,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             ? 'Walmart credentials (JSON)'
             : 'API Key / Credentials JSON';
     const credentialsPlaceholder = isSears
-        ? '{"seller_id":"...","email":"...","secret_key":"..."}'
+        ? '{"seller_id":"...","email":"...","secret_key":"...","location_id":"..."}'
         : isWalmart
             ? '{"client_id":"...","client_secret":"..."}'
             : 'Enter marketplace API key or JSON credentials';
@@ -267,7 +267,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     if (!data || typeof data !== 'object' || Array.isArray(data)) {
                         errs.push('Credentials must be a JSON object');
                     } else if (isSears) {
-                        for (const k of ['seller_id', 'email', 'secret_key']) {
+                        for (const k of ['seller_id', 'email', 'secret_key', 'location_id']) {
                             if (!String(data[k] ?? '').trim()) errs.push(`Sears JSON must include ${k}`);
                         }
                     } else if (isWalmart) {
@@ -627,7 +627,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                 {(isSears || isWalmart) && (
                                                     <p className="text-xs text-gray-500 dark:text-gray-400">
                                                         {isSears
-                                                            ? 'Required keys: seller_id, email, secret_key. Connection is verified with Sears before the store is saved.'
+                                                            ? 'Required keys: seller_id, email, secret_key, location_id. Connection is verified with Sears before the store is saved.'
                                                             : 'Required keys: client_id, client_secret. Connection is verified with Walmart before the store is saved.'}
                                                     </p>
                                                 )}
