@@ -137,8 +137,15 @@ class StoreSerializer(serializers.ModelSerializer):
                 validated_data['marketplace'] = mkt
             except Marketplace.DoesNotExist:
                 pass
+        from stores.credentials import (
+            requires_structured_credentials,
+            validate_api_token_shape,
+            verify_store_connection,
+        )
+
         is_kogan = bool(mkt and (str(mkt.code or '').strip().lower() == 'kogan' or str(mkt.name or '').strip().lower() == 'kogan'))
         is_mydeal = bool(mkt and (str(mkt.code or '').strip().lower() == 'mydeal' or str(mkt.name or '').strip().lower() == 'mydeal'))
+        is_structured = bool(mkt and requires_structured_credentials(mkt))
         if is_mydeal:
             method = (req.get('mydeal_setup_method') or 'upload').strip()
             if method not in ('upload', 'api'):
@@ -160,8 +167,11 @@ class StoreSerializer(serializers.ModelSerializer):
         elif is_mydeal:
             pass
         else:
-            if not (req.get('api_token') or '').strip():
+            token_raw = (req.get('api_token') or '').strip()
+            if not token_raw:
                 raise ValidationError({'api_token': 'API key is required.'})
+            if is_structured:
+                validated_data['api_token'] = validate_api_token_shape(mkt, token_raw)
         sched_raw = req.get('sync_schedule')
         if not sched_raw or not isinstance(sched_raw, dict) or not sched_raw.get('enabled', False):
             raise ValidationError({'sync_schedule': 'Scheduled updates are required. Choose frequency and time.'})
@@ -207,6 +217,15 @@ class StoreSerializer(serializers.ModelSerializer):
         self._save_vendor_price_settings(store, price_settings_data, Vendor)
         self._save_vendor_inventory_settings(store, inventory_settings_data, Vendor)
         self._save_sync_schedule(store, req.get('sync_schedule'), SyncSchedule)
+
+        if is_structured:
+            ok, err_msg = verify_store_connection(store)
+            if not ok:
+                store.delete()
+                raise ValidationError({
+                    'api_token': err_msg or 'Marketplace rejected these credentials.',
+                })
+
         return store
 
     def update(self, instance, validated_data):
@@ -240,9 +259,13 @@ class StoreSerializer(serializers.ModelSerializer):
                 instance.marketplace = mkt
             except Marketplace.DoesNotExist:
                 pass
+        from stores.credentials import requires_structured_credentials, validate_api_token_shape, verify_store_connection
+
         mkt_now = instance.marketplace
         is_kogan = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'kogan' or str(mkt_now.name or '').strip().lower() == 'kogan'))
         is_mydeal = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'mydeal' or str(mkt_now.name or '').strip().lower() == 'mydeal'))
+        is_structured = bool(mkt_now and requires_structured_credentials(mkt_now))
+        token_in_request = 'api_token' in validated_data or bool((req.get('api_token') or '').strip())
         if is_mydeal and 'mydeal_setup_method' in req:
             method = (req.get('mydeal_setup_method') or '').strip()
             if method and method not in ('upload', 'api'):
@@ -256,6 +279,12 @@ class StoreSerializer(serializers.ModelSerializer):
                 raise ValidationError({'kogan_sheet_id': 'Spreadsheet ID is required for Kogan.'})
             if 'kogan_tab_name' in req and not (req.get('kogan_tab_name') or '').strip():
                 raise ValidationError({'kogan_tab_name': 'Tab name is required for Kogan.'})
+        if is_structured and token_in_request:
+            token_raw = (validated_data.get('api_token') or req.get('api_token') or '').strip()
+            if token_raw:
+                normalized = validate_api_token_shape(mkt_now, token_raw)
+                instance.api_token = normalized
+                validated_data['api_token'] = normalized
         if instance.name:
             instance.name = instance.name.strip()
         if Store.objects.filter(
@@ -297,6 +326,14 @@ class StoreSerializer(serializers.ModelSerializer):
             self._save_vendor_inventory_settings(instance, req['vendor_inventory_settings'], Vendor)
         if 'sync_schedule' in req:
             self._save_sync_schedule(instance, req['sync_schedule'], SyncSchedule)
+
+        if is_structured and token_in_request:
+            ok, err_msg = verify_store_connection(instance)
+            if not ok:
+                raise ValidationError({
+                    'api_token': err_msg or 'Marketplace rejected these credentials.',
+                })
+
         return instance
 
     @staticmethod

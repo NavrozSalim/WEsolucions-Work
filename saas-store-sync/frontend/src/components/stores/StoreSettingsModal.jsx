@@ -279,7 +279,18 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const isKogan = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'kogan';
     const isMydeal = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'mydeal';
     const isSears = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'sears';
+    const isWalmart = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'walmart';
     const showRrpDiscount = isMydeal || isSears;
+    const credentialsLabel = isSears
+        ? 'Sears credentials (JSON)'
+        : isWalmart
+            ? 'Walmart credentials (JSON)'
+            : 'API Token / Credentials JSON';
+    const credentialsPlaceholder = isSears
+        ? '{"seller_id":"...","email":"...","secret_key":"..."}'
+        : isWalmart
+            ? '{"client_id":"...","client_secret":"..."}'
+            : 'Leave blank to keep current token';
     const mydealSetup = (form.mydeal_setup_method || 'upload') === 'api' ? 'api' : 'upload';
     const koganAuth = (form.kogan_auth_method || 'json') === 'token' ? 'token' : 'json';
 
@@ -488,8 +499,18 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                         />
                                     ) : !isKogan ? (
                                         <>
-                                            <Input label="API Token / Credentials JSON" type="password" placeholder="Leave blank to keep current token" value={form.api_token} onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))} />
-                                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Leave empty to keep the existing token unchanged. Sears/Walmart can use JSON credentials.</p>
+                                            <Input
+                                                label={credentialsLabel}
+                                                type="password"
+                                                placeholder={credentialsPlaceholder}
+                                                value={form.api_token}
+                                                onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))}
+                                            />
+                                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                                                {isSears || isWalmart
+                                                    ? 'Leave empty to keep the current credentials. If you paste new JSON, it must include all required keys and will be verified with the marketplace.'
+                                                    : 'Leave empty to keep the existing token unchanged.'}
+                                            </p>
                                         </>
                                     ) : (
                                         <div className="space-y-3">

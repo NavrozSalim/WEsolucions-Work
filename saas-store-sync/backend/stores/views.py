@@ -94,18 +94,10 @@ class StoreViewSet(viewsets.ModelViewSet):
         need a separate manual "Connect" click for supported marketplaces.
         """
         from django.utils import timezone as tz
-        from store_adapters import get_adapter
+        from stores.credentials import verify_store_connection
 
-        try:
-            adapter = get_adapter(store)
-            valid = getattr(
-                adapter,
-                'validate_connection',
-                lambda: bool(store.api_token and len(str(store.api_token or '')) > 10),
-            )()
-            store.connection_status = 'connected' if valid else 'error'
-        except Exception:
-            store.connection_status = 'error'
+        valid, _msg = verify_store_connection(store)
+        store.connection_status = 'connected' if valid else 'error'
         store.last_validated_at = tz.now()
         store.save(update_fields=['connection_status', 'last_validated_at'])
 
@@ -239,22 +231,19 @@ class StoreViewSet(viewsets.ModelViewSet):
     def validate(self, request, pk=None):
         """Validate store API token / connection. Persists connection_status."""
         store = self.get_object()
-        try:
-            from store_adapters import get_adapter
-            from django.utils import timezone as tz
-            adapter = get_adapter(store)
-            valid = getattr(adapter, 'validate_connection', lambda: bool(store.api_token and len(str(store.api_token or '')) > 10))()
-            store.last_validated_at = tz.now()
-            if valid:
-                store.connection_status = 'connected'
-                store.save(update_fields=['connection_status', 'last_validated_at'])
-                return Response({'valid': True, 'message': 'Connection successful', 'connection_status': 'connected'})
-            store.connection_status = 'error'
+        from django.utils import timezone as tz
+        from stores.credentials import verify_store_connection
+
+        valid, err_msg = verify_store_connection(store)
+        store.last_validated_at = tz.now()
+        if valid:
+            store.connection_status = 'connected'
             store.save(update_fields=['connection_status', 'last_validated_at'])
-            return Response({'valid': False, 'message': 'Invalid or missing token', 'connection_status': 'error'}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            from django.utils import timezone as tz
-            store.connection_status = 'error'
-            store.last_validated_at = tz.now()
-            store.save(update_fields=['connection_status', 'last_validated_at'])
-            return Response({'valid': False, 'message': str(e), 'connection_status': 'error'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'valid': True, 'message': 'Connection successful', 'connection_status': 'connected'})
+        store.connection_status = 'error'
+        store.save(update_fields=['connection_status', 'last_validated_at'])
+        message = err_msg or 'Invalid or missing credentials'
+        return Response(
+            {'valid': False, 'message': message, 'connection_status': 'error'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )

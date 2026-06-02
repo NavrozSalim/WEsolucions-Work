@@ -109,7 +109,18 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const isKogan = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'kogan';
     const isMydeal = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'mydeal';
     const isSears = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'sears';
+    const isWalmart = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'walmart';
     const showRrpDiscount = isMydeal || isSears;
+    const credentialsLabel = isSears
+        ? 'Sears credentials (JSON)'
+        : isWalmart
+            ? 'Walmart credentials (JSON)'
+            : 'API Key / Credentials JSON';
+    const credentialsPlaceholder = isSears
+        ? '{"seller_id":"...","email":"...","secret_key":"..."}'
+        : isWalmart
+            ? '{"client_id":"...","client_secret":"..."}'
+            : 'Enter marketplace API key or JSON credentials';
     const mydealSetup = (form.mydeal_setup_method || 'upload') === 'api' ? 'api' : 'upload';
     const koganAuth = (form.kogan_auth_method || 'json') === 'token' ? 'token' : 'json';
 
@@ -250,6 +261,24 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             if (mydealSetup === 'api') errs.push('Mydeal API connection is not available yet. Use Upload Option.');
         } else {
             if (!form.api_token?.trim()) errs.push('API key is required');
+            else if (isSears || isWalmart) {
+                try {
+                    const data = JSON.parse(form.api_token.trim());
+                    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+                        errs.push('Credentials must be a JSON object');
+                    } else if (isSears) {
+                        for (const k of ['seller_id', 'email', 'secret_key']) {
+                            if (!String(data[k] ?? '').trim()) errs.push(`Sears JSON must include ${k}`);
+                        }
+                    } else if (isWalmart) {
+                        for (const k of ['client_id', 'client_secret']) {
+                            if (!String(data[k] ?? '').trim()) errs.push(`Walmart JSON must include ${k}`);
+                        }
+                    }
+                } catch {
+                    errs.push('Credentials must be valid JSON');
+                }
+            }
         }
         return errs;
     };
@@ -586,14 +615,23 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                 onOpenUpload={() => setMydealUploadOpen(true)}
                                             />
                                         ) : !isKogan ? (
-                                            <Input
-                                                label="API Key / Credentials JSON"
-                                                type="password"
-                                                placeholder="Enter marketplace API key or JSON credentials"
-                                                value={form.api_token}
-                                                onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))}
-                                                required
-                                            />
+                                            <div className="space-y-2">
+                                                <Input
+                                                    label={credentialsLabel}
+                                                    type="password"
+                                                    placeholder={credentialsPlaceholder}
+                                                    value={form.api_token}
+                                                    onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))}
+                                                    required
+                                                />
+                                                {(isSears || isWalmart) && (
+                                                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                                                        {isSears
+                                                            ? 'Required keys: seller_id, email, secret_key. Connection is verified with Sears before the store is saved.'
+                                                            : 'Required keys: client_id, client_secret. Connection is verified with Walmart before the store is saved.'}
+                                                    </p>
+                                                )}
+                                            </div>
                                         ) : (
                                             <div className="space-y-3">
                                                 <Select

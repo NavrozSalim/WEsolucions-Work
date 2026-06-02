@@ -276,15 +276,14 @@ class WalmartAdapter(BaseStoreAdapter):
         )
 
     def validate_connection(self):
-        """Validate OAuth credentials via a lightweight inventory list call."""
+        """Validate OAuth credentials via token exchange and a lightweight inventory list call."""
+        client_id, client_secret = self._client_credentials()
+        if not client_id or not client_secret:
+            return False
         try:
             self._request("GET", "/v3/inventories?limit=1")
             return True
         except WalmartAPIError:
-            client_id, client_secret = self._client_credentials()
-            if not client_id or not client_secret:
-                token = (self._access_token or "").strip()
-                return len(token) > 20
             return False
 
     def lookup_listing_by_sku(self, sku: str):
