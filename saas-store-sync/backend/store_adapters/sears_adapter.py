@@ -51,7 +51,7 @@ INVENTORY_PATH_FBM = "/inventory/fbm/v7"
 PROCESSING_REPORT_PATH = "/reports/v1/processing-report"
 SEARS_AUTH_PROBE_PATH = "/oms/purchaseorder/v19"
 SEARS_VALIDATE_PROBE_SKU = "0000000000"
-DEFAULT_SALE_DAYS = 365
+DEFAULT_SALE_END_DATE = date(2035, 1, 1)
 REPORT_POLL_INTERVAL_SEC = 2
 REPORT_POLL_MAX_ATTEMPTS = 15
 
@@ -146,8 +146,8 @@ def build_pricing_feed_xml(
         sale_dec = Decimal(_format_amount(sale_price))
         use_sale = sale_dec < posted
     if use_sale:
-        start = sale_start_date or date.today()
-        end = sale_end_date or (start + timedelta(days=DEFAULT_SALE_DAYS))
+        start = sale_start_date or (date.today() - timedelta(days=1))
+        end = sale_end_date or DEFAULT_SALE_END_DATE
         parts.extend([
             '      <sale>',
             f'        <sale-price>{_format_amount(sale_price)}</sale-price>',

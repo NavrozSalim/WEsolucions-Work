@@ -1,7 +1,7 @@
 """Tests for Sears pricing/inventory XML and marketplace push helpers."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -116,7 +116,18 @@ class SearsXmlTests(SimpleTestCase):
         self.assertIn('<standard-price>100.00</standard-price>', xml)
         self.assertIn('<sale-price>74.00</sale-price>', xml)
         self.assertIn('<sale-start-date>2026-01-01</sale-start-date>', xml)
+        self.assertIn('<sale-end-date>2027-01-01</sale-end-date>', xml)
         self.assertIn('pricing-feed xmlns="http://seller.marketplace.sears.com/pricing/v6"', xml)
+
+    def test_pricing_xml_default_sale_dates_yesterday_and_2035(self):
+        expected_start = (date.today() - timedelta(days=1)).isoformat()
+        xml = build_pricing_feed_xml(
+            'CHILD-1',
+            standard_price='100.00',
+            sale_price='74.00',
+        )
+        self.assertIn(f'<sale-start-date>{expected_start}</sale-start-date>', xml)
+        self.assertIn('<sale-end-date>2035-01-01</sale-end-date>', xml)
 
     def test_pricing_xml_standard_only_when_no_sale(self):
         xml = build_pricing_feed_xml('CHILD-2', standard_price='49.99')
