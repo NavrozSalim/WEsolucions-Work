@@ -333,6 +333,8 @@ def _resolve_heb_url_for_row(
 
 def _get_or_create_product(vendor: Vendor, row: CatalogUploadRow, *, store) -> Product:
     """Get or create Product from row."""
+    from catalog.vendor_url_resolve import resolve_vendor_url_for_row, sync_product_vendor_url_from_row
+
     vendor_code = (vendor.code or "").strip().lower()
     if vendor_code in ("costcoau", "costco_au", "costco-au"):
         vsku = (
@@ -369,7 +371,7 @@ def _get_or_create_product(vendor: Vendor, row: CatalogUploadRow, *, store) -> P
             or _normalize(row.marketplace_parent_sku_raw)
         )
     vid = _normalize(row.variation_id_raw) or ''
-    url = _normalize(row.vendor_url_raw) or _resolve_heb_url_for_row(vendor, row, vendor_sku=vsku)
+    url = resolve_vendor_url_for_row(vendor, row, vendor_sku=vsku)
     product, created = Product.objects.get_or_create(
         vendor=vendor,
         vendor_sku=vsku,
@@ -377,14 +379,14 @@ def _get_or_create_product(vendor: Vendor, row: CatalogUploadRow, *, store) -> P
         owner_id=store.user_id,
         defaults={'vendor_url': url or None},
     )
-    if url and (not product.vendor_url or product.vendor_url != url):
-        product.vendor_url = url
-        product.save(update_fields=['vendor_url'])
+    sync_product_vendor_url_from_row(product, vendor, row)
     return product
 
 
 def _update_product_mapping(pm: ProductMapping, row: CatalogUploadRow) -> None:
     """Update ProductMapping fields from row."""
+    from catalog.vendor_url_resolve import sync_product_vendor_url_from_row
+
     updates = {}
     mp_sku = _normalize(row.marketplace_parent_sku_raw)
     mc_sku = _normalize(row.marketplace_child_sku_raw)
@@ -407,12 +409,8 @@ def _update_product_mapping(pm: ProductMapping, row: CatalogUploadRow) -> None:
             updates['fulfillment_lag_time'] = int(lt_raw)
         except ValueError:
             pass
-    url = _normalize(row.vendor_url_raw)
-    if not url and pm.product and pm.product.vendor:
-        url = _resolve_heb_url_for_row(pm.product.vendor, row, pm.product)
-    if url and pm.product:
-        pm.product.vendor_url = url
-        pm.product.save(update_fields=['vendor_url'])
+    if pm.product and pm.product.vendor:
+        sync_product_vendor_url_from_row(pm.product, pm.product.vendor, row)
     if updates:
         for k, v in updates.items():
             setattr(pm, k, v)
@@ -610,10 +608,10 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
                             if created
                             else CatalogUploadRow.SyncStatus.UPDATED
                         )
+                        _update_product_mapping(pm, row)
                         if created:
                             added += 1
                         else:
-                            _update_product_mapping(pm, row)
                             updated += 1
                     else:  # update
                         pm = _find_product_mapping(row, store, vendor_index=vendor_index)

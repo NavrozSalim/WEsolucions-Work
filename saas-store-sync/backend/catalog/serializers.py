@@ -60,12 +60,40 @@ class ProductMappingSerializer(serializers.ModelSerializer):
         try:
             if not obj.product:
                 return None
+            from catalog.vendor_url_resolve import (
+                is_costco_vendor_code,
+                is_heb_vendor_code,
+                latest_upload_vendor_url_for_mapping,
+                resolve_costco_product_url,
+                resolve_heb_product_url,
+            )
+
+            vendor = getattr(obj.product, 'vendor', None)
+            vcode = (getattr(vendor, 'code', '') or '').strip().lower()
+            upload_url = latest_upload_vendor_url_for_mapping(obj)
+            if is_costco_vendor_code(vcode):
+                url = resolve_costco_product_url(
+                    obj.product,
+                    vendor_url_raw=upload_url,
+                )
+                if url:
+                    return url
+            elif is_heb_vendor_code(vcode):
+                url = resolve_heb_product_url(
+                    obj.product,
+                    vendor_url_raw=upload_url,
+                    store=obj.store,
+                )
+                if url:
+                    return url
             u = obj.product.vendor_url
             if u:
                 return u
-            from catalog.vendor_url_resolve import resolve_heb_product_url
-
-            return resolve_heb_product_url(obj.product, store=obj.store)
+            if is_heb_vendor_code(vcode):
+                return resolve_heb_product_url(obj.product, store=obj.store)
+            if is_costco_vendor_code(vcode):
+                return resolve_costco_product_url(obj.product)
+            return None
         except Exception:
             return None
 

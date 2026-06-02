@@ -42,3 +42,19 @@ class VendorScrapeUrlTests(SimpleTestCase):
         st.region = 'USA'
         url = resolve_vendor_scrape_url(p, st, row)
         self.assertIn('amazon.com/dp/B0ABC1234', url)
+
+    def test_costco_scrape_url_prefers_upload_vendor_url(self):
+        full_url = 'https://www.costco.com.au/p/TFCO-173734-New/product-slug'
+        row = MagicMock()
+        row.vendor_url_raw = full_url
+        row.vendor_id_raw = '173734'
+        v = MagicMock()
+        v.code = 'costcoau'
+        p = MagicMock()
+        p.vendor = v
+        p.vendor_url = ''
+        p.vendor_sku = 'TFCO-173734-New'
+        st = MagicMock()
+        st.region = 'AU'
+        url = resolve_vendor_scrape_url(p, st, row)
+        self.assertEqual(url, full_url)
