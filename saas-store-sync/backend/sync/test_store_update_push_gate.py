@@ -113,8 +113,9 @@ class RunStoreUpdatePushGateTests(SimpleTestCase):
                 'sync.tasks._reset_active_listings_pending_for_store_update',
                 return_value={'rows_updated': 1},
             ),
+            patch('sync.tasks._scheduled_ingest_refresh', return_value={}),
+            patch('catalog.tasks._ingest_only_vendor_ids', return_value=[]),
             patch('sync.tasks._store_can_push_to_marketplace', return_value=False),
-
             patch('sync.tasks.get_price_and_stock', return_value={'price': 10.0, 'stock': 5}),
 
             patch('sync.tasks._is_ingest_only_product', return_value=False),
@@ -220,6 +221,8 @@ class RunStoreUpdatePendingResetTests(SimpleTestCase):
                 'sync.tasks._reset_active_listings_pending_for_store_update',
                 return_value={'rows_updated': 42},
             ) as mock_reset,
+            patch('sync.tasks._scheduled_ingest_refresh', return_value={}),
+            patch('catalog.tasks._ingest_only_vendor_ids', return_value=[]),
             patch('sync.tasks._store_can_push_to_marketplace', return_value=True),
             patch('sync.tasks.get_price_and_stock', return_value={'price': 10.0, 'stock': 5}),
             patch('sync.tasks._is_ingest_only_product', return_value=False),
@@ -249,8 +252,12 @@ class RunStoreUpdatePendingResetTests(SimpleTestCase):
             result = fn('store-uuid', 'beat')
 
         mock_reset.assert_called_once_with(store)
-        filter_kwargs = mock_pm_objects.filter.call_args_list[-1].kwargs
-        self.assertEqual(filter_kwargs.get('sync_status'), 'pending')
+        pending_filters = [
+            c.kwargs
+            for c in mock_pm_objects.filter.call_args_list
+            if c.kwargs.get('sync_status') == 'pending'
+        ]
+        self.assertTrue(pending_filters)
         self.assertEqual(result['pending_reset_rows'], 42)
         self.assertEqual(result['scraped'], 1)
         adapter.update_product.assert_called_once()
@@ -287,6 +294,11 @@ class RunStoreUpdateScrapeWhenDisconnectedTests(SimpleTestCase):
                 'sync.tasks._reset_active_listings_pending_for_store_update',
                 return_value={'rows_updated': 5},
             ) as mock_reset,
+            patch(
+                'sync.tasks._scheduled_ingest_refresh',
+                return_value={'vevor': {'updated': 5, 'listing_count': 5}},
+            ),
+            patch('catalog.tasks._ingest_only_vendor_ids', return_value=[]),
             patch('sync.tasks._store_can_push_to_marketplace', return_value=False),
             patch('sync.tasks.get_price_and_stock', return_value={'price': 10.0, 'stock': 5}),
             patch('sync.tasks._is_ingest_only_product', return_value=False),
@@ -317,9 +329,30 @@ class RunStoreUpdateScrapeWhenDisconnectedTests(SimpleTestCase):
         self.assertNotIn('skipped', result)
         mock_reset.assert_called_once_with(store)
         self.assertFalse(result['marketplace_push_enabled'])
-        self.assertEqual(result['scraped'], 1)
+        self.assertEqual(result['scraped'], 6)
         self.assertEqual(result['pushed'], 0)
         self.assertEqual(result['push_blocked_not_connected'], 1)
         adapter.update_product.assert_not_called()
+
+
+class ScheduledIngestRefreshTests(SimpleTestCase):
+    @patch('sync.tasks._store_has_pending_vevor_listings', return_value=True)
+    @patch('catalog.tasks.run_vevor_au_ingest', return_value={'updated': 100, 'status': 'ok'})
+    @patch('catalog.views._store_has_pending_vendor_products', return_value=False)
+    def test_scheduled_ingest_refresh_runs_vevor_feed(self, *_mocks):
+        from sync.tasks import _scheduled_ingest_refresh
+
+        store = MagicMock()
+        store.id = 'store-uuid'
+        store.name = 'TFS Vevor'
+
+        from catalog.models import HebScrapeJob
+
+        with patch.object(HebScrapeJob.objects, 'filter') as mock_filter:
+            mock_filter.return_value.order_by.return_value.first.return_value = None
+            with patch.object(HebScrapeJob.objects, 'create'):
+                result = _scheduled_ingest_refresh(store)
+
+        self.assertEqual(result['vevor']['updated'], 100)
 
 

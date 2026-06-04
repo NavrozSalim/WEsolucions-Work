@@ -609,17 +609,99 @@ def _reset_active_listings_pending_for_store_update(store) -> dict:
     return stats
 
 
+def _store_has_pending_vevor_listings(store_id) -> bool:
+    from vendor.models import Vendor
+
+    vendor_ids = list(
+        Vendor.objects.filter(code__iregex=r'^vevor(au|_au|-au)?$').values_list('id', flat=True)
+    )
+    if not vendor_ids:
+        return False
+    return ProductMapping.objects.filter(
+        store_id=store_id,
+        is_active=True,
+        sync_status='pending',
+        product__vendor_id__in=vendor_ids,
+    ).exists()
+
+
+def _scheduled_ingest_refresh(store) -> dict:
+    """
+    After pending reset: refresh ingest-only vendors (Vevor XLSX feed inline;
+    HEB/Costco desktop jobs queued when applicable).
+    """
+    from catalog.ingest_views import SUPPORTED_VENDORS
+    from catalog.models import HebScrapeJob
+    from catalog.tasks import run_vevor_au_ingest
+    from catalog.views import (
+        CatalogScrapeTriggerView,
+        _dispatch_server_vendor_job,
+        _store_has_pending_vendor_products,
+    )
+
+    result = {'vevor': None, 'desktop_jobs': []}
+
+    if _store_has_pending_vevor_listings(store.id):
+        logger.info('Scheduled update: running Vevor AU feed ingest for store %s', store.name)
+        result['vevor'] = run_vevor_au_ingest(str(store.id))
+
+    for vendor_code, cfg in SUPPORTED_VENDORS.items():
+        if vendor_code == 'vevor':
+            continue
+        if CatalogScrapeTriggerView._vendor_runs_live(vendor_code, cfg):
+            continue
+        if not _store_has_pending_vendor_products(store, vendor_code):
+            continue
+        existing = (
+            HebScrapeJob.objects.filter(
+                store=store,
+                vendor_code=vendor_code,
+                status__in=[HebScrapeJob.Status.PENDING, HebScrapeJob.Status.CLAIMED],
+            )
+            .order_by('-requested_at')
+            .first()
+        )
+        if existing:
+            result['desktop_jobs'].append({
+                'vendor': vendor_code,
+                'job_id': str(existing.id),
+                'reused': True,
+            })
+            continue
+        job = HebScrapeJob.objects.create(
+            store=store,
+            vendor_code=vendor_code,
+            requested_by=None,
+        )
+        if (cfg or {}).get('runner') == 'server':
+            _dispatch_server_vendor_job(vendor_code, store, job)
+        result['desktop_jobs'].append({
+            'vendor': vendor_code,
+            'job_id': str(job.id),
+            'reused': False,
+        })
+        logger.info(
+            'Scheduled update: queued %s desktop ingest job %s for store %s',
+            vendor_code,
+            job.id,
+            store.name,
+        )
+
+    return result
+
+
 @shared_task(bind=True, max_retries=3)
 def run_store_update(self, store_id, source='beat'):
     """
     Full scheduled update: reset listings to Pending, scrape vendor prices, push to marketplace.
     Called by scheduled jobs and manual "Update now".
 
-    Flow (beat/manual): active listings -> ``sync_status='pending'``, scrape pending rows,
-    push only when ``connection_status`` is ``connected`` (re-checked before each push).
+    Flow (beat/manual): reset active listings to Pending, refresh ingest vendors (Vevor AU
+    XLSX feed inline; HEB/Costco desktop jobs queued), browser-scrape other pending rows,
+    then push ``scraped`` rows when ``connection_status`` is ``connected``.
 
-    Scheduled runs always reset + scrape even when the store is not connected; marketplace
-    sync is skipped until connection is restored.
+    Scheduled runs always reset + ingest/scrape even when the store is not connected;
+    marketplace sync is skipped until connection is restored.
 
     ``source`` is ``beat`` when Celery Beat enqueues the job, ``manual`` when the user
     triggers an update from the sync API — used for clearer per-store activity logs.
@@ -690,6 +772,10 @@ def run_store_update(self, store_id, source='beat'):
         except Exception:
             logger.exception('append_catalog_log failed for manual_update_start')
 
+    ingest_refresh = {}
+    if source in ('beat', 'manual'):
+        ingest_refresh = _scheduled_ingest_refresh(store)
+
     now = timezone.now()
     sync_run = StoreSyncRun.objects.create(store=store, status='running')
     processed, updated, push_ok, push_fail, push_skipped = 0, 0, 0, 0, 0
@@ -710,13 +796,23 @@ def run_store_update(self, store_id, source='beat'):
     from store_adapters import get_adapter
     adapter = get_adapter(store)
 
+    from catalog.tasks import _ingest_only_vendor_ids
+
     n_active = ProductMapping.objects.filter(store=store, is_active=True).count()
     n_inactive = ProductMapping.objects.filter(store=store, is_active=False).count()
+    ingest_vendor_ids = _ingest_only_vendor_ids()
     mappings = ProductMapping.objects.filter(
         store=store,
         is_active=True,
         sync_status='pending',
     ).select_related('product', 'product__vendor')
+    if ingest_vendor_ids:
+        mappings = mappings.exclude(product__vendor_id__in=ingest_vendor_ids)
+
+    vevor_ingest = ingest_refresh.get('vevor') if isinstance(ingest_refresh, dict) else None
+    if isinstance(vevor_ingest, dict):
+        updated += int(vevor_ingest.get('updated') or 0)
+        processed += int(vevor_ingest.get('listing_count') or vevor_ingest.get('matched') or 0)
 
     hint = None
     if n_active == 0:
@@ -744,73 +840,6 @@ def run_store_update(self, store_id, source='beat'):
         price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
         for pm in mappings.iterator(chunk_size=300):
             processed += 1
-            # Ingest-only vendors (HEB, Costco AU, Vevor AU): do NOT
-            # re-apply old VendorPrice rows. Whatever the last fresh
-            # ingest wrote onto ``pm.store_price`` / ``pm.store_stock`` is
-            # what we push to the marketplace on this run; if the ingest
-            # hasn't landed yet, skip silently.
-            if pm.product and _is_ingest_only_product(pm.product):
-                if pm.store_price is None:
-                    logger.info(
-                        "Ingest-only row skipped, no fresh scrape yet (sku=%s vendor=%s)",
-                        getattr(pm.product, 'vendor_sku', '?'),
-                        (pm.product.vendor.code if pm.product.vendor else '?'),
-                    )
-                    continue
-                listing_id = pm.marketplace_id
-                if not listing_id:
-                    lookup = getattr(adapter, 'lookup_listing_by_sku', None)
-                    if lookup:
-                        for sku_candidate in listing_sku_lookup_order(pm, store):
-                            listing_id = lookup(sku_candidate)
-                            if listing_id:
-                                pm.marketplace_id = listing_id
-                                if not pm.marketplace_child_sku:
-                                    pm.marketplace_child_sku = sku_candidate
-                                    pm.save(update_fields=['marketplace_id', 'marketplace_child_sku'])
-                                else:
-                                    pm.save(update_fields=['marketplace_id'])
-                                break
-                if listing_id:
-                    if not _store_can_push_to_marketplace(store_id):
-                        push_blocked_not_connected += 1
-                        _log_push_blocked_not_connected()
-                    else:
-                        try:
-                            if bulk_supported:
-                                bulk_queue.append(
-                                    (pm, listing_id, pm.store_price, int(pm.store_stock or 0))
-                                )
-                            else:
-                                adapter.update_product(
-                                    listing_id,
-                                    **_adapter_push_kwargs(
-                                        store,
-                                        pm,
-                                        pm.store_price,
-                                        int(pm.store_stock or 0),
-                                        price_by_vid,
-                                        price_fb,
-                                    ),
-                                )
-                                push_ok += 1
-                                pm.sync_status = 'synced'
-                                pm.last_sync_time = timezone.now()
-                                pm.save(update_fields=['sync_status', 'last_sync_time'])
-                        except Exception as push_err:
-                            logger.warning(
-                                "Push failed for ingest-only %s: %s",
-                                pm.marketplace_child_sku,
-                                push_err,
-                            )
-                            push_fail += 1
-                            _record_push_error(
-                                pm.marketplace_child_sku or pm.product.vendor_sku,
-                                push_err,
-                            )
-                else:
-                    push_skipped += 1
-                continue
             pricing = _get_pricing_for_vendor_from_cache(pm.product.vendor_id, price_by_vid, price_fb)
             inventory = _get_inventory_for_vendor_from_cache(pm.product.vendor_id, inv_by_vid, inv_fb)
 
@@ -959,7 +988,66 @@ def run_store_update(self, store_id, source='beat'):
     finally:
         close_amazon_session(session)
 
-    # Bulk push (Kogan sheets) after scraping loop
+    # Push ingest-fed and other rows left at scraped (e.g. Vevor feed, or push skipped earlier)
+    push_mappings = ProductMapping.objects.filter(
+        store=store,
+        is_active=True,
+        sync_status='scraped',
+    ).select_related('product', 'product__vendor')
+    for pm in push_mappings.iterator(chunk_size=300):
+        if pm.store_price is None or not pm.product:
+            continue
+        listing_id = pm.marketplace_id
+        if not listing_id:
+            lookup = getattr(adapter, 'lookup_listing_by_sku', None)
+            if lookup:
+                for sku_candidate in listing_sku_lookup_order(pm, store):
+                    listing_id = lookup(sku_candidate)
+                    if listing_id:
+                        pm.marketplace_id = listing_id
+                        if not pm.marketplace_child_sku:
+                            pm.marketplace_child_sku = sku_candidate
+                            pm.save(update_fields=['marketplace_id', 'marketplace_child_sku'])
+                        else:
+                            pm.save(update_fields=['marketplace_id'])
+                        break
+        if not listing_id:
+            push_skipped += 1
+            continue
+        if not _store_can_push_to_marketplace(store_id):
+            push_blocked_not_connected += 1
+            _log_push_blocked_not_connected()
+            continue
+        try:
+            if bulk_supported:
+                bulk_queue.append(
+                    (pm, listing_id, pm.store_price, int(pm.store_stock or 0))
+                )
+            else:
+                adapter.update_product(
+                    listing_id,
+                    **_adapter_push_kwargs(
+                        store,
+                        pm,
+                        pm.store_price,
+                        int(pm.store_stock or 0),
+                        price_by_vid,
+                        price_fb,
+                    ),
+                )
+                push_ok += 1
+                pm.sync_status = 'synced'
+                pm.last_sync_time = timezone.now()
+                pm.save(update_fields=['sync_status', 'last_sync_time'])
+        except Exception as push_err:
+            logger.warning(
+                "Push failed for scraped listing %s: %s",
+                pm.marketplace_child_sku,
+                push_err,
+            )
+            push_fail += 1
+            _record_push_error(pm.marketplace_child_sku or pm.product.vendor_sku, push_err)
+
     if bulk_supported and bulk_queue:
         if not _store_can_push_to_marketplace(store_id):
             push_blocked_not_connected += len(bulk_queue)
@@ -982,7 +1070,7 @@ def run_store_update(self, store_id, source='beat'):
                 push_fail += 1
                 _record_push_error(it.get('sku') or '', Exception(it.get('error') or 'Bulk push failed'))
         except Exception as e:
-            logger.warning("Bulk push failed: %s", e)
+            logger.warning("Bulk push failed (scraped pass): %s", e)
             push_fail += len(bulk_queue)
             _record_push_error('bulk', e)
 
@@ -1078,6 +1166,7 @@ def run_store_update(self, store_id, source='beat'):
         'store_id': str(store_id),
         'at': now.isoformat(),
         'pending_reset_rows': pending_reset_rows,
+        'ingest_refresh': ingest_refresh,
         'marketplace_push_enabled': marketplace_push_enabled,
         'listings_processed': processed,
         'scraped': updated,
