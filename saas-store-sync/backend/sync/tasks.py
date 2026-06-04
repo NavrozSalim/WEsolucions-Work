@@ -597,15 +597,29 @@ def _store_can_push_to_marketplace(store_id) -> bool:
     return status == 'connected'
 
 
+def _reset_active_listings_pending_for_store_update(store) -> dict:
+    """Mark active catalog rows Pending before scheduled/manual scrape (chunked for large stores)."""
+    from catalog.tasks import _chunked_reset_store_active_listings_pending_scrape
+
+    stats = _chunked_reset_store_active_listings_pending_scrape(store) or {}
+    Store.objects.filter(pk=store.pk).update(
+        catalog_pending_reset_at=None,
+        catalog_zero_pending_at=None,
+    )
+    return stats
+
+
 @shared_task(bind=True, max_retries=3)
 def run_store_update(self, store_id, source='beat'):
     """
-    Full scheduled update: scrape vendor prices, apply rules, push to marketplace.
+    Full scheduled update: reset listings to Pending, scrape vendor prices, push to marketplace.
     Called by scheduled jobs and manual "Update now".
 
-    Scraping always runs when the job starts (store must be connected at enqueue/start).
-    Marketplace push re-checks ``connection_status`` after each scrape so a disconnect
-    mid-run stops sync without undoing local scrape results.
+    Flow (beat/manual): active listings -> ``sync_status='pending'``, scrape pending rows,
+    push when ``connection_status`` is still ``connected`` (re-checked before each push).
+
+    Job start still requires connected at enqueue/start for beat; marketplace push re-checks
+    connection after each scrape so a mid-run disconnect keeps local scrape results only.
 
     ``source`` is ``beat`` when Celery Beat enqueues the job, ``manual`` when the user
     triggers an update from the sync API — used for clearer per-store activity logs.
@@ -627,15 +641,25 @@ def run_store_update(self, store_id, source='beat'):
         logger.warning("Store %s not connected, skipping update", store.name)
         return {'store_id': str(store_id), 'skipped': True, 'reason': 'not_connected'}
 
+    pending_reset_stats = {}
+    if source in ('beat', 'manual'):
+        pending_reset_stats = _reset_active_listings_pending_for_store_update(store)
+
+    pending_reset_rows = int(pending_reset_stats.get('rows_updated') or 0)
+
     if source == 'beat':
         try:
             from catalog.activity_log import append_catalog_log
 
             append_catalog_log(
                 store.id,
-                'Scheduled automatic update started (vendor scrape + marketplace push).',
+                f'Scheduled automatic update started: {pending_reset_rows} active listing(s) '
+                f'set to Pending, then vendor scrape and marketplace push.',
                 action_type='scheduled_sync_start',
-                metadata={'source': 'beat'},
+                metadata={
+                    'source': 'beat',
+                    'pending_reset_rows': pending_reset_rows,
+                },
             )
         except Exception:
             logger.exception('append_catalog_log failed for scheduled_sync_start')
@@ -645,9 +669,13 @@ def run_store_update(self, store_id, source='beat'):
 
             append_catalog_log(
                 store.id,
-                'Manual marketplace update started from your store sync page.',
+                f'Manual marketplace update started: {pending_reset_rows} active listing(s) '
+                f'set to Pending, then vendor scrape and marketplace push.',
                 action_type='manual_update_start',
-                metadata={'source': 'manual'},
+                metadata={
+                    'source': 'manual',
+                    'pending_reset_rows': pending_reset_rows,
+                },
             )
         except Exception:
             logger.exception('append_catalog_log failed for manual_update_start')
@@ -675,7 +703,9 @@ def run_store_update(self, store_id, source='beat'):
     n_active = ProductMapping.objects.filter(store=store, is_active=True).count()
     n_inactive = ProductMapping.objects.filter(store=store, is_active=False).count()
     mappings = ProductMapping.objects.filter(
-        store=store, is_active=True,
+        store=store,
+        is_active=True,
+        sync_status='pending',
     ).select_related('product', 'product__vendor')
 
     hint = None
@@ -1032,6 +1062,7 @@ def run_store_update(self, store_id, source='beat'):
     return {
         'store_id': str(store_id),
         'at': now.isoformat(),
+        'pending_reset_rows': pending_reset_rows,
         'listings_processed': processed,
         'scraped': updated,
         'pushed': push_ok,
