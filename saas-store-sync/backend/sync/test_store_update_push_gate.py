@@ -92,19 +92,35 @@ class RunStoreUpdatePushGateTests(SimpleTestCase):
 
         pm.marketplace_child_sku = 'CHILD-1'
 
-        pm.store_price = None
+        pm.store_price = Decimal('12.00')
 
-        pm.store_stock = 0
+        pm.store_stock = 3
 
 
 
-        pm_qs = MagicMock()
+        pm_push_qs = MagicMock()
 
-        pm_qs.iterator.return_value = iter([pm])
+        pm_push_qs.iterator.return_value = iter([pm])
 
 
 
         fn = run_store_update.__wrapped__
+
+
+
+        def _pm_filter(**kwargs):
+            qs = MagicMock()
+            if kwargs.get('sync_status') == 'scraped':
+                qs.select_related.return_value = pm_push_qs
+            elif kwargs.get('last_scrape_time__gte') is not None:
+                qs.exclude.return_value = qs
+                qs.count.return_value = 1
+            elif kwargs.get('is_active') is True and 'sync_status' not in kwargs:
+                qs.count.return_value = 1
+            else:
+                qs.exists.return_value = False
+                qs.count.return_value = 0
+            return qs
 
 
 
@@ -114,38 +130,19 @@ class RunStoreUpdatePushGateTests(SimpleTestCase):
                 return_value={'rows_updated': 1},
             ),
             patch('sync.tasks._scheduled_ingest_refresh', return_value={}),
+            patch(
+                'sync.tasks._run_browser_scrape_for_scheduled_update',
+                return_value={'completed': True},
+            ),
             patch('catalog.tasks._ingest_only_vendor_ids', return_value=[]),
             patch('sync.tasks._store_can_push_to_marketplace', return_value=False),
-            patch('sync.tasks.get_price_and_stock', return_value={'price': 10.0, 'stock': 5}),
-
-            patch('sync.tasks._is_ingest_only_product', return_value=False),
-
             patch('sync.tasks._build_store_vendor_pricing_inventory_caches', return_value=({}, None, {}, None)),
-
-            patch('sync.tasks._get_pricing_for_vendor_from_cache', return_value=None),
-
-            patch('sync.tasks._get_inventory_for_vendor_from_cache', return_value=None),
-
-            patch('sync.tasks._apply_pricing', return_value=Decimal('12.00')),
-
-            patch('sync.tasks._apply_inventory', return_value=3),
-
-            patch('sync.tasks._has_fixed_tier', return_value=False),
-
-            patch('sync.tasks.VendorPrice.objects') as mock_vp_objects,
-
-            patch('sync.tasks.close_amazon_session'),
-
+            patch('catalog.scrape_progress.invalidate_scrape_progress_cache'),
             patch('sync.tasks.StoreSyncRun.objects') as mock_sync_run_objects,
-
             patch('store_adapters.get_adapter', return_value=adapter),
-
             patch('sync.tasks.Store.objects') as mock_store_objects,
-
             patch('sync.tasks.ProductMapping.objects') as mock_pm_objects,
-
             patch('sync.models.SyncSchedule.objects') as mock_sched_objects,
-
             patch('catalog.activity_log.append_catalog_log') as mock_log,
 
         ):
@@ -158,11 +155,7 @@ class RunStoreUpdatePushGateTests(SimpleTestCase):
 
             )
 
-            mock_pm_objects.filter.return_value.select_related.return_value = pm_qs
-
-            mock_pm_objects.filter.return_value.count.side_effect = [1, 0]
-
-            mock_vp_objects.filter.return_value.order_by.return_value.first.return_value = None
+            mock_pm_objects.filter.side_effect = _pm_filter
 
             mock_sync_run_objects.create.return_value = MagicMock()
 
@@ -211,10 +204,27 @@ class RunStoreUpdatePendingResetTests(SimpleTestCase):
         pm.marketplace_id = 'MP-1'
         pm.marketplace_child_sku = 'CHILD-1'
 
-        pm_qs = MagicMock()
-        pm_qs.iterator.return_value = iter([pm])
+        pm.store_price = Decimal('12.00')
+        pm.store_stock = 3
+
+        pm_push_qs = MagicMock()
+        pm_push_qs.iterator.return_value = iter([pm])
 
         fn = run_store_update.__wrapped__
+
+        def _pm_filter(**kwargs):
+            qs = MagicMock()
+            if kwargs.get('sync_status') == 'scraped':
+                qs.select_related.return_value = pm_push_qs
+            elif kwargs.get('last_scrape_time__gte') is not None:
+                qs.exclude.return_value = qs
+                qs.count.return_value = 1
+            elif kwargs.get('is_active') is True and 'sync_status' not in kwargs:
+                qs.count.return_value = 1
+            else:
+                qs.exists.return_value = False
+                qs.count.return_value = 0
+            return qs
 
         with (
             patch(
@@ -222,18 +232,14 @@ class RunStoreUpdatePendingResetTests(SimpleTestCase):
                 return_value={'rows_updated': 42},
             ) as mock_reset,
             patch('sync.tasks._scheduled_ingest_refresh', return_value={}),
+            patch(
+                'sync.tasks._run_browser_scrape_for_scheduled_update',
+                return_value={'completed': True},
+            ) as mock_browser,
             patch('catalog.tasks._ingest_only_vendor_ids', return_value=[]),
             patch('sync.tasks._store_can_push_to_marketplace', return_value=True),
-            patch('sync.tasks.get_price_and_stock', return_value={'price': 10.0, 'stock': 5}),
-            patch('sync.tasks._is_ingest_only_product', return_value=False),
             patch('sync.tasks._build_store_vendor_pricing_inventory_caches', return_value=({}, None, {}, None)),
-            patch('sync.tasks._get_pricing_for_vendor_from_cache', return_value=None),
-            patch('sync.tasks._get_inventory_for_vendor_from_cache', return_value=None),
-            patch('sync.tasks._apply_pricing', return_value=Decimal('12.00')),
-            patch('sync.tasks._apply_inventory', return_value=3),
-            patch('sync.tasks._has_fixed_tier', return_value=False),
-            patch('sync.tasks.VendorPrice.objects') as mock_vp_objects,
-            patch('sync.tasks.close_amazon_session'),
+            patch('catalog.scrape_progress.invalidate_scrape_progress_cache'),
             patch('sync.tasks.StoreSyncRun.objects') as mock_sync_run_objects,
             patch('store_adapters.get_adapter', return_value=adapter),
             patch('sync.tasks.Store.objects') as mock_store_objects,
@@ -243,21 +249,14 @@ class RunStoreUpdatePendingResetTests(SimpleTestCase):
         ):
             mock_store_objects.select_related.return_value.get.return_value = store
             mock_store_objects.filter.return_value.values_list.return_value.first.return_value = 'connected'
-            mock_pm_objects.filter.return_value.select_related.return_value = pm_qs
-            mock_pm_objects.filter.return_value.count.side_effect = [1, 0]
-            mock_vp_objects.filter.return_value.order_by.return_value.first.return_value = None
+            mock_pm_objects.filter.side_effect = _pm_filter
             mock_sync_run_objects.create.return_value = MagicMock()
             mock_sched_objects.get.side_effect = SyncSchedule.DoesNotExist
 
             result = fn('store-uuid', 'beat')
 
         mock_reset.assert_called_once_with(store)
-        pending_filters = [
-            c.kwargs
-            for c in mock_pm_objects.filter.call_args_list
-            if c.kwargs.get('sync_status') == 'pending'
-        ]
-        self.assertTrue(pending_filters)
+        mock_browser.assert_called_once_with(store, 'beat')
         self.assertEqual(result['pending_reset_rows'], 42)
         self.assertEqual(result['scraped'], 1)
         adapter.update_product.assert_called_once()
@@ -283,11 +282,27 @@ class RunStoreUpdateScrapeWhenDisconnectedTests(SimpleTestCase):
         pm.product = product
         pm.marketplace_id = 'MP-1'
         pm.marketplace_child_sku = 'CHILD-1'
+        pm.store_price = Decimal('12.00')
+        pm.store_stock = 3
 
-        pm_qs = MagicMock()
-        pm_qs.iterator.return_value = iter([pm])
+        pm_push_qs = MagicMock()
+        pm_push_qs.iterator.return_value = iter([pm])
 
         fn = run_store_update.__wrapped__
+
+        def _pm_filter(**kwargs):
+            qs = MagicMock()
+            if kwargs.get('sync_status') == 'scraped':
+                qs.select_related.return_value = pm_push_qs
+            elif kwargs.get('last_scrape_time__gte') is not None:
+                qs.exclude.return_value = qs
+                qs.count.return_value = 1
+            elif kwargs.get('is_active') is True and 'sync_status' not in kwargs:
+                qs.count.return_value = 1
+            else:
+                qs.exists.return_value = False
+                qs.count.return_value = 0
+            return qs
 
         with (
             patch(
@@ -298,18 +313,14 @@ class RunStoreUpdateScrapeWhenDisconnectedTests(SimpleTestCase):
                 'sync.tasks._scheduled_ingest_refresh',
                 return_value={'vevor': {'updated': 5, 'listing_count': 5}},
             ),
+            patch(
+                'sync.tasks._run_browser_scrape_for_scheduled_update',
+                return_value={'completed': True},
+            ),
             patch('catalog.tasks._ingest_only_vendor_ids', return_value=[]),
             patch('sync.tasks._store_can_push_to_marketplace', return_value=False),
-            patch('sync.tasks.get_price_and_stock', return_value={'price': 10.0, 'stock': 5}),
-            patch('sync.tasks._is_ingest_only_product', return_value=False),
             patch('sync.tasks._build_store_vendor_pricing_inventory_caches', return_value=({}, None, {}, None)),
-            patch('sync.tasks._get_pricing_for_vendor_from_cache', return_value=None),
-            patch('sync.tasks._get_inventory_for_vendor_from_cache', return_value=None),
-            patch('sync.tasks._apply_pricing', return_value=Decimal('12.00')),
-            patch('sync.tasks._apply_inventory', return_value=3),
-            patch('sync.tasks._has_fixed_tier', return_value=False),
-            patch('sync.tasks.VendorPrice.objects') as mock_vp_objects,
-            patch('sync.tasks.close_amazon_session'),
+            patch('catalog.scrape_progress.invalidate_scrape_progress_cache'),
             patch('sync.tasks.StoreSyncRun.objects') as mock_sync_run_objects,
             patch('store_adapters.get_adapter', return_value=adapter),
             patch('sync.tasks.Store.objects') as mock_store_objects,
@@ -318,9 +329,7 @@ class RunStoreUpdateScrapeWhenDisconnectedTests(SimpleTestCase):
             patch('catalog.activity_log.append_catalog_log'),
         ):
             mock_store_objects.select_related.return_value.get.return_value = store
-            mock_pm_objects.filter.return_value.select_related.return_value = pm_qs
-            mock_pm_objects.filter.return_value.count.side_effect = [1, 0]
-            mock_vp_objects.filter.return_value.order_by.return_value.first.return_value = None
+            mock_pm_objects.filter.side_effect = _pm_filter
             mock_sync_run_objects.create.return_value = MagicMock()
             mock_sched_objects.get.side_effect = SyncSchedule.DoesNotExist
 

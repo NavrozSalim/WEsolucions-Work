@@ -690,6 +690,102 @@ def _scheduled_ingest_refresh(store) -> dict:
     return result
 
 
+def _run_browser_scrape_for_scheduled_update(store, source: str) -> dict:
+    """
+    Run Amazon/eBay (live) scrapes the same way as Catalog → Start Scraping:
+    ``StoreCatalogCeleryScrapeState`` + ``catalog_scrape_store_task`` on heavy-* workers.
+
+    ``run_store_update`` waits until the scrape finishes or the user clicks Stop
+    (``should_abort_celery_scrape`` / cancel API).
+    """
+    import time
+    import uuid
+
+    from django.conf import settings
+
+    from catalog.celery_scrape_state import (
+        clear_celery_scrape_state,
+        mark_celery_scrape_worker_started,
+        set_celery_scrape_state,
+        should_abort_celery_scrape,
+    )
+    from catalog.models import StoreCatalogCeleryScrapeState
+    from catalog.scrape_progress import invalidate_scrape_progress_cache
+    from catalog.tasks import catalog_scrape_store_task, store_has_scrapeable_pending_mappings
+
+    if not store_has_scrapeable_pending_mappings(store):
+        return {'skipped': True, 'reason': 'no_scrapeable_pending'}
+
+    invalidate_scrape_progress_cache(str(store.id))
+
+    task_id = str(uuid.uuid4())
+    set_celery_scrape_state(
+        store,
+        task_id=task_id,
+        scope=StoreCatalogCeleryScrapeState.Scope.STORE,
+        upload=None,
+    )
+    mark_celery_scrape_worker_started(str(store.id))
+
+    try:
+        from catalog.activity_log import append_catalog_log
+
+        append_catalog_log(
+            store.id,
+            'Server-side vendor scrape started for scheduled/manual store update '
+            '(same path as Start Scraping — you can use Stop scraping).',
+            action_type='scrape_start',
+            metadata={'scope': 'store', 'scheduled_update': True, 'source': source},
+        )
+    except Exception:
+        logger.exception('append_catalog_log failed for scheduled browser scrape_start')
+
+    try:
+        catalog_scrape_store_task.apply_async(args=[str(store.id)], task_id=task_id)
+    except Exception as exc:
+        logger.exception('Failed to enqueue catalog_scrape_store_task for store %s', store.name)
+        clear_celery_scrape_state(str(store.id))
+        invalidate_scrape_progress_cache(str(store.id))
+        return {'error': str(exc)[:500]}
+
+    poll_interval = max(2, int(getattr(settings, 'SCHEDULED_UPDATE_BROWSER_SCRAPE_POLL_SEC', 5) or 5))
+    max_wait = max(60, int(getattr(settings, 'SCHEDULED_UPDATE_BROWSER_SCRAPE_MAX_WAIT_SEC', 7200) or 7200))
+    started = time.monotonic()
+
+    while time.monotonic() - started < max_wait:
+        if should_abort_celery_scrape(str(store.id)):
+            try:
+                from core.celery import app
+
+                app.control.revoke(task_id, terminate=True, signal='SIGTERM')
+            except Exception:
+                logger.warning('Revoke catalog scrape task %s failed', task_id, exc_info=True)
+            clear_celery_scrape_state(str(store.id))
+            invalidate_scrape_progress_cache(str(store.id))
+            return {'user_cancelled': True, 'task_id': task_id}
+
+        if not StoreCatalogCeleryScrapeState.objects.filter(store_id=store.id).exists():
+            invalidate_scrape_progress_cache(str(store.id))
+            return {'completed': True, 'task_id': task_id}
+
+        time.sleep(poll_interval)
+
+    logger.warning(
+        'Timed out waiting for browser scrape on store %s after %ss',
+        store.name,
+        max_wait,
+    )
+    try:
+        from core.celery import app
+
+        app.control.revoke(task_id, terminate=True, signal='SIGTERM')
+    except Exception:
+        pass
+    clear_celery_scrape_state(str(store.id))
+    invalidate_scrape_progress_cache(str(store.id))
+    return {'error': 'browser_scrape_timeout', 'task_id': task_id}
+
+
 @shared_task(bind=True, max_retries=3)
 def run_store_update(self, store_id, source='beat'):
     """
@@ -801,13 +897,6 @@ def run_store_update(self, store_id, source='beat'):
     n_active = ProductMapping.objects.filter(store=store, is_active=True).count()
     n_inactive = ProductMapping.objects.filter(store=store, is_active=False).count()
     ingest_vendor_ids = _ingest_only_vendor_ids()
-    mappings = ProductMapping.objects.filter(
-        store=store,
-        is_active=True,
-        sync_status='pending',
-    ).select_related('product', 'product__vendor')
-    if ingest_vendor_ids:
-        mappings = mappings.exclude(product__vendor_id__in=ingest_vendor_ids)
 
     vevor_ingest = ingest_refresh.get('vevor') if isinstance(ingest_refresh, dict) else None
     if isinstance(vevor_ingest, dict):
@@ -826,169 +915,44 @@ def run_store_update(self, store_id, source='beat'):
                 "No catalog products for this store. Upload a catalog in Catalog and run Sync first."
             )
 
-    session = {}
     error_summary = None
+    browser_scrape = {}
 
     def _record_push_error(sku_hint: str, err: Exception):
         if len(push_errors) >= 20:
             return
         push_errors.append({"sku": (sku_hint or "")[:120], "error": str(err)[:500]})
 
-    try:
-        bulk_supported = callable(getattr(adapter, 'update_products_bulk', None))
-        bulk_queue = []  # list of (pm, sku, price, stock)
-        price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
-        for pm in mappings.iterator(chunk_size=300):
-            processed += 1
-            pricing = _get_pricing_for_vendor_from_cache(pm.product.vendor_id, price_by_vid, price_fb)
-            inventory = _get_inventory_for_vendor_from_cache(pm.product.vendor_id, inv_by_vid, inv_fb)
+    from catalog.scrape_progress import invalidate_scrape_progress_cache
 
-            # --- Scrape ---
-            url = resolve_vendor_scrape_url(pm.product, store, None)
-            vendor_price = None
-            vendor_stock = 0
-            scrape_title = ''
-            result = {}
-            try:
-                if not url:
-                    raise ValueError("Product has no vendor_url or resolvable SKU")
-                result = get_price_and_stock(url, store.region, session)
-                vendor_price = result.get('price')
-                vendor_stock = _inventory_from_scrape_result(result)
-                scrape_title = (result.get('title') or '').strip()[:500]
-            except Exception as e:
-                logger.exception(
-                    "Scheduled update scrape error for %s: %s",
-                    pm.product.vendor_sku, e,
-                )
-                _fail_mapping(pm, 'scrape_exception', str(e))
-                error_summary = str(e) if not error_summary else error_summary
-                continue
+    invalidate_scrape_progress_cache(str(store.id))
 
-            if vendor_price is None:
-                err_code = (
-                    result.get('error_code') if isinstance(result, dict) else None
-                ) or 'no_price'
-                err_msg = (
-                    result.get('error_message') if isinstance(result, dict) else ''
-                ) or ''
-                _fail_mapping(pm, err_code, err_msg)
-                error_summary = err_code if not error_summary else error_summary
-                continue
+    if source in ('beat', 'manual'):
+        browser_scrape = _run_browser_scrape_for_scheduled_update(store, source)
+        if browser_scrape.get('user_cancelled'):
+            error_summary = 'user_cancelled'
+        elif browser_scrape.get('error'):
+            error_summary = browser_scrape.get('error')
 
-            if vendor_stock is None or vendor_stock <= 0:
-                vendor_stock = 0
-
-            if _has_fixed_tier(pricing):
-                tier_now = resolve_margin_tier_for_raw_cost(pricing, vendor_price)
-                if tier_now is not None and getattr(tier_now, 'margin_type', '') == 'fixed':
-                    missing = _missing_fixed_inputs(pm)
-                    if missing:
-                        _fail_mapping(
-                            pm,
-                            'missing_fixed_inputs',
-                            f"Fixed pricing requires {', '.join(missing)} on the catalog row.",
-                        )
-                        error_summary = 'missing_fixed_inputs' if not error_summary else error_summary
-                        continue
-
-            prev_vp = VendorPrice.objects.filter(product=pm.product).order_by('-scraped_at').first()
-            new_price = (
-                _apply_pricing(
-                    vendor_price,
-                    pricing,
-                    pack_qty=getattr(pm, 'pack_qty', None),
-                    prep_fees=getattr(pm, 'prep_fees', None),
-                    shipping_fees=getattr(pm, 'shipping_fees', None),
-                )
-                if vendor_price is not None else None
+        browser_scraped_qs = ProductMapping.objects.filter(
+            store=store,
+            is_active=True,
+            sync_status__in=['scraped', 'synced'],
+            last_scrape_time__gte=now,
+        )
+        if ingest_vendor_ids:
+            browser_scraped_qs = browser_scraped_qs.exclude(
+                product__vendor_id__in=ingest_vendor_ids
             )
-            if new_price is None and vendor_price is not None:
-                new_price = Decimal(str(vendor_price))
-            new_stock = _apply_inventory(vendor_stock, inventory)
+        browser_scraped = browser_scraped_qs.count()
+        updated += browser_scraped
+        processed += browser_scraped
 
-            raw_changed = prev_vp is None or (
-                prev_vp.price != Decimal(str(vendor_price))
-                or int(prev_vp.stock or 0) != int(vendor_stock or 0)
-            )
+    bulk_supported = callable(getattr(adapter, 'update_products_bulk', None))
+    bulk_queue = []  # list of (pm, sku, price, stock)
+    price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
 
-            VendorPrice.objects.create(
-                product=pm.product,
-                price=Decimal(str(vendor_price)),
-                stock=vendor_stock or 0,
-            )
-
-            pm.store_price = new_price
-            pm.store_stock = new_stock
-            pm.sync_status = 'scraped'
-            pm.failed_sync_count = 0
-            pm.last_scrape_time = now
-            pm.scrape_error = None
-            _uf = [
-                'store_price', 'store_stock', 'sync_status',
-                'failed_sync_count', 'last_scrape_time', 'scrape_error',
-            ]
-            if scrape_title:
-                pm.title = scrape_title
-                _uf.append('title')
-            pm.save(update_fields=_uf)
-            updated += 1
-
-            # --- Push to marketplace ---
-            listing_id = pm.marketplace_id
-            if not listing_id:
-                lookup = getattr(adapter, 'lookup_listing_by_sku', None)
-                if lookup:
-                    for sku_candidate in listing_sku_lookup_order(pm, store):
-                        listing_id = lookup(sku_candidate)
-                        if listing_id:
-                            pm.marketplace_id = listing_id
-                            if not pm.marketplace_child_sku:
-                                pm.marketplace_child_sku = sku_candidate
-                                pm.save(update_fields=['marketplace_id', 'marketplace_child_sku'])
-                            else:
-                                pm.save(update_fields=['marketplace_id'])
-                            break
-
-            continuous = bool(pricing and getattr(pricing, 'continuous_update', False))
-            should_push = bool(listing_id and new_price is not None)
-            if should_push and continuous and not raw_changed:
-                should_push = False
-
-            if should_push:
-                if not _store_can_push_to_marketplace(store_id):
-                    push_blocked_not_connected += 1
-                    _log_push_blocked_not_connected()
-                else:
-                    try:
-                        if bulk_supported:
-                            bulk_queue.append((pm, listing_id, new_price, int(new_stock or 0)))
-                        else:
-                            adapter.update_product(
-                                listing_id,
-                                **_adapter_push_kwargs(
-                                    store,
-                                    pm,
-                                    new_price,
-                                    int(new_stock or 0),
-                                    price_by_vid,
-                                    price_fb,
-                                ),
-                            )
-                            push_ok += 1
-                            pm.sync_status = 'synced'
-                            pm.last_sync_time = timezone.now()
-                            pm.save(update_fields=['sync_status', 'last_sync_time'])
-                    except Exception as push_err:
-                        logger.warning("Push failed for %s: %s", pm.marketplace_child_sku, push_err)
-                        push_fail += 1
-                        _record_push_error(pm.marketplace_child_sku or pm.product.vendor_sku, push_err)
-            elif new_price is not None and not listing_id:
-                push_skipped += 1
-    finally:
-        close_amazon_session(session)
-
-    # Push ingest-fed and other rows left at scraped (e.g. Vevor feed, or push skipped earlier)
+    # Push ingest-fed and browser-scraped rows (same pass as before)
     push_mappings = ProductMapping.objects.filter(
         store=store,
         is_active=True,
@@ -1162,11 +1126,14 @@ def run_store_update(self, store_id, source='beat'):
             },
         )
 
+    invalidate_scrape_progress_cache(str(store.id))
+
     return {
         'store_id': str(store_id),
         'at': now.isoformat(),
         'pending_reset_rows': pending_reset_rows,
         'ingest_refresh': ingest_refresh,
+        'browser_scrape': browser_scrape,
         'marketplace_push_enabled': marketplace_push_enabled,
         'listings_processed': processed,
         'scraped': updated,

@@ -992,7 +992,8 @@ export default function Catalog() {
         const inGraceWindow = liveRefreshUntil > Date.now();
         // Single interval: scrape progress + catalog data. Wider spacing and throttled
         // store-list refetch reduce UI/API load while workers are busy.
-        const needsLivePolling = activeFlow || inGraceWindow || trackingScrape || trackingServerScrape;
+        const serverScrapeActive = Boolean(scrapeProgress?.server_celery_scrape?.active);
+        const needsLivePolling = activeFlow || inGraceWindow || trackingScrape || trackingServerScrape || serverScrapeActive;
         if (!needsLivePolling) return undefined;
 
         let cancelled = false;
@@ -1028,7 +1029,7 @@ export default function Catalog() {
             clearInterval(intervalId);
             if (graceTimeoutId) clearTimeout(graceTimeoutId);
         };
-    }, [selectedStore, flowStatus, liveRefreshUntil, trackingScrape, trackingServerScrape, refreshLiveData]);
+    }, [selectedStore, flowStatus, liveRefreshUntil, trackingScrape, trackingServerScrape, scrapeProgress?.server_celery_scrape?.active, refreshLiveData]);
 
     // One scrape-progress fetch when opening Products; clear stale payload from other stores first.
     useEffect(() => {
@@ -1602,7 +1603,10 @@ export default function Catalog() {
         const active = Boolean(scrapeProgress.server_celery_scrape?.active);
         setTrackingServerScrape(active);
         trackingServerScrapeRef.current = active;
-    }, [scrapeProgress, selectedStore]);
+        if (active && viewMode === 'products' && flowStatus !== 'syncing') {
+            setFlowStatus((prev) => (prev === 'scraping' ? prev : 'scraping'));
+        }
+    }, [scrapeProgress, selectedStore, viewMode, flowStatus]);
 
     const handleStopScrape = () => {
         if (!selectedStore || stoppingScrape) return;
