@@ -616,10 +616,10 @@ def run_store_update(self, store_id, source='beat'):
     Called by scheduled jobs and manual "Update now".
 
     Flow (beat/manual): active listings -> ``sync_status='pending'``, scrape pending rows,
-    push when ``connection_status`` is still ``connected`` (re-checked before each push).
+    push only when ``connection_status`` is ``connected`` (re-checked before each push).
 
-    Job start still requires connected at enqueue/start for beat; marketplace push re-checks
-    connection after each scrape so a mid-run disconnect keeps local scrape results only.
+    Scheduled runs always reset + scrape even when the store is not connected; marketplace
+    sync is skipped until connection is restored.
 
     ``source`` is ``beat`` when Celery Beat enqueues the job, ``manual`` when the user
     triggers an update from the sync API — used for clearer per-store activity logs.
@@ -637,9 +637,12 @@ def run_store_update(self, store_id, source='beat'):
             'hint': 'Store no longer exists.',
         }
 
-    if store.connection_status != 'connected':
-        logger.warning("Store %s not connected, skipping update", store.name)
-        return {'store_id': str(store_id), 'skipped': True, 'reason': 'not_connected'}
+    marketplace_push_enabled = _store_can_push_to_marketplace(store_id)
+    if not marketplace_push_enabled:
+        logger.info(
+            "Store %s not connected: running reset + scrape only (no marketplace push).",
+            store.name,
+        )
 
     pending_reset_stats = {}
     if source in ('beat', 'manual'):
@@ -647,6 +650,11 @@ def run_store_update(self, store_id, source='beat'):
 
     pending_reset_rows = int(pending_reset_stats.get('rows_updated') or 0)
 
+    push_phrase = (
+        'vendor scrape and marketplace push.'
+        if marketplace_push_enabled
+        else 'vendor scrape only (store not connected — marketplace push skipped).'
+    )
     if source == 'beat':
         try:
             from catalog.activity_log import append_catalog_log
@@ -654,11 +662,12 @@ def run_store_update(self, store_id, source='beat'):
             append_catalog_log(
                 store.id,
                 f'Scheduled automatic update started: {pending_reset_rows} active listing(s) '
-                f'set to Pending, then vendor scrape and marketplace push.',
+                f'set to Pending, then {push_phrase}',
                 action_type='scheduled_sync_start',
                 metadata={
                     'source': 'beat',
                     'pending_reset_rows': pending_reset_rows,
+                    'marketplace_push_enabled': marketplace_push_enabled,
                 },
             )
         except Exception:
@@ -669,12 +678,13 @@ def run_store_update(self, store_id, source='beat'):
 
             append_catalog_log(
                 store.id,
-                f'Manual marketplace update started: {pending_reset_rows} active listing(s) '
-                f'set to Pending, then vendor scrape and marketplace push.',
+                f'Manual update started: {pending_reset_rows} active listing(s) '
+                f'set to Pending, then {push_phrase}',
                 action_type='manual_update_start',
                 metadata={
                     'source': 'manual',
                     'pending_reset_rows': pending_reset_rows,
+                    'marketplace_push_enabled': marketplace_push_enabled,
                 },
             )
         except Exception:
@@ -1027,19 +1037,24 @@ def run_store_update(self, store_id, source='beat'):
     except SyncSchedule.DoesNotExist:
         pass
 
-    if updated > 0 and push_blocked_not_connected:
+    if updated > 0 and (push_blocked_not_connected or not marketplace_push_enabled):
         from catalog.activity_log import append_catalog_log
 
+        blocked_note = (
+            f'{push_blocked_not_connected} listing(s) blocked from push'
+            if push_blocked_not_connected
+            else 'marketplace push disabled until store is connected'
+        )
         append_catalog_log(
             store.id,
             f'Update finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}: '
-            f'{updated} listing(s) scraped locally; marketplace push skipped because the store '
-            f'is not connected ({push_blocked_not_connected} listing(s)).',
+            f'{updated} listing(s) scraped locally; {blocked_note}.',
             action_type='sync_push_skipped_not_connected',
             metadata={
                 'scraped': updated,
                 'pushed': push_ok,
                 'push_blocked_not_connected': push_blocked_not_connected,
+                'marketplace_push_enabled': marketplace_push_enabled,
                 'source': source,
             },
         )
@@ -1063,6 +1078,7 @@ def run_store_update(self, store_id, source='beat'):
         'store_id': str(store_id),
         'at': now.isoformat(),
         'pending_reset_rows': pending_reset_rows,
+        'marketplace_push_enabled': marketplace_push_enabled,
         'listings_processed': processed,
         'scraped': updated,
         'pushed': push_ok,
@@ -1093,7 +1109,7 @@ def check_scheduled_updates():
     now_utc = timezone.now()
 
     for sched in SyncSchedule.objects.filter(is_active=True).select_related('store'):
-        if not sched.store.is_active or sched.store.connection_status != 'connected':
+        if not sched.store.is_active:
             continue
 
         try:

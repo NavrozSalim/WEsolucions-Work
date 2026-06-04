@@ -93,12 +93,6 @@ class TriggerManualUpdateView(APIView):
         except Store.DoesNotExist:
             return Response({"error": "Store not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        if store.connection_status != 'connected':
-            return Response(
-                {"error": "Store not connected. Validate connection first."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         run_inline = (
             request.data.get('run_inline')
             or request.query_params.get('inline') == '1'
@@ -124,9 +118,14 @@ class TriggerManualUpdateView(APIView):
                 return Response(result, status=status.HTTP_200_OK)
             return Response({"detail": detail}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
+        msg = (
+            "Update queued — scrape and push to marketplace."
+            if store.connection_status == 'connected'
+            else "Update queued — reset to Pending and scrape; marketplace push when connected."
+        )
         return Response(
             {
-                "message": "Update queued — scrape and push to marketplace.",
+                "message": msg,
                 "job_id": async_result.id,
                 "status": "queued",
             },
