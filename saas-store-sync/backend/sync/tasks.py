@@ -587,11 +587,25 @@ def run_store_sync(self, store_id):
     return {'store_id': str(store_id), 'at': str(now)}
 
 
+def _store_can_push_to_marketplace(store_id) -> bool:
+    """Fresh read of connection status before marketplace push (may change mid-run)."""
+    status = (
+        Store.objects.filter(pk=store_id)
+        .values_list('connection_status', flat=True)
+        .first()
+    )
+    return status == 'connected'
+
+
 @shared_task(bind=True, max_retries=3)
 def run_store_update(self, store_id, source='beat'):
     """
     Full scheduled update: scrape vendor prices, apply rules, push to marketplace.
     Called by scheduled jobs and manual "Update now".
+
+    Scraping always runs when the job starts (store must be connected at enqueue/start).
+    Marketplace push re-checks ``connection_status`` after each scrape so a disconnect
+    mid-run stops sync without undoing local scrape results.
 
     ``source`` is ``beat`` when Celery Beat enqueues the job, ``manual`` when the user
     triggers an update from the sync API — used for clearer per-store activity logs.
@@ -641,7 +655,19 @@ def run_store_update(self, store_id, source='beat'):
     now = timezone.now()
     sync_run = StoreSyncRun.objects.create(store=store, status='running')
     processed, updated, push_ok, push_fail, push_skipped = 0, 0, 0, 0, 0
+    push_blocked_not_connected = 0
+    push_blocked_logged = False
     push_errors = []
+
+    def _log_push_blocked_not_connected():
+        nonlocal push_blocked_logged
+        if push_blocked_logged:
+            return
+        push_blocked_logged = True
+        logger.warning(
+            "Store %s no longer connected; skipping marketplace push (scraped data kept locally).",
+            store.name,
+        )
 
     from store_adapters import get_adapter
     adapter = get_adapter(store)
@@ -706,38 +732,42 @@ def run_store_update(self, store_id, source='beat'):
                                     pm.save(update_fields=['marketplace_id'])
                                 break
                 if listing_id:
-                    try:
-                        if bulk_supported:
-                            bulk_queue.append(
-                                (pm, listing_id, pm.store_price, int(pm.store_stock or 0))
+                    if not _store_can_push_to_marketplace(store_id):
+                        push_blocked_not_connected += 1
+                        _log_push_blocked_not_connected()
+                    else:
+                        try:
+                            if bulk_supported:
+                                bulk_queue.append(
+                                    (pm, listing_id, pm.store_price, int(pm.store_stock or 0))
+                                )
+                            else:
+                                adapter.update_product(
+                                    listing_id,
+                                    **_adapter_push_kwargs(
+                                        store,
+                                        pm,
+                                        pm.store_price,
+                                        int(pm.store_stock or 0),
+                                        price_by_vid,
+                                        price_fb,
+                                    ),
+                                )
+                                push_ok += 1
+                                pm.sync_status = 'synced'
+                                pm.last_sync_time = timezone.now()
+                                pm.save(update_fields=['sync_status', 'last_sync_time'])
+                        except Exception as push_err:
+                            logger.warning(
+                                "Push failed for ingest-only %s: %s",
+                                pm.marketplace_child_sku,
+                                push_err,
                             )
-                        else:
-                            adapter.update_product(
-                                listing_id,
-                                **_adapter_push_kwargs(
-                                    store,
-                                    pm,
-                                    pm.store_price,
-                                    int(pm.store_stock or 0),
-                                    price_by_vid,
-                                    price_fb,
-                                ),
+                            push_fail += 1
+                            _record_push_error(
+                                pm.marketplace_child_sku or pm.product.vendor_sku,
+                                push_err,
                             )
-                            push_ok += 1
-                            pm.sync_status = 'synced'
-                            pm.last_sync_time = timezone.now()
-                            pm.save(update_fields=['sync_status', 'last_sync_time'])
-                    except Exception as push_err:
-                        logger.warning(
-                            "Push failed for ingest-only %s: %s",
-                            pm.marketplace_child_sku,
-                            push_err,
-                        )
-                        push_fail += 1
-                        _record_push_error(
-                            pm.marketplace_child_sku or pm.product.vendor_sku,
-                            push_err,
-                        )
                 else:
                     push_skipped += 1
                 continue
@@ -857,35 +887,44 @@ def run_store_update(self, store_id, source='beat'):
                 should_push = False
 
             if should_push:
-                try:
-                    if bulk_supported:
-                        bulk_queue.append((pm, listing_id, new_price, int(new_stock or 0)))
-                    else:
-                        adapter.update_product(
-                            listing_id,
-                            **_adapter_push_kwargs(
-                                store,
-                                pm,
-                                new_price,
-                                int(new_stock or 0),
-                                price_by_vid,
-                                price_fb,
-                            ),
-                        )
-                        push_ok += 1
-                        pm.sync_status = 'synced'
-                        pm.last_sync_time = timezone.now()
-                        pm.save(update_fields=['sync_status', 'last_sync_time'])
-                except Exception as push_err:
-                    logger.warning("Push failed for %s: %s", pm.marketplace_child_sku, push_err)
-                    push_fail += 1
-                    _record_push_error(pm.marketplace_child_sku or pm.product.vendor_sku, push_err)
+                if not _store_can_push_to_marketplace(store_id):
+                    push_blocked_not_connected += 1
+                    _log_push_blocked_not_connected()
+                else:
+                    try:
+                        if bulk_supported:
+                            bulk_queue.append((pm, listing_id, new_price, int(new_stock or 0)))
+                        else:
+                            adapter.update_product(
+                                listing_id,
+                                **_adapter_push_kwargs(
+                                    store,
+                                    pm,
+                                    new_price,
+                                    int(new_stock or 0),
+                                    price_by_vid,
+                                    price_fb,
+                                ),
+                            )
+                            push_ok += 1
+                            pm.sync_status = 'synced'
+                            pm.last_sync_time = timezone.now()
+                            pm.save(update_fields=['sync_status', 'last_sync_time'])
+                    except Exception as push_err:
+                        logger.warning("Push failed for %s: %s", pm.marketplace_child_sku, push_err)
+                        push_fail += 1
+                        _record_push_error(pm.marketplace_child_sku or pm.product.vendor_sku, push_err)
             elif new_price is not None and not listing_id:
                 push_skipped += 1
     finally:
         close_amazon_session(session)
 
     # Bulk push (Kogan sheets) after scraping loop
+    if bulk_supported and bulk_queue:
+        if not _store_can_push_to_marketplace(store_id):
+            push_blocked_not_connected += len(bulk_queue)
+            _log_push_blocked_not_connected()
+            bulk_queue = []
     if bulk_supported and bulk_queue:
         try:
             payload = [(sku, price, stock) for (_pm, sku, price, stock) in bulk_queue]
@@ -923,6 +962,7 @@ def run_store_update(self, store_id, source='beat'):
             or error_summary
             or push_fail
             or push_skipped
+            or push_blocked_not_connected
             or (processed > 0 and updated == 0)
             else 'success'
         )
@@ -937,6 +977,10 @@ def run_store_update(self, store_id, source='beat'):
     if push_skipped:
         summary_parts.append(
             f"{push_skipped} listing(s) not pushed (set Marketplace ID or Child SKU so Reverb listing can be found)"
+        )
+    if push_blocked_not_connected:
+        summary_parts.append(
+            f"{push_blocked_not_connected} marketplace push(es) skipped (store not connected)"
         )
     combined = "; ".join(summary_parts) if summary_parts else ""
     if hint and hint not in combined:
@@ -953,7 +997,23 @@ def run_store_update(self, store_id, source='beat'):
     except SyncSchedule.DoesNotExist:
         pass
 
-    if push_ok > 0:
+    if updated > 0 and push_blocked_not_connected:
+        from catalog.activity_log import append_catalog_log
+
+        append_catalog_log(
+            store.id,
+            f'Update finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}: '
+            f'{updated} listing(s) scraped locally; marketplace push skipped because the store '
+            f'is not connected ({push_blocked_not_connected} listing(s)).',
+            action_type='sync_push_skipped_not_connected',
+            metadata={
+                'scraped': updated,
+                'pushed': push_ok,
+                'push_blocked_not_connected': push_blocked_not_connected,
+                'source': source,
+            },
+        )
+    elif push_ok > 0:
         from catalog.activity_log import append_catalog_log
 
         append_catalog_log(
@@ -977,6 +1037,7 @@ def run_store_update(self, store_id, source='beat'):
         'pushed': push_ok,
         'push_failed': push_fail,
         'push_skipped': push_skipped,
+        'push_blocked_not_connected': push_blocked_not_connected,
         'error_summary': error_summary,
         'push_errors': push_errors,
         'hint': hint,
@@ -1228,10 +1289,15 @@ def run_store_critical_zero_inventory(store_id):
     """
     Set all active listing stock to 0 locally and on the marketplace, deactivate the store
     and its sync schedule (emergency stop).
+
+    Walmart: uses each listing's ``fulfillment_center_id`` as ship node (same as normal push),
+    not only the store default ship node from API credentials.
     """
     import logging
     from store_adapters import get_adapter
     from store_adapters.reverb_adapter import ReverbAPIError
+    from store_adapters.sears_adapter import SearsAPIError
+    from store_adapters.walmart_adapter import WalmartAPIError
     from sync.models import SyncSchedule
 
     logger = logging.getLogger(__name__)
@@ -1242,6 +1308,7 @@ def run_store_critical_zero_inventory(store_id):
 
     adapter = get_adapter(store)
     pushed, push_failed, local_zeroed = 0, 0, 0
+    price_by_vid, price_fb, _, _ = _build_store_vendor_pricing_inventory_caches(store)
 
     qs = ProductMapping.objects.filter(store=store, is_active=True).select_related('product')
     for pm in qs.iterator(chunk_size=100):
@@ -1254,18 +1321,22 @@ def run_store_critical_zero_inventory(store_id):
         if not listing_id:
             continue
         try:
-            from catalog.marketplace_push import quantize_posted_price
-
-            if pm.store_price is not None:
-                adapter.update_product(
-                    listing_id,
-                    price=quantize_posted_price(pm.store_price) or pm.store_price,
-                    stock=0,
-                )
-            else:
-                adapter.update_product(listing_id, stock=0)
+            kwargs = _adapter_push_kwargs(
+                store,
+                pm,
+                pm.store_price,
+                0,
+                price_by_vid,
+                price_fb,
+            )
+            if 'stock' not in kwargs:
+                kwargs['stock'] = 0
+            adapter.update_product(listing_id, **kwargs)
             pushed += 1
-        except (ReverbAPIError, Exception) as e:
+        except (ReverbAPIError, SearsAPIError, WalmartAPIError, ValueError) as e:
+            push_failed += 1
+            logger.warning("Critical zero push failed for listing %s: %s", listing_id, e)
+        except Exception as e:
             push_failed += 1
             logger.warning("Critical zero push failed for listing %s: %s", listing_id, e)
 
