@@ -37,6 +37,25 @@ logger = logging.getLogger("scrapers.amazon_us")
 RETRY_LIMIT = 3
 AMAZON_ZIP = "10001"
 
+_MAP_PRICE_PHRASES = (
+    "see price in cart",
+    "see price at checkout",
+    "see price in checkout",
+)
+
+_BUYBOX_ROOT_SELECTORS = (
+    "#buybox",
+    "#desktop_buybox",
+    "#apex_desktop",
+    "#rightCol",
+)
+
+_BUYBOX_FORM_SELECTORS = (
+    "form#addToCart",
+    "form[action*='handle-buy-box']",
+    "form[action*='add-to-cart']",
+)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # HTML parser — stateless extraction from BeautifulSoup / raw HTML
@@ -83,6 +102,120 @@ class AmazonParser:
     ]
 
     @classmethod
+    def _buybox_root(cls, soup: BeautifulSoup):
+        for sel in _BUYBOX_ROOT_SELECTORS:
+            el = soup.select_one(sel)
+            if el:
+                return el
+        return None
+
+    @classmethod
+    def is_map_price_page(cls, soup: BeautifulSoup, page_html: str = "") -> bool:
+        """True when Amazon hides the advertised price (MAP / see-price-in-cart)."""
+        if page_html:
+            low_html = page_html.lower()
+            if any(phrase in low_html for phrase in _MAP_PRICE_PHRASES):
+                return True
+        buybox = cls._buybox_root(soup)
+        if buybox:
+            low_box = buybox.get_text(" ", strip=True).lower()
+            if any(phrase in low_box for phrase in _MAP_PRICE_PHRASES):
+                return True
+        return False
+
+    @classmethod
+    def extract_buybox_form_price(cls, soup: BeautifulSoup) -> Optional[float]:
+        """Read MAP price from hidden add-to-cart form fields on the buy box."""
+        forms = []
+        for sel in _BUYBOX_FORM_SELECTORS:
+            forms.extend(soup.select(sel))
+        if not forms:
+            buybox = cls._buybox_root(soup)
+            if buybox:
+                forms = buybox.select("form")
+
+        seen = set()
+        for form in forms:
+            form_id = id(form)
+            if form_id in seen:
+                continue
+            seen.add(form_id)
+
+            amount_inp = form.select_one('input[name="items[0.base][customerVisiblePrice][amount]"]')
+            if amount_inp and amount_inp.get("value"):
+                p = parse_price_text(amount_inp["value"])
+                if p:
+                    return p
+
+            display_inp = form.select_one('input[name="items[0.base][customerVisiblePrice][displayString]"]')
+            if display_inp and display_inp.get("value"):
+                p = parse_price_text(display_inp["value"])
+                if p:
+                    return p
+
+        buybox = cls._buybox_root(soup)
+        if buybox:
+            box_html = str(buybox)
+            m = re.search(
+                r'customerVisiblePrice\]\[amount\]"[^>]*value="([\d.]+)"',
+                box_html,
+                re.IGNORECASE,
+            )
+            if m:
+                p = parse_price_text(m.group(1))
+                if p:
+                    return p
+        return None
+
+    @classmethod
+    def _extract_price_from_scope(cls, scope, page_html: str = "", *, allow_regex: bool = True) -> Optional[float]:
+        if scope is None:
+            return None
+
+        json_div = scope.select_one("div.a-section.aok-hidden.twister-plus-buying-options-price-data")
+        if json_div:
+            try:
+                data = json.loads(json_div.get_text(strip=True))
+                group = data.get("desktop_buybox_group_1", [{}])[0]
+                for key in ("priceAmount", "displayPrice"):
+                    val = group.get(key)
+                    if val is None:
+                        continue
+                    if isinstance(val, (int, float)):
+                        if 0.01 <= float(val) < 999_999:
+                            return float(val)
+                    text = str(val)
+                    if any(p in text.lower() for p in _MAP_PRICE_PHRASES):
+                        continue
+                    p = parse_price_text(text)
+                    if p:
+                        return p
+            except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
+                pass
+
+        for sel in cls.PRICE_SELECTORS[1:]:
+            elem = scope.select_one(sel)
+            if elem:
+                text = elem.get_text(strip=True)
+                if any(p in text.lower() for p in _MAP_PRICE_PHRASES):
+                    continue
+                if _is_non_usd(text):
+                    continue
+                p = parse_price_text(text)
+                if p:
+                    return p
+
+        if allow_regex and page_html:
+            scoped_html = str(scope)
+            for pat in cls.PRICE_JSON_PATTERNS:
+                m = re.search(pat, scoped_html)
+                if m:
+                    p = parse_price_text(m.group(1))
+                    if p:
+                        return p
+        return None
+
+    @classmethod
     def extract_title(cls, soup: BeautifulSoup) -> Optional[str]:
         for sel in cls.TITLE_SELECTORS:
             el = soup.select_one(sel)
@@ -94,38 +227,26 @@ class AmazonParser:
 
     @classmethod
     def extract_price(cls, soup: BeautifulSoup, page_html: str = "") -> Optional[float]:
-        """Try all selectors and JSON patterns to find the product price."""
-        json_div = soup.select_one("div.a-section.aok-hidden.twister-plus-buying-options-price-data")
-        if json_div:
-            try:
-                data = json.loads(json_div.get_text(strip=True))
-                display_price = data.get("desktop_buybox_group_1", [{}])[0].get("displayPrice")
-                if display_price:
-                    p = parse_price_text(display_price)
-                    if p:
-                        return p
-            except (json.JSONDecodeError, KeyError, IndexError):
-                pass
+        """Try buybox-scoped selectors; MAP pages use hidden customerVisiblePrice fields."""
+        form_price = cls.extract_buybox_form_price(soup)
+        if form_price is not None:
+            return form_price
 
-        for sel in cls.PRICE_SELECTORS[1:]:
-            elem = soup.select_one(sel)
-            if elem:
-                text = elem.get_text(strip=True)
-                if _is_non_usd(text):
-                    continue
-                p = parse_price_text(text)
-                if p:
-                    return p
+        is_map = cls.is_map_price_page(soup, page_html)
+        if is_map:
+            return None
 
-        if page_html:
-            for pat in cls.PRICE_JSON_PATTERNS:
-                m = re.search(pat, page_html)
-                if m:
-                    p = parse_price_text(m.group(1))
-                    if p:
-                        return p
+        buybox = cls._buybox_root(soup)
+        if buybox:
+            price = cls._extract_price_from_scope(
+                buybox,
+                page_html,
+                allow_regex=not is_map,
+            )
+            if price is not None:
+                return price
 
-        return None
+        return cls._extract_price_from_scope(soup, page_html, allow_regex=True)
 
     @classmethod
     def extract_stock(cls, soup: BeautifulSoup) -> Optional[int]:
@@ -189,6 +310,18 @@ class AmazonParser:
             "Handling Time": handling_time,
             "Scrape Time": datetime.now().strftime("%m-%d-%Y / %I:%M %p"),
         }
+
+
+def _extract_asin(url: str, soup: BeautifulSoup = None) -> Optional[str]:
+    m = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", url or "", re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    if soup is not None:
+        for sel in ('input#ASIN', 'input[name="ASIN"]'):
+            el = soup.select_one(sel)
+            if el and el.get("value"):
+                return str(el["value"]).upper()
+    return None
 
 
 def _is_non_usd(price_text: str) -> bool:
@@ -306,6 +439,15 @@ class AmazonHTTP:
         price = AmazonParser.extract_price(soup, html)
         stock = AmazonParser.extract_stock(soup)
         title = AmazonParser.extract_title(soup)
+
+        if price is None and AmazonParser.is_map_price_page(soup, html):
+            return ScrapeResult.fail(
+                "map_price_unavailable",
+                "MAP price hidden and customerVisiblePrice not found via HTTP",
+                html,
+                "amazon_us",
+                url,
+            )
 
         if price is None:
             return ScrapeResult.fail("no_price", "Price not found via HTTP", html, "amazon_us", url)
@@ -560,6 +702,118 @@ class AmazonScraper:
             return False
 
     @classmethod
+    def _parse_product_page(cls, soup: BeautifulSoup, url: str, html: str) -> ScrapeResult:
+        if not AmazonParser.is_valid_product_page(soup):
+            return ScrapeResult.fail("not_product_page", "Not a product page", html, "amazon_us", url)
+
+        price = AmazonParser.extract_price(soup, html)
+        stock = AmazonParser.extract_stock(soup)
+        title = AmazonParser.extract_title(soup)
+
+        if price is None and AmazonParser.is_map_price_page(soup, html):
+            return ScrapeResult.fail(
+                "map_price_unavailable",
+                "MAP price hidden and customerVisiblePrice not found",
+                html,
+                "amazon_us",
+                url,
+            )
+
+        if price is None:
+            data = AmazonParser.parse_full(soup, url, html)
+            processed = AmazonUSBusinessRules.process_scraped_data(data)
+            if processed.get("error_details"):
+                return ScrapeResult.fail("parse_failed", processed["error_details"], html, "amazon_us", url)
+            price = processed.get("final_price")
+            stock = processed.get("final_inventory")
+
+        if price is None:
+            return ScrapeResult.fail("no_price", "Price not found", html, "amazon_us", url)
+
+        return ScrapeResult.ok(
+            price=float(price),
+            stock=int(stock) if stock is not None else None,
+            title=title,
+        )
+
+    @classmethod
+    def extract_cart_price(cls, soup: BeautifulSoup, asin: str) -> Optional[float]:
+        if not asin:
+            return None
+        row = soup.select_one(f'[data-asin="{asin}"], div.sc-list-item[data-asin="{asin}"]')
+        if row:
+            for sel in (
+                "span.a-price span.a-offscreen",
+                ".sc-product-price",
+                ".sc-price",
+                "span.sc-product-price",
+            ):
+                el = row.select_one(sel)
+                if el:
+                    p = parse_price_text(el.get_text(strip=True))
+                    if p:
+                        return p
+        for sel in (
+            "#sc-active-cart .sc-product-price",
+            "#activeCartViewForm span.a-price span.a-offscreen",
+        ):
+            el = soup.select_one(sel)
+            if el:
+                p = parse_price_text(el.get_text(strip=True))
+                if p:
+                    return p
+        return None
+
+    @classmethod
+    def fetch_map_price_via_cart(cls, url: str, driver, soup: BeautifulSoup = None) -> Optional[float]:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+
+        asin = _extract_asin(url, soup)
+        if not asin:
+            return None
+
+        add_selectors = [
+            "#add-to-cart-button",
+            "input#add-to-cart-button",
+            "input[name='submit.add-to-cart']",
+            "#submit.add-to-cart input",
+            "#addToCart input[name='submit.add-to-cart']",
+        ]
+        clicked = False
+        for sel in add_selectors:
+            try:
+                btn = WebDriverWait(driver, 6).until(EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+                cls._safe_click(driver, btn)
+                clicked = True
+                break
+            except Exception:
+                continue
+        if not clicked:
+            logger.warning("MAP cart flow: add-to-cart button not found for %s", url[:80])
+            return None
+
+        random_delay(2, 4)
+        current = (driver.current_url or "").lower()
+        if "cart" not in current:
+            try:
+                driver.get("https://www.amazon.com/gp/cart/view.html")
+                random_delay(2, 3)
+            except Exception:
+                pass
+
+        html = driver.page_source
+        try:
+            cart_soup = BeautifulSoup(html, "lxml")
+        except Exception:
+            cart_soup = BeautifulSoup(html, "html.parser")
+        price = cls.extract_cart_price(cart_soup, asin)
+        if price is not None:
+            logger.info("MAP cart price for %s: %s", asin, price)
+        return price
+
+    @classmethod
     def fetch_and_parse(cls, url: str, driver) -> ScrapeResult:
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
@@ -601,24 +855,21 @@ class AmazonScraper:
             except Exception:
                 soup = BeautifulSoup(html, "html.parser")
 
-            if not AmazonParser.is_valid_product_page(soup):
-                return ScrapeResult.fail("not_product_page", "Not a product page", html, "amazon_us", url)
+            result = cls._parse_product_page(soup, url, html)
+            if result.success:
+                return result
 
-            data = AmazonParser.parse_full(soup, url, html)
-            processed = AmazonUSBusinessRules.process_scraped_data(data)
+            if (
+                result.error_code in ("map_price_unavailable", "no_price", "parse_failed")
+                and AmazonParser.is_map_price_page(soup, html)
+            ):
+                cart_price = cls.fetch_map_price_via_cart(url, driver, soup)
+                if cart_price is not None:
+                    stock = AmazonParser.extract_stock(soup)
+                    title = AmazonParser.extract_title(soup)
+                    return ScrapeResult.ok(price=float(cart_price), stock=stock, title=title)
 
-            price = processed.get("final_price")
-            stock = processed.get("final_inventory")
-            page_title = AmazonParser.extract_title(soup)
-
-            if price is None and processed.get("error_details"):
-                return ScrapeResult.fail("parse_failed", processed["error_details"], html, "amazon_us", url)
-
-            return ScrapeResult.ok(
-                price=float(price) if price is not None else None,
-                stock=int(stock) if stock is not None else None,
-                title=page_title,
-            )
+            return result
 
         except Exception as exc:
             logger.exception("Selenium scrape error for %s", url)
@@ -700,11 +951,11 @@ def scrape_amazon_us(vendor_url: str, region: str, session: dict = None) -> dict
                 html = driver.page_source
                 soup = BeautifulSoup(html, "html.parser")
                 if AmazonParser.is_valid_product_page(soup):
-                    data = AmazonParser.parse_full(soup, vendor_url, html)
-                    processed = AmazonUSBusinessRules.process_scraped_data(data)
-                    price = processed.get("final_price")
-                    stock = processed.get("final_inventory")
+                    price = AmazonParser.extract_price(soup, html)
+                    stock = AmazonParser.extract_stock(soup)
                     tit = AmazonParser.extract_title(soup)
+                    if price is None and AmazonParser.is_map_price_page(soup, html):
+                        price = AmazonScraper.fetch_map_price_via_cart(vendor_url, driver, soup)
                     if price is not None:
                         out = {"price": float(price), "stock": int(stock) if stock is not None else None}
                         if tit:
