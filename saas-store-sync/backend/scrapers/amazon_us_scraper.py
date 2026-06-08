@@ -19,8 +19,9 @@ import json
 import time
 import random
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import Dict, Any, Optional
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -36,6 +37,23 @@ logger = logging.getLogger("scrapers.amazon_us")
 
 RETRY_LIMIT = 3
 AMAZON_ZIP = "10001"
+MAX_DELIVERY_DAYS = 7
+_US_EASTERN = ZoneInfo("America/New_York")
+
+_MONTH_NAME_TO_NUM = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
 
 _MAP_PRICE_PHRASES = (
     "see price in cart",
@@ -55,6 +73,74 @@ _BUYBOX_FORM_SELECTORS = (
     "form[action*='handle-buy-box']",
     "form[action*='add-to-cart']",
 )
+
+_PRIMARY_DELIVERY_DATE_SELECTORS = (
+    "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE span.a-text-bold",
+    "#deliveryBlockMessage span.a-text-bold",
+    "#mir-layout-DELIVERY_BLOCK span.a-text-bold",
+)
+
+_DATE_WITH_WEEKDAY_RE = re.compile(
+    r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday),?\s+"
+    r"(january|february|march|april|may|june|july|august|september|october|november|december)\s+"
+    r"(\d{1,2})(?:,?\s+(\d{4}))?",
+    re.IGNORECASE,
+)
+_DATE_MONTH_DAY_RE = re.compile(
+    r"(january|february|march|april|may|june|july|august|september|october|november|december)\s+"
+    r"(\d{1,2})(?:,?\s+(\d{4}))?",
+    re.IGNORECASE,
+)
+
+
+def _today_us_eastern() -> date:
+    return datetime.now(_US_EASTERN).date()
+
+
+def _parse_delivery_days_from_text(text: str, today: date) -> Optional[int]:
+    """Return calendar days from ``today`` until the Amazon delivery date in ``text``."""
+    if not text:
+        return None
+    normalized = " ".join(str(text).split()).lower()
+    if not normalized:
+        return None
+
+    if "today" in normalized:
+        return 0
+    if "tomorrow" in normalized:
+        return 1
+
+    match = _DATE_WITH_WEEKDAY_RE.search(normalized) or _DATE_MONTH_DAY_RE.search(normalized)
+    if not match:
+        return None
+
+    month = _MONTH_NAME_TO_NUM.get(match.group(1).lower())
+    if not month:
+        return None
+    try:
+        day = int(match.group(2))
+    except (TypeError, ValueError):
+        return None
+
+    year = today.year
+    if match.lastindex and match.lastindex >= 3 and match.group(3):
+        try:
+            year = int(match.group(3))
+        except (TypeError, ValueError):
+            year = today.year
+
+    try:
+        delivery = date(year, month, day)
+    except ValueError:
+        return None
+
+    if delivery < today and year == today.year:
+        try:
+            delivery = date(today.year + 1, month, day)
+        except ValueError:
+            return None
+
+    return (delivery - today).days
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -249,8 +335,25 @@ class AmazonParser:
         return cls._extract_price_from_scope(soup, page_html, allow_regex=True)
 
     @classmethod
-    def extract_stock(cls, soup: BeautifulSoup) -> Optional[int]:
-        """Derive stock quantity from availability text."""
+    def extract_delivery_days(cls, soup: BeautifulSoup, *, today: Optional[date] = None) -> Optional[int]:
+        """Days until primary delivery date (US Eastern calendar days)."""
+        today = today or _today_us_eastern()
+        days_found = []
+        for sel in _PRIMARY_DELIVERY_DATE_SELECTORS:
+            for elem in soup.select(sel):
+                text = elem.get_text(" ", strip=True)
+                days = _parse_delivery_days_from_text(text, today)
+                if days is not None:
+                    days_found.append(days)
+            if days_found:
+                break
+        if not days_found:
+            return None
+        return min(days_found)
+
+    @classmethod
+    def _availability_stock(cls, soup: BeautifulSoup) -> Optional[int]:
+        """Derive stock from availability text only (before delivery-day gate)."""
         texts = []
         for sel in cls.AVAILABILITY_SELECTORS:
             elem = soup.select_one(sel)
@@ -274,6 +377,24 @@ class AmazonParser:
             return 99
 
         return None
+
+    @classmethod
+    def extract_stock(cls, soup: BeautifulSoup, *, today: Optional[date] = None) -> Optional[int]:
+        """Derive stock from availability; zero when primary delivery is more than 7 days out."""
+        stock = cls._availability_stock(soup)
+        if stock is None or stock <= 0:
+            return stock
+
+        delivery_days = cls.extract_delivery_days(soup, today=today)
+        if delivery_days is not None and delivery_days > MAX_DELIVERY_DAYS:
+            logger.info(
+                "Amazon US stock zeroed: delivery in %s days (> %s)",
+                delivery_days,
+                MAX_DELIVERY_DAYS,
+            )
+            return 0
+
+        return stock
 
     @classmethod
     def is_valid_product_page(cls, soup: BeautifulSoup) -> bool:
