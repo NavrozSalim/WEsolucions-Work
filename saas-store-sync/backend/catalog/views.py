@@ -1479,10 +1479,18 @@ class CatalogPushListingsView(APIView):
         )
 
 
-class CatalogResetListingsPendingView(APIView):
-    """Set every active listing for this store to Pending (clears scrape retry state).
+_RESET_PENDING_SCOPE_LABELS = {
+    'all': 'all active listings',
+    'failed': 'failed listings',
+    'needs_attention': 'needs-attention listings',
+}
 
-    Does not start a scrape — use Start Scraping afterward. Requires JSON body {"confirm": true}.
+
+class CatalogResetListingsPendingView(APIView):
+    """Set store listings to Pending (clears scrape retry state).
+
+    Body: ``{"confirm": true, "scope": "all"|"failed"|"needs_attention"}`` (scope defaults to ``all``).
+    Does not start a scrape — use Start Scraping afterward.
     """
     permission_classes = [IsAuthenticated]
 
@@ -1492,28 +1500,46 @@ class CatalogResetListingsPendingView(APIView):
                 {'error': 'You must send {"confirm": true}.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        scope = (request.data.get('scope') or 'all').strip().lower()
+        if scope not in _RESET_PENDING_SCOPE_LABELS:
+            return Response(
+                {'error': 'scope must be one of: all, failed, needs_attention'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         store = get_object_or_404(Store, id=store_pk, user=request.user)
+        qs = ProductMapping.objects.filter(store=store, is_active=True)
+        if scope == 'failed':
+            qs = qs.filter(sync_status='failed')
+        elif scope == 'needs_attention':
+            qs = qs.filter(sync_status='needs_attention')
+
         log_action(
-            request.user, 'catalog_reset_all_pending', 'store', str(store.id),
-            metadata={'store_name': store.name}, request=request,
+            request.user,
+            'catalog_reset_pending',
+            'store',
+            str(store.id),
+            metadata={'store_name': store.name, 'scope': scope},
+            request=request,
         )
-        n = ProductMapping.objects.filter(store=store, is_active=True).update(
+        n = qs.update(
             sync_status='pending',
             failed_sync_count=0,
             scrape_error=None,
         )
-        Store.objects.filter(id=store.id).update(
-            catalog_pending_reset_at=None,
-            catalog_zero_pending_at=None,
-        )
+        if scope == 'all':
+            Store.objects.filter(id=store.id).update(
+                catalog_pending_reset_at=None,
+                catalog_zero_pending_at=None,
+            )
         from catalog.activity_log import append_catalog_log
+        scope_label = _RESET_PENDING_SCOPE_LABELS[scope]
         append_catalog_log(
             store.id,
-            f'All active listings ({n}) were set to Pending for a fresh vendor check.',
+            f'{n} {scope_label} were set to Pending for a fresh vendor check.',
             action_type='catalog_manual_pending_reset',
-            metadata={'rows_reset': n},
+            metadata={'rows_reset': n, 'scope': scope},
         )
-        return Response({'status': 'ok', 'listings_reset': n})
+        return Response({'status': 'ok', 'listings_reset': n, 'scope': scope})
 
 
 class StoreCriticalZeroView(APIView):

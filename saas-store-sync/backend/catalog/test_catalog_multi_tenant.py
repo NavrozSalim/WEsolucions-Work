@@ -634,3 +634,79 @@ class SearsTemplateIngestTests(TestCase):
         self.assertEqual(result.get('total_rows'), 1, result)
         self.assertEqual(upload.status, CatalogUpload.Status.VALIDATED)
         self.assertEqual(upload.rows.get().marketplace_child_sku_raw, 'CHILD-LEG-1')
+
+
+@override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+class CatalogResetPendingScopeTests(TestCase):
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.client = APIClient()
+        self.mp, _ = Marketplace.objects.get_or_create(
+            code='reset_scope_mt',
+            defaults={'name': 'Reset Scope MT'},
+        )
+        self.vendor = Vendor.objects.get(code='amazonus')
+        self.user = User.objects.create_user(
+            username='reset_scope_u',
+            email='reset_scope_u@example.com',
+            password='pass12345',
+        )
+        self.store = Store.objects.create(
+            user=self.user,
+            name='Reset Scope Store',
+            region='USA',
+            api_token='tok-reset',
+            marketplace=self.mp,
+        )
+        self.client.force_authenticate(user=self.user)
+        self.url = f'/api/v1/stores/{self.store.id}/catalog/reset-pending/'
+
+    def _pm(self, sku: str, status: str):
+        product = Product.objects.create(
+            vendor=self.vendor,
+            owner=self.user,
+            vendor_sku=sku,
+            variation_id='',
+            vendor_url=f'https://www.amazon.com/dp/{sku}',
+        )
+        return ProductMapping.objects.create(
+            store=self.store,
+            product=product,
+            marketplace_child_sku=sku,
+            is_active=True,
+            sync_status=status,
+            failed_sync_count=2 if status in ('failed', 'needs_attention') else 0,
+            scrape_error='old error' if status in ('failed', 'needs_attention') else None,
+        )
+
+    def test_reset_failed_scope_only(self):
+        failed = self._pm('FAIL-1', 'failed')
+        synced = self._pm('SYNC-1', 'synced')
+        attention = self._pm('ATTN-1', 'needs_attention')
+
+        resp = self.client.post(self.url, {'confirm': True, 'scope': 'failed'}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['listings_reset'], 1)
+
+        failed.refresh_from_db()
+        synced.refresh_from_db()
+        attention.refresh_from_db()
+        self.assertEqual(failed.sync_status, 'pending')
+        self.assertIsNone(failed.scrape_error)
+        self.assertEqual(synced.sync_status, 'synced')
+        self.assertEqual(attention.sync_status, 'needs_attention')
+
+    def test_reset_needs_attention_scope_only(self):
+        failed = self._pm('FAIL-2', 'failed')
+        attention = self._pm('ATTN-2', 'needs_attention')
+
+        resp = self.client.post(self.url, {'confirm': True, 'scope': 'needs_attention'}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['listings_reset'], 1)
+
+        failed.refresh_from_db()
+        attention.refresh_from_db()
+        self.assertEqual(failed.sync_status, 'failed')
+        self.assertEqual(attention.sync_status, 'pending')
+        self.assertIsNone(attention.scrape_error)

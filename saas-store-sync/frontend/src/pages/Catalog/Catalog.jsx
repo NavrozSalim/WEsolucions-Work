@@ -37,7 +37,7 @@ import {
     exportCatalogProducts,
     triggerCatalogPushListings,
     triggerCatalogCriticalZero,
-    resetAllCatalogListingsPending,
+    resetCatalogListingsPending,
     getCatalogActivityLogs,
     getScrapeProgress,
     cancelCatalogScrape,
@@ -117,6 +117,121 @@ function formatCatalogError(err) {
     if (status === 500) return 'Something went wrong on our side. Please try again in a moment.';
     if (err.code === 'ECONNABORTED') return 'The request took too long. Check your connection and try again.';
     return err.message || 'Something went wrong. Please try again.';
+}
+
+const RESET_PENDING_OPTIONS = [
+    {
+        scope: 'failed',
+        label: 'Reset failed products',
+        modalTitle: 'Reset failed products',
+        modalMessage:
+            'Every active listing with status Failed will be marked Pending. Scrape errors are cleared so you can run Start Scraping again. Synced listings are not changed.',
+    },
+    {
+        scope: 'needs_attention',
+        label: 'Reset needs-attention products',
+        modalTitle: 'Reset needs-attention products',
+        modalMessage:
+            'Every active listing with status Needs attention will be marked Pending. Scrape errors are cleared so you can run Start Scraping again. Other listings are not changed.',
+    },
+    {
+        scope: 'all',
+        label: 'Reset all to pending',
+        modalTitle: 'Reset all to Pending',
+        modalMessage:
+            'Every active product listing for this store will be marked Pending (scraped/synced rows included). This clears scrape errors so you can run Start Scraping again. It does not fetch prices by itself.',
+    },
+];
+
+function ResetPendingDropdown({ disabled, loading, onSelectScope }) {
+    const [open, setOpen] = useState(false);
+    const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
+    const triggerRef = useRef(null);
+    const menuRef = useRef(null);
+
+    const updatePosition = useCallback(() => {
+        const el = triggerRef.current;
+        if (!el) return;
+        const r = el.getBoundingClientRect();
+        setMenuPos({ top: r.bottom + 6, left: r.left });
+    }, []);
+
+    useLayoutEffect(() => {
+        if (!open) return;
+        updatePosition();
+        const onScroll = () => updatePosition();
+        window.addEventListener('scroll', onScroll, true);
+        window.addEventListener('resize', onScroll);
+        return () => {
+            window.removeEventListener('scroll', onScroll, true);
+            window.removeEventListener('resize', onScroll);
+        };
+    }, [open, updatePosition]);
+
+    useEffect(() => {
+        if (!open) return;
+        const handler = (e) => {
+            if (triggerRef.current?.contains(e.target) || menuRef.current?.contains(e.target)) return;
+            setOpen(false);
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [open]);
+
+    const menu = open && createPortal(
+        <div
+            ref={menuRef}
+            role="menu"
+            style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, zIndex: 99999 }}
+            className="min-w-[15rem] rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40"
+        >
+            {RESET_PENDING_OPTIONS.map((opt) => (
+                <button
+                    key={opt.scope}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                        setOpen(false);
+                        onSelectScope(opt);
+                    }}
+                    className="flex w-full items-center gap-3 whitespace-nowrap px-4 py-2.5 text-left text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-800/90"
+                >
+                    <RotateCcw className="h-4 w-4 shrink-0" />
+                    <span>{opt.label}</span>
+                </button>
+            ))}
+        </div>,
+        document.body,
+    );
+
+    return (
+        <>
+            <button
+                ref={triggerRef}
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={open}
+                disabled={disabled}
+                title="Reset listing status so you can scrape again"
+                onClick={() => {
+                    if (disabled) return;
+                    setOpen((o) => {
+                        if (!o && triggerRef.current) {
+                            const r = triggerRef.current.getBoundingClientRect();
+                            setMenuPos({ top: r.bottom + 6, left: r.left });
+                        }
+                        return !o;
+                    });
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700/80"
+            >
+                <RotateCcw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                Reset status
+                <ChevronDown className="h-4 w-4 opacity-70" />
+            </button>
+            {menu}
+        </>
+    );
 }
 
 function UploadActionsDropdown({ upload, storeId, syncing, scraping, syncingUploadId, scrapingUploadId, deletingUploadId, onSync, onScrape, onDelete, onDownload, onDownloadErrors, onError }) {
@@ -701,6 +816,7 @@ export default function Catalog() {
     const [criticalLoading, setCriticalLoading] = useState(false);
     const [resetPendingModalOpen, setResetPendingModalOpen] = useState(false);
     const [resetPendingLoading, setResetPendingLoading] = useState(false);
+    const [resetPendingChoice, setResetPendingChoice] = useState(RESET_PENDING_OPTIONS[2]);
     const [activityLogs, setActivityLogs] = useState([]);
     const [logsLoading, setLogsLoading] = useState(false);
     const [liveRefreshUntil, setLiveRefreshUntil] = useState(0);
@@ -1714,15 +1830,29 @@ export default function Catalog() {
             .finally(() => setManualPushLoading(false));
     };
 
+    const handleResetPendingOption = (option) => {
+        setResetPendingChoice(option);
+        setResetPendingModalOpen(true);
+    };
+
     const handleResetAllPendingConfirm = () => {
-        if (!selectedStore) return;
+        if (!selectedStore || !resetPendingChoice) return;
+        const scope = resetPendingChoice.scope;
         setResetPendingLoading(true);
-        resetAllCatalogListingsPending(selectedStore)
+        resetCatalogListingsPending(selectedStore, scope)
             .then((res) => {
                 const n = res.data?.listings_reset ?? 0;
                 setResetPendingModalOpen(false);
                 setFlowStatus('success');
-                setMessage(`${n.toLocaleString()} listing${n === 1 ? '' : 's'} set to Pending. Run Start Scraping when you want fresh vendor prices.`);
+                const scopeHint = scope === 'all'
+                    ? 'listing'
+                    : scope === 'failed'
+                        ? 'failed listing'
+                        : 'needs-attention listing';
+                setMessage(
+                    `${n.toLocaleString()} ${scopeHint}${n === 1 ? '' : 's'} set to Pending. `
+                    + 'Run Start Scraping when you want fresh vendor prices.',
+                );
                 if (viewMode === 'products') {
                     refreshProducts();
                 }
@@ -2196,21 +2326,16 @@ export default function Catalog() {
                                     <AlertTriangle className="h-4 w-4 mr-1.5" />
                                     Critical action
                                 </Button>
-                                <Button
-                                    variant="secondary"
-                                    size="sm"
-                                    onClick={() => setResetPendingModalOpen(true)}
+                                <ResetPendingDropdown
                                     disabled={
                                         resetPendingLoading
                                         || manualPushLoading
                                         || scraping
                                         || !selectedStore
                                     }
-                                    title="Mark every active listing as Pending so the next scrape refreshes vendor data"
-                                >
-                                    <RotateCcw className={`h-4 w-4 mr-1.5 ${resetPendingLoading ? 'animate-spin' : ''}`} />
-                                    Reset to pending
-                                </Button>
+                                    loading={resetPendingLoading}
+                                    onSelectScope={handleResetPendingOption}
+                                />
                                 <div className="flex items-center gap-1.5">
                                     <select
                                         className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-2 text-xs text-slate-900 dark:text-slate-100 max-w-[10rem]"
@@ -2733,8 +2858,8 @@ export default function Catalog() {
             />
             <ConfirmModal
                 open={resetPendingModalOpen}
-                title="Reset all to Pending"
-                message="Every active product listing for this store will be marked Pending (scraped/synced rows included). This clears scrape errors so you can run Start Scraping again. It does not fetch prices by itself."
+                title={resetPendingChoice?.modalTitle || 'Reset to Pending'}
+                message={resetPendingChoice?.modalMessage || ''}
                 confirmLabel="Reset to Pending"
                 cancelLabel="Cancel"
                 variant="primary"
