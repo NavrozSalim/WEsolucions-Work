@@ -4,6 +4,10 @@
 # Consumes Celery queue ``heavy-us``: Amazon US, eBay US.
 # HEB is handled by a separate Windows desktop runner, not this worker.
 #
+# Tuned for Cloud VPS 30 (8 vCPU / 24 GB): concurrency 6 + chunk size 80 gives
+# up to 6 parallel scrape sessions per store without oversaturating Amazon/eBay.
+# Set CATALOG_SCRAPE_CHUNK_SIZE on this host too — chunk tasks are split here.
+#
 # Requirements:
 # - Same codebase image as main (build or pull BACKEND_IMAGE).
 # - DATABASE_URL and REDIS_URL must reach the main stack (private network or TLS tunnel).
@@ -32,13 +36,18 @@ services:
     command: >-
       celery -A core worker -l info
       -Q heavy-us
-      --concurrency=${CELERY_US_SCRAPER_CONCURRENCY:-2}
-      --prefetch-multiplier=1 -O fair
+      --concurrency=${CELERY_US_SCRAPER_CONCURRENCY:-6}
+      --prefetch-multiplier=1
+      --max-tasks-per-child=${CELERY_US_MAX_TASKS_PER_CHILD:-40}
+      -O fair
     init: true
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=${REDIS_URL}
-      - PG_CONN_MAX_AGE=${PG_CONN_MAX_AGE:-60}
+      - USE_REDIS_CACHE=${USE_REDIS_CACHE:-1}
+      - PG_CONN_MAX_AGE=${PG_CONN_MAX_AGE:-120}
+      - CATALOG_SCRAPE_CHUNK_SIZE=${CATALOG_SCRAPE_CHUNK_SIZE:-80}
+      - CATALOG_SCRAPE_STALL_MINUTES=${CATALOG_SCRAPE_STALL_MINUTES:-20}
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS}
@@ -61,8 +70,15 @@ services:
     volumes:
       - catalog_media_us_worker:/app/media
     restart: always
-    stop_grace_period: 60s
+    stop_grace_period: 90s
     logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "7.5"
+          memory: 20G
+        reservations:
+          memory: 4G
 
 volumes:
   catalog_media_us_worker:

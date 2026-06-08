@@ -52,11 +52,11 @@ else:
     )
 
 # Split catalog scrapes across parallel Celery tasks (separate Amazon/eBay sessions per chunk).
-# 0 = always one task (legacy). Typical prod: 300–600 with worker concurrency ≥ 2.
+# 0 = always one task (legacy). Prod US VPS 30: 80 with CELERY_US_SCRAPER_CONCURRENCY=6.
 try:
-    CATALOG_SCRAPE_CHUNK_SIZE = max(0, int(os.getenv('CATALOG_SCRAPE_CHUNK_SIZE', '400')))
+    CATALOG_SCRAPE_CHUNK_SIZE = max(0, int(os.getenv('CATALOG_SCRAPE_CHUNK_SIZE', '80')))
 except ValueError:
-    CATALOG_SCRAPE_CHUNK_SIZE = 400
+    CATALOG_SCRAPE_CHUNK_SIZE = 80
 
 # After user clicks Stop on a server-side catalog scrape, re-queue the same scrape after
 # this many seconds if listings are still Pending (0 = disabled).
