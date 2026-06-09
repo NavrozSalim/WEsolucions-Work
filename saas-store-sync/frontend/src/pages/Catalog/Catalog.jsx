@@ -1796,12 +1796,34 @@ export default function Catalog() {
     };
 
     const handleManualPushListings = () => {
-        if (!selectedStore) return;
+        if (!selectedStore || manualPushLoading) return;
         setManualPushLoading(true);
         setFlowStatus('syncing');
-        setMessage('Pushing scraped/synced listings to marketplace (no vendor scrape)…');
+        setMessage(
+            'Manual sync started — pushing listings to your marketplace on the server worker. '
+            + 'Large catalogs can take hours. Keep this tab open; check Activity for live progress.',
+        );
         startProgress();
-        triggerCatalogPushListings(selectedStore, false)
+        triggerCatalogPushListings(selectedStore, false, {
+            onPoll: ({ status, elapsedMs }) => {
+                const mins = Math.floor(elapsedMs / 60000);
+                const statusLabel = status === 'pending'
+                    ? 'queued (waiting for sync worker)'
+                    : status === 'started'
+                        ? 'running'
+                        : status;
+                setMessage(
+                    `Manual sync ${statusLabel} on the server`
+                    + (mins > 0 ? ` (${mins} min)` : '')
+                    + ' — see Activity for push counts. Do not click Manual sync again.',
+                );
+                if (viewMode === 'logs' && mins > 0 && mins % 2 === 0) {
+                    getCatalogActivityLogs(selectedStore)
+                        .then((r) => setActivityLogs(Array.isArray(r.data) ? r.data : []))
+                        .catch(() => {});
+                }
+            },
+        })
             .then((res) => {
                 const d = res.data || {};
                 finishProgress(true);
@@ -1810,7 +1832,8 @@ export default function Catalog() {
                 const failed = d.failed ?? 0;
                 const skipped = d.skipped_no_listing ?? 0;
                 setMessage(
-                    `Manual sync complete: ${pushed} pushed, ${failed} failed, ${skipped} skipped (no listing ID). `
+                    `Manual sync complete: ${pushed.toLocaleString()} pushed, ${failed.toLocaleString()} failed, `
+                    + `${skipped.toLocaleString()} skipped (no listing ID). `
                     + 'Scheduled automatic updates for this store are turned off until you enable them again in store settings.',
                 );
                 if (viewMode === 'products') {
@@ -1823,6 +1846,22 @@ export default function Catalog() {
                 }
             })
             .catch((err) => {
+                const d = err.response?.data;
+                if (err.response?.status === 409) {
+                    finishProgress(false);
+                    setFlowStatus('');
+                    setMessage(
+                        (typeof d?.detail === 'string' && d.detail)
+                            || 'A marketplace push is already running for this store. Check Activity — do not start another.',
+                    );
+                    return;
+                }
+                if (err.code === 'POLL_TIMEOUT') {
+                    finishProgress(false);
+                    setFlowStatus('syncing');
+                    setMessage(err.message);
+                    return;
+                }
                 finishProgress(false);
                 setFlowStatus('failed');
                 setMessage(formatCatalogError(err));

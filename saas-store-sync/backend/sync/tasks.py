@@ -1266,8 +1266,11 @@ def _resolve_listing_id_for_pm(adapter, pm, store):
     return listing_id
 
 
-@shared_task
-def run_store_push_listings_only(store_id, disable_schedule=False):
+PUSH_LISTINGS_PROGRESS_EVERY = 50
+PUSH_LISTINGS_PROGRESS_LOG_SEC = 120
+
+
+def _execute_store_push_listings_only(store_id, disable_schedule=False):
     """
     Push local store_price / store_stock to the marketplace for listings that are
     already scraped or synced — no vendor URL scrape (excludes pending / failed / needs_attention).
@@ -1318,8 +1321,10 @@ def run_store_push_listings_only(store_id, disable_schedule=False):
         sync_status__in=['synced', 'scraped'],
         store_price__isnull=False,
     ).select_related('product', 'product__vendor')
+    total_to_push = qs.count()
 
     succeeded, failed, skipped = 0, 0, 0
+    last_progress_log_at = time.monotonic()
     for pm in qs.iterator(chunk_size=100):
         listing_id = _resolve_listing_id_for_pm(adapter, pm, store)
         if not listing_id:
@@ -1329,46 +1334,67 @@ def run_store_push_listings_only(store_id, disable_schedule=False):
                 status=ReverbUpdateLog.Status.FAILED,
                 error_message='No marketplace listing ID or resolvable SKU for push',
             )
-            continue
-        try:
-            from catalog.marketplace_push import push_product_mapping_to_marketplace
+        else:
+            try:
+                from catalog.marketplace_push import push_product_mapping_to_marketplace
 
-            ok, err_or_warn = push_product_mapping_to_marketplace(
-                pm,
-                store,
-                price_by_vendor_id=price_by_vid,
-                price_fallback=price_fb,
-            )
-            if not ok:
-                raise ValueError(err_or_warn or 'marketplace_push_failed')
-            now_ok = timezone.now()
-            pm.sync_status = 'synced'
-            pm.last_sync_time = now_ok
-            pm.save(update_fields=['sync_status', 'last_sync_time'])
-            ReverbUpdateLog.objects.create(
-                product_mapping=pm,
-                status=ReverbUpdateLog.Status.SUCCESS,
-                pushed_price=pm.store_price,
-                pushed_stock=pm.store_stock,
-                error_message=(err_or_warn or '')[:500] if err_or_warn else None,
-            )
-            succeeded += 1
-        except (ReverbAPIError, SearsAPIError, WalmartAPIError) as e:
-            failed += 1
-            logger.warning("Manual push failed for %s: %s", pm.id, e)
-            ReverbUpdateLog.objects.create(
-                product_mapping=pm,
-                status=ReverbUpdateLog.Status.FAILED,
-                http_status=getattr(e, 'status_code', None),
-                error_message=str(e),
-            )
-        except Exception as e:
-            failed += 1
-            logger.exception("Manual push error for %s", pm.id)
-            ReverbUpdateLog.objects.create(
-                product_mapping=pm,
-                status=ReverbUpdateLog.Status.FAILED,
-                error_message=str(e)[:500],
+                ok, err_or_warn = push_product_mapping_to_marketplace(
+                    pm,
+                    store,
+                    price_by_vendor_id=price_by_vid,
+                    price_fallback=price_fb,
+                )
+                if not ok:
+                    raise ValueError(err_or_warn or 'marketplace_push_failed')
+                now_ok = timezone.now()
+                pm.sync_status = 'synced'
+                pm.last_sync_time = now_ok
+                pm.save(update_fields=['sync_status', 'last_sync_time'])
+                ReverbUpdateLog.objects.create(
+                    product_mapping=pm,
+                    status=ReverbUpdateLog.Status.SUCCESS,
+                    pushed_price=pm.store_price,
+                    pushed_stock=pm.store_stock,
+                    error_message=(err_or_warn or '')[:500] if err_or_warn else None,
+                )
+                succeeded += 1
+            except (ReverbAPIError, SearsAPIError, WalmartAPIError) as e:
+                failed += 1
+                logger.warning("Manual push failed for %s: %s", pm.id, e)
+                ReverbUpdateLog.objects.create(
+                    product_mapping=pm,
+                    status=ReverbUpdateLog.Status.FAILED,
+                    http_status=getattr(e, 'status_code', None),
+                    error_message=str(e),
+                )
+            except Exception as e:
+                failed += 1
+                logger.exception("Manual push error for %s", pm.id)
+                ReverbUpdateLog.objects.create(
+                    product_mapping=pm,
+                    status=ReverbUpdateLog.Status.FAILED,
+                    error_message=str(e)[:500],
+                )
+
+        processed = succeeded + failed + skipped
+        now_mono = time.monotonic()
+        if (
+            processed % PUSH_LISTINGS_PROGRESS_EVERY == 0
+            or now_mono - last_progress_log_at >= PUSH_LISTINGS_PROGRESS_LOG_SEC
+        ):
+            last_progress_log_at = now_mono
+            append_catalog_log(
+                store.id,
+                f'Marketplace sync in progress: {processed:,} of {total_to_push:,} processed '
+                f'({succeeded:,} pushed, {failed:,} failed, {skipped:,} skipped).',
+                action_type='sync_progress',
+                metadata={
+                    'processed': processed,
+                    'total': total_to_push,
+                    'pushed': succeeded,
+                    'failed': failed,
+                    'skipped_no_listing': skipped,
+                },
             )
 
     append_catalog_log(
@@ -1384,7 +1410,34 @@ def run_store_push_listings_only(store_id, disable_schedule=False):
         'pushed': succeeded,
         'failed': failed,
         'skipped_no_listing': skipped,
+        'total': total_to_push,
     }
+
+
+@shared_task(bind=True)
+def run_store_push_listings_only(self, store_id, disable_schedule=False):
+    """Celery entry: one push per store at a time (see sync.push_listings_lock)."""
+    from django.core.cache import cache
+
+    from sync.push_listings_lock import (
+        push_listings_lock_key,
+        release_push_listings_lock,
+        try_acquire_push_listings_lock,
+    )
+
+    store_key = str(store_id)
+    task_id = str(self.request.id)
+    lock_owner = cache.get(push_listings_lock_key(store_key))
+    if lock_owner != task_id and not try_acquire_push_listings_lock(store_key, task_id):
+        return {
+            'error': 'push_already_running',
+            'store_id': store_key,
+            'hint': 'A marketplace push is already running for this store.',
+        }
+    try:
+        return _execute_store_push_listings_only(store_id, disable_schedule=disable_schedule)
+    finally:
+        release_push_listings_lock(store_key, task_id)
 
 
 @shared_task

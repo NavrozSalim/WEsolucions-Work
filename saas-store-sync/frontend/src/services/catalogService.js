@@ -298,7 +298,27 @@ export const exportCatalogProducts = (storeId, { syncStatus } = {}) => {
     });
 };
 
-function pollCatalogCeleryJob(storeId, jobId, { intervalMs = 3500, maxWaitMs = 600000, workerGraceMs = 10000 } = {}) {
+/** Manual sync for large catalogs can run for hours — keep polling until Celery finishes. */
+const PUSH_LISTINGS_MAX_WAIT_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Poll Celery job status until ready.
+ * @param {object} options
+ * @param {boolean} [options.queuedJob=false] When true, the server returned job_id (task is
+ *   enqueued). Pending only means waiting in queue — never treat that as "no worker".
+ * @param {function} [options.onPoll] Called each poll with { status, elapsedMs, ready }.
+ */
+function pollCatalogCeleryJob(
+    storeId,
+    jobId,
+    {
+        intervalMs = 3500,
+        maxWaitMs = 600000,
+        workerGraceMs = 10000,
+        queuedJob = false,
+        onPoll = null,
+    } = {},
+) {
     const start = Date.now();
     const MAX_POLL_FAILS = 6;
     let sawStarted = false;
@@ -309,18 +329,29 @@ function pollCatalogCeleryJob(storeId, jobId, { intervalMs = 3500, maxWaitMs = 6
                 .then((res) => {
                     consecutiveFails = 0;
                     const d = res.data;
+                    const elapsedMs = Date.now() - start;
                     if (d.status !== 'pending') sawStarted = true;
+                    if (typeof onPoll === 'function') {
+                        onPoll({ status: d.status, elapsedMs, ready: d.ready });
+                    }
                     if (d.ready) {
                         if (d.successful) return resolve(d.result);
                         return reject(new Error(d.error || 'Task failed'));
                     }
-                    if (!sawStarted && Date.now() - start > workerGraceMs) {
+                    if (!queuedJob && !sawStarted && elapsedMs > workerGraceMs) {
                         const err = new Error('No Celery worker detected, falling back to inline.');
                         err.code = 'NO_WORKER';
                         return reject(err);
                     }
-                    if (Date.now() - start > maxWaitMs) {
-                        return reject(new Error('Task timed out.'));
+                    if (elapsedMs > maxWaitMs) {
+                        const err = new Error(
+                            queuedJob
+                                ? 'Manual sync is still running on the server but this page stopped waiting. '
+                                  + 'Check Activity for progress — do not start another Manual sync.'
+                                : 'Task timed out.',
+                        );
+                        err.code = 'POLL_TIMEOUT';
+                        return reject(err);
                     }
                     setTimeout(poll, intervalMs);
                 })
@@ -337,20 +368,48 @@ function pollCatalogCeleryJob(storeId, jobId, { intervalMs = 3500, maxWaitMs = 6
     });
 }
 
-function runCatalogJobPost(url, body, storeId) {
-    return api.post(url, body, { timeout: 600000 })
+function runCatalogJobPost(url, body, storeId, options = {}) {
+    const {
+        forbidInlineFallback = false,
+        workerGraceMs = 10000,
+        intervalMs = 3500,
+        maxWaitMs = 600000,
+        queuedJob = false,
+        onPoll = null,
+    } = options;
+
+    return api.post(url, body, { timeout: 120000 })
         .then((res) => {
             if (res.data?.job_id) {
-                return pollCatalogCeleryJob(storeId, res.data.job_id).then((result) => ({ data: result }));
+                return pollCatalogCeleryJob(storeId, res.data.job_id, {
+                    intervalMs,
+                    maxWaitMs,
+                    workerGraceMs,
+                    queuedJob: true,
+                    onPoll,
+                }).then((result) => ({ data: result, meta: res.data }));
             }
             return res;
         })
         .catch((err) => {
-            const shouldFallback = !body.run_inline && (
+            const transient =
                 err.code === 'NO_WORKER' ||
                 !err.response ||
-                err.response?.status >= 500
-            );
+                err.response?.status >= 500;
+            if (!body.run_inline && forbidInlineFallback && transient) {
+                const msg =
+                    err.code === 'NO_WORKER'
+                        ? 'Background sync worker is not running. Manual sync must run on celery_worker_sync. Ask your admin to start it, then try again.'
+                        : (err.response?.data?.error ||
+                              err.response?.data?.detail ||
+                              err.message ||
+                              'Manual sync failed. Try again in a moment.');
+                const wrapped = new Error(msg);
+                wrapped.response = err.response;
+                wrapped.code = err.code;
+                throw wrapped;
+            }
+            const shouldFallback = !body.run_inline && !forbidInlineFallback && transient;
             if (shouldFallback) {
                 return api.post(url, { ...body, run_inline: true }, { timeout: 600000 });
             }
@@ -378,9 +437,23 @@ export const downloadMydealTemplates = (storeId, type = 'both') =>
         responseType: 'blob',
     });
 
-/** Push scraped/synced listings to marketplace (no vendor scrape). */
-export const triggerCatalogPushListings = (storeId, runInline = false) =>
-    runCatalogJobPost(`/stores/${storeId}/catalog/push-listings/`, { run_inline: runInline }, storeId);
+/**
+ * Push scraped/synced listings to marketplace (no vendor scrape).
+ * Always Celery when runInline is false — never inline (avoids Gunicorn 120s kill on large catalogs).
+ * @param {object} [options]
+ * @param {function} [options.onPoll] Progress callback while waiting for Celery.
+ */
+export const triggerCatalogPushListings = (storeId, runInline = false, options = {}) =>
+    runCatalogJobPost(
+        `/stores/${storeId}/catalog/push-listings/`,
+        { run_inline: runInline },
+        storeId,
+        {
+            forbidInlineFallback: !runInline,
+            maxWaitMs: PUSH_LISTINGS_MAX_WAIT_MS,
+            onPoll: options.onPoll,
+        },
+    );
 
 /** Emergency: zero stock everywhere, deactivate store + schedule. Requires confirm: true on server. */
 export const triggerCatalogCriticalZero = (storeId, runInline = false) =>

@@ -1444,7 +1444,17 @@ class CatalogPushListingsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, store_pk):
+        import uuid
+
         from catalog.activity_log import append_catalog_log
+        from catalog.models import ProductMapping
+        from sync.push_listings_lock import (
+            handoff_push_listings_lock,
+            is_push_listings_locked,
+            release_push_listings_lock,
+            try_acquire_push_listings_lock,
+        )
+        from sync.tasks import _execute_store_push_listings_only, run_store_push_listings_only
 
         store = get_object_or_404(Store, id=store_pk, user=request.user)
         append_catalog_log(
@@ -1458,23 +1468,82 @@ class CatalogPushListingsView(APIView):
                 {'error': 'Store not connected. Validate connection first.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        total_listings = ProductMapping.objects.filter(
+            store=store,
+            is_active=True,
+            sync_status__in=['synced', 'scraped'],
+            store_price__isnull=False,
+        ).count()
+
         run_inline = request.data.get('run_inline') or request.query_params.get('inline') == '1'
+        store_key = str(store.id)
+
         if run_inline:
-            from sync.tasks import run_store_push_listings_only
-            result = run_store_push_listings_only(str(store.id), disable_schedule=True)
+            inline_owner = f'inline:{uuid.uuid4().hex}'
+            if not try_acquire_push_listings_lock(store_key, inline_owner):
+                return Response(
+                    {
+                        'error': 'push_listings_already_running',
+                        'detail': (
+                            'A marketplace push is already running for this store. '
+                            'Wait for it to finish or check Activity.'
+                        ),
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            try:
+                result = _execute_store_push_listings_only(store_key, disable_schedule=True)
+            finally:
+                release_push_listings_lock(store_key, inline_owner)
             return Response(result, status=status.HTTP_200_OK)
+
+        if is_push_listings_locked(store_key):
+            return Response(
+                {
+                    'error': 'push_listings_already_running',
+                    'detail': (
+                        'A marketplace push is already queued or running for this store. '
+                        'Wait for it to finish or check Activity — do not click Manual sync again.'
+                    ),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        reservation = f'reserved:{uuid.uuid4().hex}'
+        if not try_acquire_push_listings_lock(store_key, reservation):
+            return Response(
+                {
+                    'error': 'push_listings_already_running',
+                    'detail': 'A marketplace push is already running for this store.',
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
         try:
-            from sync.tasks import run_store_push_listings_only
-            async_result = run_store_push_listings_only.delay(str(store.id), True)
+            async_result = run_store_push_listings_only.delay(store_key, True)
+            handoff_push_listings_lock(store_key, reservation, async_result.id)
         except Exception as e:
+            release_push_listings_lock(store_key, reservation)
             detail = str(e)
-            if 'redis' in detail.lower() or 'connection' in detail.lower():
-                from sync.tasks import run_store_push_listings_only
-                result = run_store_push_listings_only(str(store.id), disable_schedule=True)
-                return Response(result, status=status.HTTP_200_OK)
-            return Response({'detail': detail}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return Response(
+                {
+                    'error': (
+                        'Background sync worker unavailable. Manual sync must run on '
+                        'celery_worker_sync (sync queue). Ensure Redis and celery_worker_sync are running.'
+                    ),
+                    'detail': detail,
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         return Response(
-            {'job_id': async_result.id, 'status': 'queued', 'message': 'Manual listing push queued.'},
+            {
+                'job_id': async_result.id,
+                'status': 'queued',
+                'message': 'Manual listing push queued.',
+                'total_listings': total_listings,
+            },
             status=status.HTTP_202_ACCEPTED,
         )
 

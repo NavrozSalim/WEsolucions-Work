@@ -710,3 +710,56 @@ class CatalogResetPendingScopeTests(TestCase):
         self.assertEqual(failed.sync_status, 'failed')
         self.assertEqual(attention.sync_status, 'pending')
         self.assertIsNone(attention.scrape_error)
+
+
+@override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+class CatalogPushListingsViewTests(TestCase):
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.client = APIClient()
+        self.mp, _ = Marketplace.objects.get_or_create(
+            code='push_listings_mt',
+            defaults={'name': 'Push Listings MT'},
+        )
+        self.user = User.objects.create_user(
+            username='push_listings_u',
+            email='push_listings_u@example.com',
+            password='pass12345',
+        )
+        self.store = Store.objects.create(
+            user=self.user,
+            name='Push Listings Store',
+            region='USA',
+            api_token='tok-push',
+            marketplace=self.mp,
+            connection_status='connected',
+        )
+        self.client.force_authenticate(user=self.user)
+        self.url = f'/api/v1/stores/{self.store.id}/catalog/push-listings/'
+
+    @patch('sync.tasks.run_store_push_listings_only.delay', side_effect=ConnectionError('redis down'))
+    def test_push_listings_returns_503_when_worker_unavailable(self, _delay):
+        resp = self.client.post(self.url, {}, format='json')
+        self.assertEqual(resp.status_code, 503)
+        body = resp.json()
+        self.assertIn('error', body)
+        self.assertIn('celery_worker_sync', body['error'])
+
+    @patch('sync.tasks.run_store_push_listings_only.delay')
+    def test_push_listings_queues_job_and_returns_total(self, delay_mock):
+        delay_mock.return_value.id = 'task-push-abc'
+        resp = self.client.post(self.url, {}, format='json')
+        self.assertEqual(resp.status_code, 202)
+        body = resp.json()
+        self.assertEqual(body['job_id'], 'task-push-abc')
+        self.assertIn('total_listings', body)
+        delay_mock.assert_called_once()
+
+    def test_push_listings_returns_409_when_lock_held(self):
+        from sync.push_listings_lock import try_acquire_push_listings_lock
+
+        try_acquire_push_listings_lock(str(self.store.id), 'existing-task')
+        resp = self.client.post(self.url, {}, format='json')
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json().get('error'), 'push_listings_already_running')
