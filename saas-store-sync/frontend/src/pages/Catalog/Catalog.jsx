@@ -1799,7 +1799,10 @@ export default function Catalog() {
         if (!selectedStore) return;
         setManualPushLoading(true);
         setFlowStatus('syncing');
-        setMessage('Pushing scraped/synced listings to marketplace (no vendor scrape)…');
+        setMessage(
+            'Pushing scraped/synced listings to the marketplace… '
+            + 'Large catalogs can take several minutes — keep this tab open.',
+        );
         startProgress();
         triggerCatalogPushListings(selectedStore, false)
             .then((res) => {

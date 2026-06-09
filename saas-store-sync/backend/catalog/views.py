@@ -1468,11 +1468,16 @@ class CatalogPushListingsView(APIView):
             async_result = run_store_push_listings_only.delay(str(store.id), True)
         except Exception as e:
             detail = str(e)
-            if 'redis' in detail.lower() or 'connection' in detail.lower():
-                from sync.tasks import run_store_push_listings_only
-                result = run_store_push_listings_only(str(store.id), disable_schedule=True)
-                return Response(result, status=status.HTTP_200_OK)
-            return Response({'detail': detail}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return Response(
+                {
+                    'error': (
+                        'Background sync worker unavailable. Manual sync must run on '
+                        'celery_worker_sync (sync queue). Ensure Redis and celery_worker_sync are running.'
+                    ),
+                    'detail': detail,
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return Response(
             {'job_id': async_result.id, 'status': 'queued', 'message': 'Manual listing push queued.'},
             status=status.HTTP_202_ACCEPTED,
