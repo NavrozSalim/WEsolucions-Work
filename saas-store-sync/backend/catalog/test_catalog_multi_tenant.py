@@ -772,3 +772,72 @@ class CatalogPushListingsViewTests(TestCase):
         self.assertEqual(result.get('pushed'), 0)
         self.assertEqual(result.get('failed'), 0)
         self.assertEqual(result.get('skipped_no_listing'), 0)
+
+
+@override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+class CatalogPushListingsProgressViewTests(TestCase):
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.client = APIClient()
+        self.mp, _ = Marketplace.objects.get_or_create(
+            code='push_progress_mt',
+            defaults={'name': 'Push Progress MT'},
+        )
+        self.user = User.objects.create_user(
+            username='push_progress_u',
+            email='push_progress_u@example.com',
+            password='pass12345',
+        )
+        self.store = Store.objects.create(
+            user=self.user,
+            name='Push Progress Store',
+            region='USA',
+            api_token='tok-pp',
+            marketplace=self.mp,
+            connection_status='connected',
+        )
+        self.client.force_authenticate(user=self.user)
+        self.url = f'/api/v1/stores/{self.store.id}/catalog/push-listings/progress/'
+
+    def test_progress_inactive_when_no_lock(self):
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body['active'])
+        self.assertIsNone(body['phase'])
+        self.assertEqual(body['store_id'], str(self.store.id))
+
+    def test_progress_active_with_lock_and_sync_logs(self):
+        from catalog.activity_log import append_catalog_log
+        from sync.push_listings_lock import try_acquire_push_listings_lock
+
+        try_acquire_push_listings_lock(str(self.store.id), 'task-progress-xyz')
+        append_catalog_log(
+            self.store.id,
+            'Marketplace sync started — pushing local prices and stock to your marketplace.',
+            action_type='sync_start',
+        )
+        append_catalog_log(
+            self.store.id,
+            'Marketplace sync in progress: 50 of 200 processed (45 pushed, 2 failed, 3 skipped).',
+            action_type='sync_progress',
+            metadata={
+                'processed': 50,
+                'total': 200,
+                'pushed': 45,
+                'failed': 2,
+                'skipped_no_listing': 3,
+            },
+        )
+
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body['active'])
+        self.assertEqual(body['processed'], 50)
+        self.assertEqual(body['total'], 200)
+        self.assertEqual(body['pushed'], 45)
+        self.assertEqual(body['failed'], 2)
+        self.assertEqual(body['skipped_no_listing'], 3)
+        self.assertEqual(body['pct'], 25)

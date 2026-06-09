@@ -40,6 +40,7 @@ import {
     resetCatalogListingsPending,
     getCatalogActivityLogs,
     getScrapeProgress,
+    getPushListingsProgress,
     cancelCatalogScrape,
     updateProductMapping,
     downloadMydealTemplates,
@@ -760,6 +761,73 @@ function ServerCeleryScrapeStrip({ state, progressStoreId, selectedStoreId }) {
     );
 }
 
+/**
+ * Live marketplace push (Manual sync) for the current store — real processed/total counts.
+ */
+function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId }) {
+    if (!state?.active || !selectedStoreId) return null;
+    if (progressStoreId && progressStoreId !== selectedStoreId) return null;
+    if (state.store_id && state.store_id !== selectedStoreId) return null;
+
+    const isQueued = state.phase === 'queued';
+    const pct = Math.max(0, Math.min(100, Number(state.pct || 0)));
+    const processed = Number(state.processed || 0);
+    const total = Number(state.total || 0);
+    const pushed = Number(state.pushed || 0);
+    const failed = Number(state.failed || 0);
+    const skipped = Number(state.skipped_no_listing || 0);
+    const headline = isQueued ? 'Marketplace sync queued' : 'Marketplace sync running';
+    const pillClass = isQueued
+        ? 'bg-amber-200 text-amber-950 dark:bg-amber-900/40 dark:text-amber-100'
+        : 'bg-emerald-200 text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-100';
+    const barColor = pct >= 100 ? 'bg-emerald-500' : isQueued ? 'bg-amber-500' : 'bg-emerald-500';
+
+    return (
+        <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50/80 dark:bg-emerald-950/30 p-4 mb-4 shadow-sm">
+            <div className="flex items-start gap-3">
+                <span
+                    className={`mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full ${
+                        isQueued ? 'bg-amber-500' : 'bg-emerald-500 animate-pulse'
+                    }`}
+                />
+                <div className="min-w-0 flex-1">
+                    <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                        {headline}
+                        <span className={`ml-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${pillClass}`}>
+                            {isQueued ? 'queued' : 'running'}
+                        </span>
+                    </h3>
+                    <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
+                        {processed.toLocaleString()}/{total.toLocaleString()} processed
+                        {' · '}
+                        {pushed.toLocaleString()} pushed
+                        {' · '}
+                        {failed.toLocaleString()} failed
+                        {' · '}
+                        {skipped.toLocaleString()} skipped (no listing ID)
+                    </p>
+                    {!isQueued && (
+                        <p className="text-xs text-emerald-700 dark:text-emerald-300 mt-0.5">
+                            Pushing local prices and stock to your marketplace. You can leave this page open — rows update as each listing finishes.
+                        </p>
+                    )}
+                    {isQueued && (
+                        <p className="text-xs text-amber-700 dark:text-amber-300 mt-0.5">
+                            Waiting for the sync worker — your job will start automatically. Do not click Manual sync again.
+                        </p>
+                    )}
+                </div>
+            </div>
+            <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                <div
+                    className={`h-full rounded-full transition-all duration-500 ${barColor}`}
+                    style={{ width: `${pct > 0 ? pct : isQueued ? 4 : 8}%` }}
+                />
+            </div>
+        </div>
+    );
+}
+
 export default function Catalog() {
     const [storeList, setStoreList] = useState([]);
     const [marketplaces, setMarketplaces] = useState([]);
@@ -833,6 +901,10 @@ export default function Catalog() {
     const [trackingServerScrape, setTrackingServerScrape] = useState(false);
     const trackingServerScrapeRef = useRef(false);
     useEffect(() => { trackingServerScrapeRef.current = trackingServerScrape; }, [trackingServerScrape]);
+    const [pushListingsProgress, setPushListingsProgress] = useState(null);
+    const [trackingManualPush, setTrackingManualPush] = useState(false);
+    const trackingManualPushRef = useRef(false);
+    useEffect(() => { trackingManualPushRef.current = trackingManualPush; }, [trackingManualPush]);
     const [stoppingScrape, setStoppingScrape] = useState(false);
     // Row IDs whose sync_status just changed — used to flash the row yellow.
     const [flashingRowIds, setFlashingRowIds] = useState(() => new Set());
@@ -1109,7 +1181,9 @@ export default function Catalog() {
         // Single interval: scrape progress + catalog data. Wider spacing and throttled
         // store-list refetch reduce UI/API load while workers are busy.
         const serverScrapeActive = Boolean(scrapeProgress?.server_celery_scrape?.active);
-        const needsLivePolling = activeFlow || inGraceWindow || trackingScrape || trackingServerScrape || serverScrapeActive;
+        const manualPushActive = Boolean(pushListingsProgress?.active);
+        const needsLivePolling = activeFlow || inGraceWindow || trackingScrape || trackingServerScrape
+            || serverScrapeActive || trackingManualPush || manualPushActive;
         if (!needsLivePolling) return undefined;
 
         let cancelled = false;
@@ -1128,12 +1202,20 @@ export default function Catalog() {
                     setScrapeProgress(data);
                 })
                 .catch(() => { /* transient — retry next tick */ });
+            getPushListingsProgress(storeId)
+                .then((res) => {
+                    if (cancelled) return;
+                    const data = res.data || null;
+                    if (data?.store_id && data.store_id !== storeId) return;
+                    setPushListingsProgress(data);
+                })
+                .catch(() => { /* transient — retry next tick */ });
             refreshLiveData({ skipStores: burst % 4 !== 0 });
         };
 
         poll();
-        const intervalId = setInterval(poll, 20000);
-        if (!activeFlow && !trackingScrape && !trackingServerScrape && inGraceWindow) {
+        const intervalId = setInterval(poll, 15000);
+        if (!activeFlow && !trackingScrape && !trackingServerScrape && !trackingManualPush && inGraceWindow) {
             graceTimeoutId = setTimeout(() => {
                 cancelled = true;
                 clearInterval(intervalId);
@@ -1145,15 +1227,27 @@ export default function Catalog() {
             clearInterval(intervalId);
             if (graceTimeoutId) clearTimeout(graceTimeoutId);
         };
-    }, [selectedStore, flowStatus, liveRefreshUntil, trackingScrape, trackingServerScrape, scrapeProgress?.server_celery_scrape?.active, refreshLiveData]);
+    }, [
+        selectedStore,
+        flowStatus,
+        liveRefreshUntil,
+        trackingScrape,
+        trackingServerScrape,
+        trackingManualPush,
+        scrapeProgress?.server_celery_scrape?.active,
+        pushListingsProgress?.active,
+        refreshLiveData,
+    ]);
 
-    // One scrape-progress fetch when opening Products; clear stale payload from other stores first.
+    // One progress fetch when opening Products; clear stale payload from other stores first.
     useEffect(() => {
         if (!selectedStore || viewMode !== 'products') {
             setScrapeProgress(null);
+            setPushListingsProgress(null);
             return undefined;
         }
         setScrapeProgress(null);
+        setPushListingsProgress(null);
         let cancelled = false;
         getScrapeProgress(selectedStore)
             .then((res) => {
@@ -1161,6 +1255,14 @@ export default function Catalog() {
                 const data = res.data || null;
                 if (data?.store_id && data.store_id !== selectedStore) return;
                 setScrapeProgress(data);
+            })
+            .catch(() => { /* ignore */ });
+        getPushListingsProgress(selectedStore)
+            .then((res) => {
+                if (cancelled) return;
+                const data = res.data || null;
+                if (data?.store_id && data.store_id !== selectedStore) return;
+                setPushListingsProgress(data);
             })
             .catch(() => { /* ignore */ });
         return () => { cancelled = true; };
@@ -1724,6 +1826,45 @@ export default function Catalog() {
         }
     }, [scrapeProgress, selectedStore, viewMode, flowStatus]);
 
+    useEffect(() => {
+        if (!selectedStore) {
+            setTrackingManualPush(false);
+            trackingManualPushRef.current = false;
+            return;
+        }
+        if (!pushListingsProgress) {
+            if (!manualPushLoading) {
+                setTrackingManualPush(false);
+                trackingManualPushRef.current = false;
+            }
+            return;
+        }
+        if (pushListingsProgress.store_id && pushListingsProgress.store_id !== selectedStore) {
+            setTrackingManualPush(false);
+            trackingManualPushRef.current = false;
+            return;
+        }
+        const active = Boolean(pushListingsProgress.active);
+        const wasActive = trackingManualPushRef.current;
+        setTrackingManualPush(active);
+        trackingManualPushRef.current = active;
+        if (active && viewMode === 'products' && flowStatus !== 'scraping') {
+            setFlowStatus((prev) => (prev === 'scraping' ? prev : 'syncing'));
+        }
+        if (wasActive && !active) {
+            setLiveRefreshUntil(Date.now() + 120000);
+            if (viewMode === 'products') {
+                refreshProducts();
+            }
+            getCatalogActivityLogs(selectedStore)
+                .then((r) => setActivityLogs(Array.isArray(r.data) ? r.data : []))
+                .catch(() => {});
+            getCatalogStores(selectedMarketplace || null)
+                .then((r) => setStoreList(Array.isArray(r.data) ? r.data : []))
+                .catch(() => {});
+        }
+    }, [pushListingsProgress, selectedStore, viewMode, flowStatus, manualPushLoading, selectedMarketplace, refreshProducts]);
+
     const handleStopScrape = () => {
         if (!selectedStore || stoppingScrape) return;
         setStoppingScrape(true);
@@ -1796,32 +1937,22 @@ export default function Catalog() {
     };
 
     const handleManualPushListings = () => {
-        if (!selectedStore || manualPushLoading) return;
+        if (!selectedStore || manualPushLoading || trackingManualPush) return;
         setManualPushLoading(true);
+        setTrackingManualPush(true);
+        trackingManualPushRef.current = true;
         setFlowStatus('syncing');
-        setMessage(
-            'Manual sync started — pushing listings to your marketplace on the server worker. '
-            + 'Large catalogs can take hours. Keep this tab open; check Activity for live progress.',
-        );
+        setMessage('Manual sync started — watch the progress bar above your product list.');
         startProgress();
         triggerCatalogPushListings(selectedStore, false, {
-            onPoll: ({ status, elapsedMs }) => {
-                const mins = Math.floor(elapsedMs / 60000);
-                const statusLabel = status === 'pending'
-                    ? 'queued (waiting for sync worker)'
-                    : status === 'started'
-                        ? 'running'
-                        : status;
-                setMessage(
-                    `Manual sync ${statusLabel} on the server`
-                    + (mins > 0 ? ` (${mins} min)` : '')
-                    + ' — see Activity for push counts. Do not click Manual sync again.',
-                );
-                if (viewMode === 'logs' && mins > 0 && mins % 2 === 0) {
-                    getCatalogActivityLogs(selectedStore)
-                        .then((r) => setActivityLogs(Array.isArray(r.data) ? r.data : []))
-                        .catch(() => {});
-                }
+            onPoll: () => {
+                getPushListingsProgress(selectedStore)
+                    .then((res) => {
+                        const data = res.data || null;
+                        if (data?.store_id && data.store_id !== selectedStore) return;
+                        setPushListingsProgress(data);
+                    })
+                    .catch(() => {});
             },
         })
             .then((res) => {
@@ -1866,7 +1997,12 @@ export default function Catalog() {
                 setFlowStatus('failed');
                 setMessage(formatCatalogError(err));
             })
-            .finally(() => setManualPushLoading(false));
+            .finally(() => {
+                setManualPushLoading(false);
+                getPushListingsProgress(selectedStore)
+                    .then((res) => setPushListingsProgress(res.data || null))
+                    .catch(() => {});
+            });
     };
 
     const handleResetPendingOption = (option) => {
@@ -2312,6 +2448,14 @@ export default function Catalog() {
                 />
             )}
 
+            {selectedStore && viewMode === 'products' && (
+                <ManualSyncProgressStrip
+                    state={pushListingsProgress}
+                    progressStoreId={pushListingsProgress?.store_id}
+                    selectedStoreId={selectedStore}
+                />
+            )}
+
             {/* Desktop-runner ingest status strips — one per vendor the store
                 uses (HEB, Costco, …). Backend exposes them uniformly under
                 ``scrapeProgress.vendors``. */}
@@ -2348,10 +2492,10 @@ export default function Catalog() {
                                     variant="secondary"
                                     size="sm"
                                     onClick={handleManualPushListings}
-                                    disabled={manualPushLoading || scraping || !selectedStore}
+                                    disabled={manualPushLoading || trackingManualPush || scraping || !selectedStore}
                                     title="Push current price/stock to marketplace for Synced / Scrape rows only (no new vendor fetch)"
                                 >
-                                    <RefreshCw className={`h-4 w-4 mr-1.5 ${manualPushLoading ? 'animate-spin' : ''}`} />
+                                    <RefreshCw className={`h-4 w-4 mr-1.5 ${(manualPushLoading || trackingManualPush) ? 'animate-spin' : ''}`} />
                                     Manual sync
                                 </Button>
                                 <Button
@@ -2369,6 +2513,7 @@ export default function Catalog() {
                                     disabled={
                                         resetPendingLoading
                                         || manualPushLoading
+                                        || trackingManualPush
                                         || scraping
                                         || !selectedStore
                                     }

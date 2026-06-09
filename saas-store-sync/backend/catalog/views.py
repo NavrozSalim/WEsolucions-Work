@@ -1548,6 +1548,21 @@ class CatalogPushListingsView(APIView):
         )
 
 
+class CatalogPushListingsProgressView(APIView):
+    """Live progress for Manual sync (marketplace push) — poll like scrape progress."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        from catalog.push_listings_progress import build_push_listings_progress_payload
+
+        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        return Response(
+            build_push_listings_progress_payload(store),
+            headers={'Cache-Control': 'no-store, max-age=0, private'},
+        )
+
+
 _RESET_PENDING_SCOPE_LABELS = {
     'all': 'all active listings',
     'failed': 'failed listings',

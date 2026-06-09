@@ -236,6 +236,10 @@ export const triggerCatalogScrape = (storeId, runInline = false, uploadId = null
 export const getScrapeProgress = (storeId) =>
     api.get(`/stores/${storeId}/catalog/scrape/progress/`, { timeout: 90_000 });
 
+/** Live Manual sync (marketplace push) progress — poll like scrape progress. */
+export const getPushListingsProgress = (storeId) =>
+    api.get(`/stores/${storeId}/catalog/push-listings/progress/`, { timeout: 90_000 });
+
 /**
  * Stop running price checks: pending jobs from your computer (HEB, etc.) and/or
  * fetches running on our servers. Safe to call when nothing is running.
