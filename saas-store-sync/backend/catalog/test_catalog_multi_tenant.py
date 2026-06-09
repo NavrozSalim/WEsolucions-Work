@@ -763,3 +763,12 @@ class CatalogPushListingsViewTests(TestCase):
         resp = self.client.post(self.url, {}, format='json')
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(resp.json().get('error'), 'push_listings_already_running')
+
+    def test_execute_push_listings_empty_catalog_does_not_raise(self):
+        """Regression: _execute_store_push_listings_only uses time.monotonic() at module scope."""
+        from sync.tasks import _execute_store_push_listings_only
+
+        result = _execute_store_push_listings_only(str(self.store.id), disable_schedule=False)
+        self.assertEqual(result.get('pushed'), 0)
+        self.assertEqual(result.get('failed'), 0)
+        self.assertEqual(result.get('skipped_no_listing'), 0)
