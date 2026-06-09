@@ -337,44 +337,20 @@ function pollCatalogCeleryJob(storeId, jobId, { intervalMs = 3500, maxWaitMs = 6
     });
 }
 
-function runCatalogJobPost(url, body, storeId, options = {}) {
-    const {
-        forbidInlineFallback = false,
-        workerGraceMs = 10000,
-        intervalMs = 3500,
-        maxWaitMs = 600000,
-    } = options;
-
+function runCatalogJobPost(url, body, storeId) {
     return api.post(url, body, { timeout: 600000 })
         .then((res) => {
             if (res.data?.job_id) {
-                return pollCatalogCeleryJob(storeId, res.data.job_id, {
-                    intervalMs,
-                    maxWaitMs,
-                    workerGraceMs,
-                }).then((result) => ({ data: result }));
+                return pollCatalogCeleryJob(storeId, res.data.job_id).then((result) => ({ data: result }));
             }
             return res;
         })
         .catch((err) => {
-            const transient =
+            const shouldFallback = !body.run_inline && (
                 err.code === 'NO_WORKER' ||
                 !err.response ||
-                err.response?.status >= 500;
-            if (!body.run_inline && forbidInlineFallback && transient) {
-                const msg =
-                    err.code === 'NO_WORKER'
-                        ? 'Background sync worker is not running. Manual sync must run on the server worker (celery_worker_sync). Ask your admin to start it, then try again.'
-                        : (err.response?.data?.error ||
-                              err.response?.data?.detail ||
-                              err.message ||
-                              'Manual sync failed. Try again in a moment.');
-                const wrapped = new Error(msg);
-                wrapped.response = err.response;
-                wrapped.code = err.code;
-                throw wrapped;
-            }
-            const shouldFallback = !body.run_inline && !forbidInlineFallback && transient;
+                err.response?.status >= 500
+            );
             if (shouldFallback) {
                 return api.post(url, { ...body, run_inline: true }, { timeout: 600000 });
             }
@@ -402,14 +378,9 @@ export const downloadMydealTemplates = (storeId, type = 'both') =>
         responseType: 'blob',
     });
 
-/** Push scraped/synced listings to marketplace (no vendor scrape). Always Celery — never inline (avoids web timeout). */
+/** Push scraped/synced listings to marketplace (no vendor scrape). */
 export const triggerCatalogPushListings = (storeId, runInline = false) =>
-    runCatalogJobPost(
-        `/stores/${storeId}/catalog/push-listings/`,
-        { run_inline: runInline },
-        storeId,
-        { forbidInlineFallback: !runInline, workerGraceMs: 45000 },
-    );
+    runCatalogJobPost(`/stores/${storeId}/catalog/push-listings/`, { run_inline: runInline }, storeId);
 
 /** Emergency: zero stock everywhere, deactivate store + schedule. Requires confirm: true on server. */
 export const triggerCatalogCriticalZero = (storeId, runInline = false) =>
