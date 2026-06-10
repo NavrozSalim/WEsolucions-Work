@@ -37,6 +37,7 @@ import {
     exportCatalogProducts,
     triggerCatalogPushListings,
     triggerCatalogCriticalZero,
+    triggerCatalogFailedZero,
     resetCatalogListingsPending,
     getCatalogActivityLogs,
     getScrapeProgress,
@@ -120,6 +121,25 @@ function formatCatalogError(err) {
     return err.message || 'Something went wrong. Please try again.';
 }
 
+const CRITICAL_ACTION_OPTIONS = [
+    {
+        id: 'failed_zero',
+        label: 'Zero inventory against failed products',
+        modalTitle: 'Zero failed listing inventory',
+        modalMessage:
+            'Every active listing with status Failed or Needs attention will have local stock set to 0 and inventory pushed to the marketplace (where connected). Synced listings are not changed and the store stays active.',
+        confirmLabel: 'Yes, zero failed listings',
+    },
+    {
+        id: 'full_critical',
+        label: 'Critical option',
+        modalTitle: 'Critical action',
+        modalMessage:
+            'If you click Yes, all listing inventory for this store will be set to 0 on the marketplace (where possible), local stock will be cleared, and this store will be deactivated including its scheduled sync toggle. Only use this if something went wrong and you need an immediate stop.',
+        confirmLabel: 'Yes, zero inventory and deactivate',
+    },
+];
+
 const RESET_PENDING_OPTIONS = [
     {
         scope: 'failed',
@@ -143,6 +163,97 @@ const RESET_PENDING_OPTIONS = [
             'Every active product listing for this store will be marked Pending (scraped/synced rows included). This clears scrape errors so you can run Start Scraping again. It does not fetch prices by itself.',
     },
 ];
+
+function CriticalActionDropdown({ disabled, loading, onSelectAction }) {
+    const [open, setOpen] = useState(false);
+    const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
+    const triggerRef = useRef(null);
+    const menuRef = useRef(null);
+
+    const updatePosition = useCallback(() => {
+        const el = triggerRef.current;
+        if (!el) return;
+        const r = el.getBoundingClientRect();
+        setMenuPos({ top: r.bottom + 6, left: r.left });
+    }, []);
+
+    useLayoutEffect(() => {
+        if (!open) return;
+        updatePosition();
+        const onScroll = () => updatePosition();
+        window.addEventListener('scroll', onScroll, true);
+        window.addEventListener('resize', onScroll);
+        return () => {
+            window.removeEventListener('scroll', onScroll, true);
+            window.removeEventListener('resize', onScroll);
+        };
+    }, [open, updatePosition]);
+
+    useEffect(() => {
+        if (!open) return;
+        const handler = (e) => {
+            if (triggerRef.current?.contains(e.target) || menuRef.current?.contains(e.target)) return;
+            setOpen(false);
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [open]);
+
+    const menu = open && createPortal(
+        <div
+            ref={menuRef}
+            role="menu"
+            style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, zIndex: 99999 }}
+            className="min-w-[15rem] rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40"
+        >
+            {CRITICAL_ACTION_OPTIONS.map((opt) => (
+                <button
+                    key={opt.id}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                        setOpen(false);
+                        onSelectAction(opt);
+                    }}
+                    className="flex w-full items-center gap-3 whitespace-nowrap px-4 py-2.5 text-left text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-800/90"
+                >
+                    <AlertTriangle className="h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
+                    <span>{opt.label}</span>
+                </button>
+            ))}
+        </div>,
+        document.body,
+    );
+
+    return (
+        <>
+            <button
+                ref={triggerRef}
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={open}
+                disabled={disabled}
+                title="Emergency inventory actions"
+                onClick={() => {
+                    if (disabled) return;
+                    setOpen((o) => {
+                        if (!o && triggerRef.current) {
+                            const r = triggerRef.current.getBoundingClientRect();
+                            setMenuPos({ top: r.bottom + 6, left: r.left });
+                        }
+                        return !o;
+                    });
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-700 shadow-sm transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-rose-900 dark:bg-slate-800 dark:text-rose-300 dark:hover:bg-rose-950/40"
+            >
+                <AlertTriangle className={`h-4 w-4 ${loading ? 'animate-pulse' : ''}`} />
+                Critical action
+                <ChevronDown className="h-4 w-4 opacity-70" />
+            </button>
+            {menu}
+        </>
+    );
+}
 
 function ResetPendingDropdown({ disabled, loading, onSelectScope }) {
     const [open, setOpen] = useState(false);
@@ -881,6 +992,7 @@ export default function Catalog() {
     const [exportDownloading, setExportDownloading] = useState(false);
     const [manualPushLoading, setManualPushLoading] = useState(false);
     const [criticalModalOpen, setCriticalModalOpen] = useState(false);
+    const [criticalChoice, setCriticalChoice] = useState(CRITICAL_ACTION_OPTIONS[0]);
     const [criticalLoading, setCriticalLoading] = useState(false);
     const [resetPendingModalOpen, setResetPendingModalOpen] = useState(false);
     const [resetPendingLoading, setResetPendingLoading] = useState(false);
@@ -1140,13 +1252,13 @@ export default function Catalog() {
     useEffect(() => {
         if (criticalLoading) {
             setSidebarActivity('catalog-critical', {
-                title: 'Critical action',
+                title: criticalChoice?.modalTitle || 'Critical action',
                 description: 'Updating stock and marketplace. Please wait.',
             });
         } else {
             clearSidebarActivity('catalog-critical');
         }
-    }, [criticalLoading, setSidebarActivity, clearSidebarActivity]);
+    }, [criticalLoading, criticalChoice, setSidebarActivity, clearSidebarActivity]);
 
     useEffect(() => {
         if (flowStatus === 'syncing' || flowStatus === 'scraping') {
@@ -2048,18 +2160,34 @@ export default function Catalog() {
             .finally(() => setResetPendingLoading(false));
     };
 
-    const handleCriticalZeroConfirm = () => {
-        if (!selectedStore) return;
+    const handleCriticalActionOption = (opt) => {
+        setCriticalChoice(opt);
+        setCriticalModalOpen(true);
+    };
+
+    const handleCriticalActionConfirm = () => {
+        if (!selectedStore || !criticalChoice) return;
         setCriticalLoading(true);
-        triggerCatalogCriticalZero(selectedStore, false)
+        const trigger = criticalChoice.id === 'failed_zero'
+            ? triggerCatalogFailedZero
+            : triggerCatalogCriticalZero;
+        trigger(selectedStore, false)
             .then((res) => {
                 const d = res.data || {};
                 setCriticalModalOpen(false);
                 setFlowStatus('success');
-                setMessage(
-                    `Critical action finished: local stock set to 0; ${d.marketplace_push_ok ?? 0} marketplace update(s) ok. Store and schedule are deactivated.`,
-                );
-                getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
+                if (criticalChoice.id === 'failed_zero') {
+                    setMessage(
+                        `Failed listings zeroed: ${d.local_zeroed ?? 0} local, `
+                        + `${d.marketplace_push_ok ?? 0} marketplace update(s) ok`
+                        + `${d.skipped_no_listing ? `, ${d.skipped_no_listing} skipped (no listing id)` : ''}.`,
+                    );
+                } else {
+                    setMessage(
+                        `Critical action finished: local stock set to 0; ${d.marketplace_push_ok ?? 0} marketplace update(s) ok. Store and schedule are deactivated.`,
+                    );
+                    getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
+                }
                 if (viewMode === 'products') {
                     refreshProducts();
                 }
@@ -2498,17 +2626,11 @@ export default function Catalog() {
                                     <RefreshCw className={`h-4 w-4 mr-1.5 ${(manualPushLoading || trackingManualPush) ? 'animate-spin' : ''}`} />
                                     Manual sync
                                 </Button>
-                                <Button
-                                    variant="secondary"
-                                    size="sm"
-                                    onClick={() => setCriticalModalOpen(true)}
+                                <CriticalActionDropdown
                                     disabled={criticalLoading || !selectedStore}
-                                    className="border-rose-200 text-rose-700 hover:bg-rose-50 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/40"
-                                    title="Emergency: set all listing stock to 0 and turn off store automation"
-                                >
-                                    <AlertTriangle className="h-4 w-4 mr-1.5" />
-                                    Critical action
-                                </Button>
+                                    loading={criticalLoading}
+                                    onSelectAction={handleCriticalActionOption}
+                                />
                                 <ResetPendingDropdown
                                     disabled={
                                         resetPendingLoading
@@ -3031,13 +3153,13 @@ export default function Catalog() {
             />
             <ConfirmModal
                 open={criticalModalOpen}
-                title="Critical action"
-                message="If you click Yes, all listing inventory for this store will be set to 0 on the marketplace (where possible), local stock will be cleared, and this store will be deactivated including its scheduled sync toggle. Only use this if something went wrong and you need an immediate stop."
-                confirmLabel="Yes, zero inventory and deactivate"
+                title={criticalChoice?.modalTitle || 'Critical action'}
+                message={criticalChoice?.modalMessage || ''}
+                confirmLabel={criticalChoice?.confirmLabel || 'Confirm'}
                 cancelLabel="Cancel"
                 variant="danger"
                 loading={criticalLoading}
-                onConfirm={handleCriticalZeroConfirm}
+                onConfirm={handleCriticalActionConfirm}
                 onCancel={() => !criticalLoading && setCriticalModalOpen(false)}
             />
             <ConfirmModal

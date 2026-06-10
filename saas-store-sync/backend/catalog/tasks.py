@@ -108,28 +108,11 @@ def store_has_scrapeable_pending_mappings(store) -> bool:
     return qs.exists()
 
 
-def _fail_mapping(pm, code: str, message: str = '') -> None:
-    """Mark a ProductMapping as a strict scrape failure.
+def _fail_mapping(pm, code: str, message: str = '', *, store=None) -> None:
+    """Scrape failure: zero local stock, keep last price, push 0 to marketplace."""
+    from catalog.scrape_failure import fail_product_mapping
 
-    Clears ``store_price`` + ``store_stock`` (so nothing gets pushed to the
-    marketplace), stores a short reason in ``scrape_error``, escalates
-    ``sync_status`` to ``needs_attention`` after 3 consecutive failures.
-    """
-    pm.store_price = None
-    pm.store_stock = None
-    pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-    pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-    reason = (code or 'scrape_failed').strip() or 'scrape_failed'
-    if message:
-        reason = f'{reason}: {str(message)[:240]}'
-    pm.scrape_error = reason[:512]
-    pm.save(update_fields=[
-        'store_price',
-        'store_stock',
-        'failed_sync_count',
-        'sync_status',
-        'scrape_error',
-    ])
+    fail_product_mapping(pm, code, message, store=store)
 
 
 class VendorResolveIndex:
@@ -831,7 +814,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                     row.row_number,
                     product.vendor_sku,
                 )
-                _fail_mapping(pm, 'no_vendor_url', 'Product has no vendor URL or resolvable SKU.')
+                _fail_mapping(pm, 'no_vendor_url', 'Product has no vendor URL or resolvable SKU.', store=store)
                 failed += 1
                 last_progress_at = timezone.now()
                 continue
@@ -861,7 +844,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                     "Scrape failed for %s (url=%s): %s",
                     product.vendor_sku, url, scrape_err,
                 )
-                _fail_mapping(pm, 'scrape_exception', str(scrape_err))
+                _fail_mapping(pm, 'scrape_exception', str(scrape_err), store=store)
                 failed += 1
                 last_progress_at = timezone.now()
                 continue
@@ -880,7 +863,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                     err_code,
                     err_msg[:300],
                 )
-                _fail_mapping(pm, err_code, err_msg)
+                _fail_mapping(pm, err_code, err_msg, store=store)
                 failed += 1
                 last_progress_at = timezone.now()
                 continue
@@ -901,6 +884,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                                 pm,
                                 'missing_fixed_inputs',
                                 f"Fixed pricing requires {', '.join(missing_inputs)} on the catalog row.",
+                                store=store,
                             )
                             failed += 1
                             last_progress_at = timezone.now()
@@ -955,7 +939,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                     'Pricing/inventory apply failed for SKU %s (store=%s): %s',
                     product.vendor_sku, store.id, apply_err,
                 )
-                _fail_mapping(pm, 'pricing_apply_error', str(apply_err))
+                _fail_mapping(pm, 'pricing_apply_error', str(apply_err), store=store)
                 failed += 1
                 last_progress_at = timezone.now()
                 continue
@@ -1394,7 +1378,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
                     url[:120] if url else '',
                     e,
                 )
-                _fail_mapping(pm, 'scrape_exception', str(e))
+                _fail_mapping(pm, 'scrape_exception', str(e), store=store)
                 failed += 1
                 error_summary = str(e) if not error_summary else error_summary
                 last_progress_at = timezone.now()
@@ -1414,7 +1398,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
                     err_code,
                     err_msg[:300],
                 )
-                _fail_mapping(pm, err_code, err_msg)
+                _fail_mapping(pm, err_code, err_msg, store=store)
                 failed += 1
                 error_summary = err_code if not error_summary else error_summary
                 last_progress_at = timezone.now()
@@ -1433,6 +1417,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
                                 pm,
                                 'missing_fixed_inputs',
                                 f"Fixed pricing requires {', '.join(missing_inputs)} on the catalog row.",
+                                store=store,
                             )
                             failed += 1
                             error_summary = 'missing_fixed_inputs' if not error_summary else error_summary
@@ -1494,7 +1479,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
                     store.id,
                     apply_err,
                 )
-                _fail_mapping(pm, 'pricing_apply_error', str(apply_err))
+                _fail_mapping(pm, 'pricing_apply_error', str(apply_err), store=store)
                 failed += 1
                 last_progress_at = timezone.now()
                 continue
@@ -1977,12 +1962,12 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
         raw_sku = (product.vendor_sku or '').strip()
         if not raw_sku:
             missing += 1
-            _fail_mapping(pm, 'vevor_feed_sku_missing', 'Missing vendor SKU')
+            _fail_mapping(pm, 'vevor_feed_sku_missing', 'Missing vendor SKU', store=store)
             continue
         entry = lookup_sku(lookup, lookup_compact, raw_sku)
         if not entry:
             missing += 1
-            _fail_mapping(pm, 'vevor_feed_sku_missing', 'SKU not in Vevor AU XLSX feed')
+            _fail_mapping(pm, 'vevor_feed_sku_missing', 'SKU not in Vevor AU XLSX feed', store=store)
             continue
         matched += 1
         try:
@@ -1990,7 +1975,7 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
             stock_val = int(entry.get('Posted Inventory') or 0)
         except Exception as parse_err:
             missing += 1
-            _fail_mapping(pm, 'vevor_feed_row_invalid', str(parse_err)[:240])
+            _fail_mapping(pm, 'vevor_feed_row_invalid', str(parse_err)[:240], store=store)
             continue
 
         vp_batch.append(VendorPrice(product=product, price=price, stock=stock_val))

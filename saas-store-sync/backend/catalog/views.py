@@ -1665,6 +1665,49 @@ class StoreCriticalZeroView(APIView):
         )
 
 
+class StoreFailedZeroInventoryView(APIView):
+    """
+    Zero stock locally and on the marketplace for failed / needs_attention listings only.
+    Store and schedule stay active. Requires JSON body {"confirm": true}.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        if request.data.get('confirm') is not True:
+            return Response(
+                {'error': 'You must send {"confirm": true} to run this action.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        log_action(
+            request.user, 'failed_zero_inventory', 'store', str(store.id),
+            metadata={'store_name': store.name}, request=request,
+        )
+        run_inline = request.data.get('run_inline') or request.query_params.get('inline') == '1'
+        if run_inline:
+            from sync.tasks import run_store_failed_zero_inventory
+            result = run_store_failed_zero_inventory(str(store.id))
+            return Response(result, status=status.HTTP_200_OK)
+        try:
+            from sync.tasks import run_store_failed_zero_inventory
+            async_result = run_store_failed_zero_inventory.delay(str(store.id))
+        except Exception as e:
+            detail = str(e)
+            if 'redis' in detail.lower() or 'connection' in detail.lower():
+                from sync.tasks import run_store_failed_zero_inventory
+                result = run_store_failed_zero_inventory(str(store.id))
+                return Response(result, status=status.HTTP_200_OK)
+            return Response({'detail': detail}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(
+            {
+                'job_id': async_result.id,
+                'status': 'queued',
+                'message': 'Failed-listing zero-inventory job queued.',
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
 class CatalogSampleTemplateView(APIView):
     """Download sample CSV template for catalog bulk upload (marketplace-specific columns)."""
     permission_classes = [IsAuthenticated]

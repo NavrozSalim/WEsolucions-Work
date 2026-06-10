@@ -59,26 +59,11 @@ def _is_ingest_only_product(product) -> bool:
     return False
 
 
-def _fail_mapping(pm, code: str, message: str = '') -> None:
-    """Strict live-scrape failure: clear posted price/stock, mark failed,
-    and record the reason. Do **not** fall back to historical VendorPrice —
-    stale data silently pushed to a marketplace is worse than no update.
-    """
-    pm.store_price = None
-    pm.store_stock = None
-    pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-    pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-    reason = (code or 'scrape_failed').strip() or 'scrape_failed'
-    if message:
-        reason = f'{reason}: {str(message)[:240]}'
-    pm.scrape_error = reason[:512]
-    pm.save(update_fields=[
-        'store_price',
-        'store_stock',
-        'failed_sync_count',
-        'sync_status',
-        'scrape_error',
-    ])
+def _fail_mapping(pm, code: str, message: str = '', *, store=None) -> None:
+    """Scrape failure: zero local stock, keep last price, push 0 to marketplace."""
+    from catalog.scrape_failure import fail_product_mapping
+
+    fail_product_mapping(pm, code, message, store=store)
 
 
 def _heb_product_id_from_sku(sku: str):
@@ -512,7 +497,7 @@ def run_store_sync(self, store_id):
                 logger.exception(
                     "Store sync scrape error for %s: %s", pm.product.vendor_sku, e,
                 )
-                _fail_mapping(pm, 'scrape_exception', str(e))
+                _fail_mapping(pm, 'scrape_exception', str(e), store=store)
                 error_summary = str(e) if not error_summary else error_summary
                 continue
 
@@ -523,7 +508,7 @@ def run_store_sync(self, store_id):
                 err_msg = (
                     result.get('error_message') if isinstance(result, dict) else ''
                 ) or ''
-                _fail_mapping(pm, err_code, err_msg)
+                _fail_mapping(pm, err_code, err_msg, store=store)
                 error_summary = err_code if not error_summary else error_summary
                 continue
 
@@ -539,6 +524,7 @@ def run_store_sync(self, store_id):
                             pm,
                             'missing_fixed_inputs',
                             f"Fixed pricing requires {', '.join(missing)} on the catalog row.",
+                            store=store,
                         )
                         error_summary = 'missing_fixed_inputs' if not error_summary else error_summary
                         continue
@@ -1513,4 +1499,94 @@ def run_store_critical_zero_inventory(store_id):
         'listings_zeroed_local': local_zeroed,
         'marketplace_push_ok': pushed,
         'marketplace_push_failed': push_failed,
+    }
+
+
+@shared_task
+def run_store_failed_zero_inventory(store_id):
+    """
+    Set stock to 0 locally and on the marketplace for failed / needs_attention
+    listings only. Store and schedule stay active (unlike critical zero).
+    """
+    import logging
+    from store_adapters import get_adapter
+    from store_adapters.reverb_adapter import ReverbAPIError
+    from store_adapters.sears_adapter import SearsAPIError
+    from store_adapters.walmart_adapter import WalmartAPIError
+    from catalog.activity_log import append_catalog_log
+
+    logger = logging.getLogger(__name__)
+    try:
+        store = Store.objects.select_related('marketplace').get(id=store_id)
+    except Store.DoesNotExist:
+        return {'error': 'store_not_found'}
+
+    if store.connection_status != 'connected':
+        return {
+            'error': 'not_connected',
+            'hint': 'Validate store connection before zeroing failed listings.',
+            'store_id': str(store_id),
+        }
+
+    adapter = get_adapter(store)
+    price_by_vid, price_fb, _, _ = _build_store_vendor_pricing_inventory_caches(store)
+
+    qs = ProductMapping.objects.filter(
+        store=store,
+        is_active=True,
+        sync_status__in=['failed', 'needs_attention'],
+        store_price__isnull=False,
+    ).select_related('product', 'product__vendor')
+
+    local_zeroed = pushed = push_failed = skipped = 0
+
+    for pm in qs.iterator(chunk_size=100):
+        listing_id = _resolve_listing_id_for_pm(adapter, pm, store)
+        if not listing_id:
+            skipped += 1
+            continue
+
+        pm.store_stock = 0
+        pm.save(update_fields=['store_stock'])
+        local_zeroed += 1
+
+        try:
+            from catalog.marketplace_push import push_product_mapping_to_marketplace
+
+            ok, err = push_product_mapping_to_marketplace(
+                pm,
+                store,
+                price_by_vendor_id=price_by_vid,
+                price_fallback=price_fb,
+            )
+            if not ok:
+                push_failed += 1
+                logger.warning('Failed-listing zero push failed for %s: %s', pm.id, err)
+            else:
+                pushed += 1
+                pm.last_sync_time = timezone.now()
+                pm.save(update_fields=['last_sync_time'])
+        except (ReverbAPIError, SearsAPIError, WalmartAPIError, ValueError) as e:
+            push_failed += 1
+            logger.warning('Failed-listing zero push failed for %s: %s', pm.id, e)
+        except Exception as e:
+            push_failed += 1
+            logger.exception('Failed-listing zero push error for %s: %s', pm.id, e)
+
+    append_catalog_log(
+        store.id,
+        (
+            f'Zero inventory for failed listings: {pushed} marketplace update(s) ok, '
+            f'{push_failed} failed, {skipped} skipped (no listing id), '
+            f'{local_zeroed} zeroed locally.'
+        ),
+        action_type='failed_zero_inventory',
+    )
+
+    return {
+        'store_id': str(store_id),
+        'local_zeroed': local_zeroed,
+        'marketplace_push_ok': pushed,
+        'marketplace_push_failed': push_failed,
+        'skipped_no_listing': skipped,
     }

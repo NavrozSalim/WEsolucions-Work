@@ -248,15 +248,14 @@ def _apply_to_mappings(
                 if tier_now is not None and getattr(tier_now, 'margin_type', '') == 'fixed':
                     missing_inputs = _missing_fixed_inputs(pm)
                     if missing_inputs:
-                        pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-                        pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-                        pm.scrape_error = (
-                            f'missing_fixed_inputs: Fixed pricing requires '
-                            f'{", ".join(missing_inputs)} on the catalog row.'
+                        from catalog.scrape_failure import fail_product_mapping
+
+                        fail_product_mapping(
+                            pm,
+                            'missing_fixed_inputs',
+                            f'Fixed pricing requires {", ".join(missing_inputs)} on the catalog row.',
+                            store=store,
                         )
-                        pm.save(update_fields=[
-                            'failed_sync_count', 'sync_status', 'scrape_error',
-                        ])
                         continue
 
             new_price = (
@@ -287,14 +286,14 @@ def _apply_to_mappings(
                 save_fields.append('title')
             pm.save(update_fields=save_fields)
             applied += 1
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 'Ingest apply failed for product %s store %s',
                 product.vendor_sku, store.id,
             )
-            pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-            pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-            pm.save(update_fields=['failed_sync_count', 'sync_status'])
+            from catalog.scrape_failure import fail_product_mapping
+
+            fail_product_mapping(pm, 'ingest_apply_error', str(exc), store=store)
     return applied
 
 

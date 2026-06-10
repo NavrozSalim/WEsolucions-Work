@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
@@ -710,6 +710,46 @@ class CatalogResetPendingScopeTests(TestCase):
         self.assertEqual(failed.sync_status, 'failed')
         self.assertEqual(attention.sync_status, 'pending')
         self.assertIsNone(attention.scrape_error)
+
+
+@override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+class CatalogFailedZeroViewTests(TestCase):
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.client = APIClient()
+        self.mp, _ = Marketplace.objects.get_or_create(
+            code='failed_zero_mt',
+            defaults={'name': 'Failed Zero MT'},
+        )
+        self.user = User.objects.create_user(
+            username='failed_zero_u',
+            email='failed_zero_u@example.com',
+            password='pass12345',
+        )
+        self.store = Store.objects.create(
+            user=self.user,
+            name='Failed Zero Store',
+            region='USA',
+            api_token='tok-fz',
+            marketplace=self.mp,
+            connection_status='connected',
+        )
+        self.client.force_authenticate(user=self.user)
+        self.url = f'/api/v1/stores/{self.store.id}/catalog/failed-zero/'
+
+    def test_requires_confirm(self):
+        resp = self.client.post(self.url, {}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('confirm', resp.json()['error'])
+
+    @patch('sync.tasks.run_store_failed_zero_inventory.delay')
+    def test_queues_when_confirm_true(self, mock_delay):
+        mock_delay.return_value = MagicMock(id='job-fz-1')
+        resp = self.client.post(self.url, {'confirm': True}, format='json')
+        self.assertEqual(resp.status_code, 202)
+        self.assertEqual(resp.json()['job_id'], 'job-fz-1')
+        mock_delay.assert_called_once_with(str(self.store.id))
 
 
 @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())

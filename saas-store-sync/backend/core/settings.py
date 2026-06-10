@@ -370,6 +370,7 @@ CELERY_TASK_ROUTES = (
         'sync.tasks.run_store_update': {'queue': 'sync'},
         'sync.tasks.run_store_push_listings_only': {'queue': 'sync'},
         'sync.tasks.run_store_critical_zero_inventory': {'queue': 'sync'},
+        'sync.tasks.run_store_failed_zero_inventory': {'queue': 'sync'},
         # Minute tick enqueues ``run_store_update`` → ``sync`` queue.
         'sync.tasks.check_scheduled_updates': {'queue': 'light'},
         'vendor.prune_old_vendor_prices': {'queue': 'celery'},

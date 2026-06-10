@@ -466,3 +466,11 @@ export const triggerCatalogCriticalZero = (storeId, runInline = false) =>
         { confirm: true, run_inline: runInline },
         storeId,
     );
+
+/** Zero stock for failed / needs_attention listings only; store stays active. */
+export const triggerCatalogFailedZero = (storeId, runInline = false) =>
+    runCatalogJobPost(
+        `/stores/${storeId}/catalog/failed-zero/`,
+        { confirm: true, run_inline: runInline },
+        storeId,
+    );

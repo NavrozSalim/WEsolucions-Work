@@ -127,6 +127,7 @@ class CeleryStaticTaskRoutesTests(SimpleTestCase):
             (sync_tasks.run_store_update, 'sync'),
             (sync_tasks.run_store_push_listings_only, 'sync'),
             (sync_tasks.run_store_critical_zero_inventory, 'sync'),
+            (sync_tasks.run_store_failed_zero_inventory, 'sync'),
             (sync_tasks.check_scheduled_updates, 'light'),
         ]
         from vendor import tasks as vendor_tasks
