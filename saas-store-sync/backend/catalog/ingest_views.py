@@ -525,7 +525,7 @@ def _ingest_mapping_qs(
         return ProductMapping.objects.none()
     if not store_id and restrict_to_user_id is None:
         return ProductMapping.objects.none()
-    qs = ProductMapping.objects.filter(is_active=True, product__vendor_id__in=vendor_ids)
+    qs = ProductMapping.objects.filter(is_active=True, sync_status='pending', product__vendor_id__in=vendor_ids)
     if store_id:
         qs = qs.filter(store_id=store_id)
         if restrict_to_user_id is not None:
