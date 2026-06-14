@@ -145,7 +145,6 @@ def _apply_shipping_and_delivery(
         try:
             freight_result = fetch_freight_calculate(
                 product_id,
-                sku['sku_id'],
                 sku['price'],
                 region,
                 access_token,
@@ -158,9 +157,8 @@ def _apply_shipping_and_delivery(
                     delivery_max = best['delivery_max']
         except AliExpressIOPError as exc:
             logger.warning(
-                'AliExpress freight calculate failed for %s sku=%s: %s',
+                'AliExpress freight calculate failed for %s: %s',
                 product_id,
-                sku.get('sku_id'),
                 exc,
             )
 

@@ -17,6 +17,7 @@ from scrapers.aliexpress_ds_parser import (
 from scrapers.aliexpress_iop import (
     AliExpressIOPError,
     fetch_ds_product,
+    fetch_freight_calculate,
     iop_sync_business_request,
     method_to_iop_path,
     method_to_slash_path,
@@ -194,6 +195,28 @@ class AliExpressSignTests(SimpleTestCase):
         self.assertEqual(result['ae_item_base_info_dto']['subject'], 'REST item')
         self.assertGreaterEqual(mock_sync.call_count, 1)
         mock_rest.assert_called_once()
+
+    @override_settings(
+        ALIEXPRESS_APP_KEY='536784',
+        ALIEXPRESS_APP_SECRET='secret',
+        ALIEXPRESS_IOP_GATEWAY='https://api-sg.aliexpress.com',
+    )
+    @patch('scrapers.aliexpress_iop._iop_ds_request')
+    def test_fetch_freight_calculate_uses_official_dto_fields(self, mock_req):
+        mock_req.return_value = {
+            'aliexpress_logistics_buyer_freight_calculate_response': {
+                'result': {'success': True},
+            }
+        }
+        fetch_freight_calculate('1005007170995524', 4.59, 'UK', 'oauth-token')
+        business = mock_req.call_args[0][1]
+        dto = json.loads(business['param_aeop_freight_calculate_for_buyer_d_t_o'])
+        self.assertNotIn('sku_id', dto)
+        self.assertEqual(dto['product_id'], '1005007170995524')
+        self.assertEqual(dto['product_num'], '1')
+        self.assertEqual(dto['country_code'], 'GB')
+        self.assertEqual(dto['price'], '4.59')
+        self.assertEqual(dto['price_currency'], 'GBP')
 
 
 class AliExpressDsParserTests(SimpleTestCase):

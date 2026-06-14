@@ -307,7 +307,6 @@ def fetch_ds_product(product_id: str, store_region: str | None, access_token: st
 
 def fetch_freight_calculate(
     product_id: str,
-    sku_id: str,
     sku_price: float,
     store_region: str | None,
     access_token: str,
@@ -316,17 +315,16 @@ def fetch_freight_calculate(
     from scrapers.aliexpress_markets import get_aliexpress_market
 
     pid = str(product_id or '').strip()
-    sid = str(sku_id or '').strip()
-    if not pid or not sid or sku_price is None:
+    if not pid or sku_price is None:
         return None
     market = get_aliexpress_market(store_region)
+    # Official DTO fields only — do not send sku_id (causes UnsupportedParamMapping).
     freight_dto = {
-        'product_id': int(pid),
-        'product_num': 1,
         'country_code': market['country'],
+        'product_id': pid,
+        'product_num': '1',
         'send_goods_country_code': 'CN',
-        'sku_id': sid,
-        'price': str(sku_price),
+        'price': f'{float(sku_price):.2f}',
         'price_currency': market['target_currency'],
     }
     business = {
