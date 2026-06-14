@@ -1033,20 +1033,34 @@ def run_store_update(self, store_id, source='beat'):
             bulk_queue = []
     if bulk_supported and bulk_queue:
         try:
-            payload = [(sku, price, stock) for (_pm, sku, price, stock) in bulk_queue]
-            res = adapter.update_products_bulk(payload) or {}
-            ok_set = set(res.get('ok') or [])
-            failed_list = res.get('failed') or []
-            now_ok = timezone.now()
-            for pm, sku, _price, _stock in bulk_queue:
-                if str(sku) in ok_set:
-                    push_ok += 1
-                    pm.sync_status = 'synced'
-                    pm.last_sync_time = now_ok
-                    pm.save(update_fields=['sync_status', 'last_sync_time'])
-            for it in failed_list[:50]:
-                push_fail += 1
-                _record_push_error(it.get('sku') or '', Exception(it.get('error') or 'Bulk push failed'))
+            if store_is_sears(store):
+                from catalog.marketplace_push import flush_sears_bulk_marketplace_push
+
+                stats = flush_sears_bulk_marketplace_push(
+                    store,
+                    bulk_queue,
+                    price_by_vendor_id=price_by_vid,
+                    price_fallback=price_fb,
+                )
+                push_ok += int(stats.get('push_ok') or 0)
+                push_fail += int(stats.get('push_fail') or 0)
+                for err in (stats.get('errors') or [])[:50]:
+                    _record_push_error(err.get('sku') or '', Exception(err.get('error') or 'Bulk push failed'))
+            else:
+                payload = [(sku, price, stock) for (_pm, sku, price, stock) in bulk_queue]
+                res = adapter.update_products_bulk(payload) or {}
+                ok_set = set(res.get('ok') or [])
+                failed_list = res.get('failed') or []
+                now_ok = timezone.now()
+                for pm, sku, _price, _stock in bulk_queue:
+                    if str(sku) in ok_set:
+                        push_ok += 1
+                        pm.sync_status = 'synced'
+                        pm.last_sync_time = now_ok
+                        pm.save(update_fields=['sync_status', 'last_sync_time'])
+                for it in failed_list[:50]:
+                    push_fail += 1
+                    _record_push_error(it.get('sku') or '', Exception(it.get('error') or 'Bulk push failed'))
         except Exception as e:
             logger.warning("Bulk push failed (scraped pass): %s", e)
             push_fail += len(bulk_queue)
@@ -1339,77 +1353,123 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
 
     succeeded, failed, skipped = 0, 0, 0
     last_progress_log_at = time.monotonic()
-    for pm in qs.iterator(chunk_size=100):
-        listing_id = _resolve_listing_id_for_pm(adapter, pm, store)
-        if not listing_id:
-            skipped += 1
-            ReverbUpdateLog.objects.create(
-                product_mapping=pm,
-                status=ReverbUpdateLog.Status.FAILED,
-                error_message='No marketplace listing ID or resolvable SKU for push',
-            )
-        else:
-            try:
-                from catalog.marketplace_push import push_product_mapping_to_marketplace
 
-                ok, err_or_warn = push_product_mapping_to_marketplace(
-                    pm,
-                    store,
-                    price_by_vendor_id=price_by_vid,
-                    price_fallback=price_fb,
+    if store_is_sears(store):
+        bulk_queue = []
+        queued_pairs = []
+        for pm in qs.iterator(chunk_size=100):
+            listing_id = _resolve_listing_id_for_pm(adapter, pm, store)
+            if not listing_id:
+                skipped += 1
+                ReverbUpdateLog.objects.create(
+                    product_mapping=pm,
+                    status=ReverbUpdateLog.Status.FAILED,
+                    error_message='No marketplace listing ID or resolvable SKU for push',
                 )
-                if not ok:
-                    raise ValueError(err_or_warn or 'marketplace_push_failed')
-                now_ok = timezone.now()
-                pm.sync_status = 'synced'
-                pm.last_sync_time = now_ok
-                pm.save(update_fields=['sync_status', 'last_sync_time'])
+                continue
+            bulk_queue.append((pm, listing_id, pm.store_price, int(pm.store_stock or 0)))
+            queued_pairs.append((pm, str(listing_id)))
+
+        from catalog.marketplace_push import flush_sears_bulk_marketplace_push
+
+        stats = flush_sears_bulk_marketplace_push(
+            store,
+            bulk_queue,
+            price_by_vendor_id=price_by_vid,
+            price_fallback=price_fb,
+        )
+        succeeded = int(stats.get('push_ok') or 0)
+        failed = int(stats.get('push_fail') or 0)
+        errors_by_sku = {str(e.get('sku') or ''): e.get('error') for e in (stats.get('errors') or [])}
+        warnings_by_sku = stats.get('warnings') or {}
+
+        for pm, listing_id in queued_pairs:
+            if pm.sync_status == 'synced' and pm.last_sync_time:
                 ReverbUpdateLog.objects.create(
                     product_mapping=pm,
                     status=ReverbUpdateLog.Status.SUCCESS,
                     pushed_price=pm.store_price,
                     pushed_stock=pm.store_stock,
-                    error_message=(err_or_warn or '')[:500] if err_or_warn else None,
+                    error_message=(warnings_by_sku.get(listing_id) or '')[:500] or None,
                 )
-                succeeded += 1
-            except (ReverbAPIError, SearsAPIError, WalmartAPIError) as e:
-                failed += 1
-                logger.warning("Manual push failed for %s: %s", pm.id, e)
+            else:
                 ReverbUpdateLog.objects.create(
                     product_mapping=pm,
                     status=ReverbUpdateLog.Status.FAILED,
-                    http_status=getattr(e, 'status_code', None),
-                    error_message=str(e),
+                    error_message=(errors_by_sku.get(listing_id) or pm.scrape_error or 'marketplace_push_failed')[:500],
                 )
-            except Exception as e:
-                failed += 1
-                logger.exception("Manual push error for %s", pm.id)
+    else:
+        for pm in qs.iterator(chunk_size=100):
+            listing_id = _resolve_listing_id_for_pm(adapter, pm, store)
+            if not listing_id:
+                skipped += 1
                 ReverbUpdateLog.objects.create(
                     product_mapping=pm,
                     status=ReverbUpdateLog.Status.FAILED,
-                    error_message=str(e)[:500],
+                    error_message='No marketplace listing ID or resolvable SKU for push',
                 )
+            else:
+                try:
+                    from catalog.marketplace_push import push_product_mapping_to_marketplace
 
-        processed = succeeded + failed + skipped
-        now_mono = time.monotonic()
-        if (
-            processed % PUSH_LISTINGS_PROGRESS_EVERY == 0
-            or now_mono - last_progress_log_at >= PUSH_LISTINGS_PROGRESS_LOG_SEC
-        ):
-            last_progress_log_at = now_mono
-            append_catalog_log(
-                store.id,
-                f'Marketplace sync in progress: {processed:,} of {total_to_push:,} processed '
-                f'({succeeded:,} pushed, {failed:,} failed, {skipped:,} skipped).',
-                action_type='sync_progress',
-                metadata={
-                    'processed': processed,
-                    'total': total_to_push,
-                    'pushed': succeeded,
-                    'failed': failed,
-                    'skipped_no_listing': skipped,
-                },
-            )
+                    ok, err_or_warn = push_product_mapping_to_marketplace(
+                        pm,
+                        store,
+                        price_by_vendor_id=price_by_vid,
+                        price_fallback=price_fb,
+                    )
+                    if not ok:
+                        raise ValueError(err_or_warn or 'marketplace_push_failed')
+                    now_ok = timezone.now()
+                    pm.sync_status = 'synced'
+                    pm.last_sync_time = now_ok
+                    pm.save(update_fields=['sync_status', 'last_sync_time'])
+                    ReverbUpdateLog.objects.create(
+                        product_mapping=pm,
+                        status=ReverbUpdateLog.Status.SUCCESS,
+                        pushed_price=pm.store_price,
+                        pushed_stock=pm.store_stock,
+                        error_message=(err_or_warn or '')[:500] if err_or_warn else None,
+                    )
+                    succeeded += 1
+                except (ReverbAPIError, SearsAPIError, WalmartAPIError) as e:
+                    failed += 1
+                    logger.warning("Manual push failed for %s: %s", pm.id, e)
+                    ReverbUpdateLog.objects.create(
+                        product_mapping=pm,
+                        status=ReverbUpdateLog.Status.FAILED,
+                        http_status=getattr(e, 'status_code', None),
+                        error_message=str(e),
+                    )
+                except Exception as e:
+                    failed += 1
+                    logger.exception("Manual push error for %s", pm.id)
+                    ReverbUpdateLog.objects.create(
+                        product_mapping=pm,
+                        status=ReverbUpdateLog.Status.FAILED,
+                        error_message=str(e)[:500],
+                    )
+
+            processed = succeeded + failed + skipped
+            now_mono = time.monotonic()
+            if (
+                processed % PUSH_LISTINGS_PROGRESS_EVERY == 0
+                or now_mono - last_progress_log_at >= PUSH_LISTINGS_PROGRESS_LOG_SEC
+            ):
+                last_progress_log_at = now_mono
+                append_catalog_log(
+                    store.id,
+                    f'Marketplace sync in progress: {processed:,} of {total_to_push:,} processed '
+                    f'({succeeded:,} pushed, {failed:,} failed, {skipped:,} skipped).',
+                    action_type='sync_progress',
+                    metadata={
+                        'processed': processed,
+                        'total': total_to_push,
+                        'pushed': succeeded,
+                        'failed': failed,
+                        'skipped_no_listing': skipped,
+                    },
+                )
 
     append_catalog_log(
         store.id,

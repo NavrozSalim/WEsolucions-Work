@@ -59,6 +59,15 @@ def _costco_au_runs_on_server() -> bool:
         return False
 
 
+def _bulk_push_sears_after_scrape_if_needed(store):
+    """Flush scraped Sears listings to the marketplace in batched XML feeds."""
+    if not store_is_sears(store):
+        return None
+    from catalog.marketplace_push import bulk_push_sears_scraped_listings
+
+    return bulk_push_sears_scraped_listings(store)
+
+
 def _is_ingest_only_product(product) -> bool:
     """True when the vendor has no live server-side scraper for this deployment.
 
@@ -1130,6 +1139,15 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
             'stalled': stalled_out,
         },
     )
+    sears_push = _bulk_push_sears_after_scrape_if_needed(store)
+    if isinstance(sears_push, dict) and sears_push.get('push_ok'):
+        append_catalog_log(
+            store.id,
+            f'Sears bulk marketplace push: {sears_push.get("push_ok")} listing(s) synced, '
+            f'{sears_push.get("push_fail", 0)} failed.',
+            action_type='marketplace_push',
+            metadata=sears_push,
+        )
     return out
 
 
@@ -1278,6 +1296,15 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
                 'parallel': True,
             },
         )
+        sears_push = _bulk_push_sears_after_scrape_if_needed(store)
+        if isinstance(sears_push, dict) and sears_push.get('push_ok'):
+            append_catalog_log(
+                store.id,
+                f'Sears bulk marketplace push: {sears_push.get("push_ok")} listing(s) synced, '
+                f'{sears_push.get("push_fail", 0)} failed.',
+                action_type='marketplace_push',
+                metadata=sears_push,
+            )
         return {
             'upload_id': str(upload_id),
             'run_id': str(run.id),
@@ -1632,6 +1659,15 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> d
         action_type='scrape_end',
         metadata=end_meta,
     )
+    sears_push = _bulk_push_sears_after_scrape_if_needed(store)
+    if isinstance(sears_push, dict) and sears_push.get('push_ok'):
+        append_catalog_log(
+            store.id,
+            f'Sears bulk marketplace push: {sears_push.get("push_ok")} listing(s) synced, '
+            f'{sears_push.get("push_fail", 0)} failed.',
+            action_type='marketplace_push',
+            metadata=sears_push,
+        )
     return {
         'store_id': str(store_id),
         'scope': 'store',
@@ -1756,6 +1792,15 @@ def catalog_scrape_store_finalize(results, store_id: str):
             action_type='scrape_end',
             metadata=end_meta,
         )
+        sears_push = _bulk_push_sears_after_scrape_if_needed(store)
+        if isinstance(sears_push, dict) and sears_push.get('push_ok'):
+            append_catalog_log(
+                store.id,
+                f'Sears bulk marketplace push: {sears_push.get("push_ok")} listing(s) synced, '
+                f'{sears_push.get("push_fail", 0)} failed.',
+                action_type='marketplace_push',
+                metadata=sears_push,
+            )
         return {
             'store_id': str(store_id),
             'scope': 'store',

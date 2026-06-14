@@ -400,3 +400,8 @@ try:
     ALIEXPRESS_MAX_DELIVERY_DAYS = max(1, int(os.getenv('ALIEXPRESS_MAX_DELIVERY_DAYS', '7') or '7'))
 except (TypeError, ValueError):
     ALIEXPRESS_MAX_DELIVERY_DAYS = 7
+
+try:
+    SEARS_BULK_BATCH_SIZE = max(1, min(500, int(os.getenv('SEARS_BULK_BATCH_SIZE', '100') or '100')))
+except (TypeError, ValueError):
+    SEARS_BULK_BATCH_SIZE = 100

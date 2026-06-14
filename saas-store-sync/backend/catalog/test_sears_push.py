@@ -13,19 +13,23 @@ from store_adapters.sears_adapter import (
     SearsAPIError,
     SearsAdapter,
     build_inventory_feed_xml,
+    build_inventory_feed_xml_bulk,
     build_pricing_feed_xml,
+    build_pricing_feed_xml_bulk,
+    classify_bulk_feed_results,
     parse_document_id,
+    parse_processing_report_item_errors,
     parse_processing_report_summary,
     processing_report_pending,
 )
 
 
-def _accepted_report(doc_id: str = '123456789') -> str:
+def _accepted_report(doc_id: str = '123456789', *, accepted: int = 1) -> str:
     return (
         f'<?xml version="1.0"?><processing-report>'
         f'<document-id>{doc_id}</document-id>'
         '<report><summary>'
-        '<records-accepted>1</records-accepted>'
+        f'<records-accepted>{accepted}</records-accepted>'
         '<records-with-errors>0</records-with-errors>'
         '</summary></report></processing-report>'
     )
@@ -35,7 +39,7 @@ def _sears_request_side_effect(method, path, **kwargs):
     if method == 'PUT':
         return '<?xml version="1.0"?><document-id>123456789</document-id>'
     if method == 'GET' and '/processing-report/' in path:
-        return _accepted_report()
+        return _accepted_report(accepted=99)
     return ''
 
 
@@ -162,6 +166,57 @@ class SearsXmlTests(SimpleTestCase):
         self.assertIn('inventory-feed xmlns="http://seller.marketplace.sears.com/inventory/v7"', xml)
         self.assertNotIn('<store-inventory', xml)
 
+    def test_pricing_xml_bulk_multiple_items(self):
+        xml = build_pricing_feed_xml_bulk([
+            {'sku': 'CHILD-A', 'price': '74.00', 'rrp': '100.00'},
+            {'sku': 'CHILD-B', 'standard_price': '49.99'},
+        ])
+        self.assertEqual(xml.count('<item item-id='), 2)
+        self.assertIn('item-id="CHILD-A"', xml)
+        self.assertIn('item-id="CHILD-B"', xml)
+        self.assertIn('<sale-price>74.00</sale-price>', xml)
+        self.assertIn('<standard-price>49.99</standard-price>', xml)
+
+    def test_inventory_xml_bulk_lmp_multiple_items(self):
+        xml = build_inventory_feed_xml_bulk([
+            {'sku': 'CHILD-A', 'stock': 3},
+            {'sku': 'CHILD-B', 'stock': 0},
+        ], lmp=True, location_id='LOC-1')
+        self.assertEqual(xml.count('<item item-id='), 2)
+        self.assertIn('item-id="CHILD-A"', xml)
+        self.assertIn('item-id="CHILD-B"', xml)
+        self.assertIn('location-id="LOC-1"', xml)
+
+
+class SearsBulkReportTests(SimpleTestCase):
+    def test_classify_all_accepted(self):
+        ok, failed = classify_bulk_feed_results(
+            _accepted_report().replace('<records-accepted>1</records-accepted>', '<records-accepted>2</records-accepted>'),
+            {'CHILD-1', 'CHILD-2'},
+        )
+        self.assertEqual(ok, {'CHILD-1', 'CHILD-2'})
+        self.assertEqual(failed, [])
+
+    def test_classify_item_level_errors(self):
+        body = (
+            '<?xml version="1.0"?><processing-report><report><summary>'
+            '<records-accepted>1</records-accepted>'
+            '<records-with-errors>1</records-with-errors>'
+            '</summary><detail><errors><error>'
+            '<item-id>CHILD-BAD</item-id><error-info>Invalid item</error-info>'
+            '</error></errors></detail></report></processing-report>'
+        )
+        ok, failed = classify_bulk_feed_results(body, {'CHILD-OK', 'CHILD-BAD'})
+        self.assertEqual(ok, {'CHILD-OK'})
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]['sku'], 'CHILD-BAD')
+
+    def test_parse_processing_report_item_errors(self):
+        body = (
+            '<error><item-id>SKU-1</item-id><error-info>Bad price</error-info></error>'
+        )
+        self.assertEqual(parse_processing_report_item_errors(body), {'SKU-1': 'Bad price'})
+
 
 class SearsProcessingReportTests(SimpleTestCase):
     def test_parse_document_id(self):
@@ -235,22 +290,17 @@ class SearsAdapterPushTests(SimpleTestCase):
         mock_request.side_effect = _sears_request_side_effect
         adapter = self._adapter()
         adapter.update_product('CHILD-99', price=Decimal('74.00'), rrp=Decimal('100.00'), stock=8)
-        self.assertEqual(mock_request.call_count, 4)
-        price_put = mock_request.call_args_list[0]
-        price_report = mock_request.call_args_list[1]
-        inv_put = mock_request.call_args_list[2]
-        inv_report = mock_request.call_args_list[3]
-        self.assertEqual(price_put.args[0], 'PUT')
+        put_calls = [c for c in mock_request.call_args_list if c.args[0] == 'PUT']
+        self.assertEqual(len(put_calls), 2)
+        price_put = put_calls[0]
+        inv_put = put_calls[1]
         self.assertEqual(price_put.args[1], '/pricing/fbm/v6')
         self.assertIn('<standard-price>100.00</standard-price>', price_put.kwargs['data'])
         self.assertIn('<sale-price>74.00</sale-price>', price_put.kwargs['data'])
-        self.assertEqual(price_report.args[0], 'GET')
-        self.assertIn('/processing-report/', price_report.args[1])
         self.assertEqual(inv_put.args[1], '/inventory/fbm-lmp/v7')
         self.assertIn('<store-inventory xmlns="http://seller.marketplace.sears.com/catalog/v7"', inv_put.kwargs['data'])
         self.assertIn('location-id="WH-1"', inv_put.kwargs['data'])
         self.assertIn('<quantity>8</quantity>', inv_put.kwargs['data'])
-        self.assertIn('/processing-report/', inv_report.args[1])
 
     @patch.object(SearsAdapter, '_request')
     def test_update_product_posted_only_without_rrp(self, mock_request):
@@ -279,9 +329,45 @@ class SearsAdapterPushTests(SimpleTestCase):
         self.assertTrue(result)
         self.assertIsNotNone(adapter.last_inventory_warning)
         self.assertIn('inventory not updated', adapter.last_inventory_warning.lower())
-        self.assertEqual(mock_request.call_count, 3)
-        self.assertEqual(mock_request.call_args_list[0].args[1], '/pricing/fbm/v6')
-        self.assertIn('/processing-report/', mock_request.call_args_list[1].args[1])
+        put_calls = [c for c in mock_request.call_args_list if c.args[0] == 'PUT']
+        self.assertEqual(len(put_calls), 2)
+        self.assertEqual(put_calls[0].args[1], '/pricing/fbm/v6')
+        self.assertEqual(put_calls[1].args[1], '/inventory/fbm-lmp/v7')
+
+    @patch.object(SearsAdapter, '_request')
+    def test_update_products_bulk_single_feed_per_type(self, mock_request):
+        mock_request.side_effect = _sears_request_side_effect
+        adapter = self._adapter()
+        result = adapter.update_products_bulk([
+            {'sku': 'CHILD-1', 'price': Decimal('74.00'), 'rrp': Decimal('100.00'), 'stock': 2},
+            {'sku': 'CHILD-2', 'price': Decimal('59.99'), 'rrp': Decimal('80.00'), 'stock': 5},
+        ])
+        self.assertEqual(result['ok'], {'CHILD-1', 'CHILD-2'})
+        self.assertEqual(result['failed'], [])
+        put_calls = [c for c in mock_request.call_args_list if c.args[0] == 'PUT']
+        self.assertEqual(len(put_calls), 2)
+        price_xml = put_calls[0].kwargs['data']
+        inv_xml = put_calls[1].kwargs['data']
+        self.assertEqual(price_xml.count('<item item-id='), 2)
+        self.assertEqual(inv_xml.count('<item item-id='), 2)
+        self.assertIn('item-id="CHILD-1"', price_xml)
+        self.assertIn('item-id="CHILD-2"', price_xml)
+
+    @patch.object(SearsAdapter, '_request')
+    def test_update_products_bulk_inventory_warning_after_pricing_ok(self, mock_request):
+        def side_effect(method, path, **kwargs):
+            if method == 'PUT' and path == '/inventory/fbm-lmp/v7':
+                raise SearsAPIError('Sears API PUT /inventory/fbm-lmp/v7: 403', status_code=403)
+            return _sears_request_side_effect(method, path, **kwargs)
+
+        mock_request.side_effect = side_effect
+        adapter = self._adapter()
+        result = adapter.update_products_bulk([
+            {'sku': 'CHILD-101', 'price': Decimal('143.98'), 'rrp': Decimal('194.57'), 'stock': 2},
+        ])
+        self.assertEqual(result['ok'], {'CHILD-101'})
+        self.assertEqual(result['failed'], [])
+        self.assertIn('CHILD-101', result['warnings'])
 
     @patch.object(SearsAdapter, '_request')
     def test_update_pricing_raises_when_processing_report_rejects(self, mock_request):
@@ -333,3 +419,14 @@ class SearsAdapterPushTests(SimpleTestCase):
 
     def test_store_is_sears(self):
         self.assertTrue(store_is_sears(_store('sears')))
+
+
+class SearsMarketplacePushDeferTests(SimpleTestCase):
+    def test_apply_post_scrape_skips_sears(self):
+        from catalog.marketplace_push import apply_post_scrape_marketplace_push
+
+        store = _store('sears')
+        pm = MagicMock()
+        pm.sync_status = 'scraped'
+        apply_post_scrape_marketplace_push(pm, store)
+        pm.save.assert_not_called()

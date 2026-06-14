@@ -54,6 +54,7 @@ SEARS_VALIDATE_PROBE_SKU = "0000000000"
 DEFAULT_SALE_END_DATE = date(2035, 1, 1)
 REPORT_POLL_INTERVAL_SEC = 2
 REPORT_POLL_MAX_ATTEMPTS = 15
+DEFAULT_SEARS_BULK_BATCH_SIZE = 100
 
 MSG_SEARS_CONNECTED = "Sears account connected successfully."
 MSG_SEARS_INVALID_CREDS = "Invalid Sears API credentials."
@@ -117,6 +118,111 @@ def parse_processing_report_summary(response_body: str) -> dict:
     }
 
 
+def parse_processing_report_item_errors(response_body: str) -> dict[str, str]:
+    """Map Sears Child SKU (item-id) -> error message when present in report detail."""
+    body = response_body or ''
+    errors_by_item: dict[str, str] = {}
+
+    for match in re.finditer(
+        r'<error\b[^>]*>.*?<item-id>([^<]+)</item-id>.*?<error-info>([^<]+)</error-info>',
+        body,
+        re.DOTALL | re.IGNORECASE,
+    ):
+        errors_by_item[match.group(1).strip()] = match.group(2).strip()
+
+    for match in re.finditer(
+        r'<item\b[^>]*item-id="([^"]+)"[^>]*>.*?<error-info>([^<]+)</error-info>',
+        body,
+        re.DOTALL | re.IGNORECASE,
+    ):
+        sku = match.group(1).strip()
+        if sku not in errors_by_item:
+            errors_by_item[sku] = match.group(2).strip()
+
+    return errors_by_item
+
+
+def classify_bulk_feed_results(
+    response_body: str,
+    expected_item_ids: set[str],
+) -> tuple[set[str], list[dict]]:
+    """
+    Determine per-SKU success/failure from a Sears processing report.
+
+    When item-level errors are present, only SKUs without an error entry are OK.
+    When the feed fully succeeds, all expected SKUs are OK.
+    When errors exist but cannot be mapped to SKUs, the whole batch is treated as failed
+    (safe default — avoids marking the wrong rows synced).
+    """
+    expected = {str(x).strip() for x in expected_item_ids if str(x).strip()}
+    if not expected:
+        return set(), []
+
+    summary = parse_processing_report_summary(response_body)
+    item_errors = parse_processing_report_item_errors(response_body)
+
+    if summary['errors'] == 0 and summary['accepted'] >= len(expected):
+        return set(expected), []
+
+    if item_errors:
+        ok = {sku for sku in expected if sku not in item_errors}
+        failed = [{'sku': sku, 'error': msg} for sku, msg in item_errors.items() if sku in expected]
+        unreported = expected - ok - {f['sku'] for f in failed}
+        if unreported and summary['errors'] > 0:
+            detail = summary['error_infos'][0] if summary['error_infos'] else 'feed rejected'
+            failed.extend({'sku': sku, 'error': detail[:400]} for sku in sorted(unreported))
+            ok -= unreported
+        return ok, failed
+
+    detail = summary['error_infos'][0] if summary['error_infos'] else 'feed rejected'
+    return set(), [{'sku': sku, 'error': detail[:400]} for sku in sorted(expected)]
+
+
+def _pricing_item_xml_lines(
+    item_id: str,
+    *,
+    standard_price,
+    sale_price=None,
+    sale_start_date: date | None = None,
+    sale_end_date: date | None = None,
+) -> list[str]:
+    std = _format_amount(standard_price)
+    iid = _xml_item_id(item_id)
+    lines = [
+        f'    <item item-id="{iid}">',
+        f'      <standard-price>{std}</standard-price>',
+    ]
+    use_sale = sale_price is not None
+    if use_sale:
+        posted = Decimal(std)
+        sale_dec = Decimal(_format_amount(sale_price))
+        use_sale = sale_dec < posted
+    if use_sale:
+        start = sale_start_date or (date.today() - timedelta(days=1))
+        end = sale_end_date or DEFAULT_SALE_END_DATE
+        lines.extend([
+            '      <sale>',
+            f'        <sale-price>{_format_amount(sale_price)}</sale-price>',
+            f'        <sale-start-date>{start.isoformat()}</sale-start-date>',
+            f'        <sale-end-date>{end.isoformat()}</sale-end-date>',
+            '      </sale>',
+        ])
+    lines.append('    </item>')
+    return lines
+
+
+def _pricing_fields_for_item(*, price, rrp) -> tuple[str | None, str | None]:
+    """Return (standard_price, sale_price) strings for Sears pricing XML."""
+    if price is None:
+        return None, None
+    posted = _format_amount(price)
+    if rrp is not None:
+        std = _format_amount(rrp)
+        if Decimal(std) > Decimal(posted):
+            return std, posted
+    return posted, None
+
+
 def build_pricing_feed_xml(
     item_id: str,
     *,
@@ -131,36 +237,82 @@ def build_pricing_feed_xml(
     When ``sale_price`` is set and below ``standard_price``, includes a ``<sale>`` block
     (posted price + RRP strike-through on Sears). Otherwise only ``standard-price``.
     """
-    std = _format_amount(standard_price)
-    iid = _xml_item_id(item_id)
+    return build_pricing_feed_xml_bulk([{
+        'sku': item_id,
+        'standard_price': standard_price,
+        'sale_price': sale_price,
+        'sale_start_date': sale_start_date,
+        'sale_end_date': sale_end_date,
+    }])
+
+
+def build_pricing_feed_xml_bulk(items: list[dict]) -> str:
+    """Sears pricing v6 XML for one or more Child SKUs in a single feed."""
+    if not items:
+        raise SearsAPIError('Sears bulk pricing feed requires at least one item')
+
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         f'<pricing-feed xmlns="{PRICING_NS}">',
         '  <fbm-pricing>',
-        f'    <item item-id="{iid}">',
-        f'      <standard-price>{std}</standard-price>',
     ]
-    use_sale = sale_price is not None
-    if use_sale:
-        posted = Decimal(std)
-        sale_dec = Decimal(_format_amount(sale_price))
-        use_sale = sale_dec < posted
-    if use_sale:
-        start = sale_start_date or (date.today() - timedelta(days=1))
-        end = sale_end_date or DEFAULT_SALE_END_DATE
-        parts.extend([
-            '      <sale>',
-            f'        <sale-price>{_format_amount(sale_price)}</sale-price>',
-            f'        <sale-start-date>{start.isoformat()}</sale-start-date>',
-            f'        <sale-end-date>{end.isoformat()}</sale-end-date>',
-            '      </sale>',
-        ])
-    parts.extend([
-        '    </item>',
-        '  </fbm-pricing>',
-        '</pricing-feed>',
-    ])
+    for raw in items:
+        sku = str(raw.get('sku') or raw.get('item_id') or '').strip()
+        if not sku:
+            raise SearsAPIError('Sears bulk pricing feed item missing sku')
+
+        if raw.get('standard_price') is not None or raw.get('sale_price') is not None:
+            std = raw.get('standard_price')
+            sale = raw.get('sale_price')
+        else:
+            std, sale = _pricing_fields_for_item(
+                price=raw.get('price'),
+                rrp=raw.get('rrp'),
+            )
+        if std is None:
+            continue
+
+        parts.extend(_pricing_item_xml_lines(
+            sku,
+            standard_price=std,
+            sale_price=sale,
+            sale_start_date=raw.get('sale_start_date'),
+            sale_end_date=raw.get('sale_end_date'),
+        ))
+
+    if parts[-1] == '  <fbm-pricing>':
+        raise SearsAPIError('Sears bulk pricing feed has no price rows')
+
+    parts.extend(['  </fbm-pricing>', '</pricing-feed>'])
     return '\n'.join(parts)
+
+
+def _inventory_item_xml_lines_lmp(
+    item_id: str,
+    quantity: int,
+    *,
+    location_id: str,
+    pick_up_now_eligible: bool,
+    inventory_timestamp: str | None,
+) -> list[str]:
+    iid = _xml_item_id(item_id)
+    qty = max(0, int(quantity))
+    loc_attr = _xml_attr_value(location_id)
+    pick = "true" if pick_up_now_eligible else "false"
+    ts_line = ""
+    if inventory_timestamp:
+        ts_line = f"        <inventory-timestamp>{inventory_timestamp}</inventory-timestamp>\n"
+    return [
+        f'  <item item-id="{iid}">',
+        '    <locations>',
+        f'      <location location-id="{loc_attr}">',
+        f'        <quantity>{qty}</quantity>',
+        f'        <pick-up-now-eligible>{pick}</pick-up-now-eligible>',
+        f'{ts_line.rstrip()}',
+        '      </location>',
+        '    </locations>',
+        '  </item>',
+    ]
 
 
 def build_inventory_feed_xml(
@@ -181,8 +333,25 @@ def build_inventory_feed_xml(
 
     Legacy FBM: ``inventory-feed`` + ``fbm-inventory`` → PUT /inventory/fbm/v7.
     """
-    iid = _xml_item_id(item_id)
-    qty = max(0, int(quantity))
+    return build_inventory_feed_xml_bulk([{
+        'sku': item_id,
+        'stock': quantity,
+    }], lmp=lmp, location_id=location_id, pick_up_now_eligible=pick_up_now_eligible,
+        inventory_timestamp=inventory_timestamp)
+
+
+def build_inventory_feed_xml_bulk(
+    items: list[dict],
+    *,
+    lmp: bool = True,
+    location_id: str | None = None,
+    pick_up_now_eligible: bool = False,
+    inventory_timestamp: str | None = None,
+) -> str:
+    """Sears inventory v7 XML for one or more Child SKUs in a single feed."""
+    if not items:
+        raise SearsAPIError('Sears bulk inventory feed requires at least one item')
+
     if lmp:
         loc = (location_id or "").strip()
         if not loc:
@@ -190,39 +359,54 @@ def build_inventory_feed_xml(
                 "Sears FBM-LMP inventory requires location_id in store API credentials "
                 "(Seller Portal → Account Settings → Fulfillment Location)."
             )
-        loc_attr = _xml_attr_value(loc)
-        pick = "true" if pick_up_now_eligible else "false"
-        ts_line = ""
-        if inventory_timestamp:
-            ts_line = f"        <inventory-timestamp>{inventory_timestamp}</inventory-timestamp>\n"
-        return (
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            f'<store-inventory xmlns="{STORE_INVENTORY_NS}"\n'
-            f'    xmlns:xsi="{XSI_NS}"\n'
-            f'    xsi:schemaLocation="{STORE_INVENTORY_NS} {STORE_INVENTORY_XSD}">\n'
-            f'  <item item-id="{iid}">\n'
-            '    <locations>\n'
-            f'      <location location-id="{loc_attr}">\n'
-            f'        <quantity>{qty}</quantity>\n'
-            f'        <pick-up-now-eligible>{pick}</pick-up-now-eligible>\n'
-            f'{ts_line}'
-            '      </location>\n'
-            '    </locations>\n'
-            '  </item>\n'
-            '</store-inventory>'
-        )
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        f'<inventory-feed xmlns="{INVENTORY_NS}"\n'
-        f'    xmlns:xsi="{XSI_NS}"\n'
-        f'    xsi:schemaLocation="{INVENTORY_NS} {INVENTORY_XSD}">\n'
-        '  <fbm-inventory>\n'
-        f'    <item item-id="{iid}">\n'
-        f'      <quantity>{qty}</quantity>\n'
-        '    </item>\n'
-        '  </fbm-inventory>\n'
-        '</inventory-feed>'
-    )
+        parts = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            f'<store-inventory xmlns="{STORE_INVENTORY_NS}"',
+            f'    xmlns:xsi="{XSI_NS}"',
+            f'    xsi:schemaLocation="{STORE_INVENTORY_NS} {STORE_INVENTORY_XSD}">',
+        ]
+        for raw in items:
+            sku = str(raw.get('sku') or raw.get('item_id') or '').strip()
+            if not sku:
+                raise SearsAPIError('Sears bulk inventory feed item missing sku')
+            if raw.get('stock') is None:
+                continue
+            parts.extend(_inventory_item_xml_lines_lmp(
+                sku,
+                raw['stock'],
+                location_id=loc,
+                pick_up_now_eligible=pick_up_now_eligible,
+                inventory_timestamp=inventory_timestamp,
+            ))
+        if len(parts) == 4:
+            raise SearsAPIError('Sears bulk inventory feed has no stock rows')
+        parts.append('</store-inventory>')
+        return '\n'.join(parts)
+
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        f'<inventory-feed xmlns="{INVENTORY_NS}"',
+        f'    xmlns:xsi="{XSI_NS}"',
+        f'    xsi:schemaLocation="{INVENTORY_NS} {INVENTORY_XSD}">',
+        '  <fbm-inventory>',
+    ]
+    for raw in items:
+        sku = str(raw.get('sku') or raw.get('item_id') or '').strip()
+        if not sku:
+            raise SearsAPIError('Sears bulk inventory feed item missing sku')
+        if raw.get('stock') is None:
+            continue
+        iid = _xml_item_id(sku)
+        qty = max(0, int(raw['stock']))
+        parts.extend([
+            f'    <item item-id="{iid}">',
+            f'      <quantity>{qty}</quantity>',
+            '    </item>',
+        ])
+    if parts[-1] == '  <fbm-inventory>':
+        raise SearsAPIError('Sears bulk inventory feed has no stock rows')
+    parts.extend(['  </fbm-inventory>', '</inventory-feed>'])
+    return '\n'.join(parts)
 
 
 class SearsAdapter(BaseStoreAdapter):
@@ -473,7 +657,7 @@ class SearsAdapter(BaseStoreAdapter):
             )
         return resp.text or ""
 
-    def _wait_for_processing_report(self, document_id: str) -> str:
+    def _wait_for_processing_report(self, document_id: str, *, allow_partial: bool = False) -> str:
         """Poll until Sears finishes async feed processing or raise."""
         path = f"{PROCESSING_REPORT_PATH}/{document_id}"
         params = {"sellerId": self._seller_id}
@@ -491,6 +675,15 @@ class SearsAdapter(BaseStoreAdapter):
             )
 
         summary = parse_processing_report_summary(last_body)
+        if allow_partial:
+            if summary["accepted"] < 1 and summary["errors"] > 0:
+                detail = summary["error_infos"][0] if summary["error_infos"] else "feed rejected"
+                raise SearsAPIError(
+                    f"Sears feed rejected (document {document_id}): {detail[:400]}",
+                    response_body=last_body[:500] if last_body else None,
+                )
+            return last_body
+
         if summary["errors"] > 0 or summary["accepted"] < 1:
             detail = summary["error_infos"][0] if summary["error_infos"] else "feed rejected"
             raise SearsAPIError(
@@ -499,8 +692,15 @@ class SearsAdapter(BaseStoreAdapter):
             )
         return last_body
 
-    def _put_feed_and_verify(self, path: str, xml: str, *, feed_label: str) -> str:
-        """PUT XML feed, then poll processing report until accepted or failed."""
+    def _put_feed_and_verify(
+        self,
+        path: str,
+        xml: str,
+        *,
+        feed_label: str,
+        expected_item_ids: set[str] | None = None,
+    ) -> str:
+        """PUT XML feed, poll processing report, raise on hard failure."""
         resp = self._request(
             "PUT",
             path,
@@ -513,8 +713,36 @@ class SearsAdapter(BaseStoreAdapter):
                 f"Sears {feed_label} PUT did not return document-id",
                 response_body=resp[:500] if resp else None,
             )
-        self._wait_for_processing_report(document_id)
-        return document_id
+        allow_partial = bool(expected_item_ids and len(expected_item_ids) > 1)
+        return self._wait_for_processing_report(document_id, allow_partial=allow_partial)
+
+    def _put_feed_and_classify(
+        self,
+        path: str,
+        xml: str,
+        *,
+        feed_label: str,
+        expected_item_ids: set[str],
+    ) -> tuple[set[str], list[dict], str]:
+        """PUT XML feed and return per-SKU ok/failed sets from the processing report."""
+        resp = self._request(
+            "PUT",
+            path,
+            params={"sellerId": self._seller_id},
+            data=xml,
+        )
+        document_id = parse_document_id(resp)
+        if not document_id:
+            raise SearsAPIError(
+                f"Sears {feed_label} PUT did not return document-id",
+                response_body=resp[:500] if resp else None,
+            )
+        report_body = self._wait_for_processing_report(
+            document_id,
+            allow_partial=len(expected_item_ids) > 1,
+        )
+        ok, failed = classify_bulk_feed_results(report_body, expected_item_ids)
+        return ok, failed, report_body
 
     def lookup_listing_by_sku(self, sku: str):
         """Child SKU is the Sears ``item-id`` for price/inventory feeds."""
@@ -545,37 +773,157 @@ class SearsAdapter(BaseStoreAdapter):
         sku = str(external_id or "").strip()
         if not sku:
             raise SearsAPIError("Missing Sears Child SKU (item-id) for update_product")
-        price = kwargs.get("price")
-        rrp = kwargs.get("rrp")
-        stock = kwargs.get("stock")
-        price_updated = False
-
-        if price is not None:
-            posted = _format_amount(price)
-            if rrp is not None:
-                std = _format_amount(rrp)
-                if Decimal(std) > Decimal(posted):
-                    self.update_pricing(
-                        sku,
-                        standard_price=std,
-                        sale_price=posted,
-                    )
-                else:
-                    self.update_pricing(sku, standard_price=posted)
-            else:
-                self.update_pricing(sku, standard_price=posted)
-            price_updated = True
-
-        if stock is not None:
-            try:
-                self.update_inventory(sku, stock)
-            except SearsAPIError as exc:
-                if not price_updated:
-                    raise
-                warn = f'Price updated on Sears; inventory not updated ({exc})'
-                self.last_inventory_warning = warn
-                logger.warning('Sears inventory push failed for %s after pricing OK: %s', sku, exc)
+        result = self.update_products_bulk([{
+            'sku': sku,
+            'price': kwargs.get('price'),
+            'rrp': kwargs.get('rrp'),
+            'stock': kwargs.get('stock'),
+        }])
+        failed = {str(it.get('sku')): it.get('error') for it in (result.get('failed') or [])}
+        if sku in failed:
+            raise SearsAPIError(failed[sku] or 'Sears update failed')
+        warnings = result.get('warnings') or {}
+        self.last_inventory_warning = warnings.get(sku)
         return True
+
+    def update_products_bulk(self, items: list[dict]) -> dict:
+        """
+        Bulk update many Sears Child SKUs using multi-item XML feeds.
+
+        Each item dict supports: ``sku``, ``price``, ``rrp``, ``stock``.
+
+        Returns ``{'ok': set[str], 'failed': [{'sku': str, 'error': str}], 'warnings': {sku: msg}}``.
+        """
+        from django.conf import settings
+
+        self.last_inventory_warning = None
+        if not items:
+            return {'ok': set(), 'failed': [], 'warnings': {}}
+
+        batch_size = max(
+            1,
+            int(getattr(settings, 'SEARS_BULK_BATCH_SIZE', DEFAULT_SEARS_BULK_BATCH_SIZE) or DEFAULT_SEARS_BULK_BATCH_SIZE),
+        )
+
+        ok_all: set[str] = set()
+        failed_all: list[dict] = []
+        warnings_all: dict[str, str] = {}
+
+        normalized: list[dict] = []
+        for raw in items:
+            sku = str(raw.get('sku') or raw.get('item_id') or '').strip()
+            if not sku:
+                failed_all.append({'sku': '', 'error': 'missing sku'})
+                continue
+            normalized.append({
+                'sku': sku,
+                'price': raw.get('price'),
+                'rrp': raw.get('rrp'),
+                'stock': raw.get('stock'),
+            })
+
+        for start in range(0, len(normalized), batch_size):
+            chunk = normalized[start:start + batch_size]
+            chunk_ok, chunk_failed, chunk_warnings = self._bulk_update_chunk(chunk)
+            ok_all |= chunk_ok
+            failed_all.extend(chunk_failed)
+            warnings_all.update(chunk_warnings)
+
+        if warnings_all:
+            first = next(iter(warnings_all.values()))
+            self.last_inventory_warning = first
+        return {'ok': ok_all, 'failed': failed_all, 'warnings': warnings_all}
+
+    def _bulk_update_chunk(self, items: list[dict]) -> tuple[set[str], list[dict], dict[str, str]]:
+        """Update one batch of SKUs: one pricing feed + one inventory feed when needed."""
+        from django.utils import timezone
+
+        skus = [it['sku'] for it in items]
+        sku_set = set(skus)
+        price_items = [it for it in items if it.get('price') is not None]
+        stock_items = [it for it in items if it.get('stock') is not None]
+
+        price_ok = set(skus)
+        price_failed: list[dict] = []
+
+        if price_items:
+            try:
+                xml = build_pricing_feed_xml_bulk(price_items)
+                price_ok, price_failed, _ = self._put_feed_and_classify(
+                    "/pricing/fbm/v6",
+                    xml,
+                    feed_label="pricing",
+                    expected_item_ids={it['sku'] for it in price_items},
+                )
+            except SearsAPIError as exc:
+                price_ok = set()
+                err = str(exc)[:400]
+                price_failed = [{'sku': it['sku'], 'error': err} for it in price_items]
+
+        price_failed_skus = {f['sku'] for f in price_failed}
+        final_ok: set[str] = set()
+        final_failed: list[dict] = list(price_failed)
+        warnings: dict[str, str] = {}
+
+        inv_candidates = [
+            it for it in stock_items
+            if it['sku'] not in price_failed_skus
+        ]
+
+        inv_ok = {it['sku'] for it in inv_candidates}
+        inv_failed: list[dict] = []
+
+        if inv_candidates:
+            try:
+                ts = timezone.now().strftime("%Y-%m-%dT%H:%M:%S")
+                xml = build_inventory_feed_xml_bulk(
+                    inv_candidates,
+                    lmp=self._inventory_lmp,
+                    location_id=self._location_id if self._inventory_lmp else None,
+                    pick_up_now_eligible=self._pick_up_now_eligible,
+                    inventory_timestamp=ts if self._inventory_lmp else None,
+                )
+                path = INVENTORY_PATH_LMP if self._inventory_lmp else INVENTORY_PATH_FBM
+                inv_ok, inv_failed, _ = self._put_feed_and_classify(
+                    path,
+                    xml,
+                    feed_label="inventory",
+                    expected_item_ids={it['sku'] for it in inv_candidates},
+                )
+            except SearsAPIError as exc:
+                inv_ok = set()
+                err = str(exc)[:400]
+                inv_failed = [{'sku': it['sku'], 'error': err} for it in inv_candidates]
+
+        inv_failed_map = {f['sku']: f['error'] for f in inv_failed}
+
+        for it in items:
+            sku = it['sku']
+            if sku in price_failed_skus:
+                continue
+            has_price = it.get('price') is not None
+            has_stock = it.get('stock') is not None
+
+            if has_price and sku not in price_ok:
+                final_failed.append({'sku': sku, 'error': 'pricing not accepted'})
+                continue
+
+            if has_stock:
+                if sku in inv_failed_map:
+                    if has_price and sku in price_ok:
+                        final_ok.add(sku)
+                        warnings[sku] = f'Price updated on Sears; inventory not updated ({inv_failed_map[sku]})'
+                    else:
+                        final_failed.append({'sku': sku, 'error': inv_failed_map[sku]})
+                    continue
+                if sku not in inv_ok:
+                    final_failed.append({'sku': sku, 'error': 'inventory not accepted'})
+                    continue
+
+            if has_price or has_stock:
+                final_ok.add(sku)
+
+        return final_ok, final_failed, warnings
 
     def update_pricing(
         self,
