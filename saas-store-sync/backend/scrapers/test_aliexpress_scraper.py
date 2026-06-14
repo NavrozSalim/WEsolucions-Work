@@ -208,6 +208,35 @@ class AliExpressDsParserTests(SimpleTestCase):
         self.assertEqual(price_from_ds_result(result), 11.99)
         self.assertEqual(stock_from_ds_result(result), 8)
 
+    def test_parse_simplified_ds_result(self):
+        """simplify=true uses ae_item_sku_info_d_t_o nested key."""
+        result = {
+            'ae_item_base_info_dto': {
+                'subject': 'Simplified SKU product',
+                'product_status_type': 'onSelling',
+            },
+            'ae_item_sku_info_dtos': {
+                'ae_item_sku_info_d_t_o': [
+                    {'offer_sale_price': '14.20', 'sku_available_stock': 2},
+                    {'offer_sale_price': '13.50', 'sku_available_stock': 1},
+                ]
+            },
+        }
+        self.assertEqual(title_from_ds_result(result), 'Simplified SKU product')
+        self.assertEqual(price_from_ds_result(result), 13.50)
+        self.assertEqual(stock_from_ds_result(result), 3)
+
+    def test_parse_base_min_price_fallback(self):
+        result = {
+            'ae_item_base_info_dto': {
+                'subject': 'No SKU prices',
+                'product_min_price': '9.99',
+                'product_status_type': 'onSelling',
+            },
+            'ae_item_sku_info_dtos': {},
+        }
+        self.assertEqual(price_from_ds_result(result), 9.99)
+
 
 class AliExpressResponseParseTests(SimpleTestCase):
     def test_products_from_detail_response(self):

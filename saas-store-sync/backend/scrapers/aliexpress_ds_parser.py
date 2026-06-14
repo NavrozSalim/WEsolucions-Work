@@ -27,11 +27,44 @@ def _as_dict(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+_SKU_NESTED_KEYS = (
+    'ae_item_sku_info_dto',
+    'ae_item_sku_info_d_t_o',  # simplify=true responses
+    'aeItemSkuInfoDto',
+    'ae_item_sku_info',
+    'aeItemSkuInfo',
+)
+
+_SKU_PRICE_KEYS = (
+    'offer_sale_price',
+    'offerSalePrice',
+    'offer_bulk_sale_price',
+    'offerBulkSalePrice',
+    'sku_price',
+    'skuPrice',
+    'target_sale_price',
+    'targetSalePrice',
+    'target_original_price',
+    'targetOriginalPrice',
+    'sale_price',
+    'salePrice',
+)
+
+_BASE_PRICE_KEYS = (
+    'target_sale_price',
+    'targetSalePrice',
+    'product_min_price',
+    'productMinPrice',
+    'product_max_price',
+    'productMaxPrice',
+)
+
+
 def _as_list(value) -> list:
     if isinstance(value, list):
         return value
     if isinstance(value, dict):
-        for key in ('ae_item_sku_info_dto', 'aeItemSkuInfoDto', 'ae_item_sku_info', 'aeItemSkuInfo'):
+        for key in _SKU_NESTED_KEYS:
             inner = value.get(key)
             if isinstance(inner, list):
                 return inner
@@ -41,7 +74,9 @@ def _as_list(value) -> list:
 
 
 def _sku_rows(result: dict) -> list[dict]:
-    skus = result.get('ae_item_sku_info_dtos') or result.get('aeItemSkuInfoDtos') or {}
+    skus = result.get('ae_item_sku_info_dtos') or result.get('aeItemSkuInfoDtos')
+    if skus is None:
+        return []
     return _as_list(skus)
 
 
@@ -55,29 +90,24 @@ def title_from_ds_result(result: dict) -> str | None:
     return title[:500] if title else None
 
 
-def price_from_ds_result(result: dict) -> float | None:
-    prices: list[float] = []
-    for row in _sku_rows(result):
-        for key in (
-            'offer_sale_price',
-            'offerSalePrice',
-            'sku_price',
-            'skuPrice',
-            'target_sale_price',
-            'targetSalePrice',
-        ):
-            price = _parse_price(row.get(key))
-            if price is not None:
-                prices.append(price)
-                break
-    if prices:
-        return min(prices)
-    base = _base_info(result)
-    for key in ('target_sale_price', 'targetSalePrice'):
-        price = _parse_price(base.get(key))
+def _first_price(row: dict, keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        price = _parse_price(row.get(key))
         if price is not None:
             return price
     return None
+
+
+def price_from_ds_result(result: dict) -> float | None:
+    prices: list[float] = []
+    for row in _sku_rows(result):
+        price = _first_price(row, _SKU_PRICE_KEYS)
+        if price is not None:
+            prices.append(price)
+    if prices:
+        return min(prices)
+    base = _base_info(result)
+    return _first_price(base, _BASE_PRICE_KEYS)
 
 
 def stock_from_ds_result(result: dict) -> int | None:
