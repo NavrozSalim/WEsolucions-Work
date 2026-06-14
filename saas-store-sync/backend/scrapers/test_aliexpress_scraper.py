@@ -8,7 +8,7 @@ from django.test import SimpleTestCase, override_settings
 
 from scrapers.aliexpress_client import sign_params, _products_from_detail_response, get_api_url, DEFAULT_API_URL
 from scrapers.aliexpress_ds_parser import price_from_ds_result, stock_from_ds_result, title_from_ds_result
-from scrapers.aliexpress_iop import method_to_iop_path, sign_iop_request
+from scrapers.aliexpress_iop import method_to_iop_path, sign_iop_request, iop_business_request
 from scrapers.aliexpress_markets import resolve_aliexpress_market
 from scrapers.aliexpress_scraper import (
     build_aliexpress_item_url,
@@ -96,8 +96,36 @@ class AliExpressSignTests(SimpleTestCase):
         self.assertEqual(sig, sig.upper())
 
     def test_method_to_iop_path(self):
-        self.assertEqual(method_to_iop_path('aliexpress.ds.product.get'), '/aliexpress/ds/product/get')
+        self.assertEqual(method_to_iop_path('aliexpress.ds.product.get'), '/aliexpress.ds.product.get')
         self.assertEqual(method_to_iop_path('/auth/token/security/create'), '/auth/token/security/create')
+
+    @override_settings(
+        ALIEXPRESS_APP_KEY='536784',
+        ALIEXPRESS_APP_SECRET='secret',
+        ALIEXPRESS_IOP_GATEWAY='https://api-sg.aliexpress.com',
+    )
+    @patch('scrapers.aliexpress_iop.requests.post')
+    def test_iop_business_request_uses_dotted_rest_path(self, mock_post):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.text = json.dumps(
+            {
+                'aliexpress_ds_product_get_response': {
+                    'result': {'ae_item_base_info_dto': {'subject': 'x'}},
+                }
+            }
+        )
+        mock_post.return_value.json.return_value = json.loads(mock_post.return_value.text)
+
+        iop_business_request(
+            'aliexpress.ds.product.get',
+            {'product_id': '1005007170995524'},
+            'access-token',
+        )
+
+        self.assertEqual(
+            mock_post.call_args[0][0],
+            'https://api-sg.aliexpress.com/rest/aliexpress.ds.product.get',
+        )
 
 
 class AliExpressDsParserTests(SimpleTestCase):

@@ -37,13 +37,16 @@ def iop_timestamp_ms() -> str:
 
 
 def method_to_iop_path(api_method: str) -> str:
-    """Map dotted API name to IOP REST path (aliexpress.ds.product.get → /aliexpress/ds/product/get)."""
+    """
+    Map API name to IOP REST path.
+
+    Business APIs keep dotted names (``/aliexpress.ds.product.get``).
+    System/auth APIs use slash paths (``/auth/token/security/create``).
+    """
     name = (api_method or '').strip().lstrip('/')
     if not name:
         raise ValueError('api_method is required')
-    if name.startswith('auth/'):
-        return f'/{name}'
-    return '/' + name.replace('.', '/')
+    return f'/{name}'
 
 
 def sign_iop_request(api_path: str, params: dict[str, Any], app_secret: str) -> str:
