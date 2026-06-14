@@ -15,7 +15,8 @@ from scrapers.aliexpress_markets import AliExpressMarket, get_aliexpress_market
 
 logger = logging.getLogger(__name__)
 
-API_URL = 'https://gw.api.taobao.com/router/rest'
+# Overseas HTTPS gateway (EU/US VPS). Chinese gateway gw.api.taobao.com often times out abroad.
+DEFAULT_API_URL = 'https://api.taobao.com/router/rest'
 PRODUCT_DETAIL_METHOD = 'aliexpress.affiliate.productdetail.get'
 DETAIL_FIELDS = 'product_id,product_title,sale_price,original_price,target_sale_price,target_original_price'
 
@@ -24,6 +25,11 @@ class AliExpressAPIError(Exception):
     def __init__(self, message: str, *, response_body: str | None = None):
         super().__init__(message)
         self.response_body = response_body
+
+
+def get_api_url() -> str:
+    url = (getattr(settings, 'ALIEXPRESS_API_URL', '') or '').strip()
+    return url or DEFAULT_API_URL
 
 
 def _credentials_configured() -> bool:
@@ -73,7 +79,7 @@ def call_api(method: str, business_params: dict, *, timeout: int = 30) -> dict:
     params.update({k: v for k, v in business_params.items() if v is not None and str(v) != ''})
     params['sign'] = sign_params(params, settings.ALIEXPRESS_APP_SECRET, params['sign_method'])
     try:
-        resp = requests.post(API_URL, data=params, timeout=timeout)
+        resp = requests.post(get_api_url(), data=params, timeout=timeout)
     except requests.RequestException as exc:
         raise AliExpressAPIError(str(exc)) from exc
     body = resp.text or ''

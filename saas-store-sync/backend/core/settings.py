@@ -383,3 +383,7 @@ ALIEXPRESS_APP_SECRET = os.getenv('ALIEXPRESS_APP_SECRET', '').strip()
 ALIEXPRESS_TRACKING_ID = os.getenv('ALIEXPRESS_TRACKING_ID', '').strip()
 ALIEXPRESS_DEFAULT_MARKET = (os.getenv('ALIEXPRESS_DEFAULT_MARKET', 'UK') or 'UK').strip().upper()
 ALIEXPRESS_SIGN_METHOD = (os.getenv('ALIEXPRESS_SIGN_METHOD', 'md5') or 'md5').strip().lower()
+# Overseas gateway (api.taobao.com). gw.api.taobao.com times out on many EU VPS hosts.
+ALIEXPRESS_API_URL = (
+    os.getenv('ALIEXPRESS_API_URL', 'https://api.taobao.com/router/rest') or 'https://api.taobao.com/router/rest'
+).strip()

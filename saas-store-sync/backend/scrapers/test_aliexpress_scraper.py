@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from django.test import SimpleTestCase, override_settings
 
-from scrapers.aliexpress_client import sign_params, _products_from_detail_response
+from scrapers.aliexpress_client import sign_params, _products_from_detail_response, get_api_url, DEFAULT_API_URL
 from scrapers.aliexpress_markets import resolve_aliexpress_market
 from scrapers.aliexpress_scraper import (
     build_aliexpress_item_url,
@@ -57,6 +57,19 @@ class AliExpressUrlTests(SimpleTestCase):
         self.assertFalse(is_aliexpress_vendor_code('amazonus'))
 
 
+class AliExpressApiUrlTests(SimpleTestCase):
+    def test_default_api_url_is_overseas_gateway(self):
+        self.assertEqual(DEFAULT_API_URL, 'https://api.taobao.com/router/rest')
+
+    @override_settings(ALIEXPRESS_API_URL='https://eco.taobao.com/router/rest')
+    def test_get_api_url_from_settings(self):
+        self.assertEqual(get_api_url(), 'https://eco.taobao.com/router/rest')
+
+    @override_settings(ALIEXPRESS_API_URL='')
+    def test_get_api_url_falls_back_to_default(self):
+        self.assertEqual(get_api_url(), DEFAULT_API_URL)
+
+
 class AliExpressSignTests(SimpleTestCase):
     def test_md5_sign_is_uppercase_hex(self):
         params = {
@@ -99,6 +112,7 @@ class AliExpressResponseParseTests(SimpleTestCase):
     ALIEXPRESS_APP_SECRET='secret',
     ALIEXPRESS_TRACKING_ID='track',
     ALIEXPRESS_DEFAULT_MARKET='UK',
+    ALIEXPRESS_API_URL='https://api.taobao.com/router/rest',
 )
 class AliExpressScrapeTests(SimpleTestCase):
     def test_not_configured(self):
@@ -147,6 +161,7 @@ class AliExpressScrapeTests(SimpleTestCase):
         posted = mock_post.call_args.kwargs.get('data') or mock_post.call_args[1].get('data')
         self.assertEqual(posted['country'], 'GB')
         self.assertEqual(posted['target_currency'], 'GBP')
+        self.assertEqual(mock_post.call_args[0][0], 'https://api.taobao.com/router/rest')
 
     @patch('scrapers.aliexpress_client.requests.post')
     def test_scrape_us_region(self, mock_post):
