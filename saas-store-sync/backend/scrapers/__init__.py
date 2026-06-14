@@ -13,8 +13,8 @@ Server-side vendors (scraped from this dispatcher):
   (set ``COSTCO_AU_PROXY_URLS`` on the worker; without proxies the dispatcher
   returns an ``ingest_only`` sentinel so the catalog task keeps the existing
   ``ProductMapping`` row untouched.)
-* **AliExpress**     — Affiliate Open Platform API (``ALIEXPRESS_APP_KEY`` /
-  ``ALIEXPRESS_APP_SECRET``; UK default, US/AU via store region)
+* **AliExpress**     — Drop Shipping API (OAuth + ``aliexpress.ds.product.get``);
+  Affiliate API fallback when OAuth is unavailable
 
 Desktop / feed ingest-only vendors (NOT scraped server-side):
 

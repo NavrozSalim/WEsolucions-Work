@@ -7,6 +7,8 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import models
 
+from core.fields import EncryptedTextField
+
 
 class Vendor(models.Model):
     """Lookup table for vendor sources (Amazon, Vevor, AliExpress, eBay)."""
@@ -85,3 +87,30 @@ class GoogleOAuthCredentials(models.Model):
 
     def __str__(self):
         return f"Google OAuth: {self.user_email or self.user_id}"
+
+
+class AliExpressOAuthCredentials(models.Model):
+    """AliExpress Drop Shipping OAuth tokens per user (for aliexpress.ds.product.get)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='aliexpress_oauth_credentials',
+    )
+    account = models.CharField(max_length=255, blank=True, default='')
+    account_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    access_token = EncryptedTextField(null=True, blank=True)
+    refresh_token = EncryptedTextField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    refresh_expires_at = models.DateTimeField(null=True, blank=True)
+    is_valid = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'vendor_aliexpressoauthcredentials'
+        verbose_name_plural = 'AliExpress OAuth credentials'
+
+    def __str__(self):
+        label = self.account or self.account_id or self.user_id
+        return f'AliExpress OAuth: {label}'

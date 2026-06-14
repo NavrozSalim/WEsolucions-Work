@@ -1032,6 +1032,8 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
         status=ScrapeRun.Status.RUNNING,
     )
     session = {}
+    if store.user_id:
+        session['aliexpress_user_id'] = str(store.user_id)
     succeeded = failed = 0
     fatal_error = None
     stalled_out = False
@@ -1145,6 +1147,8 @@ def catalog_scrape_upload_chunk_task(self, upload_id: str, scrape_run_id: str, r
 
     store = upload.store
     session = {}
+    if store.user_id:
+        session['aliexpress_user_id'] = str(store.user_id)
     try:
         rows = (
             CatalogUploadRow.objects.filter(id__in=row_ids)
@@ -1568,6 +1572,8 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> d
         }
 
     session: dict = {}
+    if store.user_id:
+        session['aliexpress_user_id'] = str(store.user_id)
     try:
         stats = _process_store_wide_scrape_mappings(
             base_qs.select_related('product', 'product__vendor'),
@@ -1646,6 +1652,8 @@ def catalog_scrape_store_chunk_task(self, store_id: str, mapping_ids: list):
         }
 
     session: dict = {}
+    if store.user_id:
+        session['aliexpress_user_id'] = str(store.user_id)
     try:
         mappings = (
             ProductMapping.objects.filter(id__in=mapping_ids, store=store)

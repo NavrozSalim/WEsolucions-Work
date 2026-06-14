@@ -7,6 +7,8 @@ from unittest.mock import patch
 from django.test import SimpleTestCase, override_settings
 
 from scrapers.aliexpress_client import sign_params, _products_from_detail_response, get_api_url, DEFAULT_API_URL
+from scrapers.aliexpress_ds_parser import price_from_ds_result, stock_from_ds_result, title_from_ds_result
+from scrapers.aliexpress_iop import method_to_iop_path, sign_iop_request
 from scrapers.aliexpress_markets import resolve_aliexpress_market
 from scrapers.aliexpress_scraper import (
     build_aliexpress_item_url,
@@ -81,6 +83,40 @@ class AliExpressSignTests(SimpleTestCase):
         sig = sign_params(params, 'secret', 'md5')
         self.assertEqual(len(sig), 32)
         self.assertEqual(sig, sig.upper())
+
+    def test_iop_sign_is_uppercase_hex(self):
+        params = {
+            'app_key': '536712',
+            'code': 'abc123',
+            'sign_method': 'sha256',
+            'timestamp': '1710000000000',
+        }
+        sig = sign_iop_request('/auth/token/security/create', params, 'secret')
+        self.assertEqual(len(sig), 64)
+        self.assertEqual(sig, sig.upper())
+
+    def test_method_to_iop_path(self):
+        self.assertEqual(method_to_iop_path('aliexpress.ds.product.get'), '/aliexpress/ds/product/get')
+        self.assertEqual(method_to_iop_path('/auth/token/security/create'), '/auth/token/security/create')
+
+
+class AliExpressDsParserTests(SimpleTestCase):
+    def test_parse_ds_result(self):
+        result = {
+            'ae_item_base_info_dto': {
+                'subject': 'Sample DS product',
+                'product_status_type': 'onSelling',
+            },
+            'ae_item_sku_info_dtos': {
+                'ae_item_sku_info_dto': [
+                    {'offer_sale_price': '12.50', 'sku_available_stock': 5},
+                    {'offer_sale_price': '11.99', 'sku_available_stock': 3},
+                ]
+            },
+        }
+        self.assertEqual(title_from_ds_result(result), 'Sample DS product')
+        self.assertEqual(price_from_ds_result(result), 11.99)
+        self.assertEqual(stock_from_ds_result(result), 8)
 
 
 class AliExpressResponseParseTests(SimpleTestCase):
@@ -191,3 +227,36 @@ class AliExpressScrapeTests(SimpleTestCase):
         posted = mock_post.call_args.kwargs.get('data') or mock_post.call_args[1].get('data')
         self.assertEqual(posted['country'], 'US')
         self.assertEqual(posted['target_currency'], 'USD')
+
+    @patch('scrapers.aliexpress_scraper.fetch_ds_product')
+    @patch('scrapers.aliexpress_scraper.get_valid_access_token', return_value='test-access-token')
+    def test_scrape_ds_success_uk(self, _mock_token, mock_fetch):
+        mock_fetch.return_value = {
+            'ae_item_base_info_dto': {'subject': 'DS UK item', 'product_status_type': 'onSelling'},
+            'ae_item_sku_info_dtos': {
+                'ae_item_sku_info_dto': {'offer_sale_price': '18.75', 'sku_available_stock': 12}
+            },
+        }
+        result = scrape_aliexpress(
+            'https://www.aliexpress.com/item/1005001234567890.html',
+            'UK',
+            {'aliexpress_user_id': 'user-1'},
+        )
+        self.assertEqual(result['price'], 18.75)
+        self.assertEqual(result['stock'], 12)
+        self.assertEqual(result['title'], 'DS UK item')
+        mock_fetch.assert_called_once()
+
+    @patch('scrapers.aliexpress_client.requests.post')
+    @patch('scrapers.aliexpress_scraper.get_valid_access_token', return_value=None)
+    def test_oauth_required_without_token(self, _mock_token, mock_post):
+        mock_resp = mock_post.return_value
+        mock_resp.status_code = 200
+        mock_resp.text = '{"error_response":{"code":29,"msg":"appkey not exists"}}'
+        mock_resp.json.return_value = {'error_response': {'code': 29, 'msg': 'appkey not exists'}}
+
+        result = scrape_aliexpress(
+            'https://www.aliexpress.com/item/1005001234567890.html',
+            'UK',
+        )
+        self.assertEqual(result['error_code'], 'aliexpress_oauth_required')

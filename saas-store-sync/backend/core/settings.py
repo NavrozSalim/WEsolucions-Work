@@ -377,7 +377,7 @@ CELERY_TASK_ROUTES = (
     },
 )
 
-# AliExpress Affiliate API (price lookup by product ID; UK default, US/AU via store region).
+# AliExpress Drop Shipping + optional Affiliate API (price lookup by product ID).
 ALIEXPRESS_APP_KEY = os.getenv('ALIEXPRESS_APP_KEY', '').strip()
 ALIEXPRESS_APP_SECRET = os.getenv('ALIEXPRESS_APP_SECRET', '').strip()
 ALIEXPRESS_TRACKING_ID = os.getenv('ALIEXPRESS_TRACKING_ID', '').strip()
@@ -387,3 +387,11 @@ ALIEXPRESS_SIGN_METHOD = (os.getenv('ALIEXPRESS_SIGN_METHOD', 'md5') or 'md5').s
 ALIEXPRESS_API_URL = (
     os.getenv('ALIEXPRESS_API_URL', 'https://api.taobao.com/router/rest') or 'https://api.taobao.com/router/rest'
 ).strip()
+# Drop Shipping OAuth (api-sg.aliexpress.com IOP).
+ALIEXPRESS_IOP_GATEWAY = (
+    os.getenv('ALIEXPRESS_IOP_GATEWAY', 'https://api-sg.aliexpress.com') or 'https://api-sg.aliexpress.com'
+).strip()
+ALIEXPRESS_OAUTH_REDIRECT_URI = os.getenv('ALIEXPRESS_OAUTH_REDIRECT_URI', '').strip()
+# Optional single-tenant fallback when per-user OAuth is not set up yet.
+ALIEXPRESS_ACCESS_TOKEN = os.getenv('ALIEXPRESS_ACCESS_TOKEN', '').strip()
+ALIEXPRESS_REFRESH_TOKEN = os.getenv('ALIEXPRESS_REFRESH_TOKEN', '').strip()

@@ -482,6 +482,8 @@ def run_store_sync(self, store_id):
 
     mappings = ProductMapping.objects.filter(store=store).select_related('product', 'product__vendor')
     session = {}
+    if store.user_id:
+        session['aliexpress_user_id'] = str(store.user_id)
     error_summary = None
     price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
     try:

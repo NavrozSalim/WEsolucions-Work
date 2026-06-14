@@ -1,4 +1,4 @@
-"""AliExpress price/title lookup via Affiliate API (UK / US / AU markets)."""
+"""AliExpress price/title lookup via Drop Shipping API (OAuth) or Affiliate API fallback."""
 from __future__ import annotations
 
 import logging
@@ -6,11 +6,14 @@ import re
 from decimal import Decimal, InvalidOperation
 
 from scrapers.aliexpress_client import AliExpressAPIError, fetch_product_detail, _credentials_configured
+from scrapers.aliexpress_ds_parser import price_from_ds_result, stock_from_ds_result, title_from_ds_result
+from scrapers.aliexpress_iop import AliExpressIOPError, fetch_ds_product
 from scrapers.aliexpress_markets import get_aliexpress_market, resolve_aliexpress_market
+from vendor.aliexpress_oauth import get_valid_access_token
 
 logger = logging.getLogger(__name__)
 
-# Affiliate productdetail rarely exposes warehouse stock; treat priced listings as available.
+# DS API rarely exposes warehouse stock per SKU; treat priced onSelling listings as available.
 DEFAULT_IN_STOCK_QTY = 999
 
 ALIEXPRESS_HOST_MARKERS = ('aliexpress.com', 'aliexpress.us', 'aliexpress.co.uk', 'aliexpress.ru')
@@ -95,41 +98,76 @@ def _title_from_product_row(row: dict) -> str | None:
     return None
 
 
-def scrape_aliexpress(vendor_url: str, region: str, session: dict | None = None) -> dict:
-    """
-    Fetch price/title for an AliExpress listing via the Affiliate API.
+def _oauth_user_id_from_session(session: dict | None) -> str | None:
+    if not session:
+        return None
+    for key in ('aliexpress_user_id', 'user_id'):
+        raw = session.get(key)
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    return None
 
-    ``region`` maps to market (UK/USA/AU). When unset or unknown, uses
-    ``ALIEXPRESS_DEFAULT_MARKET`` (default UK).
-    """
-    del session  # API-based; no browser session
-    product_id = extract_aliexpress_product_id(vendor_url)
-    if not product_id:
+
+def _scrape_via_dropshipping(product_id: str, region: str, session: dict | None) -> dict | None:
+    """Return scraper payload dict on success, None when DS path is unavailable."""
+    user_id = _oauth_user_id_from_session(session)
+    access_token = get_valid_access_token(user_id)
+    if not access_token:
+        return None
+
+    market_key = resolve_aliexpress_market(region)
+    market = get_aliexpress_market(region)
+    try:
+        result = fetch_ds_product(product_id, region, access_token)
+    except AliExpressIOPError as exc:
+        logger.warning('AliExpress DS API failed for %s: %s', product_id, exc)
         return {
             'price': None,
             'stock': None,
             'title': None,
-            'error_code': 'aliexpress_invalid_url',
-            'error_message': 'Could not parse AliExpress product ID from URL or SKU',
+            'error_code': 'aliexpress_ds_api_error',
+            'error_message': str(exc)[:500],
         }
-    if not _credentials_configured():
+
+    if not result:
         return {
             'price': None,
-            'stock': None,
+            'stock': 0,
             'title': None,
-            'error_code': 'aliexpress_not_configured',
+            'error_code': 'aliexpress_product_not_found',
             'error_message': (
-                'AliExpress API not configured — set ALIEXPRESS_APP_KEY and ALIEXPRESS_APP_SECRET '
-                'on the worker'
+                f'No AliExpress DS product for ID {product_id} '
+                f'(market={market_key}, country={market["country"]}, currency={market["target_currency"]})'
             ),
         }
 
+    price = price_from_ds_result(result)
+    title = title_from_ds_result(result)
+    stock = stock_from_ds_result(result)
+    if stock is None and price is not None:
+        stock = DEFAULT_IN_STOCK_QTY
+    if price is None:
+        return {
+            'price': None,
+            'stock': stock if stock is not None else 0,
+            'title': title,
+            'error_code': 'aliexpress_no_price',
+            'error_message': f'AliExpress DS returned product {product_id} without a usable price',
+        }
+    return {
+        'price': price,
+        'stock': stock if stock is not None else DEFAULT_IN_STOCK_QTY,
+        'title': title,
+    }
+
+
+def _scrape_via_affiliate(product_id: str, region: str) -> dict:
     market_key = resolve_aliexpress_market(region)
     market = get_aliexpress_market(region)
     try:
         row = fetch_product_detail(product_id, region)
     except AliExpressAPIError as exc:
-        logger.warning('AliExpress API failed for %s: %s', product_id, exc)
+        logger.warning('AliExpress affiliate API failed for %s: %s', product_id, exc)
         return {
             'price': None,
             'stock': None,
@@ -165,6 +203,55 @@ def scrape_aliexpress(vendor_url: str, region: str, session: dict | None = None)
         'price': price,
         'stock': DEFAULT_IN_STOCK_QTY,
         'title': title,
+    }
+
+
+def scrape_aliexpress(vendor_url: str, region: str, session: dict | None = None) -> dict:
+    """
+    Fetch price/title for an AliExpress listing.
+
+    Prefers Drop Shipping API (``aliexpress.ds.product.get``) when an OAuth
+    access token is available for the store user (or ``ALIEXPRESS_ACCESS_TOKEN``
+    env fallback). Falls back to the legacy Affiliate API when configured.
+    """
+    product_id = extract_aliexpress_product_id(vendor_url)
+    if not product_id:
+        return {
+            'price': None,
+            'stock': None,
+            'title': None,
+            'error_code': 'aliexpress_invalid_url',
+            'error_message': 'Could not parse AliExpress product ID from URL or SKU',
+        }
+    if not _credentials_configured():
+        return {
+            'price': None,
+            'stock': None,
+            'title': None,
+            'error_code': 'aliexpress_not_configured',
+            'error_message': (
+                'AliExpress API not configured — set ALIEXPRESS_APP_KEY and ALIEXPRESS_APP_SECRET '
+                'on the worker'
+            ),
+        }
+
+    ds_result = _scrape_via_dropshipping(product_id, region, session)
+    if ds_result is not None:
+        return ds_result
+
+    affiliate_result = _scrape_via_affiliate(product_id, region)
+    if affiliate_result.get('price') is not None:
+        return affiliate_result
+
+    return {
+        'price': None,
+        'stock': None,
+        'title': affiliate_result.get('title'),
+        'error_code': 'aliexpress_oauth_required',
+        'error_message': (
+            'AliExpress Drop Shipping requires OAuth — connect your AliExpress account via '
+            'GET /api/v1/vendors/aliexpress/connect/ or set ALIEXPRESS_ACCESS_TOKEN on the worker'
+        ),
     }
 
 
