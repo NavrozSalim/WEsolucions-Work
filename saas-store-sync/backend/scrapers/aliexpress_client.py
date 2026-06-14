@@ -70,6 +70,44 @@ def _base_params(method: str) -> dict:
     }
 
 
+def call_api_with_session(
+    method: str,
+    business_params: dict,
+    session_token: str,
+    *,
+    sign_method: str = 'hmac',
+    timeout: int = 30,
+) -> dict:
+    """TOP router call with OAuth session token (Drop Shipping APIs like ds.product.get)."""
+    if not _credentials_configured():
+        raise AliExpressAPIError(
+            'AliExpress API credentials not configured (set ALIEXPRESS_APP_KEY and ALIEXPRESS_APP_SECRET)'
+        )
+    params = _base_params(method)
+    params['sign_method'] = (sign_method or 'hmac').strip().lower()
+    params['session'] = session_token
+    params.update({k: v for k, v in business_params.items() if v is not None and str(v) != ''})
+    params['sign'] = sign_params(params, settings.ALIEXPRESS_APP_SECRET, params['sign_method'])
+    try:
+        resp = requests.post(get_api_url(), data=params, timeout=timeout)
+    except requests.RequestException as exc:
+        raise AliExpressAPIError(str(exc)) from exc
+    body = resp.text or ''
+    if resp.status_code >= 400:
+        raise AliExpressAPIError(
+            f'AliExpress API HTTP {resp.status_code}',
+            response_body=body[:500],
+        )
+    try:
+        data = resp.json()
+    except json.JSONDecodeError as exc:
+        raise AliExpressAPIError('AliExpress API returned non-JSON response', response_body=body[:500]) from exc
+    err = _extract_top_level_error(data)
+    if err:
+        raise AliExpressAPIError(err, response_body=body[:500])
+    return data
+
+
 def call_api(method: str, business_params: dict, *, timeout: int = 30) -> dict:
     if not _credentials_configured():
         raise AliExpressAPIError(

@@ -93,21 +93,29 @@ def iop_system_request(api_path: str, business_params: dict[str, Any], *, timeou
     return _post_iop(url, params, timeout=timeout)
 
 
-def iop_business_request(
+def iop_sync_business_request(
     api_method: str,
     business_params: dict[str, Any],
     access_token: str,
     *,
     timeout: int = 30,
 ) -> dict:
-    """POST to {gateway}/rest/{dotted/path} for business APIs (requires access_token)."""
+    """
+    POST to {gateway}/sync for business APIs (method + session params).
+
+    Drop Shipping APIs such as ``aliexpress.ds.product.get`` use the sync gateway,
+    not ``/rest/{dotted.path}`` (which returns InvalidApiPath).
+    """
     _, app_secret = _app_credentials()
-    path = method_to_iop_path(api_method)
+    method = (api_method or '').strip()
     params = _base_iop_params()
-    params['access_token'] = access_token
+    params['method'] = method
+    params['format'] = 'json'
+    params['session'] = access_token
+    params['simplify'] = 'true'
     params.update({k: str(v) for k, v in business_params.items() if v is not None and str(v) != ''})
-    params['sign'] = sign_iop_request(path, params, app_secret)
-    url = f'{get_iop_gateway().rstrip("/")}/rest{path}'
+    params['sign'] = sign_iop_request(method, params, app_secret)
+    url = f'{get_iop_gateway().rstrip("/")}/sync'
     return _post_iop(url, params, timeout=timeout)
 
 
@@ -163,25 +171,49 @@ def refresh_access_token(refresh_token: str) -> dict:
     return iop_system_request(TOKEN_REFRESH_PATH, {'refresh_token': refresh_token})
 
 
-def fetch_ds_product(product_id: str, store_region: str | None, access_token: str) -> dict | None:
-    """Call aliexpress.ds.product.get and return the ``result`` object, or None."""
+def _ds_business_params(product_id: str, store_region: str | None) -> dict[str, str]:
     from scrapers.aliexpress_markets import get_aliexpress_market
 
+    market = get_aliexpress_market(store_region)
+    return {
+        'product_id': product_id,
+        'ship_to_country': market['country'],
+        'target_currency': market['target_currency'],
+        'target_language': market['target_language'],
+    }
+
+
+def fetch_ds_product(product_id: str, store_region: str | None, access_token: str) -> dict | None:
+    """Call aliexpress.ds.product.get and return the ``result`` object, or None."""
     pid = str(product_id or '').strip()
     if not pid:
         return None
-    market = get_aliexpress_market(store_region)
-    data = iop_business_request(
-        DS_PRODUCT_GET_METHOD,
-        {
-            'product_id': pid,
-            'ship_to_country': market['country'],
-            'target_currency': market['target_currency'],
-            'target_language': market['target_language'],
-        },
-        access_token,
-    )
-    return _extract_ds_product_result(data)
+    business = _ds_business_params(pid, store_region)
+    errors: list[str] = []
+
+    try:
+        data = iop_sync_business_request(DS_PRODUCT_GET_METHOD, business, access_token)
+        result = _extract_ds_product_result(data)
+        if result is not None:
+            return result
+    except AliExpressIOPError as exc:
+        errors.append(f'sync: {exc}')
+        logger.warning('AliExpress DS sync API failed for %s: %s', pid, exc)
+
+    try:
+        from scrapers.aliexpress_client import AliExpressAPIError, call_api_with_session
+
+        data = call_api_with_session(DS_PRODUCT_GET_METHOD, business, access_token)
+        result = _extract_ds_product_result(data)
+        if result is not None:
+            return result
+    except AliExpressAPIError as exc:
+        errors.append(f'top: {exc}')
+        logger.warning('AliExpress DS TOP API failed for %s: %s', pid, exc)
+
+    if errors:
+        raise AliExpressIOPError('; '.join(errors))
+    return None
 
 
 def _extract_ds_product_result(data: dict) -> dict | None:

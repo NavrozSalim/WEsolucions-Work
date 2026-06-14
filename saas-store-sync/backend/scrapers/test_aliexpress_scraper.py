@@ -8,7 +8,7 @@ from django.test import SimpleTestCase, override_settings
 
 from scrapers.aliexpress_client import sign_params, _products_from_detail_response, get_api_url, DEFAULT_API_URL
 from scrapers.aliexpress_ds_parser import price_from_ds_result, stock_from_ds_result, title_from_ds_result
-from scrapers.aliexpress_iop import method_to_iop_path, sign_iop_request, iop_business_request
+from scrapers.aliexpress_iop import method_to_iop_path, sign_iop_request, iop_sync_business_request, fetch_ds_product, AliExpressIOPError
 from scrapers.aliexpress_markets import resolve_aliexpress_market
 from scrapers.aliexpress_scraper import (
     build_aliexpress_item_url,
@@ -105,7 +105,7 @@ class AliExpressSignTests(SimpleTestCase):
         ALIEXPRESS_IOP_GATEWAY='https://api-sg.aliexpress.com',
     )
     @patch('scrapers.aliexpress_iop.requests.post')
-    def test_iop_business_request_uses_dotted_rest_path(self, mock_post):
+    def test_iop_sync_business_request_uses_sync_gateway(self, mock_post):
         mock_post.return_value.status_code = 200
         mock_post.return_value.text = json.dumps(
             {
@@ -116,7 +116,7 @@ class AliExpressSignTests(SimpleTestCase):
         )
         mock_post.return_value.json.return_value = json.loads(mock_post.return_value.text)
 
-        iop_business_request(
+        iop_sync_business_request(
             'aliexpress.ds.product.get',
             {'product_id': '1005007170995524'},
             'access-token',
@@ -124,8 +124,41 @@ class AliExpressSignTests(SimpleTestCase):
 
         self.assertEqual(
             mock_post.call_args[0][0],
-            'https://api-sg.aliexpress.com/rest/aliexpress.ds.product.get',
+            'https://api-sg.aliexpress.com/sync',
         )
+        posted = mock_post.call_args.kwargs.get('data') or mock_post.call_args[1].get('data')
+        self.assertEqual(posted['method'], 'aliexpress.ds.product.get')
+        self.assertEqual(posted['session'], 'access-token')
+
+    @override_settings(
+        ALIEXPRESS_APP_KEY='536784',
+        ALIEXPRESS_APP_SECRET='secret',
+        ALIEXPRESS_IOP_GATEWAY='https://api-sg.aliexpress.com',
+    )
+    @patch('scrapers.aliexpress_client.requests.post')
+    @patch('scrapers.aliexpress_iop.iop_sync_business_request')
+    def test_fetch_ds_product_falls_back_to_top_router(self, mock_sync, mock_top_post):
+        mock_sync.side_effect = AliExpressIOPError('sync: InvalidApiPath')
+        api_body = {
+            'aliexpress_ds_product_get_response': {
+                'result': {
+                    'ae_item_base_info_dto': {'subject': 'TOP item', 'product_status_type': 'onSelling'},
+                    'ae_item_sku_info_dtos': {
+                        'ae_item_sku_info_dto': {'offer_sale_price': '9.99', 'sku_available_stock': 4}
+                    },
+                }
+            }
+        }
+        mock_top_post.return_value.status_code = 200
+        mock_top_post.return_value.text = json.dumps(api_body)
+        mock_top_post.return_value.json.return_value = api_body
+
+        result = fetch_ds_product('1005007170995524', 'UK', 'oauth-token')
+        self.assertEqual(result['ae_item_base_info_dto']['subject'], 'TOP item')
+        posted = mock_top_post.call_args.kwargs.get('data') or mock_top_post.call_args[1].get('data')
+        self.assertEqual(posted['method'], 'aliexpress.ds.product.get')
+        self.assertEqual(posted['session'], 'oauth-token')
+        self.assertEqual(posted['sign_method'], 'hmac')
 
 
 class AliExpressDsParserTests(SimpleTestCase):
