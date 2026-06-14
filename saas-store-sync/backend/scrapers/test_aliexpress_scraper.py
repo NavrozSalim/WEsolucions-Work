@@ -24,7 +24,7 @@ from scrapers.aliexpress_iop import (
     sign_iop_request,
     sign_iop_sync_request,
 )
-from scrapers.aliexpress_markets import resolve_aliexpress_market
+from scrapers.aliexpress_markets import resolve_aliexpress_market, scrape_region_for_aliexpress
 from scrapers.aliexpress_scraper import (
     build_aliexpress_item_url,
     extract_aliexpress_product_id,
@@ -44,6 +44,17 @@ class AliExpressMarketTests(SimpleTestCase):
         self.assertEqual(resolve_aliexpress_market('UK'), 'UK')
         self.assertEqual(resolve_aliexpress_market('USA'), 'USA')
         self.assertEqual(resolve_aliexpress_market('AU'), 'AU')
+
+    def test_scrape_region_from_vendor_code(self):
+        self.assertEqual(scrape_region_for_aliexpress('aliexpressuk', 'USA'), 'UK')
+        self.assertEqual(scrape_region_for_aliexpress('aliexpressus', 'UK'), 'USA')
+        self.assertEqual(scrape_region_for_aliexpress('aliexpressau', 'UK'), 'AU')
+        self.assertEqual(scrape_region_for_aliexpress('AliExpress US', 'UK'), 'USA')
+        self.assertEqual(scrape_region_for_aliexpress('aliexpress', 'USA'), 'UK')
+
+    def test_scrape_region_falls_back_to_store(self):
+        self.assertEqual(scrape_region_for_aliexpress(None, 'AU'), 'AU')
+        self.assertEqual(scrape_region_for_aliexpress('unknown', 'USA'), 'USA')
 
 
 class AliExpressUrlTests(SimpleTestCase):
@@ -71,7 +82,21 @@ class AliExpressUrlTests(SimpleTestCase):
     def test_vendor_code(self):
         self.assertTrue(is_aliexpress_vendor_code('aliexpress'))
         self.assertTrue(is_aliexpress_vendor_code('AliExpressUK'))
+        self.assertTrue(is_aliexpress_vendor_code('aliexpressus'))
+        self.assertTrue(is_aliexpress_vendor_code('aliexpressau'))
         self.assertFalse(is_aliexpress_vendor_code('amazonus'))
+
+
+class AliExpressDispatcherTests(SimpleTestCase):
+    def test_get_price_and_stock_uses_vendor_market(self):
+        from scrapers import get_price_and_stock
+        from unittest.mock import patch, MagicMock
+
+        mock_scrape = MagicMock(return_value={'price': 9.99, 'stock': 5, 'title': 'Item'})
+        url = 'https://www.aliexpress.com/item/1005001234567890.html'
+        with patch('scrapers._get_aliexpress_scraper', return_value=(mock_scrape, None)):
+            get_price_and_stock(url, 'UK', {}, vendor_code='aliexpressus')
+        mock_scrape.assert_called_once_with(url, 'USA', {})
 
 
 class AliExpressApiUrlTests(SimpleTestCase):

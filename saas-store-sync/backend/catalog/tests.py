@@ -383,3 +383,14 @@ class WalmartCatalogRulesTests(SimpleTestCase):
         pm.product.vendor_sku = 'VENDOR-99'
         store = _store('walmart')
         self.assertEqual(listing_sku_lookup_order(pm, store), ['WM-99'])
+
+
+class AliExpressVendorAliasTests(SimpleTestCase):
+    def test_resolve_canonical_vendor_codes(self):
+        from catalog.services import resolve_canonical_vendor_code
+
+        self.assertEqual(resolve_canonical_vendor_code('AliExpress UK'), 'aliexpressuk')
+        self.assertEqual(resolve_canonical_vendor_code('aliexpressus'), 'aliexpressus')
+        self.assertEqual(resolve_canonical_vendor_code('AliExpress AU'), 'aliexpressau')
+        self.assertEqual(resolve_canonical_vendor_code('aliexpress'), 'aliexpressuk')
+        self.assertEqual(resolve_canonical_vendor_code('aliexpress_us'), 'aliexpressus')

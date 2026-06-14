@@ -35,7 +35,16 @@ PRODUCT_ID_FROM_URL_RE = re.compile(
 
 def is_aliexpress_vendor_code(vcode: str) -> bool:
     v = (vcode or '').strip().lower()
-    return v in ('aliexpress', 'aliexpressuk', 'aliexpress_us', 'aliexpress_au') or v.startswith('aliexpress_')
+    if v.startswith('aliexpress'):
+        return True
+    return v.replace(' ', '') in (
+        'aliexpress',
+        'aliexpressuk',
+        'aliexpressus',
+        'aliexpressau',
+        'aliexpress_us',
+        'aliexpress_au',
+    )
 
 
 def is_aliexpress_url(url: str) -> bool:

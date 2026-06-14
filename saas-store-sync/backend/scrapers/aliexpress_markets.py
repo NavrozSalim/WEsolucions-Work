@@ -42,6 +42,30 @@ def resolve_aliexpress_market(store_region: str | None) -> str:
     return default_aliexpress_market_key()
 
 
+_ALIEXPRESS_VENDOR_MARKET: dict[str, str] = {
+    'aliexpress': 'UK',
+    'aliexpressuk': 'UK',
+    'aliexpress uk': 'UK',
+    'aliexpress_us': 'USA',
+    'aliexpressus': 'USA',
+    'aliexpress us': 'USA',
+    'aliexpress_au': 'AU',
+    'aliexpressau': 'AU',
+    'aliexpress au': 'AU',
+}
+
+
+def scrape_region_for_aliexpress(vendor_code: str | None, store_region: str | None) -> str:
+    """Prefer AliExpress vendor code (UK/US/AU) over store region for API market."""
+    raw = (vendor_code or '').strip().lower()
+    if raw in _ALIEXPRESS_VENDOR_MARKET:
+        return _ALIEXPRESS_VENDOR_MARKET[raw]
+    compact = raw.replace(' ', '')
+    if compact in _ALIEXPRESS_VENDOR_MARKET:
+        return _ALIEXPRESS_VENDOR_MARKET[compact]
+    return resolve_aliexpress_market(store_region)
+
+
 def get_aliexpress_market(store_region: str | None) -> AliExpressMarket:
     key = resolve_aliexpress_market(store_region)
     return ALIEXPRESS_MARKETS[key]

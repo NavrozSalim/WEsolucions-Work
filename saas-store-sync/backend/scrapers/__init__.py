@@ -216,7 +216,13 @@ def _vevor_ingest_only_result() -> dict:
     return _res()
 
 
-def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> dict:
+def get_price_and_stock(
+    vendor_url: str,
+    region: str,
+    session: dict = None,
+    *,
+    vendor_code: str | None = None,
+) -> dict:
     """
     Main entry point: resolve vendor URL → scraper → return price + stock.
 
@@ -231,9 +237,11 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
     vendor_url : str
         Full product URL (Amazon, eBay, etc.)
     region : str
-        Store region (``USA``, ``AU``, ``UK``) — AliExpress maps to US/AU/UK API markets.
+        Store region (``USA``, ``AU``, ``UK``) — used when vendor-specific region does not apply.
     session : dict, optional
         Shared across multiple calls in the same sync run (reuses browser sessions).
+    vendor_code : str, optional
+        Product vendor code (e.g. ``aliexpressus``) — AliExpress uses this for UK/US/AU markets.
 
     Returns
     -------
@@ -280,8 +288,16 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
 
     if any(host in url_lower for host in ("aliexpress.com", "aliexpress.us", "aliexpress.co.uk")):
         scrape_fn, _ = _get_aliexpress_scraper()
-        logger.info("Routing to AliExpress API scraper: %s", vendor_url[:80])
-        return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
+        from scrapers.aliexpress_markets import scrape_region_for_aliexpress
+
+        ae_region = scrape_region_for_aliexpress(vendor_code, region)
+        logger.info(
+            "Routing to AliExpress API scraper (market=%s vendor=%s): %s",
+            ae_region,
+            vendor_code or '-',
+            vendor_url[:80],
+        )
+        return _normalize_scrape_payload(scrape_fn(vendor_url, ae_region, session))
 
     logger.warning("No scraper registered for URL: %s", vendor_url[:80])
     return _placeholder_scrape(vendor_url, region)

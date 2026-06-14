@@ -833,7 +833,12 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
             vendor_stock = 0
             result = {}
             try:
-                result = get_price_and_stock(url, store.region or '', session)
+                result = get_price_and_stock(
+                    url,
+                    store.region or '',
+                    session,
+                    vendor_code=product.vendor.code if product.vendor else None,
+                )
                 vendor_price = result.get('price')
                 inv = _inventory_from_scrape_result(result)
                 vendor_stock = 0 if inv is None or inv < 0 else inv
@@ -1371,7 +1376,12 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
             try:
                 if not url:
                     raise ValueError('Product has no vendor_url or resolvable SKU')
-                result = get_price_and_stock(url, store.region or '', session)
+                result = get_price_and_stock(
+                    url,
+                    store.region or '',
+                    session,
+                    vendor_code=product.vendor.code if product.vendor else None,
+                )
                 vendor_price = result.get('price')
                 vendor_stock = _inventory_from_scrape_result(result)
                 scrape_title = (result.get('title') or '').strip()[:500]

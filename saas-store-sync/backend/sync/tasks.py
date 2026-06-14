@@ -511,7 +511,12 @@ def run_store_sync(self, store_id):
             try:
                 if not url:
                     raise ValueError("Product has no vendor_url or resolvable SKU")
-                result = get_price_and_stock(url, store.region, session)
+                result = get_price_and_stock(
+                    url,
+                    store.region,
+                    session,
+                    vendor_code=pm.product.vendor.code if pm.product.vendor else None,
+                )
                 vendor_price = result.get('price')
                 vendor_stock = _inventory_from_scrape_result(result)
                 scrape_title = (result.get('title') or '').strip()[:500]
