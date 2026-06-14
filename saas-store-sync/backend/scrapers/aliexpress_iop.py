@@ -6,7 +6,7 @@ import hmac
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 
 import requests
 from django.conf import settings
@@ -37,28 +37,39 @@ def iop_timestamp_ms() -> str:
 
 
 def method_to_iop_path(api_method: str) -> str:
-    """
-    Map API name to IOP REST path.
-
-    Business APIs keep dotted names (``/aliexpress.ds.product.get``).
-    System/auth APIs use slash paths (``/auth/token/security/create``).
-    """
+    """Dotted IOP path (``/aliexpress.ds.product.get``) — used in REST URL attempts."""
     name = (api_method or '').strip().lstrip('/')
     if not name:
         raise ValueError('api_method is required')
     return f'/{name}'
 
 
-def sign_iop_request(api_path: str, params: dict[str, Any], app_secret: str) -> str:
-    """
-    IOP HMAC-SHA256 signature: api_path + sorted(key+value pairs), excluding sign.
-    """
-    items = sorted(
-        (k, v)
+def method_to_slash_path(api_method: str) -> str:
+    """Slash IOP path for signing (``/aliexpress/ds/product/get``)."""
+    name = (api_method or '').strip().lstrip('/')
+    if not name:
+        raise ValueError('api_method is required')
+    return '/' + name.replace('.', '/')
+
+
+def _sorted_param_items(params: dict[str, Any]) -> list[tuple[str, str]]:
+    return sorted(
+        (k, str(v))
         for k, v in params.items()
         if k != 'sign' and v is not None and str(v) != ''
     )
-    base = api_path + ''.join(f'{k}{v}' for k, v in items)
+
+
+def sign_iop_request(api_path: str, params: dict[str, Any], app_secret: str) -> str:
+    """IOP HMAC-SHA256: api_path + sorted(key+value pairs), excluding sign."""
+    base = api_path + ''.join(f'{k}{v}' for k, v in _sorted_param_items(params))
+    digest = hmac.new(app_secret.encode('utf-8'), base.encode('utf-8'), hashlib.sha256)
+    return digest.hexdigest().upper()
+
+
+def sign_iop_sync_request(params: dict[str, Any], app_secret: str) -> str:
+    """IOP /sync HMAC-SHA256: sorted(key+value) only — dotted ``method`` has no path prefix."""
+    base = ''.join(f'{k}{v}' for k, v in _sorted_param_items(params))
     digest = hmac.new(app_secret.encode('utf-8'), base.encode('utf-8'), hashlib.sha256)
     return digest.hexdigest().upper()
 
@@ -73,12 +84,12 @@ def _app_credentials() -> tuple[str, str]:
     return app_key, app_secret
 
 
-def _base_iop_params() -> dict[str, str]:
+def _base_iop_params(*, timestamp_fn: Callable[[], str] = iop_timestamp_ms) -> dict[str, str]:
     app_key, _ = _app_credentials()
     return {
         'app_key': app_key,
         'sign_method': IOP_SIGN_METHOD,
-        'timestamp': iop_timestamp_ms(),
+        'timestamp': timestamp_fn(),
     }
 
 
@@ -93,6 +104,27 @@ def iop_system_request(api_path: str, business_params: dict[str, Any], *, timeou
     return _post_iop(url, params, timeout=timeout)
 
 
+def _build_sync_params(
+    api_method: str,
+    business_params: dict[str, Any],
+    access_token: str,
+    *,
+    timestamp_fn: Callable[[], str],
+) -> dict[str, str]:
+    app_key, _ = _app_credentials()
+    method = (api_method or '').strip()
+    params: dict[str, str] = {
+        'app_key': app_key,
+        'method': method,
+        'session': access_token,
+        'sign_method': IOP_SIGN_METHOD,
+        'timestamp': timestamp_fn(),
+        'simplify': 'true',
+    }
+    params.update({k: str(v) for k, v in business_params.items() if v is not None and str(v) != ''})
+    return params
+
+
 def iop_sync_business_request(
     api_method: str,
     business_params: dict[str, Any],
@@ -101,27 +133,76 @@ def iop_sync_business_request(
     timeout: int = 30,
 ) -> dict:
     """
-    POST to {gateway}/sync for business APIs (method + session params).
+    POST to {gateway}/sync for dotted business APIs (``aliexpress.ds.product.get``).
 
-    Drop Shipping APIs such as ``aliexpress.ds.product.get`` use the sync gateway,
-    not ``/rest/{dotted.path}`` (which returns InvalidApiPath).
+    Signs sorted params only (no path prefix), uses millisecond timestamp, and sends
+    parameters as the POST query string (AliExpress IOP /sync convention).
     """
     _, app_secret = _app_credentials()
-    method = (api_method or '').strip()
+    params = _build_sync_params(
+        api_method,
+        business_params,
+        access_token,
+        timestamp_fn=iop_timestamp_ms,
+    )
+    params['sign'] = sign_iop_sync_request(params, app_secret)
+    url = f'{get_iop_gateway().rstrip("/")}/sync'
+    return _post_iop(url, params, timeout=timeout, query_params=True)
+
+
+def _iop_sync_business_request_form(
+    api_method: str,
+    business_params: dict[str, Any],
+    access_token: str,
+    *,
+    timeout: int = 30,
+) -> dict:
+    """Same as ``iop_sync_business_request`` but POST body (form) instead of query string."""
+    _, app_secret = _app_credentials()
+    params = _build_sync_params(
+        api_method,
+        business_params,
+        access_token,
+        timestamp_fn=iop_timestamp_ms,
+    )
+    params['sign'] = sign_iop_sync_request(params, app_secret)
+    url = f'{get_iop_gateway().rstrip("/")}/sync'
+    return _post_iop(url, params, timeout=timeout, query_params=False)
+
+
+def iop_rest_business_request(
+    api_method: str,
+    business_params: dict[str, Any],
+    access_token: str,
+    *,
+    timeout: int = 30,
+) -> dict:
+    """POST to {gateway}/rest/aliexpress/ds/product/get with access_token (IOP REST)."""
+    _, app_secret = _app_credentials()
+    path = method_to_slash_path(api_method)
     params = _base_iop_params()
-    params['method'] = method
+    params['access_token'] = access_token
     params['format'] = 'json'
-    params['session'] = access_token
+    params['v'] = '2.0'
     params['simplify'] = 'true'
     params.update({k: str(v) for k, v in business_params.items() if v is not None and str(v) != ''})
-    params['sign'] = sign_iop_request(method, params, app_secret)
-    url = f'{get_iop_gateway().rstrip("/")}/sync'
+    params['sign'] = sign_iop_request(path, params, app_secret)
+    url = f'{get_iop_gateway().rstrip("/")}/rest{path}'
     return _post_iop(url, params, timeout=timeout)
 
 
-def _post_iop(url: str, params: dict[str, str], *, timeout: int) -> dict:
+def _post_iop(
+    url: str,
+    params: dict[str, str],
+    *,
+    timeout: int,
+    query_params: bool = False,
+) -> dict:
     try:
-        resp = requests.post(url, data=params, timeout=timeout)
+        if query_params:
+            resp = requests.post(url, params=params, timeout=timeout)
+        else:
+            resp = requests.post(url, data=params, timeout=timeout)
     except requests.RequestException as exc:
         raise AliExpressIOPError(str(exc)) from exc
     body = resp.text or ''
@@ -183,6 +264,13 @@ def _ds_business_params(product_id: str, store_region: str | None) -> dict[str, 
     }
 
 
+def _try_extract_ds_result(data: dict | None, product_id: str) -> dict | None:
+    result = _extract_ds_product_result(data) if data else None
+    if result is not None:
+        return result
+    return None
+
+
 def fetch_ds_product(product_id: str, store_region: str | None, access_token: str) -> dict | None:
     """Call aliexpress.ds.product.get and return the ``result`` object, or None."""
     pid = str(product_id or '').strip()
@@ -191,25 +279,24 @@ def fetch_ds_product(product_id: str, store_region: str | None, access_token: st
     business = _ds_business_params(pid, store_region)
     errors: list[str] = []
 
-    try:
-        data = iop_sync_business_request(DS_PRODUCT_GET_METHOD, business, access_token)
-        result = _extract_ds_product_result(data)
-        if result is not None:
-            return result
-    except AliExpressIOPError as exc:
-        errors.append(f'sync: {exc}')
-        logger.warning('AliExpress DS sync API failed for %s: %s', pid, exc)
+    attempts: list[tuple[str, Callable[[], dict]]] = [
+        ('sync', lambda: iop_sync_business_request(DS_PRODUCT_GET_METHOD, business, access_token)),
+        (
+            'sync-form',
+            lambda: _iop_sync_business_request_form(DS_PRODUCT_GET_METHOD, business, access_token),
+        ),
+        ('rest-slash', lambda: iop_rest_business_request(DS_PRODUCT_GET_METHOD, business, access_token)),
+    ]
 
-    try:
-        from scrapers.aliexpress_client import AliExpressAPIError, call_api_with_session
-
-        data = call_api_with_session(DS_PRODUCT_GET_METHOD, business, access_token)
-        result = _extract_ds_product_result(data)
-        if result is not None:
-            return result
-    except AliExpressAPIError as exc:
-        errors.append(f'top: {exc}')
-        logger.warning('AliExpress DS TOP API failed for %s: %s', pid, exc)
+    for label, call in attempts:
+        try:
+            data = call()
+            result = _try_extract_ds_result(data, pid)
+            if result is not None:
+                return result
+        except AliExpressIOPError as exc:
+            errors.append(f'{label}: {exc}')
+            logger.warning('AliExpress DS %s failed for %s: %s', label, pid, exc)
 
     if errors:
         raise AliExpressIOPError('; '.join(errors))
