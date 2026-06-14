@@ -13,6 +13,8 @@ Server-side vendors (scraped from this dispatcher):
   (set ``COSTCO_AU_PROXY_URLS`` on the worker; without proxies the dispatcher
   returns an ``ingest_only`` sentinel so the catalog task keeps the existing
   ``ProductMapping`` row untouched.)
+* **AliExpress**     — Affiliate Open Platform API (``ALIEXPRESS_APP_KEY`` /
+  ``ALIEXPRESS_APP_SECRET``; UK default, US/AU via store region)
 
 Desktop / feed ingest-only vendors (NOT scraped server-side):
 
@@ -51,6 +53,22 @@ _scrape_ebay_au = None
 _close_ebay_au = None
 _scrape_costco_au = None
 _close_costco_au = None
+_scrape_aliexpress = None
+_close_aliexpress = None
+
+
+def _get_aliexpress_scraper():
+    global _scrape_aliexpress, _close_aliexpress
+    if _scrape_aliexpress is None:
+        try:
+            from .aliexpress_scraper import scrape_aliexpress, close_aliexpress_session
+            _scrape_aliexpress = scrape_aliexpress
+            _close_aliexpress = close_aliexpress_session
+        except ImportError as exc:
+            logger.warning("AliExpress scraper unavailable: %s", exc)
+            _scrape_aliexpress = _placeholder_scrape
+            _close_aliexpress = lambda s: None
+    return _scrape_aliexpress, _close_aliexpress
 
 
 def _get_costco_au_scraper():
@@ -213,7 +231,7 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
     vendor_url : str
         Full product URL (Amazon, eBay, etc.)
     region : str
-        'USA' or 'AU' — scraping logic can differ by country.
+        Store region (``USA``, ``AU``, ``UK``) — AliExpress maps to US/AU/UK API markets.
     session : dict, optional
         Shared across multiple calls in the same sync run (reuses browser sessions).
 
@@ -259,6 +277,11 @@ def get_price_and_stock(vendor_url: str, region: str, session: dict = None) -> d
     if "vevor.com.au" in url_lower or "vevor.au" in url_lower:
         logger.info("Vevor AU URL skipped server-side (feed ingest): %s", vendor_url[:80])
         return _normalize_scrape_payload(_vevor_ingest_only_result())
+
+    if any(host in url_lower for host in ("aliexpress.com", "aliexpress.us", "aliexpress.co.uk")):
+        scrape_fn, _ = _get_aliexpress_scraper()
+        logger.info("Routing to AliExpress API scraper: %s", vendor_url[:80])
+        return _normalize_scrape_payload(scrape_fn(vendor_url, region, session))
 
     logger.warning("No scraper registered for URL: %s", vendor_url[:80])
     return _placeholder_scrape(vendor_url, region)
@@ -312,6 +335,8 @@ def close_amazon_session(session):
     close_ebay_au(session)
     _, close_costco = _get_costco_au_scraper()
     close_costco(session)
+    _, close_aliexpress = _get_aliexpress_scraper()
+    close_aliexpress(session)
 
 
 __all__ = ["get_price_and_stock", "close_amazon_session"]

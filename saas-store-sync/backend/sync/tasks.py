@@ -130,7 +130,20 @@ def _resolve_vendor_url(product, store):
         if pid:
             return f"https://www.costco.com.au/p/{pid}"
         return None
+    if _is_aliexpress_vendor_code(vcode):
+        from scrapers.aliexpress_scraper import build_aliexpress_item_url, extract_aliexpress_product_id
+
+        pid = extract_aliexpress_product_id(sku)
+        if pid:
+            return build_aliexpress_item_url(pid)
+        return None
     return None
+
+
+def _is_aliexpress_vendor_code(vcode: str) -> bool:
+    from scrapers.aliexpress_scraper import is_aliexpress_vendor_code
+
+    return is_aliexpress_vendor_code(vcode)
 
 
 def _vendor_url_from_vendor_id(vendor, vendor_id: str, region: str) -> str | None:
@@ -155,6 +168,13 @@ def _vendor_url_from_vendor_id(vendor, vendor_id: str, region: str) -> str | Non
         pid = _costco_product_id_from_value(vid)
         if pid:
             return f'https://www.costco.com.au/p/{pid}'
+        return None
+    if _is_aliexpress_vendor_code(vcode):
+        from scrapers.aliexpress_scraper import build_aliexpress_item_url, extract_aliexpress_product_id
+
+        pid = extract_aliexpress_product_id(vid)
+        if pid:
+            return build_aliexpress_item_url(pid)
         return None
     return None
 

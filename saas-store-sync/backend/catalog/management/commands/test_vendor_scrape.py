@@ -25,7 +25,7 @@ class Command(BaseCommand):
             "--region",
             type=str,
             default="USA",
-            help="Store region: USA or AU (default USA)",
+            help="Store region: USA, AU, or UK (AliExpress; default USA)",
         )
         parser.add_argument(
             "--save-html",
@@ -38,8 +38,8 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         url = (options["url"] or "").strip()
         region = (options["region"] or "USA").strip().upper()
-        if region not in ("USA", "AU"):
-            self.stderr.write(self.style.WARNING("Region should be USA or AU; using USA."))
+        if region not in ("USA", "AU", "UK"):
+            self.stderr.write(self.style.WARNING("Region should be USA, AU, or UK; using USA."))
             region = "USA"
 
         session = {}

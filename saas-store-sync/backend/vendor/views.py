@@ -8,12 +8,12 @@ from rest_framework.response import Response
 from .models import Vendor
 
 
-HIDDEN_VENDOR_CODES = ('aliexpress', 'koganau')
+HIDDEN_VENDOR_CODES = ('koganau',)
 
 
 class VendorViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Vendor.objects.exclude(
-        Q(code__iexact='aliexpress') | Q(code__iexact='koganau')
+        Q(code__iexact='koganau')
     )
     permission_classes = [IsAuthenticated]
 

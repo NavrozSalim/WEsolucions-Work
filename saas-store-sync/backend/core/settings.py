@@ -376,3 +376,10 @@ CELERY_TASK_ROUTES = (
         'vendor.prune_old_vendor_prices': {'queue': 'celery'},
     },
 )
+
+# AliExpress Affiliate API (price lookup by product ID; UK default, US/AU via store region).
+ALIEXPRESS_APP_KEY = os.getenv('ALIEXPRESS_APP_KEY', '').strip()
+ALIEXPRESS_APP_SECRET = os.getenv('ALIEXPRESS_APP_SECRET', '').strip()
+ALIEXPRESS_TRACKING_ID = os.getenv('ALIEXPRESS_TRACKING_ID', '').strip()
+ALIEXPRESS_DEFAULT_MARKET = (os.getenv('ALIEXPRESS_DEFAULT_MARKET', 'UK') or 'UK').strip().upper()
+ALIEXPRESS_SIGN_METHOD = (os.getenv('ALIEXPRESS_SIGN_METHOD', 'md5') or 'md5').strip().lower()
