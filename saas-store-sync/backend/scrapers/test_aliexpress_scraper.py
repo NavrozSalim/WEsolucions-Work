@@ -7,7 +7,13 @@ from unittest.mock import patch
 from django.test import SimpleTestCase, override_settings
 
 from scrapers.aliexpress_client import sign_params, _products_from_detail_response, get_api_url, DEFAULT_API_URL
-from scrapers.aliexpress_ds_parser import price_from_ds_result, stock_from_ds_result, title_from_ds_result
+from scrapers.aliexpress_ds_parser import (
+    best_freight_within_days,
+    parse_delivery_days,
+    price_from_ds_result,
+    stock_from_ds_result,
+    title_from_ds_result,
+)
 from scrapers.aliexpress_iop import (
     AliExpressIOPError,
     fetch_ds_product,
@@ -237,6 +243,47 @@ class AliExpressDsParserTests(SimpleTestCase):
         }
         self.assertEqual(price_from_ds_result(result), 9.99)
 
+    def test_parse_delivery_days(self):
+        self.assertEqual(parse_delivery_days('5-8day'), (5, 8))
+        self.assertEqual(parse_delivery_days('3~10'), (3, 10))
+        self.assertEqual(parse_delivery_days('7'), (7, 7))
+
+    def test_best_freight_within_days(self):
+        freight_result = {
+            'success': True,
+            'aeop_freight_calculate_result_for_buyer_d_t_o_list': {
+                'aeop_freight_calculate_result_for_buyer_dto': [
+                    {
+                        'estimated_delivery_time': '10-15day',
+                        'freight': {'amount': '1.00', 'currency_code': 'GBP'},
+                        'service_name': 'SLOW',
+                    },
+                    {
+                        'estimated_delivery_time': '5-7day',
+                        'freight': {'amount': '2.50', 'currency_code': 'GBP'},
+                        'service_name': 'FAST',
+                    },
+                ]
+            },
+        }
+        best = best_freight_within_days(freight_result, max_delivery_days=7)
+        self.assertIsNotNone(best)
+        self.assertEqual(best['shipping_price'], 2.50)
+        self.assertEqual(best['delivery_max'], 7)
+        self.assertEqual(best['service_name'], 'FAST')
+
+    def test_best_freight_excludes_slow_options(self):
+        freight_result = {
+            'success': True,
+            'aeop_freight_calculate_result_for_buyer_d_t_o_list': {
+                'aeop_freight_calculate_result_for_buyer_dto': {
+                    'estimated_delivery_time': '10-15day',
+                    'freight': {'amount': '1.00'},
+                }
+            },
+        }
+        self.assertIsNone(best_freight_within_days(freight_result, max_delivery_days=7))
+
 
 class AliExpressResponseParseTests(SimpleTestCase):
     def test_products_from_detail_response(self):
@@ -347,13 +394,28 @@ class AliExpressScrapeTests(SimpleTestCase):
         self.assertEqual(posted['country'], 'US')
         self.assertEqual(posted['target_currency'], 'USD')
 
+    @patch('scrapers.aliexpress_scraper.fetch_freight_calculate')
     @patch('scrapers.aliexpress_scraper.fetch_ds_product')
     @patch('scrapers.aliexpress_scraper.get_valid_access_token', return_value='test-access-token')
-    def test_scrape_ds_success_uk(self, _mock_token, mock_fetch):
+    def test_scrape_ds_success_uk(self, _mock_token, mock_fetch, mock_freight):
         mock_fetch.return_value = {
             'ae_item_base_info_dto': {'subject': 'DS UK item', 'product_status_type': 'onSelling'},
             'ae_item_sku_info_dtos': {
-                'ae_item_sku_info_dto': {'offer_sale_price': '18.75', 'sku_available_stock': 12}
+                'ae_item_sku_info_dto': {
+                    'id': '12000000000000001',
+                    'offer_sale_price': '18.75',
+                    'sku_available_stock': 12,
+                }
+            },
+        }
+        mock_freight.return_value = {
+            'success': True,
+            'aeop_freight_calculate_result_for_buyer_d_t_o_list': {
+                'aeop_freight_calculate_result_for_buyer_dto': {
+                    'estimated_delivery_time': '5-7day',
+                    'freight': {'amount': '2.50', 'currency_code': 'GBP'},
+                    'service_name': 'CAINIAO_STANDARD',
+                }
             },
         }
         result = scrape_aliexpress(
@@ -361,10 +423,44 @@ class AliExpressScrapeTests(SimpleTestCase):
             'UK',
             {'aliexpress_user_id': 'user-1'},
         )
-        self.assertEqual(result['price'], 18.75)
+        self.assertEqual(result['price'], 21.25)
         self.assertEqual(result['stock'], 12)
+        self.assertEqual(result['shipping_price'], 2.50)
         self.assertEqual(result['title'], 'DS UK item')
         mock_fetch.assert_called_once()
+        mock_freight.assert_called_once()
+
+    @patch('scrapers.aliexpress_scraper.fetch_freight_calculate')
+    @patch('scrapers.aliexpress_scraper.fetch_ds_product')
+    @patch('scrapers.aliexpress_scraper.get_valid_access_token', return_value='test-access-token')
+    def test_scrape_ds_slow_delivery_zero_stock(self, _mock_token, mock_fetch, mock_freight):
+        mock_fetch.return_value = {
+            'ae_item_base_info_dto': {'subject': 'Slow ship item', 'product_status_type': 'onSelling'},
+            'ae_item_sku_info_dtos': {
+                'ae_item_sku_info_dto': {
+                    'id': '12000000000000002',
+                    'offer_sale_price': '10.00',
+                    'sku_available_stock': 50,
+                }
+            },
+        }
+        mock_freight.return_value = {
+            'success': True,
+            'aeop_freight_calculate_result_for_buyer_d_t_o_list': {
+                'aeop_freight_calculate_result_for_buyer_dto': {
+                    'estimated_delivery_time': '12-20day',
+                    'freight': {'amount': '3.00'},
+                }
+            },
+        }
+        result = scrape_aliexpress(
+            'https://www.aliexpress.com/item/1005001234567890.html',
+            'UK',
+            {'aliexpress_user_id': 'user-1'},
+        )
+        self.assertEqual(result['stock'], 0)
+        self.assertEqual(result['price'], 10.00)
+        self.assertEqual(result['error_code'], 'aliexpress_delivery_too_slow')
 
     @patch('scrapers.aliexpress_client.requests.post')
     @patch('scrapers.aliexpress_scraper.get_valid_access_token', return_value=None)

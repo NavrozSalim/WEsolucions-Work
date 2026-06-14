@@ -5,9 +5,18 @@ import logging
 import re
 from decimal import Decimal, InvalidOperation
 
+from django.conf import settings
+
 from scrapers.aliexpress_client import AliExpressAPIError, fetch_product_detail, _credentials_configured
-from scrapers.aliexpress_ds_parser import price_from_ds_result, stock_from_ds_result, title_from_ds_result
-from scrapers.aliexpress_iop import AliExpressIOPError, fetch_ds_product
+from scrapers.aliexpress_ds_parser import (
+    best_freight_within_days,
+    cheapest_sku_for_freight,
+    price_from_ds_result,
+    product_logistics_delivery_max,
+    stock_from_ds_result,
+    title_from_ds_result,
+)
+from scrapers.aliexpress_iop import AliExpressIOPError, fetch_ds_product, fetch_freight_calculate
 from scrapers.aliexpress_markets import get_aliexpress_market, resolve_aliexpress_market
 from vendor.aliexpress_oauth import get_valid_access_token
 
@@ -108,6 +117,82 @@ def _oauth_user_id_from_session(session: dict | None) -> str | None:
     return None
 
 
+def _max_delivery_days() -> int:
+    try:
+        return max(1, int(getattr(settings, 'ALIEXPRESS_MAX_DELIVERY_DAYS', 7) or 7))
+    except (TypeError, ValueError):
+        return 7
+
+
+def _apply_shipping_and_delivery(
+    product_id: str,
+    region: str,
+    access_token: str,
+    ds_result: dict,
+    item_price: float,
+    stock: int | None,
+) -> dict:
+    """
+    Fetch freight, add shipping to item price, zero stock when no option delivers within max days.
+    """
+    max_days = _max_delivery_days()
+    sku = cheapest_sku_for_freight(ds_result)
+    shipping_price = 0.0
+    delivery_max: int | None = None
+    qualified = False
+
+    if sku:
+        try:
+            freight_result = fetch_freight_calculate(
+                product_id,
+                sku['sku_id'],
+                sku['price'],
+                region,
+                access_token,
+            )
+            if freight_result:
+                best = best_freight_within_days(freight_result, max_delivery_days=max_days)
+                if best:
+                    qualified = True
+                    shipping_price = best['shipping_price']
+                    delivery_max = best['delivery_max']
+        except AliExpressIOPError as exc:
+            logger.warning(
+                'AliExpress freight calculate failed for %s sku=%s: %s',
+                product_id,
+                sku.get('sku_id'),
+                exc,
+            )
+
+    if not qualified:
+        lead = product_logistics_delivery_max(ds_result)
+        if lead is not None and lead <= max_days:
+            qualified = True
+            delivery_max = lead
+
+    total_price = round(item_price + shipping_price, 2)
+    if not qualified:
+        return {
+            'price': item_price,
+            'stock': 0,
+            'shipping_price': shipping_price if shipping_price else None,
+            'delivery_days_max': delivery_max,
+            'error_code': 'aliexpress_delivery_too_slow',
+            'error_message': (
+                f'No AliExpress shipping option within {max_days} days for product {product_id}'
+            ),
+        }
+
+    out_stock = stock if stock is not None else DEFAULT_IN_STOCK_QTY
+    return {
+        'price': total_price,
+        'stock': out_stock,
+        'shipping_price': shipping_price,
+        'delivery_days_max': delivery_max,
+        'item_price': item_price,
+    }
+
+
 def _scrape_via_dropshipping(product_id: str, region: str, session: dict | None) -> dict | None:
     """Return scraper payload dict on success, None when DS path is unavailable."""
     user_id = _oauth_user_id_from_session(session)
@@ -154,11 +239,25 @@ def _scrape_via_dropshipping(product_id: str, region: str, session: dict | None)
             'error_code': 'aliexpress_no_price',
             'error_message': f'AliExpress DS returned product {product_id} without a usable price',
         }
-    return {
-        'price': price,
-        'stock': stock if stock is not None else DEFAULT_IN_STOCK_QTY,
+
+    shipping_payload = _apply_shipping_and_delivery(
+        product_id, region, access_token, result, price, stock
+    )
+    payload = {
+        'price': shipping_payload['price'],
+        'stock': shipping_payload['stock'],
         'title': title,
     }
+    if shipping_payload.get('shipping_price') is not None:
+        payload['shipping_price'] = shipping_payload['shipping_price']
+    if shipping_payload.get('delivery_days_max') is not None:
+        payload['delivery_days_max'] = shipping_payload['delivery_days_max']
+    if shipping_payload.get('item_price') is not None:
+        payload['item_price'] = shipping_payload['item_price']
+    if shipping_payload.get('error_code'):
+        payload['error_code'] = shipping_payload['error_code']
+        payload['error_message'] = shipping_payload['error_message']
+    return payload
 
 
 def _scrape_via_affiliate(product_id: str, region: str) -> dict:

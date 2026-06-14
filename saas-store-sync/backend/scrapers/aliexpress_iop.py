@@ -19,6 +19,7 @@ IOP_SIGN_METHOD = 'sha256'
 TOKEN_CREATE_PATH = '/auth/token/security/create'
 TOKEN_REFRESH_PATH = '/auth/token/refresh'
 DS_PRODUCT_GET_METHOD = 'aliexpress.ds.product.get'
+FREIGHT_CALCULATE_METHOD = 'aliexpress.logistics.buyer.freight.calculate'
 
 
 class AliExpressIOPError(Exception):
@@ -271,36 +272,87 @@ def _try_extract_ds_result(data: dict | None, product_id: str) -> dict | None:
     return None
 
 
+def _iop_ds_request(api_method: str, business_params: dict[str, Any], access_token: str, *, log_id: str) -> dict:
+    """Call a dotted DS business API via sync/rest fallbacks."""
+    errors: list[str] = []
+    attempts: list[tuple[str, Callable[[], dict]]] = [
+        ('sync', lambda: iop_sync_business_request(api_method, business_params, access_token)),
+        (
+            'sync-form',
+            lambda: _iop_sync_business_request_form(api_method, business_params, access_token),
+        ),
+        ('rest-slash', lambda: iop_rest_business_request(api_method, business_params, access_token)),
+    ]
+    for label, call in attempts:
+        try:
+            return call()
+        except AliExpressIOPError as exc:
+            errors.append(f'{label}: {exc}')
+            logger.warning('AliExpress DS %s %s failed for %s: %s', api_method, label, log_id, exc)
+    raise AliExpressIOPError('; '.join(errors))
+
+
 def fetch_ds_product(product_id: str, store_region: str | None, access_token: str) -> dict | None:
     """Call aliexpress.ds.product.get and return the ``result`` object, or None."""
     pid = str(product_id or '').strip()
     if not pid:
         return None
     business = _ds_business_params(pid, store_region)
-    errors: list[str] = []
+    try:
+        data = _iop_ds_request(DS_PRODUCT_GET_METHOD, business, access_token, log_id=pid)
+    except AliExpressIOPError:
+        raise
+    return _try_extract_ds_result(data, pid) or None
 
-    attempts: list[tuple[str, Callable[[], dict]]] = [
-        ('sync', lambda: iop_sync_business_request(DS_PRODUCT_GET_METHOD, business, access_token)),
-        (
-            'sync-form',
-            lambda: _iop_sync_business_request_form(DS_PRODUCT_GET_METHOD, business, access_token),
-        ),
-        ('rest-slash', lambda: iop_rest_business_request(DS_PRODUCT_GET_METHOD, business, access_token)),
-    ]
 
-    for label, call in attempts:
-        try:
-            data = call()
-            result = _try_extract_ds_result(data, pid)
-            if result is not None:
+def fetch_freight_calculate(
+    product_id: str,
+    sku_id: str,
+    sku_price: float,
+    store_region: str | None,
+    access_token: str,
+) -> dict | None:
+    """Call aliexpress.logistics.buyer.freight.calculate; return ``result`` dict or None."""
+    from scrapers.aliexpress_markets import get_aliexpress_market
+
+    pid = str(product_id or '').strip()
+    sid = str(sku_id or '').strip()
+    if not pid or not sid or sku_price is None:
+        return None
+    market = get_aliexpress_market(store_region)
+    freight_dto = {
+        'product_id': int(pid),
+        'product_num': 1,
+        'country_code': market['country'],
+        'send_goods_country_code': 'CN',
+        'sku_id': sid,
+        'price': str(sku_price),
+        'price_currency': market['target_currency'],
+    }
+    business = {
+        'param_aeop_freight_calculate_for_buyer_d_t_o': json.dumps(freight_dto, separators=(',', ':')),
+    }
+    try:
+        data = _iop_ds_request(FREIGHT_CALCULATE_METHOD, business, access_token, log_id=pid)
+    except AliExpressIOPError:
+        raise
+    return _extract_freight_calculate_result(data)
+
+
+def _extract_freight_calculate_result(data: dict) -> dict | None:
+    if not isinstance(data, dict):
+        return None
+    for key in (
+        'aliexpress_logistics_buyer_freight_calculate_response',
+        'aliexpressLogisticsBuyerFreightCalculateResponse',
+    ):
+        root = data.get(key)
+        if isinstance(root, dict):
+            result = root.get('result')
+            if isinstance(result, dict):
                 return result
-        except AliExpressIOPError as exc:
-            errors.append(f'{label}: {exc}')
-            logger.warning('AliExpress DS %s failed for %s: %s', label, pid, exc)
-
-    if errors:
-        raise AliExpressIOPError('; '.join(errors))
-    return None
+    result = data.get('result')
+    return result if isinstance(result, dict) else None
 
 
 def _extract_ds_product_result(data: dict) -> dict | None:

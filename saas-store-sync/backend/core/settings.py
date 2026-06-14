@@ -395,3 +395,8 @@ ALIEXPRESS_OAUTH_REDIRECT_URI = os.getenv('ALIEXPRESS_OAUTH_REDIRECT_URI', '').s
 # Optional single-tenant fallback when per-user OAuth is not set up yet.
 ALIEXPRESS_ACCESS_TOKEN = os.getenv('ALIEXPRESS_ACCESS_TOKEN', '').strip()
 ALIEXPRESS_REFRESH_TOKEN = os.getenv('ALIEXPRESS_REFRESH_TOKEN', '').strip()
+# Drop Shipping: only count in-stock when shipping ETA max days is <= this (default 7).
+try:
+    ALIEXPRESS_MAX_DELIVERY_DAYS = max(1, int(os.getenv('ALIEXPRESS_MAX_DELIVERY_DAYS', '7') or '7'))
+except (TypeError, ValueError):
+    ALIEXPRESS_MAX_DELIVERY_DAYS = 7
