@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from django.core.cache import cache
 
-PUSH_LISTINGS_LOCK_TTL_SEC = 6 * 60 * 60  # 6h — large catalogs can take hours
+PUSH_LISTINGS_LOCK_TTL_SEC = 24 * 60 * 60  # 24h — large Sears bulk syncs can take many hours
 
 
 def push_listings_lock_key(store_id: str) -> str:

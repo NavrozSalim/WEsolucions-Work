@@ -1357,6 +1357,7 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
     if store_is_sears(store):
         bulk_queue = []
         queued_pairs = []
+        queued_count = 0
         for pm in qs.iterator(chunk_size=100):
             listing_id = _resolve_listing_id_for_pm(adapter, pm, store)
             if not listing_id:
@@ -1369,22 +1370,84 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
                 continue
             bulk_queue.append((pm, listing_id, pm.store_price, int(pm.store_stock or 0)))
             queued_pairs.append((pm, str(listing_id)))
+            queued_count += 1
+            now_mono = time.monotonic()
+            if (
+                queued_count % PUSH_LISTINGS_PROGRESS_EVERY == 0
+                or now_mono - last_progress_log_at >= PUSH_LISTINGS_PROGRESS_LOG_SEC
+            ):
+                last_progress_log_at = now_mono
+                append_catalog_log(
+                    store.id,
+                    f'Marketplace sync in progress: preparing bulk push — '
+                    f'{skipped + queued_count:,} of {total_to_push:,} queued '
+                    f'({skipped:,} skipped, no listing ID).',
+                    action_type='sync_progress',
+                    metadata={
+                        'processed': skipped + queued_count,
+                        'total': total_to_push,
+                        'pushed': 0,
+                        'failed': 0,
+                        'skipped_no_listing': skipped,
+                    },
+                )
 
         from catalog.marketplace_push import flush_sears_bulk_marketplace_push
+
+        bulk_succeeded = 0
+        bulk_failed = 0
+
+        def _sears_bulk_batch_progress(batch_num, total_batches, batch_ok, batch_failed, _batch_size):
+            nonlocal bulk_succeeded, bulk_failed, last_progress_log_at
+            bulk_succeeded += batch_ok
+            bulk_failed += batch_failed
+            processed = skipped + bulk_succeeded + bulk_failed
+            now_mono = time.monotonic()
+            if (
+                batch_num == total_batches
+                or batch_num % max(1, total_batches // 20) == 0
+                or now_mono - last_progress_log_at >= PUSH_LISTINGS_PROGRESS_LOG_SEC
+            ):
+                last_progress_log_at = now_mono
+                append_catalog_log(
+                    store.id,
+                    f'Marketplace sync in progress: batch {batch_num:,} of {total_batches:,} '
+                    f'({processed:,} of {total_to_push:,} listings; '
+                    f'{bulk_succeeded:,} pushed, {bulk_failed:,} failed, {skipped:,} skipped).',
+                    action_type='sync_progress',
+                    metadata={
+                        'processed': processed,
+                        'total': total_to_push,
+                        'pushed': bulk_succeeded,
+                        'failed': bulk_failed,
+                        'skipped_no_listing': skipped,
+                    },
+                )
 
         stats = flush_sears_bulk_marketplace_push(
             store,
             bulk_queue,
             price_by_vendor_id=price_by_vid,
             price_fallback=price_fb,
+            on_batch_progress=_sears_bulk_batch_progress,
+            lock_owner=str(store_id),
         )
+        if stats.get('reason') == 'sears_seller_busy':
+            append_catalog_log(
+                store.id,
+                stats.get('errors', [{}])[0].get('error', 'Another Sears sync is already running.')
+                if stats.get('errors')
+                else 'Another Sears sync is already running for this seller account.',
+                action_type='info',
+            )
         succeeded = int(stats.get('push_ok') or 0)
         failed = int(stats.get('push_fail') or 0)
         errors_by_sku = {str(e.get('sku') or ''): e.get('error') for e in (stats.get('errors') or [])}
         warnings_by_sku = stats.get('warnings') or {}
+        ok_skus = {str(s) for s in (stats.get('ok_skus') or set())}
 
         for pm, listing_id in queued_pairs:
-            if pm.sync_status == 'synced' and pm.last_sync_time:
+            if listing_id in ok_skus:
                 ReverbUpdateLog.objects.create(
                     product_mapping=pm,
                     status=ReverbUpdateLog.Status.SUCCESS,

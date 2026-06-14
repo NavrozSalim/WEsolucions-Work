@@ -405,3 +405,46 @@ try:
     SEARS_BULK_BATCH_SIZE = max(1, min(500, int(os.getenv('SEARS_BULK_BATCH_SIZE', '100') or '100')))
 except (TypeError, ValueError):
     SEARS_BULK_BATCH_SIZE = 100
+
+try:
+    SEARS_REPORT_POLL_MAX_ATTEMPTS = max(
+        1, int(os.getenv('SEARS_REPORT_POLL_MAX_ATTEMPTS', '120') or '120')
+    )
+except (TypeError, ValueError):
+    SEARS_REPORT_POLL_MAX_ATTEMPTS = 120
+
+try:
+    SEARS_REPORT_POLL_INTERVAL_SEC = max(
+        1.0, float(os.getenv('SEARS_REPORT_POLL_INTERVAL_SEC', '5') or '5')
+    )
+except (TypeError, ValueError):
+    SEARS_REPORT_POLL_INTERVAL_SEC = 5.0
+
+try:
+    SEARS_REPORT_POLL_EXTENDED_ATTEMPTS = max(
+        0, int(os.getenv('SEARS_REPORT_POLL_EXTENDED_ATTEMPTS', '60') or '60')
+    )
+except (TypeError, ValueError):
+    SEARS_REPORT_POLL_EXTENDED_ATTEMPTS = 60
+
+try:
+    SEARS_REPORT_POLL_EXTENDED_INTERVAL_SEC = max(
+        1.0, float(os.getenv('SEARS_REPORT_POLL_EXTENDED_INTERVAL_SEC', '10') or '10')
+    )
+except (TypeError, ValueError):
+    SEARS_REPORT_POLL_EXTENDED_INTERVAL_SEC = 10.0
+
+try:
+    # Sears pricing feed rate limit is ~120 files/hour; pause between bulk batches.
+    SEARS_BULK_FEED_DELAY_SEC = max(
+        0.0, float(os.getenv('SEARS_BULK_FEED_DELAY_SEC', '31') or '31')
+    )
+except (TypeError, ValueError):
+    SEARS_BULK_FEED_DELAY_SEC = 31.0
+
+try:
+    SEARS_RATE_LIMIT_RETRY_SEC = max(
+        0.0, float(os.getenv('SEARS_RATE_LIMIT_RETRY_SEC', '60') or '60')
+    )
+except (TypeError, ValueError):
+    SEARS_RATE_LIMIT_RETRY_SEC = 60.0

@@ -198,6 +198,7 @@ def _apply_sears_bulk_push_results(
         'push_fail': push_fail,
         'errors': errors,
         'warnings': warnings_by_sku,
+        'ok_skus': ok_set,
     }
 
 
@@ -207,6 +208,8 @@ def flush_sears_bulk_marketplace_push(
     *,
     price_by_vendor_id=None,
     price_fallback=None,
+    on_batch_progress=None,
+    lock_owner: str | None = None,
 ) -> dict:
     """
     Push many Sears listings in batched multi-item XML feeds.
@@ -214,6 +217,10 @@ def flush_sears_bulk_marketplace_push(
     ``bulk_queue`` entries are ``(pm, listing_id, price, stock)``.
     """
     from store_adapters import get_adapter
+    from sync.sears_seller_lock import (
+        release_sears_seller_lock,
+        try_acquire_sears_seller_lock,
+    )
 
     if not store_is_sears(store):
         return {'push_ok': 0, 'push_fail': 0, 'errors': [], 'skipped': True}
@@ -233,13 +240,39 @@ def flush_sears_bulk_marketplace_push(
         return stats
 
     adapter = get_adapter(store)
+    seller_id = getattr(adapter, '_seller_id', '') or ''
+    owner = lock_owner or str(getattr(store, 'id', '') or 'sears-push')
+    seller_locked = False
+    if seller_id and not try_acquire_sears_seller_lock(seller_id, owner):
+        logger.warning(
+            'Sears bulk push skipped for store %s: seller %s already pushing from another store',
+            getattr(store, 'id', None),
+            seller_id,
+        )
+        busy_err = (
+            f'Sears seller {seller_id} is already syncing from another store. '
+            'Wait for the current sync to finish before starting another.'
+        )
+        failed = [{'sku': it['sku'], 'error': busy_err} for it in items]
+        stats = _apply_sears_bulk_push_results(
+            pm_by_sku,
+            {'ok': set(), 'failed': failed, 'warnings': {}},
+            pre_failed=pre_failed,
+        )
+        stats['skipped'] = True
+        stats['reason'] = 'sears_seller_busy'
+        return stats
+
+    seller_locked = bool(seller_id)
     bulk_fn = getattr(adapter, 'update_products_bulk', None)
     if not callable(bulk_fn):
+        if seller_locked:
+            release_sears_seller_lock(seller_id, owner)
         stats = {'push_ok': 0, 'push_fail': len(bulk_queue), 'errors': [], 'skipped': True}
         return stats
 
     try:
-        result = bulk_fn(items) or {}
+        result = bulk_fn(items, on_batch_complete=on_batch_progress) or {}
     except Exception as exc:
         logger.warning('Sears bulk marketplace push failed: %s', exc)
         failed = [{'sku': it['sku'], 'error': str(exc)[:500]} for it in items]
@@ -250,6 +283,9 @@ def flush_sears_bulk_marketplace_push(
         )
         stats['skipped'] = False
         return stats
+    finally:
+        if seller_locked:
+            release_sears_seller_lock(seller_id, owner)
 
     stats = _apply_sears_bulk_push_results(pm_by_sku, result, pre_failed=pre_failed)
     stats['skipped'] = False

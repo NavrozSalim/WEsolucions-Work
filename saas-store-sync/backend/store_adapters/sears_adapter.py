@@ -52,15 +52,70 @@ PROCESSING_REPORT_PATH = "/reports/v1/processing-report"
 SEARS_AUTH_PROBE_PATH = "/oms/purchaseorder/v19"
 SEARS_VALIDATE_PROBE_SKU = "0000000000"
 DEFAULT_SALE_END_DATE = date(2035, 1, 1)
-REPORT_POLL_INTERVAL_SEC = 2
-REPORT_POLL_MAX_ATTEMPTS = 15
+DEFAULT_REPORT_POLL_MAX_ATTEMPTS = 120
+DEFAULT_REPORT_POLL_INTERVAL_SEC = 5
+DEFAULT_REPORT_POLL_EXTENDED_ATTEMPTS = 60
+DEFAULT_REPORT_POLL_EXTENDED_INTERVAL_SEC = 10
 DEFAULT_SEARS_BULK_BATCH_SIZE = 100
+DEFAULT_SEARS_BULK_FEED_DELAY_SEC = 31.0
+DEFAULT_SEARS_RATE_LIMIT_RETRY_SEC = 60.0
 
 MSG_SEARS_CONNECTED = "Sears account connected successfully."
 MSG_SEARS_INVALID_CREDS = "Invalid Sears API credentials."
 MSG_SEARS_LOCATION_WARNING = (
     "Connected, but location_id could not be verified for inventory sync."
 )
+
+
+def get_sears_report_poll_settings() -> tuple[int, float, int, float]:
+    """Return (max_attempts, interval_sec, extended_attempts, extended_interval_sec)."""
+    from django.conf import settings
+
+    max_attempts = int(
+        getattr(settings, 'SEARS_REPORT_POLL_MAX_ATTEMPTS', DEFAULT_REPORT_POLL_MAX_ATTEMPTS)
+        or DEFAULT_REPORT_POLL_MAX_ATTEMPTS
+    )
+    interval = float(
+        getattr(settings, 'SEARS_REPORT_POLL_INTERVAL_SEC', DEFAULT_REPORT_POLL_INTERVAL_SEC)
+        or DEFAULT_REPORT_POLL_INTERVAL_SEC
+    )
+    extended_attempts = int(
+        getattr(settings, 'SEARS_REPORT_POLL_EXTENDED_ATTEMPTS', DEFAULT_REPORT_POLL_EXTENDED_ATTEMPTS)
+        or DEFAULT_REPORT_POLL_EXTENDED_ATTEMPTS
+    )
+    extended_interval = float(
+        getattr(
+            settings,
+            'SEARS_REPORT_POLL_EXTENDED_INTERVAL_SEC',
+            DEFAULT_REPORT_POLL_EXTENDED_INTERVAL_SEC,
+        )
+        or DEFAULT_REPORT_POLL_EXTENDED_INTERVAL_SEC
+    )
+    return max(1, max_attempts), max(0.5, interval), max(0, extended_attempts), max(0.5, extended_interval)
+
+
+def get_sears_bulk_feed_delay_sec() -> float:
+    from django.conf import settings
+
+    return max(
+        0.0,
+        float(
+            getattr(settings, 'SEARS_BULK_FEED_DELAY_SEC', DEFAULT_SEARS_BULK_FEED_DELAY_SEC)
+            or DEFAULT_SEARS_BULK_FEED_DELAY_SEC
+        ),
+    )
+
+
+def get_sears_rate_limit_retry_sec() -> float:
+    from django.conf import settings
+
+    return max(
+        0.0,
+        float(
+            getattr(settings, 'SEARS_RATE_LIMIT_RETRY_SEC', DEFAULT_SEARS_RATE_LIMIT_RETRY_SEC)
+            or DEFAULT_SEARS_RATE_LIMIT_RETRY_SEC
+        ),
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -659,20 +714,46 @@ class SearsAdapter(BaseStoreAdapter):
 
     def _wait_for_processing_report(self, document_id: str, *, allow_partial: bool = False) -> str:
         """Poll until Sears finishes async feed processing or raise."""
+        max_attempts, interval, ext_attempts, ext_interval = get_sears_report_poll_settings()
         path = f"{PROCESSING_REPORT_PATH}/{document_id}"
         params = {"sellerId": self._seller_id}
         last_body = ""
-        for attempt in range(REPORT_POLL_MAX_ATTEMPTS):
-            if attempt:
-                time.sleep(REPORT_POLL_INTERVAL_SEC)
+
+        def poll_once() -> bool:
+            nonlocal last_body
             last_body = self._request("GET", path, params=params)
-            if not processing_report_pending(last_body):
+            return not processing_report_pending(last_body)
+
+        for attempt in range(max_attempts):
+            if attempt:
+                time.sleep(interval)
+            if poll_once():
                 break
         else:
-            raise SearsAPIError(
-                f"Sears processing report timed out for document {document_id}",
-                response_body=last_body[:500] if last_body else None,
-            )
+            if ext_attempts > 0 and processing_report_pending(last_body):
+                logger.info(
+                    "Sears processing report %s still pending after %s attempts; "
+                    "extended polling (%s × %ss)",
+                    document_id,
+                    max_attempts,
+                    ext_attempts,
+                    ext_interval,
+                )
+                for attempt in range(ext_attempts):
+                    time.sleep(ext_interval)
+                    if poll_once():
+                        break
+                else:
+                    if processing_report_pending(last_body):
+                        raise SearsAPIError(
+                            f"Sears processing report timed out for document {document_id}",
+                            response_body=last_body[:500] if last_body else None,
+                        )
+            elif processing_report_pending(last_body):
+                raise SearsAPIError(
+                    f"Sears processing report timed out for document {document_id}",
+                    response_body=last_body[:500] if last_body else None,
+                )
 
         summary = parse_processing_report_summary(last_body)
         if allow_partial:
@@ -692,6 +773,24 @@ class SearsAdapter(BaseStoreAdapter):
             )
         return last_body
 
+    def _put_feed_xml(self, path: str, xml: str) -> str:
+        """PUT XML feed; retry once after a pause when pricing PUT returns 403 (rate limit)."""
+        params = {"sellerId": self._seller_id}
+        retry_sec = get_sears_rate_limit_retry_sec() if '/pricing/' in path else 0.0
+        try:
+            return self._request("PUT", path, params=params, data=xml)
+        except SearsAPIError as exc:
+            if exc.status_code == 403 and retry_sec > 0:
+                logger.warning(
+                    "Sears PUT %s returned 403 for seller %s; retrying after %ss",
+                    path,
+                    self._seller_id,
+                    retry_sec,
+                )
+                time.sleep(retry_sec)
+                return self._request("PUT", path, params=params, data=xml)
+            raise
+
     def _put_feed_and_verify(
         self,
         path: str,
@@ -701,12 +800,7 @@ class SearsAdapter(BaseStoreAdapter):
         expected_item_ids: set[str] | None = None,
     ) -> str:
         """PUT XML feed, poll processing report, raise on hard failure."""
-        resp = self._request(
-            "PUT",
-            path,
-            params={"sellerId": self._seller_id},
-            data=xml,
-        )
+        resp = self._put_feed_xml(path, xml)
         document_id = parse_document_id(resp)
         if not document_id:
             raise SearsAPIError(
@@ -725,12 +819,7 @@ class SearsAdapter(BaseStoreAdapter):
         expected_item_ids: set[str],
     ) -> tuple[set[str], list[dict], str]:
         """PUT XML feed and return per-SKU ok/failed sets from the processing report."""
-        resp = self._request(
-            "PUT",
-            path,
-            params={"sellerId": self._seller_id},
-            data=xml,
-        )
+        resp = self._put_feed_xml(path, xml)
         document_id = parse_document_id(resp)
         if not document_id:
             raise SearsAPIError(
@@ -786,7 +875,12 @@ class SearsAdapter(BaseStoreAdapter):
         self.last_inventory_warning = warnings.get(sku)
         return True
 
-    def update_products_bulk(self, items: list[dict]) -> dict:
+    def update_products_bulk(
+        self,
+        items: list[dict],
+        *,
+        on_batch_complete=None,
+    ) -> dict:
         """
         Bulk update many Sears Child SKUs using multi-item XML feeds.
 
@@ -804,6 +898,7 @@ class SearsAdapter(BaseStoreAdapter):
             1,
             int(getattr(settings, 'SEARS_BULK_BATCH_SIZE', DEFAULT_SEARS_BULK_BATCH_SIZE) or DEFAULT_SEARS_BULK_BATCH_SIZE),
         )
+        feed_delay = get_sears_bulk_feed_delay_sec()
 
         ok_all: set[str] = set()
         failed_all: list[dict] = []
@@ -822,12 +917,25 @@ class SearsAdapter(BaseStoreAdapter):
                 'stock': raw.get('stock'),
             })
 
+        total_batches = max(1, (len(normalized) + batch_size - 1) // batch_size) if normalized else 0
+        batch_num = 0
         for start in range(0, len(normalized), batch_size):
+            batch_num += 1
             chunk = normalized[start:start + batch_size]
             chunk_ok, chunk_failed, chunk_warnings = self._bulk_update_chunk(chunk)
             ok_all |= chunk_ok
             failed_all.extend(chunk_failed)
             warnings_all.update(chunk_warnings)
+            if callable(on_batch_complete):
+                on_batch_complete(
+                    batch_num,
+                    total_batches,
+                    len(chunk_ok),
+                    len(chunk_failed),
+                    len(chunk),
+                )
+            if feed_delay > 0 and batch_num < total_batches:
+                time.sleep(feed_delay)
 
         if warnings_all:
             first = next(iter(warnings_all.values()))

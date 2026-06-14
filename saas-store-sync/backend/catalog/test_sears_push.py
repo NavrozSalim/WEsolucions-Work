@@ -17,6 +17,7 @@ from store_adapters.sears_adapter import (
     build_pricing_feed_xml,
     build_pricing_feed_xml_bulk,
     classify_bulk_feed_results,
+    get_sears_report_poll_settings,
     parse_document_id,
     parse_processing_report_item_errors,
     parse_processing_report_summary,
@@ -274,6 +275,52 @@ class SearsProcessingReportTests(SimpleTestCase):
         adapter._wait_for_processing_report('1')
         self.assertEqual(mock_request.call_count, 2)
         mock_sleep.assert_called_once()
+
+    @patch('store_adapters.sears_adapter.get_sears_report_poll_settings')
+    @patch('store_adapters.sears_adapter.time.sleep')
+    @patch.object(SearsAdapter, '_request')
+    def test_wait_for_processing_report_extended_poll(self, mock_request, mock_sleep, mock_poll_settings):
+        mock_poll_settings.return_value = (2, 1, 2, 1)
+        submitted = (
+            '<?xml version="1.0"?><processing-report><document-id>1</document-id>'
+            '<status>Submitted</status></processing-report>'
+        )
+        responses = [submitted, submitted, submitted, _accepted_report('1')]
+
+        def side_effect(method, path, **kwargs):
+            if method == 'GET':
+                return responses.pop(0)
+            return ''
+
+        mock_request.side_effect = side_effect
+        adapter = SearsAdapter(MagicMock(api_token=(
+            '{"seller_id":"123","email":"a@b.com","secret_key":"secretkeysecretkeysecretkey12"}'
+        )))
+        adapter._wait_for_processing_report('1')
+        self.assertEqual(mock_request.call_count, 4)
+        self.assertGreaterEqual(mock_sleep.call_count, 2)
+
+    @patch('store_adapters.sears_adapter.time.sleep')
+    @patch('store_adapters.sears_adapter.get_sears_rate_limit_retry_sec', return_value=1)
+    @patch.object(SearsAdapter, '_request')
+    def test_put_feed_xml_retries_403_once(self, mock_request, _mock_retry_sec, mock_sleep):
+        mock_request.side_effect = [
+            SearsAPIError('Sears API PUT /pricing/fbm/v6: 403', status_code=403),
+            '<?xml version="1.0"?><document-id>99</document-id>',
+        ]
+        adapter = SearsAdapter(MagicMock(api_token=(
+            '{"seller_id":"123","email":"a@b.com","secret_key":"secretkeysecretkeysecretkey12"}'
+        )))
+        body = adapter._put_feed_xml('/pricing/fbm/v6', '<price/>')
+        self.assertIn('document-id', body)
+        self.assertEqual(mock_request.call_count, 2)
+
+    def test_get_sears_report_poll_settings_defaults(self):
+        attempts, interval, ext_attempts, ext_interval = get_sears_report_poll_settings()
+        self.assertGreaterEqual(attempts, 60)
+        self.assertGreaterEqual(interval, 1.0)
+        self.assertGreaterEqual(ext_attempts, 0)
+        self.assertGreaterEqual(ext_interval, 1.0)
 
 
 class SearsAdapterPushTests(SimpleTestCase):
