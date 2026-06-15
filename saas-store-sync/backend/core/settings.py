@@ -288,6 +288,8 @@ REST_FRAMEWORK = {
         'anon': '100/hour',
         'login': '5/minute',
         'sync_trigger': '10/minute',
+        # Progress/scrape/job polls during multi-hour Sears sync (UI polls ~every 15s).
+        'progress_read': '300/minute',
     },
 }
 

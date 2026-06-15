@@ -185,7 +185,19 @@ export default function StoreSettings() {
                 setStores(Array.isArray(list) ? list : []);
                 setMarketplaces(Array.isArray(mktRes.data) ? mktRes.data : []);
             })
-            .catch(() => setStores([]))
+            .catch((err) => {
+                setStores([]);
+                if (err.response?.status === 429) {
+                    const detail = err.response?.data?.detail;
+                    showToast(
+                        typeof detail === 'string' && detail.trim()
+                            ? detail
+                            : 'Too many requests — wait a minute, then refresh. Your stores are still in the database.',
+                        'error',
+                        10000,
+                    );
+                }
+            })
             .finally(() => setLoading(false));
     }, []);
 

@@ -8,3 +8,9 @@ class LoginRateThrottle(AnonRateThrottle):
 
 class SyncTriggerRateThrottle(UserRateThrottle):
     scope = 'sync_trigger'
+
+
+class ProgressReadRateThrottle(UserRateThrottle):
+    """High limit for progress polling during long Sears bulk syncs."""
+
+    scope = 'progress_read'

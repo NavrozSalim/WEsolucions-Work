@@ -1,6 +1,7 @@
 """Build marketplace push (Manual sync) progress for the Catalog UI."""
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from typing import Any
 
@@ -30,6 +31,20 @@ def _lock_phase(lock_owner: str) -> str:
     if len(owner) >= 8 and '-' in owner:
         return _celery_phase(owner)
     return 'running'
+
+
+def _infer_sync_step(message: str, metadata: dict) -> str:
+    step = (metadata.get('sync_step') or '').strip()
+    if step:
+        return step
+    lower = (message or '').lower()
+    if 'waiting for sears' in lower:
+        return 'waiting_sears'
+    if 'preparing bulk push' in lower:
+        return 'queue_build'
+    if 'batch ' in lower and ' of ' in lower:
+        return 'bulk_push'
+    return 'bulk_push' if metadata.get('pushed') or metadata.get('failed') else 'queue_build'
 
 
 def build_push_listings_progress_payload(store) -> dict[str, Any]:
@@ -69,20 +84,38 @@ def build_push_listings_progress_payload(store) -> dict[str, Any]:
     processed = pushed = failed = skipped = 0
     total = eligible_total
     started_at = None
+    status_message = ''
+    sync_step = ''
+    batch_num = 0
+    total_batches = 0
+    sears_document_id = ''
 
+    latest_progress = None
     if run_start:
         started_at = run_start.created_at.isoformat()
         for lg in logs:
             if lg.created_at < run_start.created_at:
                 break
             if lg.action_type == 'sync_progress' and lg.metadata:
-                md = lg.metadata
-                processed = int(md.get('processed') or 0)
-                total = int(md.get('total') or total)
-                pushed = int(md.get('pushed') or 0)
-                failed = int(md.get('failed') or 0)
-                skipped = int(md.get('skipped_no_listing') or 0)
+                latest_progress = lg
                 break
+
+        if latest_progress:
+            md = latest_progress.metadata or {}
+            processed = int(md.get('processed') or 0)
+            total = int(md.get('total') or total)
+            pushed = int(md.get('pushed') or 0)
+            failed = int(md.get('failed') or 0)
+            skipped = int(md.get('skipped_no_listing') or 0)
+            status_message = (latest_progress.message or '').strip()
+            sync_step = _infer_sync_step(status_message, md)
+            batch_num = int(md.get('batch_num') or 0)
+            total_batches = int(md.get('total_batches') or 0)
+            sears_document_id = str(md.get('sears_document_id') or '').strip()
+            if not sears_document_id and status_message:
+                match = re.search(r'document[:\s]+(\d+)', status_message, re.IGNORECASE)
+                if match:
+                    sears_document_id = match.group(1)
 
     active = bool(lock_owner)
     phase = _lock_phase(lock_owner) if lock_owner else None
@@ -107,4 +140,9 @@ def build_push_listings_progress_payload(store) -> dict[str, Any]:
         'pct': min(100, max(0, pct)),
         'started_at': started_at,
         'checked_at': timezone.now().isoformat(),
+        'sync_step': sync_step,
+        'status_message': status_message,
+        'batch_num': batch_num,
+        'total_batches': total_batches,
+        'sears_document_id': sears_document_id,
     }

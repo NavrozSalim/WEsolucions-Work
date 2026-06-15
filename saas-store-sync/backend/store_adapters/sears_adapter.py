@@ -712,12 +712,36 @@ class SearsAdapter(BaseStoreAdapter):
             )
         return resp.text or ""
 
-    def _wait_for_processing_report(self, document_id: str, *, allow_partial: bool = False) -> str:
+    def _wait_for_processing_report(
+        self,
+        document_id: str,
+        *,
+        allow_partial: bool = False,
+        on_report_wait=None,
+        feed_label: str = '',
+        batch_num: int = 0,
+        total_batches: int = 0,
+    ) -> str:
         """Poll until Sears finishes async feed processing or raise."""
         max_attempts, interval, ext_attempts, ext_interval = get_sears_report_poll_settings()
         path = f"{PROCESSING_REPORT_PATH}/{document_id}"
         params = {"sellerId": self._seller_id}
         last_body = ""
+        heartbeat_every = max(1, int(60 / interval)) if interval else 12
+
+        def maybe_heartbeat(wait_phase: str, attempt: int, max_for_phase: int) -> None:
+            if not callable(on_report_wait):
+                return
+            if attempt > 0 and attempt % heartbeat_every == 0:
+                on_report_wait(
+                    document_id=document_id,
+                    feed_label=feed_label,
+                    wait_phase=wait_phase,
+                    attempt=attempt,
+                    max_attempts=max_for_phase,
+                    batch_num=batch_num,
+                    total_batches=total_batches,
+                )
 
         def poll_once() -> bool:
             nonlocal last_body
@@ -727,6 +751,7 @@ class SearsAdapter(BaseStoreAdapter):
         for attempt in range(max_attempts):
             if attempt:
                 time.sleep(interval)
+            maybe_heartbeat('primary', attempt, max_attempts)
             if poll_once():
                 break
         else:
@@ -739,8 +764,19 @@ class SearsAdapter(BaseStoreAdapter):
                     ext_attempts,
                     ext_interval,
                 )
+                ext_heartbeat_every = max(1, int(60 / ext_interval)) if ext_interval else 6
                 for attempt in range(ext_attempts):
                     time.sleep(ext_interval)
+                    if attempt > 0 and attempt % ext_heartbeat_every == 0 and callable(on_report_wait):
+                        on_report_wait(
+                            document_id=document_id,
+                            feed_label=feed_label,
+                            wait_phase='extended',
+                            attempt=attempt,
+                            max_attempts=ext_attempts,
+                            batch_num=batch_num,
+                            total_batches=total_batches,
+                        )
                     if poll_once():
                         break
                 else:
@@ -817,6 +853,9 @@ class SearsAdapter(BaseStoreAdapter):
         *,
         feed_label: str,
         expected_item_ids: set[str],
+        on_report_wait=None,
+        batch_num: int = 0,
+        total_batches: int = 0,
     ) -> tuple[set[str], list[dict], str]:
         """PUT XML feed and return per-SKU ok/failed sets from the processing report."""
         resp = self._put_feed_xml(path, xml)
@@ -829,6 +868,10 @@ class SearsAdapter(BaseStoreAdapter):
         report_body = self._wait_for_processing_report(
             document_id,
             allow_partial=len(expected_item_ids) > 1,
+            on_report_wait=on_report_wait,
+            feed_label=feed_label,
+            batch_num=batch_num,
+            total_batches=total_batches,
         )
         ok, failed = classify_bulk_feed_results(report_body, expected_item_ids)
         return ok, failed, report_body
@@ -880,6 +923,7 @@ class SearsAdapter(BaseStoreAdapter):
         items: list[dict],
         *,
         on_batch_complete=None,
+        on_report_wait=None,
     ) -> dict:
         """
         Bulk update many Sears Child SKUs using multi-item XML feeds.
@@ -922,7 +966,12 @@ class SearsAdapter(BaseStoreAdapter):
         for start in range(0, len(normalized), batch_size):
             batch_num += 1
             chunk = normalized[start:start + batch_size]
-            chunk_ok, chunk_failed, chunk_warnings = self._bulk_update_chunk(chunk)
+            chunk_ok, chunk_failed, chunk_warnings = self._bulk_update_chunk(
+                chunk,
+                batch_num=batch_num,
+                total_batches=total_batches,
+                on_report_wait=on_report_wait,
+            )
             ok_all |= chunk_ok
             failed_all.extend(chunk_failed)
             warnings_all.update(chunk_warnings)
@@ -942,7 +991,14 @@ class SearsAdapter(BaseStoreAdapter):
             self.last_inventory_warning = first
         return {'ok': ok_all, 'failed': failed_all, 'warnings': warnings_all}
 
-    def _bulk_update_chunk(self, items: list[dict]) -> tuple[set[str], list[dict], dict[str, str]]:
+    def _bulk_update_chunk(
+        self,
+        items: list[dict],
+        *,
+        batch_num: int = 0,
+        total_batches: int = 0,
+        on_report_wait=None,
+    ) -> tuple[set[str], list[dict], dict[str, str]]:
         """Update one batch of SKUs: one pricing feed + one inventory feed when needed."""
         from django.utils import timezone
 
@@ -962,6 +1018,9 @@ class SearsAdapter(BaseStoreAdapter):
                     xml,
                     feed_label="pricing",
                     expected_item_ids={it['sku'] for it in price_items},
+                    on_report_wait=on_report_wait,
+                    batch_num=batch_num,
+                    total_batches=total_batches,
                 )
             except SearsAPIError as exc:
                 price_ok = set()
@@ -997,6 +1056,9 @@ class SearsAdapter(BaseStoreAdapter):
                     xml,
                     feed_label="inventory",
                     expected_item_ids={it['sku'] for it in inv_candidates},
+                    on_report_wait=on_report_wait,
+                    batch_num=batch_num,
+                    total_batches=total_batches,
                 )
             except SearsAPIError as exc:
                 inv_ok = set()

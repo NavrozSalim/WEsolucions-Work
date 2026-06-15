@@ -279,6 +279,38 @@ class SearsProcessingReportTests(SimpleTestCase):
     @patch('store_adapters.sears_adapter.get_sears_report_poll_settings')
     @patch('store_adapters.sears_adapter.time.sleep')
     @patch.object(SearsAdapter, '_request')
+    def test_wait_for_processing_report_heartbeat(self, mock_request, mock_sleep, mock_poll_settings):
+        mock_poll_settings.return_value = (3, 30, 0, 10)
+        submitted = (
+            '<?xml version="1.0"?><processing-report><document-id>1</document-id>'
+            '<status>Submitted</status></processing-report>'
+        )
+        responses = [submitted, submitted, _accepted_report('1')]
+        heartbeats = []
+
+        def side_effect(method, path, **kwargs):
+            if method == 'GET':
+                return responses.pop(0)
+            return ''
+
+        mock_request.side_effect = side_effect
+        adapter = SearsAdapter(MagicMock(api_token=(
+            '{"seller_id":"123","email":"a@b.com","secret_key":"secretkeysecretkeysecretkey12"}'
+        )))
+        adapter._wait_for_processing_report(
+            '1',
+            on_report_wait=lambda **kw: heartbeats.append(kw),
+            feed_label='pricing',
+            batch_num=1,
+            total_batches=5,
+        )
+        self.assertTrue(heartbeats)
+        self.assertEqual(heartbeats[0]['document_id'], '1')
+        self.assertEqual(heartbeats[0]['feed_label'], 'pricing')
+
+    @patch('store_adapters.sears_adapter.get_sears_report_poll_settings')
+    @patch('store_adapters.sears_adapter.time.sleep')
+    @patch.object(SearsAdapter, '_request')
     def test_wait_for_processing_report_extended_poll(self, mock_request, mock_sleep, mock_poll_settings):
         mock_poll_settings.return_value = (2, 1, 2, 1)
         submitted = (

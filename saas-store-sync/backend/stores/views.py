@@ -6,11 +6,17 @@ from stores.models import Store
 from stores.serializers import StoreSerializer
 from rest_framework.permissions import IsAuthenticated
 from audit.utils import log_action
+from core.throttles import ProgressReadRateThrottle
 
 
 class StoreViewSet(viewsets.ModelViewSet):
     serializer_class = StoreSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_throttles(self):
+        if getattr(self, 'action', None) in ('list', 'retrieve'):
+            return [ProgressReadRateThrottle()]
+        return super().get_throttles()
 
     def get_queryset(self):
         user = self.request.user

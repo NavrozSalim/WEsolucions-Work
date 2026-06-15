@@ -108,6 +108,11 @@ function isMydealMarketplace(storeData) {
 function formatCatalogError(err) {
     const status = err.response?.status;
     const d = err.response?.data;
+    if (status === 429) {
+        if (typeof d === 'string' && d.trim()) return d;
+        if (typeof d?.detail === 'string' && d.detail.trim()) return d.detail;
+        return 'Too many requests — wait a minute, then refresh the page. Sync may still be running on the server.';
+    }
     if (typeof d === 'string' && d.trim()) return d;
     if (d?.detail != null) {
         if (typeof d.detail === 'string') return d.detail;
@@ -881,17 +886,28 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId }) {
     if (state.store_id && state.store_id !== selectedStoreId) return null;
 
     const isQueued = state.phase === 'queued';
+    const syncStep = state.sync_step || (isQueued ? 'queued' : 'bulk_push');
+    const stepLabels = {
+        queued: 'Queued',
+        queue_build: 'Preparing listings',
+        bulk_push: 'Pushing to marketplace',
+        waiting_sears: 'Waiting on Sears',
+    };
+    const stepLabel = stepLabels[syncStep] || 'Syncing';
     const pct = Math.max(0, Math.min(100, Number(state.pct || 0)));
     const processed = Number(state.processed || 0);
     const total = Number(state.total || 0);
     const pushed = Number(state.pushed || 0);
     const failed = Number(state.failed || 0);
     const skipped = Number(state.skipped_no_listing || 0);
+    const isWaitingSears = syncStep === 'waiting_sears';
     const headline = isQueued ? 'Marketplace sync queued' : 'Marketplace sync running';
     const pillClass = isQueued
         ? 'bg-amber-200 text-amber-950 dark:bg-amber-900/40 dark:text-amber-100'
-        : 'bg-emerald-200 text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-100';
-    const barColor = pct >= 100 ? 'bg-emerald-500' : isQueued ? 'bg-amber-500' : 'bg-emerald-500';
+        : isWaitingSears
+            ? 'bg-sky-200 text-sky-950 dark:bg-sky-900/40 dark:text-sky-100'
+            : 'bg-emerald-200 text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-100';
+    const barColor = pct >= 100 ? 'bg-emerald-500' : isQueued ? 'bg-amber-500' : isWaitingSears ? 'bg-sky-500' : 'bg-emerald-500';
 
     return (
         <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50/80 dark:bg-emerald-950/30 p-4 mb-4 shadow-sm">
@@ -905,7 +921,7 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId }) {
                     <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                         {headline}
                         <span className={`ml-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${pillClass}`}>
-                            {isQueued ? 'queued' : 'running'}
+                            {isQueued ? 'queued' : stepLabel}
                         </span>
                     </h3>
                     <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
@@ -917,9 +933,19 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId }) {
                         {' · '}
                         {skipped.toLocaleString()} skipped (no listing ID)
                     </p>
-                    {!isQueued && (
+                    {state.status_message ? (
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 truncate" title={state.status_message}>
+                            {state.status_message}
+                        </p>
+                    ) : null}
+                    {!isQueued && !isWaitingSears && (
                         <p className="text-xs text-emerald-700 dark:text-emerald-300 mt-0.5">
                             Pushing local prices and stock to your marketplace. You can leave this page open — rows update as each listing finishes.
+                        </p>
+                    )}
+                    {isWaitingSears && (
+                        <p className="text-xs text-sky-700 dark:text-sky-300 mt-0.5">
+                            Sears is processing your feed — this can take several minutes per batch. Progress updates every ~2 minutes.
                         </p>
                     )}
                     {isQueued && (
@@ -1065,13 +1091,14 @@ export default function Catalog() {
     const refreshLiveData = useCallback((opts = {}) => {
         if (!selectedStore) return;
         const skipStores = Boolean(opts.skipStores);
+        const skipProducts = Boolean(opts.skipProducts);
         if (!skipStores) {
             getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
         }
         getCatalogUploads(selectedStore)
             .then((r) => setUploads(Array.isArray(r.data) ? r.data : []))
             .catch(() => {});
-        if (viewMode === 'products') {
+        if (viewMode === 'products' && !skipProducts) {
             refreshProducts();
         } else if (viewMode === 'logs') {
             getCatalogActivityLogs(selectedStore).then((r) =>
@@ -1321,8 +1348,14 @@ export default function Catalog() {
                     if (data?.store_id && data.store_id !== storeId) return;
                     setPushListingsProgress(data);
                 })
-                .catch(() => { /* transient — retry next tick */ });
-            refreshLiveData({ skipStores: burst % 4 !== 0 });
+                .catch((err) => {
+                    if (cancelled) return;
+                    if (err.response?.status === 429) {
+                        setMessage(formatCatalogError(err));
+                    }
+                });
+            const manualActive = trackingManualPushRef.current;
+            refreshLiveData({ skipStores: burst % 4 !== 0, skipProducts: manualActive });
         };
 
         poll();

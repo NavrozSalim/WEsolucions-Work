@@ -13,6 +13,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db import transaction
 
+from core.throttles import ProgressReadRateThrottle
 from catalog.models import (
     ProductMapping,
     CatalogUpload,
@@ -74,6 +75,7 @@ def _upload_action_reason_from_rows(rows):
 class CatalogStoresView(APIView):
     """List user's stores with product count. Optional filter: marketplace_id."""
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ProgressReadRateThrottle]
 
     def get(self, request):
         from sync.models import SyncSchedule
@@ -1336,6 +1338,7 @@ class CatalogScrapeProgressView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ProgressReadRateThrottle]
 
     def get(self, request, store_pk):
         from catalog.scrape_progress import get_scrape_progress_payload
@@ -1402,6 +1405,7 @@ class CatalogUpdateLogsView(APIView):
 class CatalogJobStatusView(APIView):
     """Poll Celery task status by job_id (task id from sync/scrape/update trigger)."""
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ProgressReadRateThrottle]
 
     def get(self, request, store_pk, job_id):
         from celery.result import AsyncResult
@@ -1425,6 +1429,7 @@ class CatalogActivityLogListView(APIView):
     """Last 24 hours of catalog timeline for a store (scrape, sync, resets)."""
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ProgressReadRateThrottle]
 
     def get(self, request, store_pk):
         from datetime import timedelta
@@ -1552,6 +1557,7 @@ class CatalogPushListingsProgressView(APIView):
     """Live progress for Manual sync (marketplace push) — poll like scrape progress."""
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ProgressReadRateThrottle]
 
     def get(self, request, store_pk):
         from catalog.push_listings_progress import build_push_listings_progress_payload

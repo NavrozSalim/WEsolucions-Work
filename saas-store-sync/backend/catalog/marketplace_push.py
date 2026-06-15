@@ -210,6 +210,7 @@ def flush_sears_bulk_marketplace_push(
     price_fallback=None,
     on_batch_progress=None,
     lock_owner: str | None = None,
+    on_report_wait=None,
 ) -> dict:
     """
     Push many Sears listings in batched multi-item XML feeds.
@@ -272,7 +273,11 @@ def flush_sears_bulk_marketplace_push(
         return stats
 
     try:
-        result = bulk_fn(items, on_batch_complete=on_batch_progress) or {}
+        result = bulk_fn(
+            items,
+            on_batch_complete=on_batch_progress,
+            on_report_wait=on_report_wait,
+        ) or {}
     except Exception as exc:
         logger.warning('Sears bulk marketplace push failed: %s', exc)
         failed = [{'sku': it['sku'], 'error': str(exc)[:500]} for it in items]

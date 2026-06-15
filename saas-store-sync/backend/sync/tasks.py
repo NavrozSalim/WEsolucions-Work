@@ -1389,13 +1389,23 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
                         'pushed': 0,
                         'failed': 0,
                         'skipped_no_listing': skipped,
+                        'sync_step': 'queue_build',
                     },
                 )
 
         from catalog.marketplace_push import flush_sears_bulk_marketplace_push
+        from django.conf import settings as django_settings
 
         bulk_succeeded = 0
         bulk_failed = 0
+        sears_batch_size = max(
+            1,
+            int(getattr(django_settings, 'SEARS_BULK_BATCH_SIZE', 100) or 100),
+        )
+        total_batches_estimate = (
+            max(1, (len(bulk_queue) + sears_batch_size - 1) // sears_batch_size)
+            if bulk_queue else 0
+        )
 
         def _sears_bulk_batch_progress(batch_num, total_batches, batch_ok, batch_failed, _batch_size):
             nonlocal bulk_succeeded, bulk_failed, last_progress_log_at
@@ -1421,8 +1431,49 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
                         'pushed': bulk_succeeded,
                         'failed': bulk_failed,
                         'skipped_no_listing': skipped,
+                        'sync_step': 'bulk_push',
+                        'batch_num': batch_num,
+                        'total_batches': total_batches,
                     },
                 )
+
+        def _sears_report_wait_heartbeat(
+            *,
+            document_id,
+            feed_label='',
+            wait_phase='',
+            attempt=0,
+            max_attempts=0,
+            batch_num=0,
+            total_batches=0,
+            **_kwargs,
+        ):
+            nonlocal last_progress_log_at, bulk_succeeded, bulk_failed
+            now_mono = time.monotonic()
+            if now_mono - last_progress_log_at < PUSH_LISTINGS_PROGRESS_LOG_SEC:
+                return
+            last_progress_log_at = now_mono
+            processed = skipped + bulk_succeeded + bulk_failed
+            batch_label = batch_num or 0
+            batches_label = total_batches or total_batches_estimate
+            append_catalog_log(
+                store.id,
+                f'Waiting for Sears processing report {document_id} '
+                f'({feed_label or "feed"}, batch {batch_label:,}/{batches_label:,}, '
+                f'{wait_phase or "polling"} poll {attempt}/{max_attempts}).',
+                action_type='sync_progress',
+                metadata={
+                    'processed': processed,
+                    'total': total_to_push,
+                    'pushed': bulk_succeeded,
+                    'failed': bulk_failed,
+                    'skipped_no_listing': skipped,
+                    'sync_step': 'waiting_sears',
+                    'batch_num': batch_label,
+                    'total_batches': batches_label,
+                    'sears_document_id': str(document_id or ''),
+                },
+            )
 
         stats = flush_sears_bulk_marketplace_push(
             store,
@@ -1430,6 +1481,7 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
             price_by_vendor_id=price_by_vid,
             price_fallback=price_fb,
             on_batch_progress=_sears_bulk_batch_progress,
+            on_report_wait=_sears_report_wait_heartbeat,
             lock_owner=str(store_id),
         )
         if stats.get('reason') == 'sears_seller_busy':
