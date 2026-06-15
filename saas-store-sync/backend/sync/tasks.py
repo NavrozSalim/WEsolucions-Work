@@ -1391,6 +1391,20 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
     try:
         _raise_if_push_aborted(store_id)
 
+        append_catalog_log(
+            store.id,
+            f'Marketplace sync in progress: preparing bulk push — 0 of {total_to_push:,} queued.',
+            action_type='sync_progress',
+            metadata={
+                'processed': 0,
+                'total': total_to_push,
+                'pushed': 0,
+                'failed': 0,
+                'skipped_no_listing': 0,
+                'sync_step': 'queue_build',
+            },
+        )
+
         if store_is_sears(store):
             bulk_queue = []
             queued_pairs = []

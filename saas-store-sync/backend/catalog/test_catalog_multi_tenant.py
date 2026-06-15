@@ -881,3 +881,22 @@ class CatalogPushListingsProgressViewTests(TestCase):
         self.assertEqual(body['failed'], 2)
         self.assertEqual(body['skipped_no_listing'], 3)
         self.assertEqual(body['pct'], 25)
+
+    def test_progress_queue_build_when_sync_started_without_progress_log(self):
+        from catalog.activity_log import append_catalog_log
+        from sync.push_listings_lock import try_acquire_push_listings_lock
+
+        try_acquire_push_listings_lock(str(self.store.id), 'task-progress-queued')
+        append_catalog_log(
+            self.store.id,
+            'Marketplace sync started — pushing local prices and stock to your marketplace.',
+            action_type='sync_start',
+        )
+
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body['active'])
+        self.assertEqual(body['processed'], 0)
+        self.assertEqual(body['pct'], 0)
+        self.assertEqual(body['sync_step'], 'queue_build')

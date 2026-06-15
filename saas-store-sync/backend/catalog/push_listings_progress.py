@@ -116,6 +116,9 @@ def build_push_listings_progress_payload(store) -> dict[str, Any]:
                 match = re.search(r'document[:\s]+(\d+)', status_message, re.IGNORECASE)
                 if match:
                     sears_document_id = match.group(1)
+        else:
+            sync_step = 'queue_build'
+            status_message = f'Preparing listings for marketplace push — 0 of {total:,} queued.'
 
     active = bool(lock_owner)
     phase = _lock_phase(lock_owner) if lock_owner else None

@@ -887,7 +887,10 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId, onSt
     if (state.store_id && state.store_id !== selectedStoreId) return null;
 
     const isQueued = state.phase === 'queued';
-    const syncStep = state.sync_step || (isQueued ? 'queued' : 'bulk_push');
+    const processed = Number(state.processed || 0);
+    const total = Number(state.total || 0);
+    const pct = Math.max(0, Math.min(100, Number(state.pct || 0)));
+    const syncStep = state.sync_step || (isQueued ? 'queued' : (processed > 0 ? 'bulk_push' : 'queue_build'));
     const stepLabels = {
         queued: 'Queued',
         queue_build: 'Preparing listings',
@@ -895,20 +898,28 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId, onSt
         waiting_sears: 'Waiting on Sears',
     };
     const stepLabel = stepLabels[syncStep] || 'Syncing';
-    const pct = Math.max(0, Math.min(100, Number(state.pct || 0)));
-    const processed = Number(state.processed || 0);
-    const total = Number(state.total || 0);
     const pushed = Number(state.pushed || 0);
     const failed = Number(state.failed || 0);
     const skipped = Number(state.skipped_no_listing || 0);
     const isWaitingSears = syncStep === 'waiting_sears';
+    const isQueueBuild = syncStep === 'queue_build';
     const headline = isQueued ? 'Marketplace sync queued' : 'Marketplace sync running';
     const pillClass = isQueued
         ? 'bg-amber-200 text-amber-950 dark:bg-amber-900/40 dark:text-amber-100'
-        : isWaitingSears
-            ? 'bg-sky-200 text-sky-950 dark:bg-sky-900/40 dark:text-sky-100'
-            : 'bg-emerald-200 text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-100';
-    const barColor = pct >= 100 ? 'bg-emerald-500' : isQueued ? 'bg-amber-500' : isWaitingSears ? 'bg-sky-500' : 'bg-emerald-500';
+        : isQueueBuild
+            ? 'bg-violet-200 text-violet-950 dark:bg-violet-900/40 dark:text-violet-100'
+            : isWaitingSears
+                ? 'bg-sky-200 text-sky-950 dark:bg-sky-900/40 dark:text-sky-100'
+                : 'bg-emerald-200 text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-100';
+    const barColor = pct >= 100
+        ? 'bg-emerald-500'
+        : isQueued
+            ? 'bg-amber-500'
+            : isQueueBuild
+                ? 'bg-violet-500'
+                : isWaitingSears
+                    ? 'bg-sky-500'
+                    : 'bg-emerald-500';
 
     return (
         <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50/80 dark:bg-emerald-950/30 p-4 mb-4 shadow-sm">
@@ -940,7 +951,12 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId, onSt
                             {state.status_message}
                         </p>
                     ) : null}
-                    {!isQueued && !isWaitingSears && (
+                    {!isQueued && isQueueBuild && (
+                        <p className="text-xs text-violet-700 dark:text-violet-300 mt-0.5">
+                            Preparing listings for marketplace push — counts update as each batch completes. Use Stop Syncing to cancel.
+                        </p>
+                    )}
+                    {!isQueued && !isWaitingSears && !isQueueBuild && (
                         <p className="text-xs text-emerald-700 dark:text-emerald-300 mt-0.5">
                             Pushing local prices and stock to your marketplace. You can leave this page — use Stop Syncing to cancel.
                         </p>
@@ -969,7 +985,7 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId, onSt
             <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
                 <div
                     className={`h-full rounded-full transition-all duration-500 ${barColor}`}
-                    style={{ width: `${pct > 0 ? pct : isQueued ? 4 : 8}%` }}
+                    style={{ width: `${pct}%` }}
                 />
             </div>
         </div>
