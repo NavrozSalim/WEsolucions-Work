@@ -43,6 +43,7 @@ import {
     getScrapeProgress,
     getPushListingsProgress,
     cancelCatalogScrape,
+    cancelCatalogPushListings,
     updateProductMapping,
     downloadMydealTemplates,
 } from '../../services/catalogService';
@@ -880,7 +881,7 @@ function ServerCeleryScrapeStrip({ state, progressStoreId, selectedStoreId }) {
 /**
  * Live marketplace push (Manual sync) for the current store — real processed/total counts.
  */
-function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId }) {
+function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId, onStopSync, stopping }) {
     if (!state?.active || !selectedStoreId) return null;
     if (progressStoreId && progressStoreId !== selectedStoreId) return null;
     if (state.store_id && state.store_id !== selectedStoreId) return null;
@@ -911,7 +912,8 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId }) {
 
     return (
         <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50/80 dark:bg-emerald-950/30 p-4 mb-4 shadow-sm">
-            <div className="flex items-start gap-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="flex items-start gap-3 min-w-0 flex-1">
                 <span
                     className={`mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full ${
                         isQueued ? 'bg-amber-500' : 'bg-emerald-500 animate-pulse'
@@ -940,12 +942,12 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId }) {
                     ) : null}
                     {!isQueued && !isWaitingSears && (
                         <p className="text-xs text-emerald-700 dark:text-emerald-300 mt-0.5">
-                            Pushing local prices and stock to your marketplace. You can leave this page open — rows update as each listing finishes.
+                            Pushing local prices and stock to your marketplace. You can leave this page — use Stop Syncing to cancel.
                         </p>
                     )}
                     {isWaitingSears && (
                         <p className="text-xs text-sky-700 dark:text-sky-300 mt-0.5">
-                            Sears is processing your feed — this can take several minutes per batch. Progress updates every ~2 minutes.
+                            Sears is processing your feed — this can take several minutes per batch. Use Stop Syncing to cancel.
                         </p>
                     )}
                     {isQueued && (
@@ -954,6 +956,15 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId }) {
                         </p>
                     )}
                 </div>
+                </div>
+                <button
+                    type="button"
+                    onClick={onStopSync}
+                    disabled={stopping}
+                    className="self-start shrink-0 rounded-md border border-rose-200 px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-60 dark:border-rose-800 dark:text-rose-300 dark:hover:bg-rose-900/30"
+                >
+                    {stopping ? 'Stopping…' : 'Stop Syncing'}
+                </button>
             </div>
             <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
                 <div
@@ -1044,6 +1055,7 @@ export default function Catalog() {
     const trackingManualPushRef = useRef(false);
     useEffect(() => { trackingManualPushRef.current = trackingManualPush; }, [trackingManualPush]);
     const [stoppingScrape, setStoppingScrape] = useState(false);
+    const [stoppingSync, setStoppingSync] = useState(false);
     // Row IDs whose sync_status just changed — used to flash the row yellow.
     const [flashingRowIds, setFlashingRowIds] = useState(() => new Set());
     const prevStatusRef = useRef(new Map()); // product.id -> last seen sync_status
@@ -2010,6 +2022,46 @@ export default function Catalog() {
         }
     }, [pushListingsProgress, selectedStore, viewMode, flowStatus, manualPushLoading, selectedMarketplace, refreshProducts]);
 
+    const handleStopSync = () => {
+        if (!selectedStore || stoppingSync) return;
+        setStoppingSync(true);
+        setMessage('Stopping marketplace sync…');
+        cancelCatalogPushListings(selectedStore)
+            .then((res) => {
+                const stopped = Boolean(res?.data?.push_listings_stopped);
+                if (stopped) {
+                    setTrackingManualPush(false);
+                    trackingManualPushRef.current = false;
+                    setManualPushLoading(false);
+                    finishProgress(false);
+                    setFlowStatus('');
+                    const pushed = Number(res?.data?.pushed || 0);
+                    const failed = Number(res?.data?.failed || 0);
+                    const skipped = Number(res?.data?.skipped_no_listing || 0);
+                    setMessage(
+                        `Stop was sent. Sync should wind down in a few seconds `
+                        + `(${pushed.toLocaleString()} pushed, ${failed.toLocaleString()} failed, `
+                        + `${skipped.toLocaleString()} skipped before stop).`,
+                    );
+                } else {
+                    setMessage(res?.data?.detail || 'Nothing was running to stop.');
+                }
+                getPushListingsProgress(selectedStore)
+                    .then((p) => {
+                        const data = p.data || null;
+                        if (data?.store_id && data.store_id !== selectedStore) return;
+                        setPushListingsProgress(data);
+                    })
+                    .catch(() => {});
+            })
+            .catch((err) => {
+                setMessage(formatCatalogError(err) || 'Could not stop marketplace sync.');
+            })
+            .finally(() => {
+                setStoppingSync(false);
+            });
+    };
+
     const handleStopScrape = () => {
         if (!selectedStore || stoppingScrape) return;
         setStoppingScrape(true);
@@ -2103,6 +2155,22 @@ export default function Catalog() {
             .then((res) => {
                 const d = res.data || {};
                 finishProgress(true);
+                if (d.cancelled) {
+                    setFlowStatus('');
+                    const pushed = d.pushed ?? 0;
+                    const failed = d.failed ?? 0;
+                    const skipped = d.skipped_no_listing ?? 0;
+                    setMessage(
+                        `Manual sync stopped: ${pushed.toLocaleString()} pushed, ${failed.toLocaleString()} failed, `
+                        + `${skipped.toLocaleString()} skipped before stop.`,
+                    );
+                    setTrackingManualPush(false);
+                    trackingManualPushRef.current = false;
+                    if (viewMode === 'products') {
+                        refreshProducts();
+                    }
+                    return;
+                }
                 setFlowStatus('success');
                 const pushed = d.pushed ?? 0;
                 const failed = d.failed ?? 0;
@@ -2614,6 +2682,8 @@ export default function Catalog() {
                     state={pushListingsProgress}
                     progressStoreId={pushListingsProgress?.store_id}
                     selectedStoreId={selectedStore}
+                    onStopSync={handleStopSync}
+                    stopping={stoppingSync}
                 />
             )}
 

@@ -211,6 +211,7 @@ def flush_sears_bulk_marketplace_push(
     on_batch_progress=None,
     lock_owner: str | None = None,
     on_report_wait=None,
+    should_abort=None,
 ) -> dict:
     """
     Push many Sears listings in batched multi-item XML feeds.
@@ -277,8 +278,20 @@ def flush_sears_bulk_marketplace_push(
             items,
             on_batch_complete=on_batch_progress,
             on_report_wait=on_report_wait,
+            should_abort=should_abort,
         ) or {}
     except Exception as exc:
+        from sync.push_listings_cancel import PushListingsCancelled
+
+        if isinstance(exc, PushListingsCancelled):
+            stats = _apply_sears_bulk_push_results(
+                pm_by_sku,
+                {'ok': set(), 'failed': [], 'warnings': {}},
+                pre_failed=pre_failed,
+            )
+            stats['skipped'] = False
+            stats['cancelled'] = True
+            return stats
         logger.warning('Sears bulk marketplace push failed: %s', exc)
         failed = [{'sku': it['sku'], 'error': str(exc)[:500]} for it in items]
         stats = _apply_sears_bulk_push_results(
@@ -294,6 +307,8 @@ def flush_sears_bulk_marketplace_push(
 
     stats = _apply_sears_bulk_push_results(pm_by_sku, result, pre_failed=pre_failed)
     stats['skipped'] = False
+    if result.get('cancelled'):
+        stats['cancelled'] = True
     return stats
 
 

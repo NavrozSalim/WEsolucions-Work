@@ -1500,6 +1500,9 @@ class CatalogPushListingsView(APIView):
             try:
                 result = _execute_store_push_listings_only(store_key, disable_schedule=True)
             finally:
+                from sync.push_listings_cancel import clear_push_listings_cancel
+
+                clear_push_listings_cancel(store_key)
                 release_push_listings_lock(store_key, inline_owner)
             return Response(result, status=status.HTTP_200_OK)
 
@@ -1509,7 +1512,7 @@ class CatalogPushListingsView(APIView):
                     'error': 'push_listings_already_running',
                     'detail': (
                         'A marketplace push is already queued or running for this store. '
-                        'Wait for it to finish or check Activity — do not click Manual sync again.'
+                        'Wait for it to finish, check Activity, or use Stop Syncing and try again.'
                     ),
                 },
                 status=status.HTTP_409_CONFLICT,
@@ -1566,6 +1569,103 @@ class CatalogPushListingsProgressView(APIView):
         return Response(
             build_push_listings_progress_payload(store),
             headers={'Cache-Control': 'no-store, max-age=0, private'},
+        )
+
+
+class CatalogPushListingsCancelView(APIView):
+    """Stop Manual sync (marketplace push) for a store — mirrors Stop Scraping."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        from catalog.activity_log import append_catalog_log
+        from catalog.models import CatalogActivityLog
+        from catalog.reverb_catalog import store_is_sears
+        from sync.push_listings_cancel import request_push_listings_cancel
+        from sync.push_listings_lock import (
+            force_release_push_listings_lock,
+            get_push_listings_lock_owner,
+        )
+        from sync.sears_seller_lock import release_sears_seller_lock
+
+        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store_id = str(store.id)
+        lock_owner = get_push_listings_lock_owner(store_id)
+
+        if not lock_owner:
+            return Response(
+                {
+                    'push_listings_stopped': False,
+                    'detail': 'Nothing was running, so there was nothing to stop.',
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        request_push_listings_cancel(store_id)
+
+        owner = str(lock_owner)
+        if not owner.startswith('reserved:') and not owner.startswith('inline:'):
+            try:
+                from core.celery import app
+
+                app.control.revoke(owner, terminate=True, signal='SIGTERM')
+            except Exception:
+                logger.exception('Failed to revoke push listings task %s', owner)
+
+        force_release_push_listings_lock(store_id)
+
+        if store_is_sears(store):
+            try:
+                from store_adapters import get_adapter
+
+                adapter = get_adapter(store)
+                seller_id = getattr(adapter, '_seller_id', '') or ''
+                if seller_id:
+                    release_sears_seller_lock(seller_id, store_id)
+            except Exception:
+                logger.exception('Failed to release Sears seller lock for store %s', store_id)
+
+        pushed = failed = skipped = 0
+        latest_progress = (
+            CatalogActivityLog.objects.filter(
+                store=store,
+                action_type='sync_progress',
+            )
+            .order_by('-created_at')
+            .first()
+        )
+        if latest_progress and latest_progress.metadata:
+            md = latest_progress.metadata
+            pushed = int(md.get('pushed') or 0)
+            failed = int(md.get('failed') or 0)
+            skipped = int(md.get('skipped_no_listing') or 0)
+
+        append_catalog_log(
+            store.id,
+            'You stopped Manual sync (marketplace push).',
+            action_type='sync_cancelled',
+            user_id=request.user.id,
+            metadata={
+                'lock_owner': owner,
+                'pushed': pushed,
+                'failed': failed,
+                'skipped_no_listing': skipped,
+            },
+        )
+
+        return Response(
+            {
+                'push_listings_stopped': True,
+                'job_id': (
+                    owner
+                    if not owner.startswith('reserved:') and not owner.startswith('inline:')
+                    else None
+                ),
+                'pushed': pushed,
+                'failed': failed,
+                'skipped_no_listing': skipped,
+            },
+            status=status.HTTP_200_OK,
         )
 
 

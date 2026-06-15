@@ -247,6 +247,10 @@ export const getPushListingsProgress = (storeId) =>
 export const cancelCatalogScrape = (storeId) =>
     api.post(`/stores/${storeId}/catalog/scrape/cancel/`, {});
 
+/** Stop Manual sync (marketplace push). Safe to call when nothing is running. */
+export const cancelCatalogPushListings = (storeId) =>
+    api.post(`/stores/${storeId}/catalog/push-listings/cancel/`, {});
+
 /** Map store row from /catalog/stores/ to reverb | walmart | sears for sample CSV columns. */
 export const resolveMarketplaceTemplateKind = (store) => {
     if (!store) return '';

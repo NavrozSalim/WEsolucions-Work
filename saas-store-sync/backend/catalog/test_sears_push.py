@@ -254,9 +254,11 @@ class SearsProcessingReportTests(SimpleTestCase):
         self.assertEqual(summary['errors'], 1)
         self.assertEqual(summary['error_infos'], ['Invalid XML'])
 
+    @patch('store_adapters.sears_adapter.get_sears_report_poll_settings')
     @patch('store_adapters.sears_adapter.time.sleep')
     @patch.object(SearsAdapter, '_request')
-    def test_wait_for_processing_report_polls_until_ready(self, mock_request, mock_sleep):
+    def test_wait_for_processing_report_polls_until_ready(self, mock_request, mock_sleep, mock_poll_settings):
+        mock_poll_settings.return_value = (3, 1.0, 0, 10.0)
         responses = [
             '<?xml version="1.0"?><processing-report><document-id>1</document-id>'
             '<status>Submitted</status></processing-report>',

@@ -25,6 +25,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from xml.sax.saxutils import escape
@@ -118,6 +119,23 @@ def get_sears_rate_limit_retry_sec() -> float:
     )
 
 logger = logging.getLogger(__name__)
+
+
+def _check_push_abort(should_abort: Callable[[], bool] | None) -> None:
+    if callable(should_abort) and should_abort():
+        from sync.push_listings_cancel import PushListingsCancelled
+
+        raise PushListingsCancelled('Manual sync stopped by user')
+
+
+def _sleep_with_abort(seconds: float, should_abort: Callable[[], bool] | None) -> None:
+    """Sleep in 1s slices so Stop Syncing can interrupt long Sears poll delays."""
+    remaining = max(0.0, float(seconds))
+    while remaining > 0:
+        _check_push_abort(should_abort)
+        step = min(1.0, remaining)
+        time.sleep(step)
+        remaining -= step
 
 
 class SearsAPIError(Exception):
@@ -721,6 +739,7 @@ class SearsAdapter(BaseStoreAdapter):
         feed_label: str = '',
         batch_num: int = 0,
         total_batches: int = 0,
+        should_abort=None,
     ) -> str:
         """Poll until Sears finishes async feed processing or raise."""
         max_attempts, interval, ext_attempts, ext_interval = get_sears_report_poll_settings()
@@ -749,8 +768,9 @@ class SearsAdapter(BaseStoreAdapter):
             return not processing_report_pending(last_body)
 
         for attempt in range(max_attempts):
+            _check_push_abort(should_abort)
             if attempt:
-                time.sleep(interval)
+                _sleep_with_abort(interval, should_abort)
             maybe_heartbeat('primary', attempt, max_attempts)
             if poll_once():
                 break
@@ -766,7 +786,8 @@ class SearsAdapter(BaseStoreAdapter):
                 )
                 ext_heartbeat_every = max(1, int(60 / ext_interval)) if ext_interval else 6
                 for attempt in range(ext_attempts):
-                    time.sleep(ext_interval)
+                    _check_push_abort(should_abort)
+                    _sleep_with_abort(ext_interval, should_abort)
                     if attempt > 0 and attempt % ext_heartbeat_every == 0 and callable(on_report_wait):
                         on_report_wait(
                             document_id=document_id,
@@ -856,6 +877,7 @@ class SearsAdapter(BaseStoreAdapter):
         on_report_wait=None,
         batch_num: int = 0,
         total_batches: int = 0,
+        should_abort=None,
     ) -> tuple[set[str], list[dict], str]:
         """PUT XML feed and return per-SKU ok/failed sets from the processing report."""
         resp = self._put_feed_xml(path, xml)
@@ -872,6 +894,7 @@ class SearsAdapter(BaseStoreAdapter):
             feed_label=feed_label,
             batch_num=batch_num,
             total_batches=total_batches,
+            should_abort=should_abort,
         )
         ok, failed = classify_bulk_feed_results(report_body, expected_item_ids)
         return ok, failed, report_body
@@ -924,6 +947,7 @@ class SearsAdapter(BaseStoreAdapter):
         *,
         on_batch_complete=None,
         on_report_wait=None,
+        should_abort=None,
     ) -> dict:
         """
         Bulk update many Sears Child SKUs using multi-item XML feeds.
@@ -963,28 +987,45 @@ class SearsAdapter(BaseStoreAdapter):
 
         total_batches = max(1, (len(normalized) + batch_size - 1) // batch_size) if normalized else 0
         batch_num = 0
-        for start in range(0, len(normalized), batch_size):
-            batch_num += 1
-            chunk = normalized[start:start + batch_size]
-            chunk_ok, chunk_failed, chunk_warnings = self._bulk_update_chunk(
-                chunk,
-                batch_num=batch_num,
-                total_batches=total_batches,
-                on_report_wait=on_report_wait,
-            )
-            ok_all |= chunk_ok
-            failed_all.extend(chunk_failed)
-            warnings_all.update(chunk_warnings)
-            if callable(on_batch_complete):
-                on_batch_complete(
-                    batch_num,
-                    total_batches,
-                    len(chunk_ok),
-                    len(chunk_failed),
-                    len(chunk),
+        try:
+            for start in range(0, len(normalized), batch_size):
+                _check_push_abort(should_abort)
+                batch_num += 1
+                chunk = normalized[start:start + batch_size]
+                chunk_ok, chunk_failed, chunk_warnings = self._bulk_update_chunk(
+                    chunk,
+                    batch_num=batch_num,
+                    total_batches=total_batches,
+                    on_report_wait=on_report_wait,
+                    should_abort=should_abort,
                 )
-            if feed_delay > 0 and batch_num < total_batches:
-                time.sleep(feed_delay)
+                ok_all |= chunk_ok
+                failed_all.extend(chunk_failed)
+                warnings_all.update(chunk_warnings)
+                if callable(on_batch_complete):
+                    on_batch_complete(
+                        batch_num,
+                        total_batches,
+                        len(chunk_ok),
+                        len(chunk_failed),
+                        len(chunk),
+                    )
+                if feed_delay > 0 and batch_num < total_batches:
+                    _sleep_with_abort(feed_delay, should_abort)
+        except Exception as exc:
+            from sync.push_listings_cancel import PushListingsCancelled
+
+            if not isinstance(exc, PushListingsCancelled):
+                raise
+            if warnings_all:
+                first = next(iter(warnings_all.values()))
+                self.last_inventory_warning = first
+            return {
+                'ok': ok_all,
+                'failed': failed_all,
+                'warnings': warnings_all,
+                'cancelled': True,
+            }
 
         if warnings_all:
             first = next(iter(warnings_all.values()))
@@ -998,6 +1039,7 @@ class SearsAdapter(BaseStoreAdapter):
         batch_num: int = 0,
         total_batches: int = 0,
         on_report_wait=None,
+        should_abort=None,
     ) -> tuple[set[str], list[dict], dict[str, str]]:
         """Update one batch of SKUs: one pricing feed + one inventory feed when needed."""
         from django.utils import timezone
@@ -1021,6 +1063,7 @@ class SearsAdapter(BaseStoreAdapter):
                     on_report_wait=on_report_wait,
                     batch_num=batch_num,
                     total_batches=total_batches,
+                    should_abort=should_abort,
                 )
             except SearsAPIError as exc:
                 price_ok = set()
@@ -1059,6 +1102,7 @@ class SearsAdapter(BaseStoreAdapter):
                     on_report_wait=on_report_wait,
                     batch_num=batch_num,
                     total_batches=total_batches,
+                    should_abort=should_abort,
                 )
             except SearsAPIError as exc:
                 inv_ok = set()

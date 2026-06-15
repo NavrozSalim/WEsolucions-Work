@@ -35,3 +35,17 @@ def handoff_push_listings_lock(store_id: str, from_owner: str, to_owner: str) ->
         return False
     cache.set(key, str(to_owner), PUSH_LISTINGS_LOCK_TTL_SEC)
     return True
+
+
+def get_push_listings_lock_owner(store_id: str) -> str | None:
+    owner = cache.get(push_listings_lock_key(str(store_id)))
+    return str(owner) if owner is not None else None
+
+
+def force_release_push_listings_lock(store_id: str) -> str | None:
+    """Delete lock regardless of owner; returns the previous owner id if any."""
+    key = push_listings_lock_key(str(store_id))
+    prev = cache.get(key)
+    if prev is not None:
+        cache.delete(key)
+    return str(prev) if prev is not None else None
