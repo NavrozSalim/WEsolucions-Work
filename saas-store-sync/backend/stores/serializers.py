@@ -22,6 +22,7 @@ class StoreVendorPriceSettingsReadSerializer(serializers.ModelSerializer):
             'id', 'vendor', 'vendor_code', 'vendor_name',
             'purchase_tax_percentage', 'marketplace_fees_percentage',
             'mydeal_rrp_margin_percentage',
+            'kogan_price_margin_percentage',
             'multiplier', 'optional_fee', 'rounding_option', 'continuous_update',
             'range_margins',
         ]
@@ -472,11 +473,16 @@ class StoreSerializer(serializers.ModelSerializer):
             rrp_margin_dec = None
             if rrp_margin not in (None, ''):
                 rrp_margin_dec = _c(rrp_margin, default=0)
+            kogan_price_margin = item.get('kogan_price_margin_percentage')
+            kogan_price_margin_dec = None
+            if kogan_price_margin not in (None, ''):
+                kogan_price_margin_dec = _c(kogan_price_margin, default=0)
             ps = StoreVendorPriceSettings.objects.create(
                 store=store, vendor=vendor,
                 purchase_tax_percentage=_c(item.get('purchase_tax_percentage', 0) or 0),
                 marketplace_fees_percentage=_c(item.get('marketplace_fees_percentage', 0) or 0),
                 mydeal_rrp_margin_percentage=rrp_margin_dec,
+                kogan_price_margin_percentage=kogan_price_margin_dec,
                 multiplier=max(0.0, float(item.get('multiplier', 1) or 1)),
                 optional_fee=max(0.0, float(item.get('optional_fee', 0) or 0)),
                 rounding_option=str(item.get('rounding_option', 'none') or 'none'),

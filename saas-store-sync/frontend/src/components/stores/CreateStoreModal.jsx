@@ -407,6 +407,9 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 mydeal_rrp_margin_percentage: showRrpDiscount
                     ? (parseFloat(vp.mydeal_rrp_margin_percentage) || 0)
                     : undefined,
+                kogan_price_margin_percentage: isKogan
+                    ? (parseFloat(vp.kogan_price_margin_percentage) || 0)
+                    : undefined,
                 range_margins: ranges.map((r) => ({
                     from_value: parseFloat(r.from_value) || 0,
                     to_value: r.to_value === '' || r.to_value === 'MAX' ? null : parseFloat(r.to_value),
@@ -985,6 +988,22 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                             if (v === '') { updateVendorPrice(i, 'mydeal_rrp_margin_percentage', ''); return; }
                                                             const n = parseFloat(v);
                                                             updateVendorPrice(i, 'mydeal_rrp_margin_percentage', Number.isFinite(n) ? Math.max(0, n) : '');
+                                                        }}
+                                                    />
+                                                )}
+                                                {isKogan && (
+                                                    <Input
+                                                        label="Price margin (%)"
+                                                        type="number"
+                                                        min={0}
+                                                        max={99.99}
+                                                        step="0.01"
+                                                        value={vp.kogan_price_margin_percentage ?? ''}
+                                                        onChange={(e) => {
+                                                            const v = e.target.value;
+                                                            if (v === '') { updateVendorPrice(i, 'kogan_price_margin_percentage', ''); return; }
+                                                            const n = parseFloat(v);
+                                                            updateVendorPrice(i, 'kogan_price_margin_percentage', Number.isFinite(n) ? Math.max(0, n) : '');
                                                         }}
                                                     />
                                                 )}

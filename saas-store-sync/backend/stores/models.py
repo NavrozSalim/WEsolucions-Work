@@ -128,6 +128,13 @@ class StoreVendorPriceSettings(models.Model):
         blank=True,
         help_text='Mydeal, Sears, Kogan: RRP discount % off RRP. RRP = posted price / ((100 - this) / 100).',
     )
+    kogan_price_margin_percentage = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text='Kogan only: PRICE column margin % off list price. PRICE = kogan_first_price / ((100 - this) / 100).',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

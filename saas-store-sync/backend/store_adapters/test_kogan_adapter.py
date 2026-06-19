@@ -17,6 +17,7 @@ def _kogan_store(**overrides):
     store.kogan_tab_name = 'Sheet1'
     store.kogan_sku_column = 'PRODUCT_SKU'
     store.kogan_stock_column = 'STOCK'
+    store.kogan_price_column = 'PRICE'
     store.kogan_first_price_column = 'kogan_first_price'
     store.kogan_rrp_column = 'rrp'
     store.api_token = ''
@@ -29,13 +30,14 @@ def _kogan_store(**overrides):
 
 
 class KoganAdapterRrpTests(SimpleTestCase):
-    def test_adapter_push_kwargs_adds_rrp_for_kogan(self):
+    def test_adapter_push_kwargs_adds_rrp_and_list_price_for_kogan(self):
         store = _kogan_store()
         pm = MagicMock()
         pm.product_id = 1
         pm.product.vendor_id = 'vid-1'
         ps = MagicMock()
         ps.mydeal_rrp_margin_percentage = Decimal('26')
+        ps.kogan_price_margin_percentage = Decimal('20')
         kwargs = adapter_push_kwargs(
             store,
             pm,
@@ -46,14 +48,16 @@ class KoganAdapterRrpTests(SimpleTestCase):
         self.assertEqual(kwargs['price'], Decimal('74.00'))
         self.assertEqual(kwargs['stock'], 5)
         self.assertEqual(kwargs['rrp'], Decimal('100.00'))
+        self.assertEqual(kwargs['list_price'], Decimal('92.50'))
 
     @patch.object(KoganAdapter, '_get_service')
-    def test_bulk_update_writes_rrp_column(self, mock_get_service):
+    def test_bulk_update_writes_price_first_price_and_rrp_columns(self, mock_get_service):
         store = _kogan_store()
         adapter = KoganAdapter(store)
         adapter._header_cache = [
             'PRODUCT_SKU',
             'STOCK',
+            'PRICE',
             'kogan_first_price',
             'rrp',
         ]
@@ -75,14 +79,15 @@ class KoganAdapterRrpTests(SimpleTestCase):
         mock_get_service.return_value.spreadsheets.return_value = spreadsheets_api
 
         result = adapter.update_products_bulk([
-            ('SKU-1', 74.0, 3, 100.0),
-            ('SKU-2', 50.0, 0, None),
+            ('SKU-1', 74.0, 3, 100.0, 92.5),
+            ('SKU-2', 50.0, 0, None, None),
         ])
 
         self.assertEqual(result['ok'], {'SKU-1', 'SKU-2'})
         self.assertEqual(result['failed'], [])
         ranges = {u['range']: u['values'][0][0] for u in batch_updates}
-        self.assertEqual(ranges['Sheet1!C2'], 74.0)
-        self.assertEqual(ranges['Sheet1!D2'], 100.0)
         self.assertEqual(ranges['Sheet1!B2'], 3)
-        self.assertNotIn('Sheet1!D3', ranges)
+        self.assertEqual(ranges['Sheet1!C2'], 92.5)
+        self.assertEqual(ranges['Sheet1!D2'], 74.0)
+        self.assertEqual(ranges['Sheet1!E2'], 100.0)
+        self.assertNotIn('Sheet1!E3', ranges)

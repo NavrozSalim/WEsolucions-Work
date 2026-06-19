@@ -1091,6 +1091,7 @@ def run_store_update(self, store_id, source='beat'):
                         kwargs.get('price'),
                         kwargs.get('stock', int(stock or 0)),
                         kwargs.get('rrp'),
+                        kwargs.get('list_price'),
                     ))
                 res = adapter.update_products_bulk(payload) or {}
                 ok_set = set(res.get('ok') or [])

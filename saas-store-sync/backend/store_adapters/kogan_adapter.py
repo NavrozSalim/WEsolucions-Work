@@ -51,7 +51,8 @@ class KoganSheetConfig:
     tab_name: str
     sku_col_name: str = "PRODUCT_SKU"
     stock_col_name: str = "STOCK"
-    price_col_name: str = "kogan_first_price"
+    first_price_col_name: str = "kogan_first_price"
+    list_price_col_name: str = "PRICE"
     rrp_col_name: str = "rrp"
 
 
@@ -90,10 +91,14 @@ class KoganAdapter(BaseStoreAdapter):
             tab_name=tab,
             sku_col_name=(getattr(self.store, "kogan_sku_column", None) or "PRODUCT_SKU").strip() or "PRODUCT_SKU",
             stock_col_name=(getattr(self.store, "kogan_stock_column", None) or "STOCK").strip() or "STOCK",
-            price_col_name=(
+            first_price_col_name=(
                 getattr(self.store, "kogan_first_price_column", None) or "kogan_first_price"
             ).strip()
             or "kogan_first_price",
+            list_price_col_name=(
+                getattr(self.store, "kogan_price_column", None) or "PRICE"
+            ).strip()
+            or "PRICE",
             rrp_col_name=(
                 getattr(self.store, "kogan_rrp_column", None) or "rrp"
             ).strip()
@@ -134,7 +139,7 @@ class KoganAdapter(BaseStoreAdapter):
         cfg = self._config()
         headers = self._get_headers()
         missing = []
-        for col in (cfg.sku_col_name, cfg.stock_col_name, cfg.price_col_name):
+        for col in (cfg.sku_col_name, cfg.stock_col_name, cfg.first_price_col_name):
             if col not in headers:
                 missing.append(col)
         if missing:
@@ -173,14 +178,15 @@ class KoganAdapter(BaseStoreAdapter):
         price = kwargs.get("price")
         stock = kwargs.get("stock")
         rrp = kwargs.get("rrp")
-        self.update_products_bulk([(sku, price, stock, rrp)])
+        list_price = kwargs.get("list_price")
+        self.update_products_bulk([(sku, price, stock, rrp, list_price)])
         return True
 
-    def update_products_bulk(self, items: list[tuple[str, float | None, int | None, float | None]]):
+    def update_products_bulk(self, items: list[tuple[str, float | None, int | None, float | None, float | None]]):
         """
         Bulk update many SKU rows in a single run.
 
-        items: list of (sku, price, stock, rrp) — rrp may be None.
+        items: list of (sku, first_price, stock, rrp, list_price) — rrp/list_price may be None.
         Returns: {'ok': set(sku), 'failed': [{'sku':..., 'error':...}, ...]}
         """
         if not items:
@@ -193,7 +199,12 @@ class KoganAdapter(BaseStoreAdapter):
 
         sku_idx = headers.index(cfg.sku_col_name)
         stock_idx = headers.index(cfg.stock_col_name)
-        price_idx = headers.index(cfg.price_col_name)
+        first_price_idx = headers.index(cfg.first_price_col_name)
+        list_price_idx = (
+            headers.index(cfg.list_price_col_name)
+            if cfg.list_price_col_name in headers
+            else None
+        )
         rrp_idx = headers.index(cfg.rrp_col_name) if cfg.rrp_col_name in headers else None
 
         # Read all SKU values in the sheet once to build SKU -> row mapping
@@ -231,9 +242,10 @@ class KoganAdapter(BaseStoreAdapter):
 
         for item in items:
             sku = item[0] if item else ''
-            price = item[1] if len(item) > 1 else None
+            first_price = item[1] if len(item) > 1 else None
             stock = item[2] if len(item) > 2 else None
             rrp = item[3] if len(item) > 3 else None
+            list_price = item[4] if len(item) > 4 else None
             s = _clean_sku(sku)
             if not s:
                 continue
@@ -247,8 +259,10 @@ class KoganAdapter(BaseStoreAdapter):
                     _add_cell_update(stock_idx, row_num, int(stock))
                 except Exception:
                     _add_cell_update(stock_idx, row_num, stock)
-            if price is not None:
-                _add_cell_update(price_idx, row_num, float(price))
+            if first_price is not None:
+                _add_cell_update(first_price_idx, row_num, float(first_price))
+            if list_price is not None and list_price_idx is not None:
+                _add_cell_update(list_price_idx, row_num, float(list_price))
             if rrp is not None and rrp_idx is not None:
                 _add_cell_update(rrp_idx, row_num, float(rrp))
             ok.add(s)

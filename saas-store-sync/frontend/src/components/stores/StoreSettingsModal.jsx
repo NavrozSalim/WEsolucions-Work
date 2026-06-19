@@ -67,6 +67,7 @@ function storeToForm(store) {
             purchase_tax_percentage: vp.purchase_tax_percentage ?? 0,
             marketplace_fees_percentage: vp.marketplace_fees_percentage ?? 0,
             mydeal_rrp_margin_percentage: vp.mydeal_rrp_margin_percentage ?? '',
+            kogan_price_margin_percentage: vp.kogan_price_margin_percentage ?? '',
             rounding_option: vp.rounding_option || 'none',
             continuous_update: !!vp.continuous_update,
             range_margins: (vp.range_margins || []).map((r) => ({
@@ -309,6 +310,9 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                 continuous_update: !!vp.continuous_update,
                 mydeal_rrp_margin_percentage: showRrpDiscount
                     ? (parseFloat(vp.mydeal_rrp_margin_percentage) || 0)
+                    : undefined,
+                kogan_price_margin_percentage: isKogan
+                    ? (parseFloat(vp.kogan_price_margin_percentage) || 0)
                     : undefined,
                 range_margins: ranges.map((r) => ({
                     from_value: parseFloat(r.from_value) || 0,
@@ -730,6 +734,22 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                                         if (v === '') { updateVendorPrice(i, 'mydeal_rrp_margin_percentage', ''); return; }
                                                         const n = parseFloat(v);
                                                         updateVendorPrice(i, 'mydeal_rrp_margin_percentage', Number.isFinite(n) ? Math.max(0, n) : '');
+                                                    }}
+                                                />
+                                            )}
+                                            {isKogan && (
+                                                <Input
+                                                    label="Price margin (%)"
+                                                    type="number"
+                                                    min={0}
+                                                    max={99.99}
+                                                    step="0.01"
+                                                    value={vp.kogan_price_margin_percentage ?? ''}
+                                                    onChange={(e) => {
+                                                        const v = e.target.value;
+                                                        if (v === '') { updateVendorPrice(i, 'kogan_price_margin_percentage', ''); return; }
+                                                        const n = parseFloat(v);
+                                                        updateVendorPrice(i, 'kogan_price_margin_percentage', Number.isFinite(n) ? Math.max(0, n) : '');
                                                     }}
                                                 />
                                             )}

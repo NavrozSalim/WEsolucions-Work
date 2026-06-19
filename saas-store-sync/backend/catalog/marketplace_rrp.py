@@ -42,13 +42,12 @@ def compute_marketplace_rrp(price: Decimal | float | None, margin_pct: Decimal |
     return (posted / divisor).quantize(_TWOPL, rounding=ROUND_HALF_UP)
 
 
-def rrp_discount_pct_for_pm(
-    store,
+def _margin_pct_from_settings(
     pm,
-    price_by_vendor_id: dict | None = None,
-    price_fallback: Any = None,
+    price_by_vendor_id: dict | None,
+    price_fallback: Any,
+    field_name: str,
 ) -> Decimal | None:
-    """Per-vendor RRP discount % from store pricing settings (Mydeal, Sears, Kogan)."""
     if pm is None or not getattr(pm, 'product_id', None):
         return None
     vendor_id = pm.product.vendor_id
@@ -59,7 +58,7 @@ def rrp_discount_pct_for_pm(
         ps = price_fallback
     if ps is None:
         return None
-    m = getattr(ps, 'mydeal_rrp_margin_percentage', None)
+    m = getattr(ps, field_name, None)
     if m is None:
         return None
     try:
@@ -69,6 +68,35 @@ def rrp_discount_pct_for_pm(
     if val <= 0 or val >= Decimal('100'):
         return None
     return val
+
+
+def rrp_discount_pct_for_pm(
+    store,
+    pm,
+    price_by_vendor_id: dict | None = None,
+    price_fallback: Any = None,
+) -> Decimal | None:
+    """Per-vendor RRP discount % from store pricing settings (Mydeal, Sears, Kogan)."""
+    return _margin_pct_from_settings(
+        pm,
+        price_by_vendor_id,
+        price_fallback,
+        'mydeal_rrp_margin_percentage',
+    )
+
+
+def kogan_price_margin_pct_for_pm(
+    pm,
+    price_by_vendor_id: dict | None = None,
+    price_fallback: Any = None,
+) -> Decimal | None:
+    """Per-vendor Kogan PRICE column margin % from store pricing settings."""
+    return _margin_pct_from_settings(
+        pm,
+        price_by_vendor_id,
+        price_fallback,
+        'kogan_price_margin_percentage',
+    )
 
 
 def adapter_push_kwargs(
@@ -81,9 +109,10 @@ def adapter_push_kwargs(
     price_fallback: Any = None,
 ) -> dict[str, Any]:
     """
-    kwargs for ``adapter.update_product`` — adds ``rrp`` (Decimal) for Sears/Kogan when configured.
+    kwargs for ``adapter.update_product`` — adds ``rrp`` for Sears/Kogan and
+    ``list_price`` (Kogan PRICE column) when configured.
 
-    ``price`` = posted/sale price (``store_price``), quantized to cents.
+    ``price`` = posted/sale price (``store_price`` / kogan_first_price), quantized to cents.
     ``stock`` = ``store_stock``.
     """
     kwargs: dict[str, Any] = {}
@@ -104,4 +133,9 @@ def adapter_push_kwargs(
         rrp = compute_marketplace_rrp(posted, pct)
         if rrp is not None and rrp > posted:
             kwargs['rrp'] = rrp
+    if store_is_kogan(store) and posted is not None and pm is not None:
+        price_pct = kogan_price_margin_pct_for_pm(pm, price_by_vendor_id, price_fallback)
+        list_price = compute_marketplace_rrp(posted, price_pct)
+        if list_price is not None and list_price > posted:
+            kwargs['list_price'] = list_price
     return kwargs
