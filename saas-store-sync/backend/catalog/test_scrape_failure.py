@@ -6,7 +6,11 @@ from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase
 
-from catalog.scrape_failure import fail_product_mapping
+from catalog.scrape_failure import (
+    FALLBACK_LISTING_PRICE,
+    apply_no_vendor_price_fallback,
+    fail_product_mapping,
+)
 
 
 class FailProductMappingTests(SimpleTestCase):
@@ -58,3 +62,23 @@ class FailProductMappingTests(SimpleTestCase):
         mock_push.assert_called_once()
         self.assertEqual(mock_push.call_args[0][0], pm)
         self.assertEqual(mock_push.call_args[0][1], store)
+
+
+class ApplyNoVendorPriceFallbackTests(SimpleTestCase):
+    def test_sets_fallback_price_and_zero_stock(self):
+        pm = MagicMock()
+        pm.failed_sync_count = 2
+        store = MagicMock()
+        store.connection_status = 'connected'
+
+        with patch('catalog.scrape_failure._push_fallback_listing') as mock_push:
+            apply_no_vendor_price_fallback(pm, 'no_price', 'missing', store=store)
+
+        self.assertEqual(pm.store_price, FALLBACK_LISTING_PRICE)
+        self.assertEqual(pm.store_stock, 0)
+        self.assertEqual(pm.sync_status, 'scraped')
+        self.assertEqual(pm.failed_sync_count, 0)
+        self.assertIn('no_price', pm.scrape_error)
+        self.assertIn('489.99', pm.scrape_error)
+        pm.save.assert_called_once()
+        mock_push.assert_called_once_with(pm, store, None, None)

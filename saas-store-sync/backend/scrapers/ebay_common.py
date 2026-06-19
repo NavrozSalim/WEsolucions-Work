@@ -542,19 +542,6 @@ class EbayParser:
         "was ended",
     )
 
-    # AU-only terminal status selectors. When the page exposes any of these
-    # banners but the parser cannot extract price or inventory, the AU wrapper
-    # ``_parse_html_to_result_au`` returns ``price=99.99, stock=0`` so the
-    # catalog still posts a zero-inventory update instead of marking the row
-    # failed with ``no_price``.
-    AU_TERMINAL_STATUS_SELECTORS = (
-        ".ux-message__title span.ux-textspans",
-        "[data-testid='ux-hotness-signal-text'] span.signal--time-sensitive",
-        ".ux-layout-section__textual-display--statusMessage span",
-        ".page-notice__title span",
-        "h2[data-testid='dp-error-banner-container-title-undefined']",
-    )
-
     # AU postage row. Paid postage is added on top of the scraped item price.
     AU_SHIPPING_BLOCK_SELECTOR = ".ux-labels-values--shipping"
     AU_SHIPPING_VALUES_SELECTOR = (
@@ -1328,19 +1315,6 @@ class EbayParser:
                 continue
 
         return None
-
-    @classmethod
-    def has_au_terminal_status(cls, soup: BeautifulSoup) -> bool:
-        """True if any AU terminal status banner is visible on the page.
-
-        The check is *presence + non-empty text*; the wrapper decides whether
-        to trigger the 99.99/stock=0 fallback based on the parse result.
-        """
-        for sel in cls.AU_TERMINAL_STATUS_SELECTORS:
-            el = soup.select_one(sel)
-            if el and el.get_text(strip=True):
-                return True
-        return False
 
     @classmethod
     def _au_shipping_line_is_noise(cls, text: str) -> bool:
@@ -2195,18 +2169,8 @@ def _parse_html_to_result(html: str, url: str) -> Optional[dict]:
 def _parse_html_to_result_au(html: str, url: str) -> Optional[dict]:
     """AU-only wrapper around :func:`_parse_html_to_result`.
 
-    Adds two AU-specific behaviors on top of the shared parser:
-
-    1. **Terminal status fallback** — when price or stock is missing but the
-       page exposes any of
-       :pyattr:`EbayParser.AU_TERMINAL_STATUS_SELECTORS` (sold-out banner,
-       hot/time-sensitive signal, listing-status message, or page notice),
-       return ``{"price": 99.99, "stock": 0}`` so the catalog posts a
-       zero-inventory update instead of failing with ``no_price``.
-    2. **Shipping add-on** — when the AU postage row is present with a paid
-       amount, add it to the scraped item price (rounded to 2 decimals).
-       Free postage rows are ignored. The add-on never applies to the
-       terminal fallback price (99.99 stays 99.99).
+    When the AU postage row is present with a paid amount, add it to the
+    scraped item price (rounded to 2 decimals). Free postage rows are ignored.
     """
     if not html:
         return None
@@ -2217,15 +2181,6 @@ def _parse_html_to_result_au(html: str, url: str) -> Optional[dict]:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
         soup = BeautifulSoup(html, "html.parser")
-
-    needs_terminal_check = (
-        parsed is None
-        or parsed.get("price") is None
-        or parsed.get("stock") is None
-    )
-    if needs_terminal_check and EbayParser.has_au_terminal_status(soup):
-        title = (parsed or {}).get("title") or EbayParser.extract_title(soup)
-        return {"price": 99.99, "stock": 0, "title": title}
 
     if parsed is None or parsed.get("price") is None:
         return parsed

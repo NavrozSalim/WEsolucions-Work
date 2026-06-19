@@ -124,6 +124,31 @@ def _fail_mapping(pm, code: str, message: str = '', *, store=None) -> None:
     fail_product_mapping(pm, code, message, store=store)
 
 
+def _apply_no_vendor_price_fallback(
+    pm,
+    code: str,
+    message: str = '',
+    *,
+    store=None,
+    scrape_title: str = '',
+    now=None,
+    price_by_vid=None,
+    price_fb=None,
+) -> None:
+    from catalog.scrape_failure import apply_no_vendor_price_fallback
+
+    apply_no_vendor_price_fallback(
+        pm,
+        code,
+        message,
+        store=store,
+        scrape_title=scrape_title,
+        now=now,
+        price_by_vendor_id=price_by_vid,
+        price_fallback=price_fb,
+    )
+
+
 class VendorResolveIndex:
     """O(1) vendor lookup for catalog sync — avoids ``Vendor.objects.all()`` per row."""
 
@@ -877,8 +902,17 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                     err_code,
                     err_msg[:300],
                 )
-                _fail_mapping(pm, err_code, err_msg, store=store)
-                failed += 1
+                _apply_no_vendor_price_fallback(
+                    pm,
+                    err_code,
+                    err_msg,
+                    store=store,
+                    scrape_title=scrape_title,
+                    now=now,
+                    price_by_vid=price_by_vid,
+                    price_fb=price_fb,
+                )
+                succeeded += 1
                 last_progress_at = timezone.now()
                 continue
 
@@ -1439,9 +1473,17 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
                     err_code,
                     err_msg[:300],
                 )
-                _fail_mapping(pm, err_code, err_msg, store=store)
-                failed += 1
-                error_summary = err_code if not error_summary else error_summary
+                _apply_no_vendor_price_fallback(
+                    pm,
+                    err_code,
+                    err_msg,
+                    store=store,
+                    scrape_title=scrape_title,
+                    now=now,
+                    price_by_vid=price_by_vid,
+                    price_fb=price_fb,
+                )
+                succeeded += 1
                 last_progress_at = timezone.now()
                 continue
 

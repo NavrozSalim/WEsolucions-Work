@@ -486,43 +486,43 @@ def _au_html(*blocks: str) -> str:
 
 
 class TestEbayAuTerminalStatus(unittest.TestCase):
-    """AU-only: terminal status banner forces price=99.99, stock=0 when scrape misses."""
+    """AU ended/sold-out banners no longer inject a scraper-side fallback price."""
 
-    def test_ux_message_title_with_no_price_returns_99_99(self):
+    def test_ux_message_title_with_no_price_returns_none(self):
         html = _au_html(
             "<div class='ux-message__title'><span class='ux-textspans'>This listing was ended by the seller</span></div>"
         )
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
-        self.assertEqual(result, {"price": 99.99, "stock": 0, "title": "Test title"})
+        self.assertIsNone(result)
 
-    def test_hotness_signal_with_no_price_returns_99_99(self):
+    def test_hotness_signal_with_no_price_returns_none(self):
         html = _au_html(
             "<div data-testid='ux-hotness-signal-text'><span class='signal--time-sensitive'>Selling fast</span></div>"
         )
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
-        self.assertEqual(result, {"price": 99.99, "stock": 0, "title": "Test title"})
+        self.assertIsNone(result)
 
-    def test_status_message_with_no_price_returns_99_99(self):
+    def test_status_message_with_no_price_returns_none(self):
         html = _au_html(
             "<div class='ux-layout-section__textual-display--statusMessage'><span>This listing has ended.</span></div>"
         )
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
-        self.assertEqual(result, {"price": 99.99, "stock": 0, "title": "Test title"})
+        self.assertTrue(result is None or result.get("price") is None)
 
-    def test_page_notice_with_no_price_returns_99_99(self):
+    def test_page_notice_with_no_price_returns_none(self):
         html = _au_html(
             "<div class='page-notice__title'><span>Item not available</span></div>"
         )
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
-        self.assertEqual(result, {"price": 99.99, "stock": 0, "title": "Test title"})
+        self.assertIsNone(result)
 
-    def test_dp_error_banner_with_no_price_returns_99_99(self):
+    def test_dp_error_banner_with_no_price_returns_none(self):
         html = _au_html(
             "<h2 data-testid='dp-error-banner-container-title-undefined'>"
             "This listing isn't available</h2>"
         )
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
-        self.assertEqual(result, {"price": 99.99, "stock": 0, "title": "Test title"})
+        self.assertIsNone(result)
 
     def test_valid_price_and_stock_without_terminal_selector_unchanged(self):
         html = _au_html(_AU_PRICE_BLOCK, _AU_QTY_BLOCK)
@@ -531,7 +531,7 @@ class TestEbayAuTerminalStatus(unittest.TestCase):
         self.assertEqual(result["stock"], 10)
 
     def test_valid_price_and_stock_with_terminal_selector_does_not_override(self):
-        """Both price and stock present: terminal selector must NOT downgrade to 99.99."""
+        """Both price and stock present: terminal selector must not change parsed values."""
         html = _au_html(
             _AU_PRICE_BLOCK,
             _AU_QTY_BLOCK,
@@ -565,14 +565,13 @@ class TestEbayAuShippingAddOn(unittest.TestCase):
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
         self.assertEqual(result["price"], 50.0)
 
-    def test_terminal_fallback_ignores_shipping(self):
-        """The 99.99 sentinel must not be inflated by shipping."""
+    def test_terminal_banner_with_shipping_returns_none(self):
         html = _au_html(
             _AU_SHIPPING_BLOCK,
             "<div class='ux-message__title'><span class='ux-textspans'>Out of stock</span></div>",
         )
         result = _parse_html_to_result_au(html, "https://www.ebay.com.au/itm/1")
-        self.assertEqual(result, {"price": 99.99, "stock": 0, "title": "Test title"})
+        self.assertIsNone(result)
 
     def test_shipping_amount_helper_parses_au_dollar(self):
         soup = BeautifulSoup(_AU_SHIPPING_BLOCK, "lxml")

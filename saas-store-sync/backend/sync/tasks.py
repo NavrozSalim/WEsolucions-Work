@@ -66,6 +66,28 @@ def _fail_mapping(pm, code: str, message: str = '', *, store=None) -> None:
     fail_product_mapping(pm, code, message, store=store)
 
 
+def _apply_no_vendor_price_fallback(
+    pm,
+    code: str,
+    message: str = '',
+    *,
+    store=None,
+    scrape_title: str = '',
+    now=None,
+) -> None:
+    from catalog.scrape_failure import apply_no_vendor_price_fallback
+
+    apply_no_vendor_price_fallback(
+        pm,
+        code,
+        message,
+        store=store,
+        scrape_title=scrape_title,
+        now=now,
+        push_marketplace=False,
+    )
+
+
 def _heb_product_id_from_sku(sku: str):
     """
     Pick the HEB PDP numeric id from a composite SKU (e.g. AHJH-150275-0311-PK3).
@@ -535,8 +557,15 @@ def run_store_sync(self, store_id):
                 err_msg = (
                     result.get('error_message') if isinstance(result, dict) else ''
                 ) or ''
-                _fail_mapping(pm, err_code, err_msg, store=store)
-                error_summary = err_code if not error_summary else error_summary
+                _apply_no_vendor_price_fallback(
+                    pm,
+                    err_code,
+                    err_msg,
+                    store=store,
+                    scrape_title=scrape_title,
+                    now=now,
+                )
+                updated += 1
                 continue
 
             if vendor_stock is None or vendor_stock <= 0:
