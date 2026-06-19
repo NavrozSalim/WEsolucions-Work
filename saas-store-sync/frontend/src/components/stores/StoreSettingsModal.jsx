@@ -280,7 +280,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const isMydeal = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'mydeal';
     const isSears = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'sears';
     const isWalmart = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'walmart';
-    const showRrpDiscount = isMydeal || isSears;
+    const showRrpDiscount = isMydeal || isSears || isKogan;
     const credentialsLabel = isSears
         ? 'Sears credentials (JSON)'
         : isWalmart
@@ -717,7 +717,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                                 <Input label="Purchase Tax (%)" type="number" min={0} step="0.01" value={allDirect ? 0 : vp.purchase_tax_percentage} disabled={allDirect} onChange={(e) => { const v = e.target.value; if (v === '') { updateVendorPrice(i, 'purchase_tax_percentage', ''); return; } const n = parseFloat(v); updateVendorPrice(i, 'purchase_tax_percentage', Number.isFinite(n) ? Math.max(0, n) : ''); }} />
                                                 <Input label="Marketplace Fees (%)" type="number" min={0} step="0.01" value={allDirect ? 0 : vp.marketplace_fees_percentage} disabled={allDirect} onChange={(e) => { const v = e.target.value; if (v === '') { updateVendorPrice(i, 'marketplace_fees_percentage', ''); return; } const n = parseFloat(v); updateVendorPrice(i, 'marketplace_fees_percentage', Number.isFinite(n) ? Math.max(0, n) : ''); }} />
                                             </div>
-                                            {(isMydeal || isSears) && (
+                                            {showRrpDiscount && (
                                                 <Input
                                                     label="RRP discount (%)"
                                                     type="number"

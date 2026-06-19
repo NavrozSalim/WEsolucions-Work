@@ -55,6 +55,24 @@ def store_is_walmart(store) -> bool:
     return code == 'walmart'
 
 
+def store_is_kogan(store) -> bool:
+    """True when the store's marketplace is Kogan (code ``kogan``)."""
+    m = getattr(store, 'marketplace', None)
+    if m is not None:
+        code = (getattr(m, 'code', None) or '').strip().lower()
+        name = (getattr(m, 'name', None) or '').strip().lower()
+        return code == 'kogan' or name == 'kogan'
+    mk_id = getattr(store, 'marketplace_id', None)
+    if not mk_id:
+        return False
+    from marketplace.models import Marketplace
+
+    row = Marketplace.objects.filter(pk=mk_id).values('code', 'name').first() or {}
+    code = (row.get('code') or '').strip().lower()
+    name = (row.get('name') or '').strip().lower()
+    return code == 'kogan' or name == 'kogan'
+
+
 def listing_sku_lookup_order(pm, store):
     """
     SKUs to try for adapters that resolve listing id by SKU (e.g. Reverb).

@@ -1,10 +1,10 @@
-"""Shared marketplace RRP (strike-through / standard price) helpers for Mydeal export and Sears API push."""
+"""Shared marketplace RRP (strike-through / standard price) helpers for Mydeal, Sears, and Kogan."""
 from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
-from catalog.reverb_catalog import store_is_sears, store_is_walmart
+from catalog.reverb_catalog import store_is_kogan, store_is_sears, store_is_walmart
 
 _TWOPL = Decimal('0.01')
 
@@ -48,7 +48,7 @@ def rrp_discount_pct_for_pm(
     price_by_vendor_id: dict | None = None,
     price_fallback: Any = None,
 ) -> Decimal | None:
-    """Per-vendor RRP discount % from store pricing settings (Mydeal + Sears)."""
+    """Per-vendor RRP discount % from store pricing settings (Mydeal, Sears, Kogan)."""
     if pm is None or not getattr(pm, 'product_id', None):
         return None
     vendor_id = pm.product.vendor_id
@@ -81,7 +81,7 @@ def adapter_push_kwargs(
     price_fallback: Any = None,
 ) -> dict[str, Any]:
     """
-    kwargs for ``adapter.update_product`` — adds ``rrp`` (Decimal) for Sears when configured.
+    kwargs for ``adapter.update_product`` — adds ``rrp`` (Decimal) for Sears/Kogan when configured.
 
     ``price`` = posted/sale price (``store_price``), quantized to cents.
     ``stock`` = ``store_stock``.
@@ -99,7 +99,7 @@ def adapter_push_kwargs(
         lt = getattr(pm, 'fulfillment_lag_time', None)
         if lt is not None:
             kwargs['lag_time'] = int(lt)
-    if store_is_sears(store) and posted is not None and pm is not None:
+    if posted is not None and pm is not None and (store_is_sears(store) or store_is_kogan(store)):
         pct = rrp_discount_pct_for_pm(store, pm, price_by_vendor_id, price_fallback)
         rrp = compute_marketplace_rrp(posted, pct)
         if rrp is not None and rrp > posted:

@@ -107,6 +107,22 @@ class MarketplaceRrpTests(SimpleTestCase):
         self.assertEqual(kwargs, {'price': Decimal('99.00'), 'stock': 1})
         self.assertNotIn('rrp', kwargs)
 
+    def test_adapter_push_kwargs_adds_rrp_for_kogan(self):
+        store = _store('kogan')
+        pm = MagicMock()
+        pm.product_id = 1
+        pm.product.vendor_id = 'vid-1'
+        ps = MagicMock()
+        ps.mydeal_rrp_margin_percentage = Decimal('26')
+        kwargs = adapter_push_kwargs(
+            store,
+            pm,
+            74.0,
+            2,
+            price_by_vendor_id={'vid-1': ps},
+        )
+        self.assertEqual(kwargs['rrp'], Decimal('100.00'))
+
 
 class SearsXmlTests(SimpleTestCase):
     def test_pricing_xml_standard_and_sale(self):

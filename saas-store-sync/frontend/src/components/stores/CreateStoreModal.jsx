@@ -198,7 +198,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const isMydeal = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'mydeal';
     const isSears = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'sears';
     const isWalmart = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'walmart';
-    const showRrpDiscount = isMydeal || isSears;
+    const showRrpDiscount = isMydeal || isSears || isKogan;
     const credentialsLabel = isSears
         ? 'Sears credentials (JSON)'
         : isWalmart
@@ -972,7 +972,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                     <Input label="Purchase Tax (%)" type="number" step="0.01" min={0} value={allDirect ? 0 : vp.purchase_tax_percentage} disabled={allDirect} onChange={(e) => { const v = e.target.value; if (v === '') { updateVendorPrice(i, 'purchase_tax_percentage', ''); return; } const n = parseFloat(v); updateVendorPrice(i, 'purchase_tax_percentage', Number.isFinite(n) ? Math.max(0, n) : ''); }} />
                                                     <Input label="Marketplace Fees (%)" type="number" step="0.01" min={0} value={allDirect ? 0 : vp.marketplace_fees_percentage} disabled={allDirect} onChange={(e) => { const v = e.target.value; if (v === '') { updateVendorPrice(i, 'marketplace_fees_percentage', ''); return; } const n = parseFloat(v); updateVendorPrice(i, 'marketplace_fees_percentage', Number.isFinite(n) ? Math.max(0, n) : ''); }} />
                                                 </div>
-                                                {(isMydeal || isSears) && (
+                                                {showRrpDiscount && (
                                                     <Input
                                                         label="RRP discount (%)"
                                                         type="number"

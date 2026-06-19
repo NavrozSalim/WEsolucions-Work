@@ -52,6 +52,7 @@ class KoganSheetConfig:
     sku_col_name: str = "PRODUCT_SKU"
     stock_col_name: str = "STOCK"
     price_col_name: str = "kogan_first_price"
+    rrp_col_name: str = "rrp"
 
 
 class KoganAdapter(BaseStoreAdapter):
@@ -93,6 +94,10 @@ class KoganAdapter(BaseStoreAdapter):
                 getattr(self.store, "kogan_first_price_column", None) or "kogan_first_price"
             ).strip()
             or "kogan_first_price",
+            rrp_col_name=(
+                getattr(self.store, "kogan_rrp_column", None) or "rrp"
+            ).strip()
+            or "rrp",
         )
 
     def _get_service(self):
@@ -167,14 +172,15 @@ class KoganAdapter(BaseStoreAdapter):
             raise ValueError("Missing SKU for Kogan update.")
         price = kwargs.get("price")
         stock = kwargs.get("stock")
-        self.update_products_bulk([(sku, price, stock)])
+        rrp = kwargs.get("rrp")
+        self.update_products_bulk([(sku, price, stock, rrp)])
         return True
 
-    def update_products_bulk(self, items: list[tuple[str, float | None, int | None]]):
+    def update_products_bulk(self, items: list[tuple[str, float | None, int | None, float | None]]):
         """
         Bulk update many SKU rows in a single run.
 
-        items: list of (sku, price, stock)
+        items: list of (sku, price, stock, rrp) — rrp may be None.
         Returns: {'ok': set(sku), 'failed': [{'sku':..., 'error':...}, ...]}
         """
         if not items:
@@ -188,6 +194,7 @@ class KoganAdapter(BaseStoreAdapter):
         sku_idx = headers.index(cfg.sku_col_name)
         stock_idx = headers.index(cfg.stock_col_name)
         price_idx = headers.index(cfg.price_col_name)
+        rrp_idx = headers.index(cfg.rrp_col_name) if cfg.rrp_col_name in headers else None
 
         # Read all SKU values in the sheet once to build SKU -> row mapping
         sku_col_letter = _col_index_to_letter(sku_idx)
@@ -222,7 +229,11 @@ class KoganAdapter(BaseStoreAdapter):
                 }
             )
 
-        for sku, price, stock in items:
+        for item in items:
+            sku = item[0] if item else ''
+            price = item[1] if len(item) > 1 else None
+            stock = item[2] if len(item) > 2 else None
+            rrp = item[3] if len(item) > 3 else None
             s = _clean_sku(sku)
             if not s:
                 continue
@@ -238,6 +249,8 @@ class KoganAdapter(BaseStoreAdapter):
                     _add_cell_update(stock_idx, row_num, stock)
             if price is not None:
                 _add_cell_update(price_idx, row_num, float(price))
+            if rrp is not None and rrp_idx is not None:
+                _add_cell_update(rrp_idx, row_num, float(rrp))
             ok.add(s)
 
         if not updates:

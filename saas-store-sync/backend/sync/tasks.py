@@ -1076,7 +1076,22 @@ def run_store_update(self, store_id, source='beat'):
                 for err in (stats.get('errors') or [])[:50]:
                     _record_push_error(err.get('sku') or '', Exception(err.get('error') or 'Bulk push failed'))
             else:
-                payload = [(sku, price, stock) for (_pm, sku, price, stock) in bulk_queue]
+                payload = []
+                for pm, sku, price, stock in bulk_queue:
+                    kwargs = _adapter_push_kwargs(
+                        store,
+                        pm,
+                        price,
+                        int(stock or 0),
+                        price_by_vid,
+                        price_fb,
+                    )
+                    payload.append((
+                        sku,
+                        kwargs.get('price'),
+                        kwargs.get('stock', int(stock or 0)),
+                        kwargs.get('rrp'),
+                    ))
                 res = adapter.update_products_bulk(payload) or {}
                 ok_set = set(res.get('ok') or [])
                 failed_list = res.get('failed') or []
