@@ -67,8 +67,8 @@ def apply_no_vendor_price_fallback(
 
     pm.store_price = FALLBACK_LISTING_PRICE
     pm.store_stock = 0
-    pm.sync_status = 'scraped'
-    pm.failed_sync_count = 0
+    pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
+    pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
     pm.last_scrape_time = now
     pm.scrape_error = reason[:512]
     save_fields = [

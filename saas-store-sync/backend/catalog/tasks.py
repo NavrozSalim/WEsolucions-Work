@@ -912,7 +912,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                     price_by_vid=price_by_vid,
                     price_fb=price_fb,
                 )
-                succeeded += 1
+                failed += 1
                 last_progress_at = timezone.now()
                 continue
 
@@ -1483,7 +1483,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
                     price_by_vid=price_by_vid,
                     price_fb=price_fb,
                 )
-                succeeded += 1
+                failed += 1
                 last_progress_at = timezone.now()
                 continue
 

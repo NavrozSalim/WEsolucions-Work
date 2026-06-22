@@ -67,7 +67,7 @@ class FailProductMappingTests(SimpleTestCase):
 class ApplyNoVendorPriceFallbackTests(SimpleTestCase):
     def test_sets_fallback_price_and_zero_stock(self):
         pm = MagicMock()
-        pm.failed_sync_count = 2
+        pm.failed_sync_count = 0
         store = MagicMock()
         store.connection_status = 'connected'
 
@@ -76,8 +76,8 @@ class ApplyNoVendorPriceFallbackTests(SimpleTestCase):
 
         self.assertEqual(pm.store_price, FALLBACK_LISTING_PRICE)
         self.assertEqual(pm.store_stock, 0)
-        self.assertEqual(pm.sync_status, 'scraped')
-        self.assertEqual(pm.failed_sync_count, 0)
+        self.assertEqual(pm.sync_status, 'failed')
+        self.assertEqual(pm.failed_sync_count, 1)
         self.assertIn('no_price', pm.scrape_error)
         self.assertIn('489.99', pm.scrape_error)
         pm.save.assert_called_once()
