@@ -1617,6 +1617,140 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
                         status=ReverbUpdateLog.Status.FAILED,
                         error_message=(errors_by_sku.get(listing_id) or pm.scrape_error or 'marketplace_push_failed')[:500],
                     )
+        elif callable(getattr(adapter, 'update_products_bulk', None)):
+            bulk_queue = []
+            queued_pairs = []
+            queued_count = 0
+            for pm in qs.iterator(chunk_size=100):
+                _raise_if_push_aborted(store_id)
+                listing_id = _resolve_listing_id_for_pm(adapter, pm, store)
+                if not listing_id:
+                    skipped += 1
+                    ReverbUpdateLog.objects.create(
+                        product_mapping=pm,
+                        status=ReverbUpdateLog.Status.FAILED,
+                        error_message='No marketplace listing ID or resolvable SKU for push',
+                    )
+                    continue
+                bulk_queue.append((pm, listing_id, pm.store_price, int(pm.store_stock or 0)))
+                queued_pairs.append((pm, str(listing_id)))
+                queued_count += 1
+                now_mono = time.monotonic()
+                if (
+                    queued_count == 1
+                    or queued_count % PUSH_LISTINGS_PROGRESS_EVERY == 0
+                    or now_mono - last_progress_log_at >= PUSH_LISTINGS_PROGRESS_LOG_SEC
+                ):
+                    last_progress_log_at = now_mono
+                    append_catalog_log(
+                        store.id,
+                        f'Marketplace sync in progress: preparing bulk push — '
+                        f'{skipped + queued_count:,} of {total_to_push:,} queued '
+                        f'({skipped:,} skipped, no listing ID).',
+                        action_type='sync_progress',
+                        metadata={
+                            'processed': skipped + queued_count,
+                            'total': total_to_push,
+                            'pushed': 0,
+                            'failed': 0,
+                            'skipped_no_listing': skipped,
+                            'sync_step': 'queue_build',
+                        },
+                    )
+
+            _raise_if_push_aborted(store_id)
+
+            payload = []
+            for pm, sku, price, stock in bulk_queue:
+                kwargs = _adapter_push_kwargs(
+                    store,
+                    pm,
+                    price,
+                    int(stock or 0),
+                    price_by_vid,
+                    price_fb,
+                )
+                payload.append((
+                    sku,
+                    kwargs.get('price'),
+                    kwargs.get('stock', int(stock or 0)),
+                    kwargs.get('rrp'),
+                    kwargs.get('list_price'),
+                ))
+
+            if bulk_queue:
+                append_catalog_log(
+                    store.id,
+                    f'Marketplace sync in progress: pushing {len(bulk_queue):,} listing(s) to marketplace in bulk.',
+                    action_type='sync_progress',
+                    metadata={
+                        'processed': skipped + len(bulk_queue),
+                        'total': total_to_push,
+                        'pushed': 0,
+                        'failed': 0,
+                        'skipped_no_listing': skipped,
+                        'sync_step': 'bulk_push',
+                    },
+                )
+
+            try:
+                res = adapter.update_products_bulk(payload) or {}
+            except Exception as e:
+                logger.warning("Bulk manual push failed for store %s: %s", store_id, e)
+                err_msg = str(e)[:500]
+                for pm, _listing_id in queued_pairs:
+                    failed += 1
+                    ReverbUpdateLog.objects.create(
+                        product_mapping=pm,
+                        status=ReverbUpdateLog.Status.FAILED,
+                        error_message=err_msg,
+                    )
+            else:
+                ok_set = {str(s) for s in (res.get('ok') or set())}
+                failed_list = res.get('failed') or []
+                errors_by_sku = {
+                    str(it.get('sku') or ''): it.get('error') for it in failed_list
+                }
+                now_ok = timezone.now()
+                for pm, listing_id in queued_pairs:
+                    if listing_id in ok_set:
+                        succeeded += 1
+                        pm.sync_status = 'synced'
+                        pm.last_sync_time = now_ok
+                        pm.save(update_fields=['sync_status', 'last_sync_time'])
+                        ReverbUpdateLog.objects.create(
+                            product_mapping=pm,
+                            status=ReverbUpdateLog.Status.SUCCESS,
+                            pushed_price=pm.store_price,
+                            pushed_stock=pm.store_stock,
+                        )
+                    else:
+                        failed += 1
+                        ReverbUpdateLog.objects.create(
+                            product_mapping=pm,
+                            status=ReverbUpdateLog.Status.FAILED,
+                            error_message=(
+                                errors_by_sku.get(listing_id)
+                                or pm.scrape_error
+                                or 'marketplace_push_failed'
+                            )[:500],
+                        )
+
+            processed = succeeded + failed + skipped
+            append_catalog_log(
+                store.id,
+                f'Marketplace sync in progress: {processed:,} of {total_to_push:,} processed '
+                f'({succeeded:,} pushed, {failed:,} failed, {skipped:,} skipped).',
+                action_type='sync_progress',
+                metadata={
+                    'processed': processed,
+                    'total': total_to_push,
+                    'pushed': succeeded,
+                    'failed': failed,
+                    'skipped_no_listing': skipped,
+                    'sync_step': 'bulk_push',
+                },
+            )
         else:
             for pm in qs.iterator(chunk_size=100):
                 _raise_if_push_aborted(store_id)

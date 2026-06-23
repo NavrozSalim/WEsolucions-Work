@@ -211,3 +211,66 @@ class SearsReportWaitAbortTests(TestCase):
                 should_abort=should_abort,
             )
         self.assertTrue(cancelled['value'])
+
+
+@override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+class KoganManualBulkPushTests(TestCase):
+    def setUp(self):
+        self.mp, _ = Marketplace.objects.get_or_create(
+            code='kogan',
+            defaults={'name': 'Kogan'},
+        )
+        self.user = User.objects.create_user(
+            username='kogan_bulk_u',
+            email='kogan_bulk_u@example.com',
+            password='pass12345',
+        )
+        self.store = Store.objects.create(
+            user=self.user,
+            name='Kogan Bulk Store',
+            region='AU',
+            marketplace=self.mp,
+            connection_status='connected',
+            kogan_sheet_id='sheet-123',
+            kogan_tab_name='Sheet1',
+        )
+        self.vendor, _ = Vendor.objects.get_or_create(
+            code='kogan_bulk_vendor',
+            defaults={'name': 'Kogan Bulk Vendor'},
+        )
+        for idx, sku in enumerate(('KOG-SKU-1', 'KOG-SKU-2', 'KOG-SKU-3'), start=1):
+            product = Product.objects.create(
+                owner=self.user,
+                vendor=self.vendor,
+                vendor_sku=f'vendor-{idx}',
+                vendor_url=f'https://example.com/p{idx}',
+            )
+            ProductMapping.objects.create(
+                store=self.store,
+                product=product,
+                is_active=True,
+                sync_status='scraped',
+                store_price=10 + idx,
+                store_stock=idx,
+                marketplace_child_sku=sku,
+                marketplace_id=sku,
+            )
+
+    @patch('store_adapters.get_adapter')
+    def test_manual_sync_calls_bulk_once_not_per_row(self, get_adapter_mock):
+        adapter = MagicMock()
+        adapter.update_products_bulk.return_value = {
+            'ok': {'KOG-SKU-1', 'KOG-SKU-2', 'KOG-SKU-3'},
+            'failed': [],
+        }
+        get_adapter_mock.return_value = adapter
+
+        result = _execute_store_push_listings_only(str(self.store.id), disable_schedule=False)
+
+        self.assertEqual(result.get('pushed'), 3)
+        self.assertEqual(result.get('failed'), 0)
+        adapter.update_products_bulk.assert_called_once()
+        payload = adapter.update_products_bulk.call_args[0][0]
+        self.assertEqual(len(payload), 3)
+        skus = {row[0] for row in payload}
+        self.assertEqual(skus, {'KOG-SKU-1', 'KOG-SKU-2', 'KOG-SKU-3'})
