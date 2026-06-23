@@ -1339,8 +1339,8 @@ def _resolve_listing_id_for_pm(adapter, pm, store):
     return listing_id
 
 
-PUSH_LISTINGS_PROGRESS_EVERY = 50
-PUSH_LISTINGS_PROGRESS_LOG_SEC = 120
+PUSH_LISTINGS_PROGRESS_EVERY = 10
+PUSH_LISTINGS_PROGRESS_LOG_SEC = 20
 
 
 def _raise_if_push_aborted(store_id) -> None:
@@ -1470,7 +1470,8 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
                 queued_count += 1
                 now_mono = time.monotonic()
                 if (
-                    queued_count % PUSH_LISTINGS_PROGRESS_EVERY == 0
+                    queued_count == 1
+                    or queued_count % PUSH_LISTINGS_PROGRESS_EVERY == 0
                     or now_mono - last_progress_log_at >= PUSH_LISTINGS_PROGRESS_LOG_SEC
                 ):
                     last_progress_log_at = now_mono
@@ -1672,7 +1673,8 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
                 processed = succeeded + failed + skipped
                 now_mono = time.monotonic()
                 if (
-                    processed % PUSH_LISTINGS_PROGRESS_EVERY == 0
+                    processed == 1
+                    or processed % PUSH_LISTINGS_PROGRESS_EVERY == 0
                     or now_mono - last_progress_log_at >= PUSH_LISTINGS_PROGRESS_LOG_SEC
                 ):
                     last_progress_log_at = now_mono
@@ -1687,6 +1689,7 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
                             'pushed': succeeded,
                             'failed': failed,
                             'skipped_no_listing': skipped,
+                            'sync_step': 'bulk_push',
                         },
                     )
 
