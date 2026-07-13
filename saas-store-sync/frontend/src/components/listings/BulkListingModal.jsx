@@ -1,12 +1,20 @@
 import { useRef, useState } from 'react';
 import { Download, UploadCloud, X } from 'lucide-react';
 import Button from '../ui/Button';
+import Select from '../ui/Select';
 import { bulkUploadListings, downloadListingTemplate } from '../../services/listingService';
 
-/** Bulk-create managed store listings from a CSV/XLSX template. */
+const ACTION_OPTIONS = [
+    { value: 'create', label: 'Create — new listings' },
+    { value: 'mapped', label: 'Mapped — already on the store' },
+    { value: 'delete', label: 'Delete — SKU only' },
+];
+
+/** Bulk listing upload: one action per file (Create, Mapped, or Delete). */
 export default function BulkListingModal({ open, onClose, onImported, storeId }) {
     const fileRef = useRef(null);
     const [file, setFile] = useState(null);
+    const [action, setAction] = useState('create');
     const [uploading, setUploading] = useState(false);
     const [error, setError] = useState('');
     const [result, setResult] = useState(null);
@@ -15,6 +23,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId })
 
     const reset = () => {
         setFile(null);
+        setAction('create');
         setError('');
         setResult(null);
         if (fileRef.current) fileRef.current.value = '';
@@ -26,12 +35,12 @@ export default function BulkListingModal({ open, onClose, onImported, storeId })
     };
 
     const handleTemplate = () => {
-        downloadListingTemplate(storeId)
+        downloadListingTemplate(storeId, action)
             .then((res) => {
                 const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = 'listing_template.csv';
+                a.download = `listing_template_${action}.csv`;
                 a.click();
                 URL.revokeObjectURL(url);
             })
@@ -46,7 +55,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId })
         setUploading(true);
         setError('');
         setResult(null);
-        bulkUploadListings(storeId, file)
+        bulkUploadListings(storeId, file, action)
             .then((res) => {
                 setResult(res.data);
                 onImported?.(res.data);
@@ -58,6 +67,11 @@ export default function BulkListingModal({ open, onClose, onImported, storeId })
     };
 
     const invalidRows = (result?.rows || []).filter((r) => !r.valid);
+    const actionHelp = {
+        create: 'Each row creates a new listing. Duplicate SKUs are rejected.',
+        mapped: 'Each row maps an existing marketplace listing into the system.',
+        delete: 'Each row only needs SKU — removes the listing from the marketplace.',
+    };
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -75,9 +89,19 @@ export default function BulkListingModal({ open, onClose, onImported, storeId })
 
                 <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
                     <p className="text-sm text-slate-600 dark:text-slate-400">
-                        Download the template, fill one row per variant, then upload it. Valid rows are imported as
-                        created products (upserted by Variant Key); rows with errors are listed below so you can fix and re-upload.
+                        Choose one action for the whole file, download the matching template, fill rows, then upload.
+                        Rows with errors appear under the <strong>Errors</strong> filter on Created products.
                     </p>
+
+                    <div className="mt-4">
+                        <Select
+                            label="Action for this file"
+                            value={action}
+                            onChange={(e) => { setAction(e.target.value); setFile(null); if (fileRef.current) fileRef.current.value = ''; }}
+                            options={ACTION_OPTIONS}
+                        />
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{actionHelp[action]}</p>
+                    </div>
 
                     <div className="mt-4 flex flex-wrap items-center gap-2">
                         <Button variant="secondary" size="sm" onClick={handleTemplate}>
@@ -102,7 +126,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId })
                     {result && (
                         <div className="mt-4 space-y-3">
                             <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/20 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-300">
-                                Imported {result.imported} of {result.total_rows} row(s).
+                                Processed {result.imported} of {result.total_rows} row(s) ({result.action || action}).
                                 {invalidRows.length > 0 && ` ${invalidRows.length} row(s) had errors.`}
                             </div>
                             {invalidRows.length > 0 && (

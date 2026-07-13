@@ -7,6 +7,7 @@ import logging
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from stores.credentials import marketplace_kind
@@ -15,9 +16,56 @@ from . import csv_import
 from .errors import MarketplaceError
 from .lasoo import mapper, validator
 from .lasoo.client import LasooClient
-from .models import Environment, ListingStatus, StoreListing
+from .models import (
+    Environment,
+    ListingAction,
+    ListingStatus,
+    ListingUpload,
+    StoreListing,
+)
 
 logger = logging.getLogger("listings")
+
+# Listings in these statuses exist on the marketplace and need an API call to remove.
+ON_MARKETPLACE_STATUSES = (
+    ListingStatus.UPLOADED_STAGING,
+    ListingStatus.UPLOADED_PRODUCTION,
+)
+
+
+def record_activity(
+    user,
+    store,
+    *,
+    action: str,
+    source: str = ListingUpload.Source.SINGLE,
+    filename: str = "",
+    total: int = 1,
+    success: int = 1,
+    errors: int = 0,
+    rows=None,
+    message: str = "",
+) -> ListingUpload:
+    """Persist an Upload-history row for a file or single-listing change."""
+    if errors and success:
+        status = ListingUpload.Status.PARTIAL
+    elif errors:
+        status = ListingUpload.Status.FAILED
+    else:
+        status = ListingUpload.Status.COMPLETED
+    return ListingUpload.objects.create(
+        user=user,
+        store=store,
+        filename=filename,
+        source=source,
+        action=action,
+        status=status,
+        total_rows=total,
+        success_rows=success,
+        error_rows=errors,
+        rows_json=rows,
+        message=message,
+    )
 
 
 def _safe_decimal(value) -> Decimal:
@@ -47,6 +95,14 @@ def _apply_fields(listing: StoreListing, data: dict):
     listing.sale_price = _safe_decimal(data.get("sale_price"))
 
 
+def _uploaded_status(environment: str) -> str:
+    return (
+        ListingStatus.UPLOADED_PRODUCTION
+        if environment == Environment.PRODUCTION
+        else ListingStatus.UPLOADED_STAGING
+    )
+
+
 def _finalize_validation(listing: StoreListing, data: dict) -> list[str]:
     errors = validator.validate_listing(data)
     if errors:
@@ -60,13 +116,20 @@ def _finalize_validation(listing: StoreListing, data: dict) -> list[str]:
         listing.original_price_cents = mapper.dollars_to_cents(data.get("original_price"))
         listing.sale_price_cents = mapper.dollars_to_cents(data.get("sale_price"))
         listing.external_data_object_json = mapper.build_external_data_object(data)
-        listing.status = ListingStatus.READY
+        # Mapped listings already exist on the marketplace: valid ones go
+        # straight to the uploaded status so they show under Inventory management.
+        if listing.action == ListingAction.MAPPED:
+            listing.status = _uploaded_status(listing.environment)
+        else:
+            listing.status = ListingStatus.READY
     return errors
 
 
-def create(user, store, data: dict) -> StoreListing:
+def create(user, store, data: dict, action: str = ListingAction.CREATE) -> StoreListing:
+    if action not in (ListingAction.CREATE, ListingAction.MAPPED):
+        action = ListingAction.CREATE
     environment = store.lasoo_environment or Environment.STAGING
-    listing = StoreListing(user=user, store=store, environment=environment)
+    listing = StoreListing(user=user, store=store, environment=environment, action=action)
     _apply_fields(listing, data)
     _, variant_key = mapper.resolve_keys(data)
     if variant_key and StoreListing.objects.filter(
@@ -74,6 +137,7 @@ def create(user, store, data: dict) -> StoreListing:
     ).exists():
         raise MarketplaceError(
             f'A created product with variant key "{variant_key}" already exists for this store.'
+            + (' Use the Mapped action to update it.' if action == ListingAction.CREATE else '')
         )
     _finalize_validation(listing, data)
     listing.save()
@@ -85,6 +149,27 @@ def update(listing: StoreListing, data: dict) -> StoreListing:
     _finalize_validation(listing, data)
     listing.save()
     return listing
+
+
+def delete(user, store, listing: StoreListing) -> dict:
+    """Delete a listing locally; remove it from the marketplace first when it
+    exists there (uploaded or mapped)."""
+    on_marketplace = (
+        listing.status in ON_MARKETPLACE_STATUSES
+        or listing.action == ListingAction.MAPPED
+    )
+    if on_marketplace and marketplace_kind(store.marketplace) == "lasoo":
+        environment = listing.environment or store.lasoo_environment or Environment.STAGING
+        client = LasooClient(store, environment)
+        payload = mapper.build_bulk_delete_payload([listing.external_variant_key], client.auth_key)
+        result = client.send("bulk_delete", payload)
+        if not result.ok:
+            raise MarketplaceError(
+                result.message or "Could not delete the listing on the marketplace."
+            )
+    variant_key = listing.external_variant_key
+    listing.delete()
+    return {"ok": True, "variant_key": variant_key, "marketplace_deleted": on_marketplace}
 
 
 def _listing_to_data(listing: StoreListing) -> dict:
@@ -105,14 +190,111 @@ def _listing_to_data(listing: StoreListing) -> dict:
     }
 
 
-def bulk_import(user, store, filename: str, content: bytes) -> dict:
-    """Import listings from a CSV/XLSX template; upserts by variant key."""
+def _resolve_file_action(rows: list[dict], requested: str) -> str:
+    """A file must use exactly one action: from the Action column or the
+    action chosen in the UI. Mixed-action files are rejected."""
+    row_actions = {r.get("action") for r in rows if r.get("action")}
+    if len(row_actions) > 1:
+        raise MarketplaceError(
+            "Use one action per file. This file mixes: "
+            + ", ".join(sorted(row_actions)) + "."
+        )
+    action = next(iter(row_actions), "") or (requested or "").strip().lower()
+    if action not in (ListingAction.CREATE, ListingAction.MAPPED, ListingAction.DELETE):
+        action = ListingAction.CREATE
+    if requested and row_actions and action != requested.strip().lower():
+        raise MarketplaceError(
+            f'You selected the "{requested}" action but the file\'s Action column says "{action}". '
+            "Use one action per file."
+        )
+    return action
+
+
+def _bulk_delete(user, store, filename: str, rows: list[dict]) -> dict:
+    """Delete listings by SKU: remove from the marketplace (when there), then locally."""
+    preview, deleted = [], 0
+    to_delete, marketplace_keys = [], []
+    for row in rows:
+        sku = (row.get("sku") or "").strip()
+        row_result = {
+            "row_number": row.get("row_number"),
+            "sku": sku,
+            "variant_key": sku,
+            "errors": [],
+            "valid": True,
+            "imported": False,
+        }
+        if not sku:
+            row_result["errors"] = ["SKU is required to delete a listing."]
+            row_result["valid"] = False
+            preview.append(row_result)
+            continue
+        listing = (
+            StoreListing.objects.filter(store=store, user=user)
+            .filter(Q(sku=sku) | Q(external_variant_key=sku))
+            .first()
+        )
+        if not listing:
+            row_result["errors"] = [f'No listing found with SKU "{sku}".']
+            row_result["valid"] = False
+            preview.append(row_result)
+            continue
+        to_delete.append((listing, row_result))
+        if (
+            listing.status in ON_MARKETPLACE_STATUSES
+            or listing.action == ListingAction.MAPPED
+        ):
+            marketplace_keys.append(listing.external_variant_key)
+        preview.append(row_result)
+
+    # One marketplace call for every listing that actually exists there.
+    if marketplace_keys:
+        if marketplace_kind(store.marketplace) != "lasoo":
+            raise MarketplaceError(
+                "Deleting marketplace listings is currently only supported for Lasoo stores."
+            )
+        environment = store.lasoo_environment or Environment.STAGING
+        client = LasooClient(store, environment)
+        payload = mapper.build_bulk_delete_payload(marketplace_keys, client.auth_key)
+        result = client.send("bulk_delete", payload)
+        if not result.ok:
+            raise MarketplaceError(
+                result.message or "Could not delete the listings on the marketplace."
+            )
+
+    for listing, row_result in to_delete:
+        listing.delete()
+        row_result["imported"] = True
+        deleted += 1
+
+    error_rows = sum(1 for r in preview if not r["valid"])
+    record_activity(
+        user, store,
+        action=ListingAction.DELETE,
+        source=ListingUpload.Source.FILE,
+        filename=filename,
+        total=len(rows), success=deleted, errors=error_rows,
+        rows=preview,
+        message=f"Deleted {deleted} listing(s)." if deleted else "",
+    )
+    return {"total_rows": len(rows), "imported": deleted, "action": ListingAction.DELETE, "rows": preview}
+
+
+def bulk_import(user, store, filename: str, content: bytes, action: str = "") -> dict:
+    """Import listings from a CSV/XLSX template. One action per file:
+    Create (new listings), Mapped (already on the store), Delete (SKU only).
+    Invalid Create/Mapped rows are saved with validation_failed status so they
+    show under the Error filter on Created products."""
     rows = csv_import.parse_upload(filename, content)
     if not rows:
         raise MarketplaceError("No data rows found in the uploaded file.")
 
+    file_action = _resolve_file_action(rows, action)
+    if file_action == ListingAction.DELETE:
+        return _bulk_delete(user, store, filename, rows)
+
     environment = store.lasoo_environment or Environment.STAGING
-    preview, imported = [], 0
+    preview, imported, error_rows = [], 0, 0
     for row in rows:
         errors = validator.validate_listing(row)
         row_result = {
@@ -123,26 +305,55 @@ def bulk_import(user, store, filename: str, content: bytes) -> dict:
             "valid": not errors,
             "imported": False,
         }
-        if errors:
+
+        _, variant_key = mapper.resolve_keys(row)
+        if not variant_key:
+            # Nothing to upsert by; keep the row purely in the upload report.
+            error_rows += 1
             preview.append(row_result)
             continue
 
-        _, variant_key = mapper.resolve_keys(row)
-        listing, _ = StoreListing.objects.get_or_create(
-            user=user,
-            store=store,
+        existing = StoreListing.objects.filter(
+            store=store, external_variant_key=variant_key, environment=environment,
+        ).first()
+        if file_action == ListingAction.CREATE and existing and not errors:
+            row_result["valid"] = False
+            row_result["errors"] = [
+                f'A listing with variant key "{variant_key}" already exists. '
+                'Use the Mapped action to update it.'
+            ]
+            error_rows += 1
+            preview.append(row_result)
+            continue
+
+        listing = existing or StoreListing(
+            user=user, store=store,
             external_variant_key=variant_key,
+            external_product_key=variant_key,
             environment=environment,
-            defaults={"external_product_key": variant_key},
         )
+        listing.action = file_action
         _apply_fields(listing, row)
         _finalize_validation(listing, row)
         listing.save()
-        imported += 1
-        row_result["imported"] = True
+        if errors:
+            # Persisted with validation_failed status -> Error filter on Created products.
+            error_rows += 1
+        else:
+            imported += 1
+            row_result["imported"] = True
         preview.append(row_result)
 
-    return {"total_rows": len(rows), "imported": imported, "rows": preview}
+    record_activity(
+        user, store,
+        action=file_action,
+        source=ListingUpload.Source.FILE,
+        filename=filename,
+        total=len(rows), success=imported, errors=error_rows,
+        rows=preview,
+        message=f"Imported {imported} of {len(rows)} row(s).",
+    )
+    return {"total_rows": len(rows), "imported": imported, "action": file_action, "rows": preview}
 
 
 @transaction.atomic

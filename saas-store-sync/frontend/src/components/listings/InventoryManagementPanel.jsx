@@ -5,17 +5,13 @@ import { deleteListing, getListings, publishListings } from '../../services/list
 import ListingFormModal from './ListingFormModal';
 
 const STATUS_STYLES = {
-    ready: 'bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300',
-    validation_failed: 'bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300',
-    failed: 'bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300',
-    draft: 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300',
+    uploaded_staging: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300',
+    uploaded_production: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300',
 };
 
 const STATUS_LABELS = {
-    ready: 'Create',
-    validation_failed: 'Error',
-    failed: 'Push failed',
-    draft: 'Draft',
+    uploaded_staging: 'On Lasoo (staging)',
+    uploaded_production: 'On Lasoo (production)',
 };
 
 const ACTION_LABELS = {
@@ -23,32 +19,23 @@ const ACTION_LABELS = {
     mapped: 'Mapped',
 };
 
-const FILTER_OPTIONS = [
-    { id: 'all', label: 'All' },
-    { id: 'ready', label: 'Create status' },
-    { id: 'errors', label: 'Errors' },
-];
-
-/** Staging queue: new/mapped listings before or after publish attempt. */
-export default function CreatedProductsPanel({ storeId, reloadNonce = 0, onMessage }) {
+/** Live marketplace listings the user can edit inventory/price and re-publish. */
+export default function InventoryManagementPanel({ storeId, reloadNonce = 0, onMessage }) {
     const [listings, setListings] = useState([]);
     const [loading, setLoading] = useState(false);
     const [publishing, setPublishing] = useState(false);
     const [editListing, setEditListing] = useState(null);
     const [editOpen, setEditOpen] = useState(false);
-    const [filter, setFilter] = useState('all');
+    const [search, setSearch] = useState('');
 
     const load = useCallback(() => {
         if (!storeId) return;
         setLoading(true);
-        const params = { view: 'created' };
-        if (filter === 'ready') params.status = 'ready';
-        if (filter === 'errors') params.errors = '1';
-        getListings(storeId, params)
+        getListings(storeId, { view: 'inventory', search: search || undefined })
             .then((res) => setListings(Array.isArray(res.data) ? res.data : []))
-            .catch(() => onMessage?.('Failed to load created products.', 'error'))
+            .catch(() => onMessage?.('Failed to load inventory.', 'error'))
             .finally(() => setLoading(false));
-    }, [storeId, filter, onMessage]);
+    }, [storeId, search, onMessage]);
 
     useEffect(() => {
         load();
@@ -58,7 +45,7 @@ export default function CreatedProductsPanel({ storeId, reloadNonce = 0, onMessa
         setPublishing(true);
         publishListings(storeId, ids)
             .then((res) => {
-                onMessage?.(res.data?.message || 'Published to marketplace.', 'success');
+                onMessage?.(res.data?.message || 'Inventory updated on marketplace.', 'success');
                 load();
             })
             .catch((err) => {
@@ -69,43 +56,32 @@ export default function CreatedProductsPanel({ storeId, reloadNonce = 0, onMessa
     };
 
     const handleDelete = (listing) => {
-        if (!window.confirm(`Delete "${listing.external_variant_key}"?`)) return;
+        if (!window.confirm(`Remove "${listing.external_variant_key}" from the marketplace?`)) return;
         deleteListing(storeId, listing.id)
             .then(() => {
-                onMessage?.(`Deleted "${listing.external_variant_key}".`, 'success');
+                onMessage?.(`Removed "${listing.external_variant_key}".`, 'success');
                 load();
             })
             .catch((err) => onMessage?.(err.response?.data?.detail || 'Delete failed.', 'error'));
     };
 
-    const publishableCount = listings.filter((l) => l.status === 'ready' || l.status === 'failed').length;
-
     return (
         <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-700 px-4 py-3">
                 <div>
-                    <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Created products</h2>
+                    <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Inventory management</h2>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                        Listings from Create or Bulk upload. Fix errors, then publish to move them to Inventory management.
+                        Successfully created or mapped listings on the marketplace. Edit stock or price, then publish.
                     </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                    <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-600 p-0.5">
-                        {FILTER_OPTIONS.map((opt) => (
-                            <button
-                                key={opt.id}
-                                type="button"
-                                onClick={() => setFilter(opt.id)}
-                                className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
-                                    filter === opt.id
-                                        ? 'bg-accent-500 text-white'
-                                        : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
-                                }`}
-                            >
-                                {opt.label}
-                            </button>
-                        ))}
-                    </div>
+                    <input
+                        type="search"
+                        placeholder="Search SKU or title…"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm text-slate-900 dark:text-slate-100"
+                    />
                     <Button variant="secondary" size="sm" onClick={load} disabled={loading}>
                         <RefreshCw className={`mr-1.5 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
                         Refresh
@@ -114,20 +90,21 @@ export default function CreatedProductsPanel({ storeId, reloadNonce = 0, onMessa
                         variant="primary"
                         size="sm"
                         onClick={() => handlePublish()}
-                        disabled={publishing || publishableCount === 0}
+                        disabled={publishing || listings.length === 0}
                     >
                         <Send className="mr-1.5 h-4 w-4" />
-                        {publishing ? 'Publishing…' : `Publish all (${publishableCount})`}
+                        {publishing ? 'Publishing…' : `Publish all (${listings.length})`}
                     </Button>
                 </div>
             </div>
 
             <div className="overflow-x-auto">
                 {loading && listings.length === 0 ? (
-                    <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">Loading created products…</p>
+                    <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">Loading inventory…</p>
                 ) : listings.length === 0 ? (
                     <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">
-                        No created products yet. Use “Create Listing” or “Bulk Listing” in the toolbar above.
+                        No listings on the marketplace yet. Create or map listings, publish them from Created products,
+                        then manage inventory here.
                     </p>
                 ) : (
                     <table className="w-full text-left text-sm">
@@ -139,6 +116,7 @@ export default function CreatedProductsPanel({ storeId, reloadNonce = 0, onMessa
                                 <th className="px-4 py-2.5">Price</th>
                                 <th className="px-4 py-2.5">Stock</th>
                                 <th className="px-4 py-2.5">Status</th>
+                                <th className="px-4 py-2.5">Last push</th>
                                 <th className="px-4 py-2.5 text-right">Actions</th>
                             </tr>
                         </thead>
@@ -161,29 +139,27 @@ export default function CreatedProductsPanel({ storeId, reloadNonce = 0, onMessa
                                         {l.infinite_quantity ? '∞' : l.inventory}
                                     </td>
                                     <td className="px-4 py-2.5">
-                                        <span
-                                            className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[l.status] || STATUS_STYLES.draft}`}
-                                            title={Array.isArray(l.validation_errors_json) ? l.validation_errors_json.join(' ') : undefined}
-                                        >
+                                        <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[l.status] || ''}`}>
                                             {STATUS_LABELS[l.status] || l.status}
                                         </span>
                                     </td>
+                                    <td className="px-4 py-2.5 text-xs text-slate-500 dark:text-slate-400">
+                                        {l.last_uploaded_at ? new Date(l.last_uploaded_at).toLocaleString() : '—'}
+                                    </td>
                                     <td className="px-4 py-2.5">
                                         <div className="flex items-center justify-end gap-1">
-                                            {(l.status === 'ready' || l.status === 'failed') && (
-                                                <button
-                                                    type="button"
-                                                    title="Publish"
-                                                    className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
-                                                    onClick={() => handlePublish([l.id])}
-                                                    disabled={publishing}
-                                                >
-                                                    <Send className="h-4 w-4" />
-                                                </button>
-                                            )}
                                             <button
                                                 type="button"
-                                                title="Edit"
+                                                title="Publish changes"
+                                                className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                                                onClick={() => handlePublish([l.id])}
+                                                disabled={publishing}
+                                            >
+                                                <Send className="h-4 w-4" />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                title="Edit inventory"
                                                 className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
                                                 onClick={() => { setEditListing(l); setEditOpen(true); }}
                                             >
@@ -191,7 +167,7 @@ export default function CreatedProductsPanel({ storeId, reloadNonce = 0, onMessa
                                             </button>
                                             <button
                                                 type="button"
-                                                title="Delete"
+                                                title="Remove from marketplace"
                                                 className="rounded-md p-1.5 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20"
                                                 onClick={() => handleDelete(l)}
                                             >

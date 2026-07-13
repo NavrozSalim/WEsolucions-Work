@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import MarketplaceOrder, OrderShipment, StoreListing
+from .models import ListingUpload, MarketplaceOrder, OrderShipment, StoreListing
 
 
 class StoreListingSerializer(serializers.ModelSerializer):
@@ -11,16 +11,33 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'title', 'description', 'brand', 'category', 'sku', 'barcode',
             'image_urls', 'inventory', 'infinite_quantity',
             'original_price', 'sale_price',
-            'environment', 'status', 'validation_errors_json',
+            'environment', 'action', 'status', 'validation_errors_json',
             'marketplace_response_json', 'last_uploaded_at',
             'created_at', 'updated_at',
         ]
         read_only_fields = [
             'id', 'store', 'external_product_key', 'external_variant_key',
-            'environment', 'status', 'validation_errors_json',
+            'environment', 'action', 'status', 'validation_errors_json',
             'marketplace_response_json', 'last_uploaded_at',
             'created_at', 'updated_at',
         ]
+
+
+class ListingUploadSerializer(serializers.ModelSerializer):
+    user_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ListingUpload
+        fields = [
+            'id', 'store', 'filename', 'source', 'action', 'status',
+            'total_rows', 'success_rows', 'error_rows', 'rows_json',
+            'message', 'user_name', 'created_at',
+        ]
+
+    def get_user_name(self, obj):
+        user = obj.user
+        full = f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
+        return full or getattr(user, 'username', '') or getattr(user, 'email', '')
 
 
 class ListingInputSerializer(serializers.Serializer):
@@ -40,6 +57,9 @@ class ListingInputSerializer(serializers.Serializer):
     infinite_quantity = serializers.BooleanField(required=False, default=False)
     original_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=0)
     sale_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=0)
+    action = serializers.ChoiceField(
+        choices=['create', 'mapped'], required=False, default='create',
+    )
 
 
 class OrderShipmentSerializer(serializers.ModelSerializer):

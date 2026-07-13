@@ -83,10 +83,11 @@ class ValidatorTests(TestCase):
 
 class CsvImportTests(TestCase):
     def test_parse_csv_template(self):
-        content = csv_import.build_template_csv().encode()
+        content = csv_import.build_template_csv("create").encode()
         rows = csv_import.parse_upload("listings.csv", content)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["sku"], "TSHIRT-001-BLACK-M")
+        self.assertEqual(rows[0]["action"], "create")
         self.assertEqual(rows[0]["row_number"], 2)
         self.assertFalse(rows[0]["infinite_quantity"])
 
@@ -144,14 +145,35 @@ class ListingServiceTests(TestCase):
         listing = listing_service.update(listing, {**VALID_DATA, "sale_price": "99.99"})
         self.assertEqual(listing.status, ListingStatus.VALIDATION_FAILED)
 
-    def test_bulk_import_upserts_by_variant_key(self):
-        content = csv_import.build_template_csv().encode()
-        result = listing_service.bulk_import(self.user, self.store, "l.csv", content)
+    def test_bulk_import_create_action(self):
+        content = csv_import.build_template_csv("create").encode()
+        result = listing_service.bulk_import(self.user, self.store, "l.csv", content, action="create")
         self.assertEqual(result["imported"], 1)
-        # Re-import: same variant key updates in place, no duplicate row.
-        result2 = listing_service.bulk_import(self.user, self.store, "l.csv", content)
-        self.assertEqual(result2["imported"], 1)
+        self.assertEqual(result["action"], "create")
+        listing = StoreListing.objects.get(store=self.store)
+        self.assertEqual(listing.status, ListingStatus.READY)
+        self.assertEqual(listing.action, "create")
+
+    def test_bulk_import_rejects_duplicate_on_create(self):
+        content = csv_import.build_template_csv("create").encode()
+        listing_service.bulk_import(self.user, self.store, "l.csv", content, action="create")
+        result2 = listing_service.bulk_import(self.user, self.store, "l.csv", content, action="create")
+        self.assertEqual(result2["imported"], 0)
         self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 1)
+
+    def test_bulk_import_mapped_sets_uploaded_status(self):
+        content = csv_import.build_template_csv("mapped").encode()
+        result = listing_service.bulk_import(self.user, self.store, "m.csv", content, action="mapped")
+        self.assertEqual(result["imported"], 1)
+        listing = StoreListing.objects.get(store=self.store)
+        self.assertEqual(listing.action, "mapped")
+        self.assertEqual(listing.status, ListingStatus.UPLOADED_STAGING)
+
+    def test_delete_template_only_needs_sku(self):
+        content = csv_import.build_template_csv("delete").encode()
+        self.assertIn("SKU", content.decode())
+        rows = csv_import.parse_upload("d.csv", content)
+        self.assertEqual(rows[0]["action"], "delete")
 
     def test_publish_requires_lasoo_marketplace(self):
         reverb, _ = Marketplace.objects.get_or_create(code="reverb", defaults={"name": "Reverb"})

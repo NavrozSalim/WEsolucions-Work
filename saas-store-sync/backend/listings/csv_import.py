@@ -7,6 +7,7 @@ import io
 
 # Maps human template headers -> internal field names.
 COLUMN_MAP = {
+    "action": "action",
     "product key": "product_key",
     "variant key": "variant_key",
     "title": "title",
@@ -24,6 +25,7 @@ COLUMN_MAP = {
 }
 
 TEMPLATE_HEADERS = [
+    "Action",
     "Product Key",
     "Variant Key",
     "Title",
@@ -38,6 +40,11 @@ TEMPLATE_HEADERS = [
     "Original Price",
     "Sale Price",
 ]
+
+# Delete files only need the SKU (enough to remove the listing).
+DELETE_TEMPLATE_HEADERS = ["Action", "SKU"]
+
+VALID_ACTIONS = {"create", "mapped", "delete"}
 
 _TRUE_VALUES = {"true", "1", "yes", "y", "t"}
 
@@ -100,13 +107,25 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
         if not any(normalized.values()):
             continue
         normalized["infinite_quantity"] = _coerce_bool(normalized.get("infinite_quantity", ""))
+        action = str(normalized.get("action", "")).strip().lower()
+        normalized["action"] = action if action in VALID_ACTIONS else ""
         normalized["row_number"] = idx
         rows.append(normalized)
     return rows
 
 
-def build_template_csv() -> str:
+def build_template_csv(action: str = "create") -> str:
+    """Template CSV for the given action. Delete only needs Action + SKU."""
+    action = (action or "create").strip().lower()
+    if action == "delete":
+        out = io.StringIO()
+        writer = csv.DictWriter(out, fieldnames=DELETE_TEMPLATE_HEADERS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow({"Action": "Delete", "SKU": "TSHIRT-001-BLACK-M"})
+        return out.getvalue()
+
     sample = {
+        "Action": "Mapped" if action == "mapped" else "Create",
         "Product Key": "TSHIRT-001",
         "Variant Key": "TSHIRT-001-BLACK-M",
         "Title": "Black T-Shirt (M)",

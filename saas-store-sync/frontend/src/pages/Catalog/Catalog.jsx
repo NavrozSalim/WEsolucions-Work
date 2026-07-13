@@ -53,6 +53,7 @@ import MydealUploadModal from '../../components/catalog/MydealUploadModal';
 import ListingFormModal from '../../components/listings/ListingFormModal';
 import BulkListingModal from '../../components/listings/BulkListingModal';
 import CreatedProductsPanel from '../../components/listings/CreatedProductsPanel';
+import InventoryManagementPanel from '../../components/listings/InventoryManagementPanel';
 import Button from '../../components/ui/Button';
 import Select from '../../components/ui/Select';
 import ConfirmModal from '../../components/ui/ConfirmModal';
@@ -60,6 +61,7 @@ import PageHeader from '../../components/design/PageHeader';
 import EmptyState from '../../components/design/EmptyState';
 import Badge from '../../components/design/Badge';
 import UpdateWithFileModal from '../../components/catalog/UpdateWithFileModal';
+import { getListingUploads } from '../../services/listingService';
 import { useSidebarActivity } from '../../context/SidebarActivityContext';
 
 const syncStatusVariant = {
@@ -79,10 +81,12 @@ const syncStatusLabel = {
 const uploadStatusVariant = {
     synced: 'success', validated: 'success', pending: 'warning',
     processing: 'warning', partial: 'error', failed: 'error',
+    completed: 'success',
 };
 const uploadStatusLabel = {
     synced: 'Success', validated: 'Success', pending: 'Pending',
-    processing: 'Processing', partial: 'Failed', failed: 'Failed',
+    processing: 'Processing', partial: 'Partial', failed: 'Failed',
+    completed: 'Success',
 };
 
 function formatDate(iso) {
@@ -1147,9 +1151,14 @@ export default function Catalog() {
 
     const fetchUploadHistory = useCallback((storeId, signal) => {
         const id = ++uploadsFetchGenRef.current;
+        const storeData = storeList.find((s) => s.id === storeId);
+        const managed = storeData?.management_mode === 'full_store';
         setUploadsLoading(true);
         setUploadsError('');
-        getCatalogUploads(storeId, { signal })
+        const req = managed
+            ? getListingUploads(storeId)
+            : getCatalogUploads(storeId, { signal });
+        req
             .then((res) => {
                 if (id !== uploadsFetchGenRef.current) return;
                 setUploads(Array.isArray(res.data) ? res.data : []);
@@ -1164,7 +1173,7 @@ export default function Catalog() {
                 if (id !== uploadsFetchGenRef.current) return;
                 setUploadsLoading(false);
             });
-    }, []);
+    }, [storeList]);
 
     useEffect(() => {
         getMarketplaces()
@@ -2454,7 +2463,7 @@ export default function Catalog() {
                                             : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                                     }`}
                                 >
-                                    Products
+                                    {isManagedStore ? 'Inventory management' : 'Products'}
                                 </button>
                                 {isManagedStore && (
                                     <button
@@ -2540,7 +2549,7 @@ export default function Catalog() {
                                         )}
                                     </div>
                                 </>
-                            ) : (
+                            ) : !isManagedStore ? (
                                 <Button
                                     variant="primary"
                                     size="sm"
@@ -2550,7 +2559,7 @@ export default function Catalog() {
                                     <UploadCloud className="h-4 w-4 mr-1.5" />
                                     Upload Catalog
                                 </Button>
-                            )}
+                            ) : null}
                         </div>
                     </div>
                 </div>
@@ -2568,12 +2577,28 @@ export default function Catalog() {
                 />
             )}
 
+            {/* Inventory management (managed stores — replaces vendor Products tab) */}
+            {selectedStore && viewMode === 'products' && isManagedStore && (
+                <InventoryManagementPanel
+                    storeId={selectedStore}
+                    reloadNonce={createdReloadNonce}
+                    onMessage={(msg, variant) => {
+                        setMessage(msg);
+                        setFlowStatus(variant === 'error' ? 'failed' : 'success');
+                    }}
+                />
+            )}
+
             {/* Upload history view (when store selected) */}
             {selectedStore && viewMode === 'history' && (
                 <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden">
                     <div className="border-b border-slate-200 dark:border-slate-700 px-4 py-3">
                         <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Upload history</h2>
-                        <p className="text-xs text-slate-500 dark:text-slate-400">Files uploaded for this store; sync or scrape per row.</p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                            {isManagedStore
+                                ? 'Bulk listing files and single listing create/edit/delete/publish actions.'
+                                : 'Files uploaded for this store; sync or scrape per row.'}
+                        </p>
                     </div>
 
                     <div className="overflow-x-auto">
@@ -2636,19 +2661,72 @@ export default function Catalog() {
                             <EmptyState
                                 icon={FileText}
                                 title="No uploads yet"
-                                description="Upload a catalog file with Upload Catalog in the bar above, then Ready to Upload below when it appears."
+                                description={
+                                    isManagedStore
+                                        ? 'Use Bulk Listing or Create Listing in the toolbar above. All file and single-product changes appear here.'
+                                        : 'Upload a catalog file with Upload Catalog in the bar above, then Ready to Upload below when it appears.'
+                                }
                                 action={
-                                    <Button
-                                        variant="primary"
-                                        size="sm"
-                                        onClick={() => selectedStore && setUploadModalOpen(true)}
-                                        disabled={!selectedStore || uploading}
-                                    >
-                                        <UploadCloud className="h-4 w-4 mr-1.5" />
-                                        Upload Catalog
-                                    </Button>
+                                    isManagedStore ? (
+                                        <Button
+                                            variant="primary"
+                                            size="sm"
+                                            onClick={() => setBulkListingOpen(true)}
+                                            disabled={!selectedStore}
+                                        >
+                                            <Layers className="h-4 w-4 mr-1.5" />
+                                            Bulk Listing
+                                        </Button>
+                                    ) : (
+                                        <Button
+                                            variant="primary"
+                                            size="sm"
+                                            onClick={() => selectedStore && setUploadModalOpen(true)}
+                                            disabled={!selectedStore || uploading}
+                                        >
+                                            <UploadCloud className="h-4 w-4 mr-1.5" />
+                                            Upload Catalog
+                                        </Button>
+                                    )
                                 }
                             />
+                        ) : isManagedStore ? (
+                            <table className="table-base">
+                                <thead>
+                                    <tr>
+                                        <th className="whitespace-nowrap">Date</th>
+                                        <th className="whitespace-nowrap">User</th>
+                                        <th className="whitespace-nowrap">Source</th>
+                                        <th className="whitespace-nowrap">Action</th>
+                                        <th className="whitespace-nowrap">File</th>
+                                        <th className="text-right whitespace-nowrap">OK</th>
+                                        <th className="text-right whitespace-nowrap">Errors</th>
+                                        <th className="whitespace-nowrap">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {uploads.map((u) => (
+                                        <tr key={u.id}>
+                                            <td className="text-sm text-slate-600 dark:text-slate-400 whitespace-nowrap align-middle">
+                                                {formatDate(u.created_at)}
+                                            </td>
+                                            <td className="text-sm align-middle">{u.user_name || '—'}</td>
+                                            <td className="text-sm capitalize align-middle">{u.source || '—'}</td>
+                                            <td className="text-sm capitalize align-middle">{u.action || '—'}</td>
+                                            <td className="text-sm text-slate-600 dark:text-slate-400 align-middle max-w-[200px] truncate" title={u.filename}>
+                                                {u.filename || '—'}
+                                            </td>
+                                            <td className="text-right text-sm tabular-nums align-middle">{u.success_rows ?? '—'}</td>
+                                            <td className="text-right text-sm tabular-nums align-middle">{u.error_rows ?? '—'}</td>
+                                            <td className="align-middle whitespace-nowrap">
+                                                <Badge variant={uploadStatusVariant[u.status] || 'warning'}>
+                                                    {uploadStatusLabel[u.status] || u.status}
+                                                </Badge>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
                         ) : (
                             <table className="table-base">
                                 <thead>
@@ -2740,8 +2818,8 @@ export default function Catalog() {
                 </div>
             )}
 
-            {/* Server-side Celery catalog scrape (Amazon, eBay, …) — when active, poll keeps rows fresh */}
-            {selectedStore && viewMode === 'products' && (
+            {/* Server-side Celery catalog scrape (Amazon, eBay, …) — inventory-only stores */}
+            {selectedStore && viewMode === 'products' && !isManagedStore && (
                 <ServerCeleryScrapeStrip
                     state={scrapeProgress?.server_celery_scrape}
                     progressStoreId={scrapeProgress?.store_id}
@@ -2749,7 +2827,7 @@ export default function Catalog() {
                 />
             )}
 
-            {selectedStore && viewMode === 'products' && (
+            {selectedStore && viewMode === 'products' && !isManagedStore && (
                 <ManualSyncProgressStrip
                     state={pushListingsProgress}
                     progressStoreId={pushListingsProgress?.store_id}
@@ -2762,7 +2840,7 @@ export default function Catalog() {
             {/* Desktop-runner ingest status strips — one per vendor the store
                 uses (HEB, Costco, …). Backend exposes them uniformly under
                 ``scrapeProgress.vendors``. */}
-            {selectedStore && viewMode === 'products'
+            {selectedStore && viewMode === 'products' && !isManagedStore
                 && getVendorSummaries(scrapeProgress).map((vendor) => (
                     <VendorProgressStrip
                         key={vendor.code}
@@ -2773,8 +2851,8 @@ export default function Catalog() {
                     />
                 ))}
 
-            {/* Product table (when View Products clicked) */}
-            {selectedStore && viewMode === 'products' && (
+            {/* Product table (inventory-only stores) */}
+            {selectedStore && viewMode === 'products' && !isManagedStore && (
                 <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden">
                     <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between border-b border-slate-200 dark:border-slate-700">
                         <div>
@@ -3295,6 +3373,7 @@ export default function Catalog() {
                     setMessage(`Listing "${listing?.external_variant_key || ''}" saved. Publish it from Created products.`);
                     setFlowStatus('success');
                     setCreatedReloadNonce((n) => n + 1);
+                    setUploadsReloadNonce((n) => n + 1);
                     setViewMode('created');
                 }}
             />
@@ -3303,7 +3382,11 @@ export default function Catalog() {
                 open={bulkListingOpen && !!selectedStore}
                 storeId={selectedStore}
                 onClose={() => setBulkListingOpen(false)}
-                onImported={() => setCreatedReloadNonce((n) => n + 1)}
+                onImported={() => {
+                    setCreatedReloadNonce((n) => n + 1);
+                    setUploadsReloadNonce((n) => n + 1);
+                    setViewMode('created');
+                }}
             />
 
             <UpdateWithFileModal

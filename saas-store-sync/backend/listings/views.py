@@ -12,14 +12,26 @@ from stores.models import Store
 
 from . import csv_import, listing_service, order_service, shipping_service
 from .errors import MarketplaceError
-from .models import MarketplaceOrder, StoreListing
+from .models import ListingAction, ListingStatus, ListingUpload, MarketplaceOrder, StoreListing
 from .serializers import (
     ListingInputSerializer,
+    ListingUploadSerializer,
     MarketplaceOrderSerializer,
     StoreListingSerializer,
 )
 
 logger = logging.getLogger("listings")
+
+INVENTORY_STATUSES = (
+    ListingStatus.UPLOADED_STAGING,
+    ListingStatus.UPLOADED_PRODUCTION,
+)
+CREATED_STATUSES = (
+    ListingStatus.DRAFT,
+    ListingStatus.VALIDATION_FAILED,
+    ListingStatus.READY,
+    ListingStatus.FAILED,
+)
 
 
 def _get_store(request, store_pk) -> Store:
@@ -30,33 +42,67 @@ def _get_listing(request, store, pk) -> StoreListing:
     return get_object_or_404(StoreListing, pk=pk, store=store, user=request.user)
 
 
+def _filter_listings(qs, request):
+    view = (request.query_params.get('view') or '').strip().lower()
+    if view == 'inventory':
+        qs = qs.filter(status__in=INVENTORY_STATUSES)
+    elif view == 'created':
+        qs = qs.filter(status__in=CREATED_STATUSES)
+
+    status_filter = request.query_params.get('status')
+    if status_filter:
+        qs = qs.filter(status=status_filter)
+
+    if request.query_params.get('errors') in ('1', 'true', 'yes'):
+        qs = qs.filter(status=ListingStatus.VALIDATION_FAILED)
+
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        from django.db.models import Q
+        qs = qs.filter(
+            Q(sku__icontains=search)
+            | Q(title__icontains=search)
+            | Q(external_variant_key__icontains=search)
+        )
+    return qs
+
+
 class StoreListingListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk):
         store = _get_store(request, store_pk)
         qs = StoreListing.objects.filter(store=store, user=request.user)
-        status_filter = request.query_params.get('status')
-        if status_filter:
-            qs = qs.filter(status=status_filter)
-        search = (request.query_params.get('search') or '').strip()
-        if search:
-            from django.db.models import Q
-            qs = qs.filter(
-                Q(sku__icontains=search)
-                | Q(title__icontains=search)
-                | Q(external_variant_key__icontains=search)
-            )
+        qs = _filter_listings(qs, request)
         return Response(StoreListingSerializer(qs, many=True).data)
 
     def post(self, request, store_pk):
         store = _get_store(request, store_pk)
         ser = ListingInputSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
+        data = ser.validated_data
+        action = data.pop('action', ListingAction.CREATE)
         try:
-            listing = listing_service.create(request.user, store, ser.validated_data)
+            listing = listing_service.create(request.user, store, data, action=action)
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        has_errors = listing.status == ListingStatus.VALIDATION_FAILED
+        listing_service.record_activity(
+            request.user, store,
+            action=action,
+            source=ListingUpload.Source.SINGLE,
+            filename='Single listing',
+            total=1,
+            success=0 if has_errors else 1,
+            errors=1 if has_errors else 0,
+            rows=[{
+                'sku': listing.sku,
+                'variant_key': listing.external_variant_key,
+                'valid': not has_errors,
+                'errors': listing.validation_errors_json or [],
+            }],
+            message=f'Created listing {listing.external_variant_key}.',
+        )
         return Response(StoreListingSerializer(listing).data, status=status.HTTP_201_CREATED)
 
 
@@ -73,13 +119,38 @@ class StoreListingDetailView(APIView):
         listing = _get_listing(request, store, pk)
         ser = ListingInputSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        listing = listing_service.update(listing, ser.validated_data)
+        data = ser.validated_data
+        data.pop('action', None)
+        listing = listing_service.update(listing, data)
+        has_errors = listing.status == ListingStatus.VALIDATION_FAILED
+        listing_service.record_activity(
+            request.user, store,
+            action=listing.action,
+            source=ListingUpload.Source.SINGLE,
+            filename=f'Edit {listing.external_variant_key}',
+            total=1,
+            success=0 if has_errors else 1,
+            errors=1 if has_errors else 0,
+            message=f'Updated listing {listing.external_variant_key}.',
+        )
         return Response(StoreListingSerializer(listing).data)
 
     def delete(self, request, store_pk, pk):
         store = _get_store(request, store_pk)
         listing = _get_listing(request, store, pk)
-        listing.delete()
+        variant_key = listing.external_variant_key
+        try:
+            listing_service.delete(request.user, store, listing)
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        listing_service.record_activity(
+            request.user, store,
+            action=ListingAction.DELETE,
+            source=ListingUpload.Source.SINGLE,
+            filename=f'Delete {variant_key}',
+            total=1, success=1, errors=0,
+            message=f'Deleted listing {variant_key}.',
+        )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -88,8 +159,10 @@ class StoreListingTemplateView(APIView):
 
     def get(self, request, store_pk):
         _get_store(request, store_pk)
-        resp = HttpResponse(csv_import.build_template_csv(), content_type='text/csv')
-        resp['Content-Disposition'] = 'attachment; filename="listing_template.csv"'
+        action = (request.query_params.get('action') or 'create').strip().lower()
+        resp = HttpResponse(csv_import.build_template_csv(action), content_type='text/csv')
+        name = f'listing_template_{action}.csv'
+        resp['Content-Disposition'] = f'attachment; filename="{name}"'
         return resp
 
 
@@ -102,13 +175,23 @@ class StoreListingBulkUploadView(APIView):
         if not upload:
             return Response({'detail': 'Attach a CSV or XLSX file as "file".'},
                             status=status.HTTP_400_BAD_REQUEST)
+        action = (request.data.get('action') or request.POST.get('action') or '').strip().lower()
         try:
             result = listing_service.bulk_import(
-                request.user, store, upload.name, upload.read(),
+                request.user, store, upload.name, upload.read(), action=action,
             )
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result)
+
+
+class StoreListingUploadHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        qs = ListingUpload.objects.filter(store=store, user=request.user)
+        return Response(ListingUploadSerializer(qs, many=True).data)
 
 
 class StoreListingPublishView(APIView):
@@ -122,6 +205,16 @@ class StoreListingPublishView(APIView):
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY
+        if result.get('published'):
+            listing_service.record_activity(
+                request.user, store,
+                action=ListingAction.CREATE,
+                source=ListingUpload.Source.SINGLE,
+                filename='Publish to marketplace',
+                total=result.get('published', 0),
+                success=result.get('published', 0),
+                message=result.get('message') or '',
+            )
         return Response(result, status=code)
 
 

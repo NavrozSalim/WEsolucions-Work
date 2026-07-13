@@ -100,3 +100,16 @@ def build_bulk_upsert_payload(
         },
         auth=auth_key,
     )
+
+
+def build_bulk_delete_payload(variant_keys: list[str], auth_key: str) -> dict:
+    """Assemble the Variants_BulkDelete payload (keys mirror BulkUpsert)."""
+    return build_payload(
+        "bulk_delete",
+        data={
+            "variants": [
+                {"externalVariantKey": key} for key in variant_keys if key
+            ],
+        },
+        auth=auth_key,
+    )

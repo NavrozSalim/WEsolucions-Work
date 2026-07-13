@@ -1,6 +1,6 @@
 import api from './api';
 
-// --- Created products (managed store listings) ---
+// --- Managed store listings ---
 export const getListings = (storeId, params) => api.get(`/stores/${storeId}/listings/`, { params });
 export const createListing = (storeId, data) => api.post(`/stores/${storeId}/listings/`, data);
 export const getListing = (storeId, listingId) => api.get(`/stores/${storeId}/listings/${listingId}/`);
@@ -11,16 +11,23 @@ export const deleteListing = (storeId, listingId) => api.delete(`/stores/${store
 export const publishListings = (storeId, listingIds = null) =>
     api.post(`/stores/${storeId}/listings/publish/`, listingIds ? { listing_ids: listingIds } : {});
 
-export const bulkUploadListings = (storeId, file) => {
+export const bulkUploadListings = (storeId, file, action = 'create') => {
     const fd = new FormData();
     fd.append('file', file);
+    fd.append('action', action);
     return api.post(`/stores/${storeId}/listings/bulk-upload/`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
     });
 };
 
-export const downloadListingTemplate = (storeId) =>
-    api.get(`/stores/${storeId}/listings/template/`, { responseType: 'blob' });
+export const downloadListingTemplate = (storeId, action = 'create') =>
+    api.get(`/stores/${storeId}/listings/template/`, {
+        params: { action },
+        responseType: 'blob',
+    });
+
+export const getListingUploads = (storeId) =>
+    api.get(`/stores/${storeId}/listings/uploads/`);
 
 // --- Orders ---
 export const getOrders = (storeId, { refresh = false } = {}) =>

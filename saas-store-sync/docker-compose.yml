@@ -36,6 +36,12 @@ services:
       - catalog_media_dev:/app/media
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     environment:
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       - REDIS_URL=redis://redis:6379/0
@@ -87,6 +93,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      backend:
+        condition: service_healthy
 
   celery_beat:
     build:
@@ -99,11 +107,16 @@ services:
     environment:
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET=${JWT_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - DEBUG=${DEBUG:-True}
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_started
+      backend:
+        condition: service_healthy
 
   frontend:
     build:
@@ -117,7 +130,8 @@ services:
     environment:
       - VITE_API_URL=${VITE_API_URL:-http://localhost:8000/api/v1}
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   pgdata_dev:

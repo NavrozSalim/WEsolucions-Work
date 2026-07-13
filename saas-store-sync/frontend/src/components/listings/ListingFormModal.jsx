@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
+import Select from '../ui/Select';
 import { createListing, updateListing } from '../../services/listingService';
 
 const EMPTY_FORM = {
+    action: 'create',
     product_key: '',
     variant_key: '',
     title: '',
@@ -128,6 +130,19 @@ export default function ListingFormModal({ open, onClose, onSaved, storeId, list
                         {error && (
                             <div className="mb-4 rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-900/20 px-4 py-3 text-sm text-rose-700 dark:text-rose-300">
                                 {error}
+                            </div>
+                        )}
+                        {!isEdit && (
+                            <div className="mb-4">
+                                <Select
+                                    label="Action"
+                                    value={form.action}
+                                    onChange={set('action')}
+                                    options={[
+                                        { value: 'create', label: 'Create — new listing' },
+                                        { value: 'mapped', label: 'Mapped — already on the store' },
+                                    ]}
+                                />
                             </div>
                         )}
                         {isEdit && Array.isArray(listing?.validation_errors_json) && listing.validation_errors_json.length > 0 && (

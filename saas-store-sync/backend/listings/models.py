@@ -27,6 +27,14 @@ class ListingStatus(models.TextChoices):
     FAILED = 'failed', 'Upload Failed'
 
 
+class ListingAction(models.TextChoices):
+    """How a listing entered the system: newly created here, mapped to an
+    existing marketplace listing, or (for uploads) a delete request."""
+    CREATE = 'create', 'Create'
+    MAPPED = 'mapped', 'Mapped'
+    DELETE = 'delete', 'Delete'
+
+
 class OrderStatus(models.TextChoices):
     NEW = 'new', 'New'
     PAID = 'paid', 'Paid'
@@ -61,6 +69,7 @@ class StoreListing(models.Model):
     external_data_object_json = models.TextField(blank=True, default='')
 
     environment = models.CharField(max_length=20, choices=Environment.choices, default=Environment.STAGING)
+    action = models.CharField(max_length=20, choices=ListingAction.choices, default=ListingAction.CREATE)
     status = models.CharField(max_length=30, choices=ListingStatus.choices, default=ListingStatus.DRAFT, db_index=True)
     validation_errors_json = models.JSONField(null=True, blank=True)
     marketplace_request_json = models.JSONField(null=True, blank=True)
@@ -83,6 +92,43 @@ class StoreListing(models.Model):
 
     def __str__(self):
         return f"{self.external_variant_key} - {self.title}"
+
+
+class ListingUpload(models.Model):
+    """History record for managed-store listing changes: bulk template files
+    and single-listing actions (create/edit/delete). Powers Upload history."""
+
+    class Source(models.TextChoices):
+        FILE = 'file', 'File'
+        SINGLE = 'single', 'Single'
+
+    class Status(models.TextChoices):
+        COMPLETED = 'completed', 'Completed'
+        PARTIAL = 'partial', 'Partial'
+        FAILED = 'failed', 'Failed'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='listing_uploads')
+    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='listing_uploads', db_index=True)
+
+    filename = models.CharField(max_length=500, blank=True, default='')
+    source = models.CharField(max_length=20, choices=Source.choices, default=Source.FILE)
+    action = models.CharField(max_length=20, choices=ListingAction.choices, default=ListingAction.CREATE)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.COMPLETED)
+    total_rows = models.IntegerField(default=0)
+    success_rows = models.IntegerField(default=0)
+    error_rows = models.IntegerField(default=0)
+    rows_json = models.JSONField(null=True, blank=True)  # per-row results incl. errors
+    message = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'listings_listingupload'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.action} {self.filename or self.source} ({self.store_id})"
 
 
 class MarketplaceOrder(models.Model):
