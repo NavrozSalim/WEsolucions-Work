@@ -73,6 +73,7 @@ class OrderShipmentSerializer(serializers.ModelSerializer):
 
 class MarketplaceOrderSerializer(serializers.ModelSerializer):
     shipments = OrderShipmentSerializer(many=True, read_only=True)
+    details = serializers.SerializerMethodField()
 
     class Meta:
         model = MarketplaceOrder
@@ -80,5 +81,15 @@ class MarketplaceOrderSerializer(serializers.ModelSerializer):
             'id', 'store', 'external_order_key', 'invoice_number',
             'customer_info_json', 'line_items_json',
             'status', 'shipping_status', 'total_amount_cents',
-            'environment', 'shipments', 'created_at', 'updated_at',
+            'environment', 'shipments', 'raw_response_json',
+            'details', 'created_at', 'updated_at',
         ]
+
+    def get_details(self, obj):
+        from .order_service import build_order_details
+        return build_order_details(
+            obj.raw_response_json,
+            customer_info=obj.customer_info_json,
+            line_items=obj.line_items_json,
+            total_cents=obj.total_amount_cents,
+        )
