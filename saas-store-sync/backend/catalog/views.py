@@ -132,6 +132,7 @@ class CatalogStoresView(APIView):
                 'marketplace_id': str(s.marketplace_id) if s.marketplace_id else None,
                 'marketplace_name': s.marketplace.name if s.marketplace else None,
                 'marketplace_code': (s.marketplace.code or '').strip() if s.marketplace else None,
+                'management_mode': s.management_mode,
                 'product_count': s.product_count,
                 'schedule_active': sch.is_active if sch else None,
                 'has_fixed_tier': s.id in fixed_tier_store_ids,

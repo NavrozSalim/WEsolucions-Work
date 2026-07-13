@@ -13,12 +13,39 @@ class Store(models.Model):
         ('connected', 'Connected'),
         ('error', 'Error'),
     ]
+    MANAGEMENT_MODE_CHOICES = [
+        ('inventory_only', 'Inventory only'),
+        ('full_store', 'Managed store'),
+    ]
+    LASOO_ENVIRONMENT_CHOICES = [
+        ('staging', 'Staging'),
+        ('production', 'Production'),
+    ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='stores')
     name = models.CharField(max_length=255)
     region = models.CharField(max_length=10, choices=[('USA', 'USA'), ('AU', 'Australia')])
+    management_mode = models.CharField(
+        max_length=20,
+        choices=MANAGEMENT_MODE_CHOICES,
+        default='inventory_only',
+        db_index=True,
+        help_text=(
+            'full_store = we manage listings, orders and shipping on the marketplace; '
+            'inventory_only = we only sync price/stock for listings created elsewhere.'
+        ),
+    )
     api_token = EncryptedTextField(help_text="Encrypted at rest; set ENCRYPTION_KEY in production")
+    # --- Lasoo (managed stores) ---
+    lasoo_environment = models.CharField(
+        max_length=20, choices=LASOO_ENVIRONMENT_CHOICES, default='staging', blank=True,
+        help_text='Which Lasoo environment listing pushes / order pulls use by default.',
+    )
+    lasoo_staging_base_url = models.URLField(max_length=500, blank=True, default='')
+    lasoo_production_base_url = models.URLField(max_length=500, blank=True, default='')
+    lasoo_staging_auth_key = EncryptedTextField(null=True, blank=True)
+    lasoo_production_auth_key = EncryptedTextField(null=True, blank=True)
     # --- Kogan via Google Sheets ---
     # Users upload a Google Service Account JSON key; we use it to update a specific spreadsheet tab.
     kogan_service_account_json = EncryptedTextField(null=True, blank=True)

@@ -19,6 +19,8 @@ import {
     AlertTriangle,
     FileDown,
     ScrollText,
+    Plus,
+    Layers,
 } from 'lucide-react';
 import { getMarketplaces, deleteStore } from '../../services/storeService';
 import {
@@ -48,6 +50,9 @@ import {
     downloadMydealTemplates,
 } from '../../services/catalogService';
 import MydealUploadModal from '../../components/catalog/MydealUploadModal';
+import ListingFormModal from '../../components/listings/ListingFormModal';
+import BulkListingModal from '../../components/listings/BulkListingModal';
+import CreatedProductsPanel from '../../components/listings/CreatedProductsPanel';
 import Button from '../../components/ui/Button';
 import Select from '../../components/ui/Select';
 import ConfirmModal from '../../components/ui/ConfirmModal';
@@ -1014,6 +1019,9 @@ export default function Catalog() {
     const [flowStatus, setFlowStatus] = useState(''); // file uploaded | ready to sync | syncing | success | failed
     const [message, setMessage] = useState('');
     const [uploadModalOpen, setUploadModalOpen] = useState(false);
+    const [createListingOpen, setCreateListingOpen] = useState(false);
+    const [bulkListingOpen, setBulkListingOpen] = useState(false);
+    const [createdReloadNonce, setCreatedReloadNonce] = useState(0);
     const [mydealUploadOpen, setMydealUploadOpen] = useState(false);
     const [mydealDownloadOpen, setMydealDownloadOpen] = useState(false);
     const [mydealDownloading, setMydealDownloading] = useState(false);
@@ -1081,6 +1089,9 @@ export default function Catalog() {
 
     const selectedStoreData = storeList.find((s) => s.id === selectedStore);
     const isMydealStore = isMydealMarketplace(selectedStoreData);
+    // Managed (full_store) stores get Create Listing / Bulk Listing and a
+    // "Created products" view alongside the regular vendor catalog flow.
+    const isManagedStore = selectedStoreData?.management_mode === 'full_store';
     // Only show Pack QTY / Prep Fees / Shipping Fees columns when the store
     // has at least one ``margin_type='fixed'`` tier configured. The backend
     // (CatalogStoresView) exposes this via ``has_fixed_tier`` so we don't
@@ -2445,6 +2456,19 @@ export default function Catalog() {
                                 >
                                     Products
                                 </button>
+                                {isManagedStore && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setViewMode('created')}
+                                        className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                                            viewMode === 'created'
+                                                ? 'bg-accent-500 text-white shadow-sm'
+                                                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
+                                        }`}
+                                    >
+                                        Created products
+                                    </button>
+                                )}
                                 <button
                                     type="button"
                                     onClick={() => setViewMode('logs')}
@@ -2457,6 +2481,26 @@ export default function Catalog() {
                                     Logs
                                 </button>
                             </div>
+                            {isManagedStore && (
+                                <>
+                                    <Button
+                                        variant="primary"
+                                        size="sm"
+                                        onClick={() => setCreateListingOpen(true)}
+                                    >
+                                        <Plus className="h-4 w-4 mr-1.5" />
+                                        Create Listing
+                                    </Button>
+                                    <Button
+                                        variant="secondary"
+                                        size="sm"
+                                        onClick={() => setBulkListingOpen(true)}
+                                    >
+                                        <Layers className="h-4 w-4 mr-1.5" />
+                                        Bulk Listing
+                                    </Button>
+                                </>
+                            )}
                             {isMydealStore ? (
                                 <>
                                     <Button
@@ -2510,6 +2554,18 @@ export default function Catalog() {
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* Created products view (managed stores) */}
+            {selectedStore && viewMode === 'created' && (
+                <CreatedProductsPanel
+                    storeId={selectedStore}
+                    reloadNonce={createdReloadNonce}
+                    onMessage={(msg, variant) => {
+                        setMessage(msg);
+                        setFlowStatus(variant === 'error' ? 'failed' : 'success');
+                    }}
+                />
             )}
 
             {/* Upload history view (when store selected) */}
@@ -3229,6 +3285,25 @@ export default function Catalog() {
                 onComplete={() => {
                     getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
                 }}
+            />
+
+            <ListingFormModal
+                open={createListingOpen && !!selectedStore}
+                storeId={selectedStore}
+                onClose={() => setCreateListingOpen(false)}
+                onSaved={(listing) => {
+                    setMessage(`Listing "${listing?.external_variant_key || ''}" saved. Publish it from Created products.`);
+                    setFlowStatus('success');
+                    setCreatedReloadNonce((n) => n + 1);
+                    setViewMode('created');
+                }}
+            />
+
+            <BulkListingModal
+                open={bulkListingOpen && !!selectedStore}
+                storeId={selectedStore}
+                onClose={() => setBulkListingOpen(false)}
+                onImported={() => setCreatedReloadNonce((n) => n + 1)}
             />
 
             <UpdateWithFileModal

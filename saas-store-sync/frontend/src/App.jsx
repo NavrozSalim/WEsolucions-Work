@@ -11,6 +11,7 @@ import Dashboard from './pages/Dashboard/Dashboard';
 import StoreSettings from './pages/StoreSettings/StoreSettings';
 
 const Catalog = lazy(() => import('./pages/Catalog/Catalog'));
+const Orders = lazy(() => import('./pages/Orders/Orders'));
 
 function App() {
     return (
@@ -32,6 +33,14 @@ function App() {
                                     element={
                                         <Suspense fallback={<div className="p-8 text-slate-600 dark:text-slate-400">Loading catalog…</div>}>
                                             <Catalog />
+                                        </Suspense>
+                                    }
+                                />
+                                <Route
+                                    path="/orders"
+                                    element={
+                                        <Suspense fallback={<div className="p-8 text-slate-600 dark:text-slate-400">Loading orders…</div>}>
+                                            <Orders />
                                         </Suspense>
                                     }
                                 />

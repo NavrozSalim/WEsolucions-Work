@@ -116,6 +116,7 @@ INSTALLED_APPS = [
     'vendor',
     'products',
     'catalog',
+    'listings',
     'sync',
     'analytics',
     'audit',

@@ -14,6 +14,7 @@ urlpatterns = [
     path('api/v1/', include('marketplace.urls')),
     path('api/v1/', include('vendor.urls')),
     path('api/v1/', include('catalog.urls')),
+    path('api/v1/', include('listings.urls')),
     path('api/v1/', include('sync.urls')),
     path('api/v1/', include('analytics.urls')),
 ]

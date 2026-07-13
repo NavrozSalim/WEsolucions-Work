@@ -6,6 +6,7 @@ import { ThemeContext } from '../context/ThemeContext';
 import {
     LayoutDashboard,
     Package,
+    ShoppingCart,
     LogOut,
     Menu,
     X,
@@ -23,6 +24,7 @@ const navItems = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard },
     { path: '/store-settings', label: 'Stores', icon: Store },
     { path: '/catalog', label: 'Catalog', icon: Package },
+    { path: '/orders', label: 'Orders', icon: ShoppingCart },
 ];
 
 function DashboardLayoutInner() {

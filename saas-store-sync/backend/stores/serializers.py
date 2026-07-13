@@ -88,10 +88,12 @@ class StoreSerializer(serializers.ModelSerializer):
     class Meta:
         model = Store
         fields = [
-            'id', 'name', 'region', 'api_token', 'marketplace', 'marketplace_id', 'marketplace_name',
+            'id', 'name', 'region', 'management_mode', 'api_token', 'marketplace', 'marketplace_id', 'marketplace_name',
             'kogan_service_account_json', 'kogan_sheet_id', 'kogan_tab_name',
             'kogan_sku_column', 'kogan_stock_column', 'kogan_price_column', 'kogan_rrp_column', 'kogan_first_price_column',
             'mydeal_setup_method',
+            'lasoo_environment', 'lasoo_staging_base_url', 'lasoo_production_base_url',
+            'lasoo_staging_auth_key', 'lasoo_production_auth_key',
             'connection_status', 'last_validated_at',
             'is_active', 'created_at', 'updated_at',
             'vendor_price_settings', 'vendor_inventory_settings',
@@ -102,6 +104,8 @@ class StoreSerializer(serializers.ModelSerializer):
             # Non-Kogan marketplaces are validated explicitly in create().
             'api_token': {'write_only': True, 'required': False, 'allow_blank': True},
             'kogan_service_account_json': {'write_only': True},
+            'lasoo_staging_auth_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'lasoo_production_auth_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'marketplace': {'allow_null': True},
             'connection_status': {'read_only': True},
             'last_validated_at': {'read_only': True},
@@ -146,7 +150,25 @@ class StoreSerializer(serializers.ModelSerializer):
 
         is_kogan = bool(mkt and (str(mkt.code or '').strip().lower() == 'kogan' or str(mkt.name or '').strip().lower() == 'kogan'))
         is_mydeal = bool(mkt and (str(mkt.code or '').strip().lower() == 'mydeal' or str(mkt.name or '').strip().lower() == 'mydeal'))
+        is_lasoo = bool(mkt and (str(mkt.code or '').strip().lower() == 'lasoo' or str(mkt.name or '').strip().lower() == 'lasoo'))
         is_structured = bool(mkt and requires_structured_credentials(mkt))
+        management_mode = (req.get('management_mode') or validated_data.get('management_mode') or 'inventory_only').strip()
+        if management_mode not in ('inventory_only', 'full_store'):
+            raise ValidationError({'management_mode': 'Management mode must be inventory_only or full_store.'})
+        validated_data['management_mode'] = management_mode
+        if management_mode == 'full_store':
+            from stores.credentials import marketplace_kind
+            kind = marketplace_kind(mkt)
+            if kind not in ('reverb', 'lasoo'):
+                raise ValidationError({
+                    'marketplace': 'Managed stores are only available for Reverb and Lasoo right now.',
+                })
+        if is_lasoo:
+            # Lasoo uses per-environment AuthKeys, not Store.api_token.
+            staging_key = (req.get('lasoo_staging_auth_key') or '').strip()
+            if not staging_key:
+                raise ValidationError({'lasoo_staging_auth_key': 'Lasoo staging AuthKey is required.'})
+            validated_data.setdefault('api_token', '')
         if is_mydeal:
             method = (req.get('mydeal_setup_method') or 'upload').strip()
             if method not in ('upload', 'api'):
@@ -165,7 +187,7 @@ class StoreSerializer(serializers.ModelSerializer):
             has_json = bool((req.get('kogan_service_account_json') or '').strip() or (validated_data.get('kogan_service_account_json') or '').strip())
             if not has_json and not (req.get('api_token') or '').strip():
                 raise ValidationError({'kogan_service_account_json': 'Upload service account JSON for Kogan (or paste it into API token).'})
-        elif is_mydeal:
+        elif is_mydeal or is_lasoo:
             pass
         else:
             token_raw = (req.get('api_token') or '').strip()
@@ -185,6 +207,7 @@ class StoreSerializer(serializers.ModelSerializer):
             if k in (
                 'name',
                 'region',
+                'management_mode',
                 'api_token',
                 'marketplace',
                 'is_active',
@@ -198,6 +221,12 @@ class StoreSerializer(serializers.ModelSerializer):
                 'kogan_rrp_column',
                 'kogan_first_price_column',
                 'mydeal_setup_method',
+                # Lasoo (managed stores)
+                'lasoo_environment',
+                'lasoo_staging_base_url',
+                'lasoo_production_base_url',
+                'lasoo_staging_auth_key',
+                'lasoo_production_auth_key',
             )
         }
         if store_data.get('name'):
@@ -238,6 +267,7 @@ class StoreSerializer(serializers.ModelSerializer):
             if attr in (
                 'name',
                 'region',
+                'management_mode',
                 'api_token',
                 'marketplace',
                 'is_active',
@@ -251,7 +281,16 @@ class StoreSerializer(serializers.ModelSerializer):
                 'kogan_rrp_column',
                 'kogan_first_price_column',
                 'mydeal_setup_method',
+                # Lasoo (managed stores)
+                'lasoo_environment',
+                'lasoo_staging_base_url',
+                'lasoo_production_base_url',
+                'lasoo_staging_auth_key',
+                'lasoo_production_auth_key',
             ):
+                if attr in ('lasoo_staging_auth_key', 'lasoo_production_auth_key') and not (value or '').strip():
+                    # Blank key in a PATCH means "keep the existing key".
+                    continue
                 setattr(instance, attr, value)
         marketplace_id = req.get('marketplace_id') or req.get('marketplace')
         if marketplace_id is not None:

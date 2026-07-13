@@ -35,6 +35,11 @@ const FREQUENCY_OPTIONS = [
 
 const DEFAULT_TZ = { USA: 'America/New_York', AU: 'Australia/Sydney' };
 
+// Marketplaces where we can create listings + manage orders (managed store mode).
+const FULL_STORE_MARKETPLACES = ['reverb', 'lasoo'];
+const LASOO_DEFAULT_STAGING_URL = 'https://stage.api.lasoo.com.au';
+const LASOO_DEFAULT_PRODUCTION_URL = 'https://api.lasoo.com.au';
+
 function frequencyToCrontab(freq, hour, minute) {
     const h = parseInt(hour, 10) || 0;
     const m = parseInt(minute, 10) || 0;
@@ -65,6 +70,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const [createdStoreId, setCreatedStoreId] = useState(null);
     const [form, setForm] = useState({
         name: '',
+        management_mode: 'inventory_only', // 'inventory_only' | 'full_store'
         marketplace_id: '',
         api_token: '',
         kogan_auth_method: 'json', // 'json' (supported) | 'token' (placeholder)
@@ -72,6 +78,11 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         kogan_tab_name: '',
         kogan_service_account_json: '',
         mydeal_setup_method: 'upload',
+        lasoo_environment: 'staging',
+        lasoo_staging_base_url: LASOO_DEFAULT_STAGING_URL,
+        lasoo_staging_auth_key: '',
+        lasoo_production_base_url: LASOO_DEFAULT_PRODUCTION_URL,
+        lasoo_production_auth_key: '',
         region: 'USA',
         vendor_price_settings: [],
         vendor_inventory_settings: [],
@@ -90,12 +101,18 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             const region = copyFromStore?.region || 'USA';
             setForm({
                 name: copyFromStore ? `${copyFromStore.name} (Copy)` : '',
+                management_mode: copyFromStore?.management_mode || 'inventory_only',
                 marketplace_id: copyFromStore?.marketplace_id || copyFromStore?.marketplace || '',
                 api_token: '',
                 kogan_auth_method: 'json',
                 kogan_sheet_id: '',
                 kogan_tab_name: '',
                 kogan_service_account_json: '',
+                lasoo_environment: 'staging',
+                lasoo_staging_base_url: LASOO_DEFAULT_STAGING_URL,
+                lasoo_staging_auth_key: '',
+                lasoo_production_base_url: LASOO_DEFAULT_PRODUCTION_URL,
+                lasoo_production_auth_key: '',
                 region,
                 vendor_price_settings: [],
                 vendor_inventory_settings: [],
@@ -193,11 +210,17 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     };
 
     const regionTimezones = TIMEZONE_OPTIONS[form.region] || TIMEZONE_OPTIONS.USA;
+    const isFullStore = form.management_mode === 'full_store';
+    const marketplaceCode = (m) => (m?.code || m?.name || '').toString().trim().toLowerCase();
+    const availableMarketplaces = isFullStore
+        ? marketplaces.filter((m) => FULL_STORE_MARKETPLACES.includes(marketplaceCode(m)))
+        : marketplaces;
     const selectedMarketplace = marketplaces.find((m) => String(m.id) === String(form.marketplace_id));
     const isKogan = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'kogan';
     const isMydeal = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'mydeal';
     const isSears = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'sears';
     const isWalmart = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'walmart';
+    const isLasoo = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'lasoo';
     const showRrpDiscount = isMydeal || isSears || isKogan;
     const credentialsLabel = isSears
         ? 'Sears credentials (JSON)'
@@ -337,6 +360,14 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         const errs = [];
         if (!form.name?.trim()) errs.push('Store name is required');
         if (!form.marketplace_id) errs.push('Marketplace is required');
+        if (isFullStore && selectedMarketplace && !FULL_STORE_MARKETPLACES.includes(marketplaceCode(selectedMarketplace))) {
+            errs.push('Managed stores are only available for Reverb and Lasoo right now');
+        }
+        if (isLasoo) {
+            if (!form.lasoo_staging_auth_key?.trim()) errs.push('Lasoo staging AuthKey is required');
+            if (!form.lasoo_staging_base_url?.trim()) errs.push('Lasoo staging base URL is required');
+            return errs;
+        }
         if (isKogan) {
             if (koganAuth === 'json') {
                 if (!form.kogan_sheet_id?.trim()) errs.push('Spreadsheet ID is required');
@@ -372,7 +403,11 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     };
     const validateStep2 = () => {
         const errs = [];
-        if (!(form.vendor_price_settings || []).some((vp) => vp.vendor_id)) errs.push('Add at least one vendor with price settings');
+        const hasVendors = (form.vendor_price_settings || []).some((vp) => vp.vendor_id);
+        // Managed Lasoo stores create listings with their own prices, so vendor
+        // pricing is optional there; every other store needs at least one vendor.
+        if (!hasVendors && isLasoo && isFullStore) return errs;
+        if (!hasVendors) errs.push('Add at least one vendor with price settings');
         (form.vendor_price_settings || []).forEach((vp) => {
             if (!vp.vendor_id) return;
             const allDirect = (vp.range_margins || []).length > 0 && (vp.range_margins || []).every((r) => r.margin_type === 'direct');
@@ -390,9 +425,19 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     };
     const validateStep3 = () => {
         const errs = [];
-        if (!(form.vendor_inventory_settings || []).some((vi) => vi.vendor_id)) errs.push('Add at least one vendor with inventory ranges');
+        const hasVendors = (form.vendor_inventory_settings || []).some((vi) => vi.vendor_id);
+        if (!hasVendors && isLasoo && isFullStore) return errs;
+        if (!hasVendors) errs.push('Add at least one vendor with inventory ranges');
         return errs;
     };
+
+    const buildLasooPayload = () => ({
+        lasoo_environment: form.lasoo_environment || 'staging',
+        lasoo_staging_base_url: form.lasoo_staging_base_url?.trim() || LASOO_DEFAULT_STAGING_URL,
+        lasoo_staging_auth_key: form.lasoo_staging_auth_key?.trim(),
+        lasoo_production_base_url: form.lasoo_production_base_url?.trim() || '',
+        lasoo_production_auth_key: form.lasoo_production_auth_key?.trim() || '',
+    });
 
     const buildSettingsPayload = () => ({
         vendor_price_settings: (form.vendor_price_settings || []).map((vp) => {
@@ -477,6 +522,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             setError('');
             const payload = {
                 name: form.name.trim(),
+                management_mode: form.management_mode,
                 marketplace_id: form.marketplace_id,
                 ...(isKogan && koganAuth === 'json'
                     ? {
@@ -488,6 +534,8 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                         ? { api_token: form.api_token }
                     : isMydeal
                         ? { mydeal_setup_method: mydealSetup }
+                    : isLasoo
+                        ? buildLasooPayload()
                     : { api_token: form.api_token }),
                 region: form.region,
                 sync_schedule: buildSchedulePayload(),
@@ -560,6 +608,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         setError('');
         const payload = {
             name: form.name.trim(),
+            management_mode: form.management_mode,
             marketplace_id: form.marketplace_id,
             ...(isKogan && koganAuth === 'json'
                 ? {
@@ -571,6 +620,8 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     ? { api_token: form.api_token }
                 : isMydeal
                     ? { mydeal_setup_method: mydealSetup }
+                : isLasoo
+                    ? buildLasooPayload()
                 : { api_token: form.api_token }),
             region: form.region,
             ...buildSettingsPayload(),
@@ -676,6 +727,52 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                         {(step === 1 || isDuplicate) && (
                             <div className="space-y-5">
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    {!isDuplicate && (
+                                        <div className="sm:col-span-2">
+                                            <p className="mb-2 text-sm font-medium text-slate-700 dark:text-slate-300">
+                                                How will this store be managed?
+                                            </p>
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                                {[
+                                                    {
+                                                        value: 'full_store',
+                                                        title: 'Managed store',
+                                                        desc: 'Create listings from here, push them to the marketplace, and manage orders & shipping. (Reverb, Lasoo)',
+                                                    },
+                                                    {
+                                                        value: 'inventory_only',
+                                                        title: 'Inventory only',
+                                                        desc: 'Listings already exist on the marketplace — we only sync price and stock from your vendors.',
+                                                    },
+                                                ].map((opt) => (
+                                                    <button
+                                                        key={opt.value}
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setForm((f) => {
+                                                                const next = { ...f, management_mode: opt.value };
+                                                                if (opt.value === 'full_store') {
+                                                                    const sel = marketplaces.find((m) => String(m.id) === String(f.marketplace_id));
+                                                                    if (sel && !FULL_STORE_MARKETPLACES.includes(marketplaceCode(sel))) {
+                                                                        next.marketplace_id = '';
+                                                                    }
+                                                                }
+                                                                return next;
+                                                            });
+                                                        }}
+                                                        className={`rounded-lg border p-3 text-left transition ${
+                                                            form.management_mode === opt.value
+                                                                ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/20 ring-1 ring-accent-500'
+                                                                : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
+                                                        }`}
+                                                    >
+                                                        <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">{opt.title}</p>
+                                                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{opt.desc}</p>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
                                     <div className="sm:col-span-2">
                                         <Input label="Store Name" placeholder={isMydeal ? 'e.g. TFS or P&P' : 'e.g. My Reverb Store'} value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} required />
                                     </div>
@@ -692,13 +789,63 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                             }}
                                             options={[
                                                 { value: '', label: 'Select marketplace' },
-                                                ...([...marketplaces].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map((m) => ({ value: m.id, label: m.name }))),
+                                                ...([...availableMarketplaces].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map((m) => ({ value: m.id, label: m.name }))),
                                             ]}
                                             required
                                         />
+                                        {isFullStore && (
+                                            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                                Managed store mode currently supports Reverb and Lasoo.
+                                            </p>
+                                        )}
                                     </div>
                                     <div className="sm:col-span-2">
-                                        {isMydeal ? (
+                                        {isLasoo ? (
+                                            <div className="space-y-3 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
+                                                <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">Lasoo connection</p>
+                                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                                    <Input
+                                                        label="Staging base URL"
+                                                        value={form.lasoo_staging_base_url}
+                                                        onChange={(e) => setForm((f) => ({ ...f, lasoo_staging_base_url: e.target.value }))}
+                                                        required
+                                                    />
+                                                    <Input
+                                                        label="Staging AuthKey"
+                                                        type="password"
+                                                        placeholder="Provided by Lasoo"
+                                                        value={form.lasoo_staging_auth_key}
+                                                        onChange={(e) => setForm((f) => ({ ...f, lasoo_staging_auth_key: e.target.value }))}
+                                                        required
+                                                    />
+                                                    <Input
+                                                        label="Production base URL (optional)"
+                                                        value={form.lasoo_production_base_url}
+                                                        onChange={(e) => setForm((f) => ({ ...f, lasoo_production_base_url: e.target.value }))}
+                                                    />
+                                                    <Input
+                                                        label="Production AuthKey (optional)"
+                                                        type="password"
+                                                        placeholder="Add later once staging is verified"
+                                                        value={form.lasoo_production_auth_key}
+                                                        onChange={(e) => setForm((f) => ({ ...f, lasoo_production_auth_key: e.target.value }))}
+                                                    />
+                                                </div>
+                                                <Select
+                                                    label="Active environment"
+                                                    value={form.lasoo_environment}
+                                                    onChange={(e) => setForm((f) => ({ ...f, lasoo_environment: e.target.value }))}
+                                                    options={[
+                                                        { value: 'staging', label: 'Staging (test first)' },
+                                                        { value: 'production', label: 'Production' },
+                                                    ]}
+                                                />
+                                                <p className="text-xs text-slate-500 dark:text-slate-400">
+                                                    Listings you create are pushed to the active environment; orders are pulled from it too.
+                                                    Start with staging, then switch to production once Lasoo approves your feed.
+                                                </p>
+                                            </div>
+                                        ) : isMydeal ? (
                                             <MydealSetupFields
                                                 setupMethod={mydealSetup}
                                                 onSetupMethodChange={(v) => setForm((f) => ({ ...f, mydeal_setup_method: v }))}
