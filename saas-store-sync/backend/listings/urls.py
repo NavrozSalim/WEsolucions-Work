@@ -7,10 +7,15 @@ from .views import (
     StoreListingPublishView,
     StoreListingTemplateView,
     StoreListingUploadHistoryView,
+    StoreOrderCancelReasonsView,
+    StoreOrderCancelView,
     StoreOrderShippingCompleteView,
     StoreOrderShippingView,
     StoreOrdersView,
     StoreOrderTestView,
+    StoreTicketReplyView,
+    StoreTicketsView,
+    StoreTicketTestView,
 )
 
 urlpatterns = [
@@ -22,6 +27,11 @@ urlpatterns = [
     path('stores/<uuid:store_pk>/listings/<uuid:pk>/', StoreListingDetailView.as_view(), name='store-listing-detail'),
     path('stores/<uuid:store_pk>/orders/', StoreOrdersView.as_view(), name='store-orders'),
     path('stores/<uuid:store_pk>/orders/test/', StoreOrderTestView.as_view(), name='store-orders-test'),
+    path('stores/<uuid:store_pk>/orders/cancel-reasons/', StoreOrderCancelReasonsView.as_view(), name='store-order-cancel-reasons'),
     path('stores/<uuid:store_pk>/orders/<uuid:pk>/shipping/', StoreOrderShippingView.as_view(), name='store-order-shipping'),
     path('stores/<uuid:store_pk>/orders/<uuid:pk>/shipping/complete/', StoreOrderShippingCompleteView.as_view(), name='store-order-shipping-complete'),
+    path('stores/<uuid:store_pk>/orders/<uuid:pk>/cancel/', StoreOrderCancelView.as_view(), name='store-order-cancel'),
+    path('stores/<uuid:store_pk>/tickets/', StoreTicketsView.as_view(), name='store-tickets'),
+    path('stores/<uuid:store_pk>/tickets/test/', StoreTicketTestView.as_view(), name='store-tickets-test'),
+    path('stores/<uuid:store_pk>/tickets/<uuid:pk>/reply/', StoreTicketReplyView.as_view(), name='store-ticket-reply'),
 ]

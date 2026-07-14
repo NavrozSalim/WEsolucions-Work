@@ -85,6 +85,7 @@ def _apply_fields(listing: StoreListing, data: dict):
     listing.category = (data.get("category") or "").strip()
     listing.sku = (data.get("sku") or "").strip()
     listing.barcode = (data.get("barcode") or "").strip()
+    listing.vendor_url = (data.get("vendor_url") or "").strip()[:1000]
     listing.image_urls = mapper.normalize_image_urls(data.get("image_urls"))
     listing.infinite_quantity = bool(data.get("infinite_quantity"))
     try:
@@ -182,6 +183,7 @@ def _listing_to_data(listing: StoreListing) -> dict:
         "category": listing.category,
         "sku": listing.sku,
         "barcode": listing.barcode,
+        "vendor_url": listing.vendor_url,
         "image_urls": listing.image_urls,
         "inventory": listing.inventory,
         "infinite_quantity": listing.infinite_quantity,

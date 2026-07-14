@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import ListingUpload, MarketplaceOrder, OrderShipment, StoreListing
+from .models import ListingUpload, MarketplaceOrder, OrderShipment, StoreListing, SupportTicket, TicketMessage
 
 
 class StoreListingSerializer(serializers.ModelSerializer):
@@ -9,7 +9,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'store', 'external_product_key', 'external_variant_key',
             'title', 'description', 'brand', 'category', 'sku', 'barcode',
-            'image_urls', 'inventory', 'infinite_quantity',
+            'vendor_url', 'image_urls', 'inventory', 'infinite_quantity',
             'original_price', 'sale_price',
             'environment', 'action', 'status', 'validation_errors_json',
             'marketplace_response_json', 'last_uploaded_at',
@@ -52,6 +52,7 @@ class ListingInputSerializer(serializers.Serializer):
     category = serializers.CharField(required=False, allow_blank=True, default='')
     sku = serializers.CharField(required=False, allow_blank=True, default='')
     barcode = serializers.CharField(required=False, allow_blank=True, default='')
+    vendor_url = serializers.CharField(required=False, allow_blank=True, default='', max_length=1000)
     image_urls = serializers.CharField(required=False, allow_blank=True, default='')
     inventory = serializers.IntegerField(required=False, default=0)
     infinite_quantity = serializers.BooleanField(required=False, default=False)
@@ -86,10 +87,36 @@ class MarketplaceOrderSerializer(serializers.ModelSerializer):
         ]
 
     def get_details(self, obj):
-        from .order_service import build_order_details
-        return build_order_details(
+        from .order_service import build_order_details, enrich_order_line_items
+
+        details = build_order_details(
             obj.raw_response_json,
             customer_info=obj.customer_info_json,
             line_items=obj.line_items_json,
             total_cents=obj.total_amount_cents,
         )
+        return enrich_order_line_items(details, obj.store)
+
+
+class TicketMessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TicketMessage
+        fields = [
+            'id', 'external_message_key', 'direction', 'body',
+            'sender_name', 'sender_type', 'delivered_to_marketplace',
+            'sent_at', 'created_at',
+        ]
+
+
+class SupportTicketSerializer(serializers.ModelSerializer):
+    messages = TicketMessageSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = SupportTicket
+        fields = [
+            'id', 'store', 'external_ticket_key', 'subject',
+            'customer_name', 'customer_email', 'related_order_key',
+            'status', 'unread_count', 'last_message_at',
+            'last_customer_message_at', 'environment',
+            'messages', 'created_at', 'updated_at',
+        ]

@@ -7,6 +7,7 @@ import { getMarketplaces, getVendors, updateStore } from '../../services/storeSe
 import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
 import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
+import LasooConnectionFields from './LasooConnectionFields';
 
 const LASOO_DEFAULT_STAGING_URL = 'https://stage.api.lasoo.com.au';
 const LASOO_DEFAULT_PRODUCTION_URL = 'https://api.lasoo.com.au';
@@ -408,9 +409,13 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
         const errs = [];
         if (!form.name?.trim()) errs.push('Store name is required');
         if (isLasoo) {
-            if (!form.lasoo_staging_base_url?.trim()) errs.push('Lasoo staging base URL is required');
-            if (form.lasoo_environment === 'production' && !form.lasoo_production_base_url?.trim() && !(store?.lasoo_production_base_url || '').trim()) {
-                errs.push('Lasoo production base URL is required when production is active');
+            const env = form.lasoo_environment || 'staging';
+            if (env === 'production') {
+                if (!form.lasoo_production_base_url?.trim() && !(store?.lasoo_production_base_url || '').trim()) {
+                    errs.push('Lasoo production base URL is required when production is active');
+                }
+            } else if (!form.lasoo_staging_base_url?.trim()) {
+                errs.push('Lasoo staging base URL is required');
             }
         }
         return errs;
@@ -564,48 +569,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                 </div>
                                 <div className="sm:col-span-2">
                                     {isLasoo ? (
-                                        <div className="space-y-3 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
-                                            <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">Lasoo connection</p>
-                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                                <Input
-                                                    label="Staging base URL"
-                                                    value={form.lasoo_staging_base_url}
-                                                    onChange={(e) => setForm((f) => ({ ...f, lasoo_staging_base_url: e.target.value }))}
-                                                    required
-                                                />
-                                                <Input
-                                                    label="Staging AuthKey"
-                                                    type="password"
-                                                    placeholder="Leave blank to keep current"
-                                                    value={form.lasoo_staging_auth_key}
-                                                    onChange={(e) => setForm((f) => ({ ...f, lasoo_staging_auth_key: e.target.value }))}
-                                                />
-                                                <Input
-                                                    label="Production base URL (optional)"
-                                                    value={form.lasoo_production_base_url}
-                                                    onChange={(e) => setForm((f) => ({ ...f, lasoo_production_base_url: e.target.value }))}
-                                                />
-                                                <Input
-                                                    label="Production AuthKey (optional)"
-                                                    type="password"
-                                                    placeholder="Leave blank to keep current"
-                                                    value={form.lasoo_production_auth_key}
-                                                    onChange={(e) => setForm((f) => ({ ...f, lasoo_production_auth_key: e.target.value }))}
-                                                />
-                                            </div>
-                                            <Select
-                                                label="Active environment"
-                                                value={form.lasoo_environment}
-                                                onChange={(e) => setForm((f) => ({ ...f, lasoo_environment: e.target.value }))}
-                                                options={[
-                                                    { value: 'staging', label: 'Staging (test first)' },
-                                                    { value: 'production', label: 'Production' },
-                                                ]}
-                                            />
-                                            <p className="text-xs text-slate-500 dark:text-slate-400">
-                                                AuthKeys are write-only. Leave blank to keep existing keys. Listings and orders use the active environment.
-                                            </p>
-                                        </div>
+                                        <LasooConnectionFields form={form} setForm={setForm} mode="edit" />
                                     ) : isMydeal ? (
                                         <MydealSetupFields
                                             setupMethod={mydealSetup}

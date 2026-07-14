@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
+    Ban,
     CheckCircle2,
     ChevronDown,
     ChevronUp,
+    ExternalLink,
     FlaskConical,
     Mail,
     MapPin,
@@ -19,8 +21,10 @@ import PageHeader from '../../components/design/PageHeader';
 import EmptyState from '../../components/design/EmptyState';
 import { getCatalogStores } from '../../services/catalogService';
 import {
+    cancelOrder,
     completeOrderShipping,
     createTestOrder,
+    getOrderCancelReasons,
     getOrders,
     submitOrderShipping,
 } from '../../services/listingService';
@@ -82,6 +86,63 @@ function itemsSummary(order) {
     if (!Array.isArray(items) || items.length === 0) return '—';
     const count = items.reduce((sum, it) => sum + (Number(it?.quantity ?? it?.qty) || 1), 0);
     return `${count} item${count !== 1 ? 's' : ''}`;
+}
+
+/** Unique vendor/source URLs for the top orders list column. */
+function sourceLinks(order) {
+    const fromDetails = orderDetails(order).sourceLinks;
+    if (Array.isArray(fromDetails) && fromDetails.length > 0) {
+        return fromDetails.filter(Boolean);
+    }
+    const items = orderDetails(order).lineItems || [];
+    const seen = new Set();
+    const links = [];
+    for (const it of items) {
+        const url = (it?.vendorUrl || it?.vendor_url || '').trim();
+        if (url && !seen.has(url)) {
+            seen.add(url);
+            links.push(url);
+        }
+    }
+    return links;
+}
+
+function SourceLinkCell({ order }) {
+    const links = sourceLinks(order);
+    if (links.length === 0) {
+        return <span className="text-slate-400">—</span>;
+    }
+    if (links.length === 1) {
+        return (
+            <a
+                href={links[0]}
+                target="_blank"
+                rel="noreferrer"
+                title={links[0]}
+                className="inline-flex items-center gap-1 text-accent-600 hover:underline dark:text-accent-400"
+            >
+                <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                <span className="max-w-[140px] truncate">Source</span>
+            </a>
+        );
+    }
+    return (
+        <span className="inline-flex flex-col gap-0.5">
+            <a
+                href={links[0]}
+                target="_blank"
+                rel="noreferrer"
+                title={links[0]}
+                className="inline-flex items-center gap-1 text-accent-600 hover:underline dark:text-accent-400"
+            >
+                <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                Source
+            </a>
+            <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                +{links.length - 1} more
+            </span>
+        </span>
+    );
 }
 
 function formatAddress(addr) {
@@ -177,11 +238,143 @@ function ShippingModal({ open, onClose, onSubmit, order, loading }) {
     );
 }
 
-function DetailSection({ title, children }) {
+function CancelOrderModal({ open, onClose, onSubmit, order, loading, storeId }) {
+    const [reason, setReason] = useState('');
+    const [otherReason, setOtherReason] = useState('');
+    const [reasons, setReasons] = useState([]);
+    const [reasonsLoading, setReasonsLoading] = useState(false);
+    const [error, setError] = useState('');
+
+    useEffect(() => {
+        if (!open || !storeId) return;
+        setError('');
+        setOtherReason('');
+        setReasonsLoading(true);
+        getOrderCancelReasons(storeId)
+            .then((res) => {
+                const list = Array.isArray(res.data?.reasons) ? res.data.reasons : [];
+                setReasons(list);
+                setReason(list[0]?.value || '');
+            })
+            .catch(() => {
+                setReasons([{ value: 'Out of stock', label: 'Out of stock' }, { value: 'Other', label: 'Other' }]);
+                setReason('Out of stock');
+                setError('Could not load marketplace reasons; using defaults.');
+            })
+            .finally(() => setReasonsLoading(false));
+    }, [open, storeId]);
+
+    if (!open) return null;
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        const selected = reason.trim();
+        if (!selected) {
+            setError('Please select a cancellation reason.');
+            return;
+        }
+        const text = selected === 'Other' ? otherReason.trim() : selected;
+        if (!text) {
+            setError(selected === 'Other' ? 'Please enter a reason.' : 'Please select a cancellation reason.');
+            return;
+        }
+        onSubmit({ reason: text });
+    };
+
+    const reasonOptions = [
+        { value: '', label: reasonsLoading ? 'Loading reasons…' : 'Select a reason' },
+        ...reasons.map((r) => ({ value: r.value, label: r.label || r.value })),
+    ];
+
     return (
-        <div>
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{title}</p>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} aria-hidden="true" />
+            <div
+                className="relative w-full max-w-md overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-700 px-6 py-4">
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                        Cancel order — {order?.invoice_number || order?.external_order_key}
+                    </h2>
+                    <button type="button" className="rounded-md p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={onClose}>
+                        <X className="h-5 w-5" />
+                    </button>
+                </div>
+                <form onSubmit={handleSubmit} className="space-y-4 px-6 py-4">
+                    {error && (
+                        <div className="rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-900/20 px-4 py-3 text-sm text-rose-700 dark:text-rose-300">
+                            {error}
+                        </div>
+                    )}
+                    <p className="text-sm text-slate-600 dark:text-slate-400">
+                        This marks the order cancelled here and requests a cancel/refund on Lasoo.
+                        Choose a reason from the marketplace list.
+                    </p>
+                    <Select
+                        label="Reason"
+                        value={reason}
+                        onChange={(e) => setReason(e.target.value)}
+                        options={reasonOptions}
+                        disabled={reasonsLoading || loading}
+                        required
+                    />
+                    {reason === 'Other' && (
+                        <Input
+                            label="Other reason"
+                            value={otherReason}
+                            onChange={(e) => setOtherReason(e.target.value)}
+                            placeholder="Describe the reason"
+                            required
+                        />
+                    )}
+                    <div className="flex justify-end gap-2 pt-2">
+                        <Button variant="secondary" type="button" onClick={onClose} disabled={loading}>
+                            Keep order
+                        </Button>
+                        <Button variant="danger" type="submit" disabled={loading || reasonsLoading || !reason}>
+                            {loading ? 'Cancelling…' : 'Cancel order'}
+                        </Button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    );
+}
+
+function DetailSection({ title, children, className = '', align = 'left' }) {
+    return (
+        <div className={`${className} ${align === 'right' ? 'text-right' : ''}`}>
+            <p
+                className={`mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 ${
+                    align === 'right' ? 'text-right' : ''
+                }`}
+            >
+                {title}
+            </p>
+            <div className={`text-sm text-slate-700 dark:text-slate-300 ${align === 'right' ? 'text-right' : ''}`}>
+                {children}
+            </div>
+        </div>
+    );
+}
+
+function InfoCard({ title, children }) {
+    return (
+        <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900/60 p-3.5 h-full">
+            <p className="mb-2.5 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                {title}
+            </p>
             <div className="text-sm text-slate-700 dark:text-slate-300">{children}</div>
+        </div>
+    );
+}
+
+function InfoRow({ label, children }) {
+    return (
+        <div className="grid grid-cols-[7.5rem_1fr] gap-x-3 gap-y-0.5 items-baseline">
+            <dt className="text-slate-500 dark:text-slate-400">{label}</dt>
+            <dd className="text-right font-medium text-slate-900 dark:text-slate-100 break-words">{children}</dd>
         </div>
     );
 }
@@ -199,14 +392,14 @@ function OrderDetailPanel({ order }) {
     const dates = d.dates || {};
 
     return (
-        <div className="space-y-5">
-            <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
-                <DetailSection title="Customer">
+        <div className="space-y-6">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                <InfoCard title="Customer">
                     <p className="font-medium text-slate-900 dark:text-slate-100">{customerName(order)}</p>
                     {customer.email && (
-                        <p className="mt-1 flex items-center gap-1.5 text-slate-600 dark:text-slate-400">
+                        <p className="mt-1.5 flex items-center gap-1.5 text-slate-600 dark:text-slate-400">
                             <Mail className="h-3.5 w-3.5 shrink-0" />
-                            <a href={`mailto:${customer.email}`} className="hover:underline">{customer.email}</a>
+                            <a href={`mailto:${customer.email}`} className="hover:underline truncate">{customer.email}</a>
                         </p>
                     )}
                     {customer.phone && (
@@ -218,13 +411,13 @@ function OrderDetailPanel({ order }) {
                     {!customer.email && !customer.phone && customerName(order) === '—' && (
                         <p className="text-slate-500">No customer details from Lasoo.</p>
                     )}
-                </DetailSection>
+                </InfoCard>
 
-                <DetailSection title="Shipping address">
+                <InfoCard title="Shipping address">
                     {(shippingAddr || marketplaceShipAddr) ? (
                         <div className="flex gap-1.5">
                             <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
-                            <div>
+                            <div className="space-y-0.5">
                                 {(shippingAddr || marketplaceShipAddr).map((line) => (
                                     <p key={line}>{line}</p>
                                 ))}
@@ -233,61 +426,56 @@ function OrderDetailPanel({ order }) {
                     ) : (
                         <p className="text-slate-500">No shipping address.</p>
                     )}
-                </DetailSection>
+                </InfoCard>
 
-                <DetailSection title="Order info">
-                    <dl className="space-y-1 text-slate-600 dark:text-slate-400">
-                        <div className="flex justify-between gap-4">
-                            <dt>Invoice</dt>
-                            <dd className="font-medium text-slate-900 dark:text-slate-100">{order.invoice_number || '—'}</dd>
-                        </div>
-                        <div className="flex justify-between gap-4">
-                            <dt>Order key</dt>
-                            <dd className="font-mono text-xs">{order.external_order_key || '—'}</dd>
-                        </div>
-                        <div className="flex justify-between gap-4">
-                            <dt>Ordered</dt>
-                            <dd>{formatDate(dates.orderedAt || order.created_at)}</dd>
-                        </div>
+                <InfoCard title="Order info">
+                    <dl className="space-y-1.5">
+                        <InfoRow label="Invoice">{order.invoice_number || '—'}</InfoRow>
+                        <InfoRow label="Order key">
+                            <span className="font-mono text-xs">{order.external_order_key || '—'}</span>
+                        </InfoRow>
+                        <InfoRow label="Ordered">{formatDate(dates.orderedAt || order.created_at)}</InfoRow>
                         {dates.paidAt && (
-                            <div className="flex justify-between gap-4">
-                                <dt>Paid</dt>
-                                <dd>{formatDate(dates.paidAt)}</dd>
-                            </div>
+                            <InfoRow label="Paid">{formatDate(dates.paidAt)}</InfoRow>
                         )}
                         {d.marketplaceStatus && (
-                            <div className="flex justify-between gap-4">
-                                <dt>Lasoo status</dt>
-                                <dd className="capitalize">{String(d.marketplaceStatus)}</dd>
-                            </div>
+                            <InfoRow label="Lasoo status">
+                                <span className="capitalize">{String(d.marketplaceStatus)}</span>
+                            </InfoRow>
                         )}
-                        <div className="flex justify-between gap-4">
-                            <dt>Environment</dt>
-                            <dd className="capitalize">{order.environment}</dd>
-                        </div>
+                        <InfoRow label="Environment">
+                            <span className="capitalize">{order.environment}</span>
+                        </InfoRow>
                     </dl>
-                </DetailSection>
+                </InfoCard>
             </div>
 
             {billingAddr && (
-                <DetailSection title="Billing address">
+                <InfoCard title="Billing address">
                     {billingAddr.map((line) => (
                         <p key={line}>{line}</p>
                     ))}
-                </DetailSection>
+                </InfoCard>
             )}
 
             <DetailSection title="Line items">
                 {lineItems.length > 0 ? (
-                    <div className="overflow-x-auto rounded-md border border-slate-200 dark:border-slate-700">
-                        <table className="w-full text-left text-xs">
+                    <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
+                        <table className="w-full table-fixed text-left text-xs">
+                            <colgroup>
+                                <col className="w-[42%]" />
+                                <col className="w-[22%]" />
+                                <col className="w-[8%]" />
+                                <col className="w-[14%]" />
+                                <col className="w-[14%]" />
+                            </colgroup>
                             <thead className="bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400">
                                 <tr>
-                                    <th className="px-3 py-2 font-semibold">Product</th>
-                                    <th className="px-3 py-2 font-semibold">SKU / Variant</th>
-                                    <th className="px-3 py-2 text-right font-semibold">Qty</th>
-                                    <th className="px-3 py-2 text-right font-semibold">Price</th>
-                                    <th className="px-3 py-2 text-right font-semibold">Line total</th>
+                                    <th className="px-3 py-2.5 font-semibold">Product</th>
+                                    <th className="px-3 py-2.5 font-semibold">Marketplace SKU</th>
+                                    <th className="px-3 py-2.5 text-right font-semibold">Qty</th>
+                                    <th className="px-3 py-2.5 text-right font-semibold">Price</th>
+                                    <th className="px-3 py-2.5 text-right font-semibold">Line total</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -295,17 +483,24 @@ function OrderDetailPanel({ order }) {
                                     const qty = Number(it.quantity ?? it.qty) || 1;
                                     const unit = it.priceCents;
                                     const lineTotal = unit != null ? unit * qty : null;
+                                    const marketplaceSku = (
+                                        it.marketplaceSku
+                                        || it.sku
+                                        || it.externalVariantKey
+                                        || it.variantKey
+                                        || ''
+                                    ).trim();
                                     return (
                                         <tr key={it.lineItemId || i} className="border-t border-slate-100 dark:border-slate-800">
-                                            <td className="px-3 py-2 text-slate-800 dark:text-slate-200">
+                                            <td className="px-3 py-2.5 text-slate-800 dark:text-slate-200 align-top">
                                                 {it.title || it.name || '—'}
                                             </td>
-                                            <td className="px-3 py-2 font-mono text-slate-600 dark:text-slate-400">
-                                                {it.sku || it.externalVariantKey || it.variantKey || '—'}
+                                            <td className="px-3 py-2.5 font-mono text-slate-600 dark:text-slate-400 align-top break-all">
+                                                {marketplaceSku || '—'}
                                             </td>
-                                            <td className="px-3 py-2 text-right tabular-nums">{qty}</td>
-                                            <td className="px-3 py-2 text-right tabular-nums">{money(unit, currency)}</td>
-                                            <td className="px-3 py-2 text-right tabular-nums font-medium">{money(lineTotal, currency)}</td>
+                                            <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap align-top">{qty}</td>
+                                            <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap align-top">{money(unit, currency)}</td>
+                                            <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap font-medium align-top">{money(lineTotal, currency)}</td>
                                         </tr>
                                     );
                                 })}
@@ -317,85 +512,42 @@ function OrderDetailPanel({ order }) {
                 )}
             </DetailSection>
 
-            <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-                <DetailSection title="Totals">
-                    <dl className="space-y-1 max-w-xs">
-                        {totals.subtotalCents != null && (
-                            <div className="flex justify-between gap-6">
-                                <dt>Subtotal</dt>
-                                <dd>{money(totals.subtotalCents, currency)}</dd>
-                            </div>
-                        )}
-                        {totals.shippingCents != null && (
-                            <div className="flex justify-between gap-6">
-                                <dt>Shipping</dt>
-                                <dd>{money(totals.shippingCents, currency)}</dd>
-                            </div>
-                        )}
-                        {totals.taxCents != null && (
-                            <div className="flex justify-between gap-6">
-                                <dt>Tax / GST</dt>
-                                <dd>{money(totals.taxCents, currency)}</dd>
-                            </div>
-                        )}
-                        {totals.discountCents != null && Number(totals.discountCents) !== 0 && (
-                            <div className="flex justify-between gap-6">
-                                <dt>Discount</dt>
-                                <dd>-{money(Math.abs(totals.discountCents), currency)}</dd>
-                            </div>
-                        )}
-                        <div className="flex justify-between gap-6 border-t border-slate-200 dark:border-slate-700 pt-1.5 font-semibold text-slate-900 dark:text-slate-100">
-                            <dt>Total</dt>
-                            <dd>{money(totals.totalCents ?? order.total_amount_cents, currency)}</dd>
-                        </div>
-                    </dl>
-                </DetailSection>
-
-                <DetailSection title="Shipping / tracking">
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_16rem] lg:items-start">
+                <InfoCard title="Shipping / tracking">
                     {(marketplaceShip.status || marketplaceShip.trackingNumber || marketplaceShip.carrier) ? (
-                        <dl className="mb-3 space-y-1 text-slate-600 dark:text-slate-400">
+                        <dl className="mb-3 space-y-1.5">
                             {marketplaceShip.status && (
-                                <div className="flex justify-between gap-4">
-                                    <dt>Lasoo shipping</dt>
-                                    <dd className="capitalize">{String(marketplaceShip.status).replace(/_/g, ' ')}</dd>
-                                </div>
+                                <InfoRow label="Lasoo shipping">
+                                    <span className="capitalize">{String(marketplaceShip.status).replace(/_/g, ' ')}</span>
+                                </InfoRow>
                             )}
                             {marketplaceShip.method && (
-                                <div className="flex justify-between gap-4">
-                                    <dt>Method</dt>
-                                    <dd>{marketplaceShip.method}</dd>
-                                </div>
+                                <InfoRow label="Method">{marketplaceShip.method}</InfoRow>
                             )}
                             {(marketplaceShip.carrier || marketplaceShip.trackingNumber) && (
-                                <div className="flex justify-between gap-4">
-                                    <dt>Carrier / tracking</dt>
-                                    <dd>
-                                        {[marketplaceShip.carrier, marketplaceShip.trackingNumber].filter(Boolean).join(' · ')}
-                                        {marketplaceShip.trackingUrl && (
-                                            <>
-                                                {' · '}
-                                                <a href={marketplaceShip.trackingUrl} target="_blank" rel="noreferrer" className="text-accent-600 hover:underline">
-                                                    Track
-                                                </a>
-                                            </>
-                                        )}
-                                    </dd>
-                                </div>
+                                <InfoRow label="Tracking">
+                                    {[marketplaceShip.carrier, marketplaceShip.trackingNumber].filter(Boolean).join(' · ')}
+                                    {marketplaceShip.trackingUrl && (
+                                        <>
+                                            {' · '}
+                                            <a href={marketplaceShip.trackingUrl} target="_blank" rel="noreferrer" className="text-accent-600 hover:underline">
+                                                Track
+                                            </a>
+                                        </>
+                                    )}
+                                </InfoRow>
                             )}
                             {marketplaceShip.dispatchedAt && (
-                                <div className="flex justify-between gap-4">
-                                    <dt>Dispatched</dt>
-                                    <dd>{formatDate(marketplaceShip.dispatchedAt)}</dd>
-                                </div>
+                                <InfoRow label="Dispatched">{formatDate(marketplaceShip.dispatchedAt)}</InfoRow>
                             )}
                         </dl>
                     ) : null}
 
-                    <p className="mb-1 text-xs font-medium text-slate-500 dark:text-slate-400">Submitted from this app</p>
+                    <p className="mb-1.5 text-xs font-medium text-slate-500 dark:text-slate-400">Submitted from this app</p>
                     {order.shipments?.length ? (
-                        <ul className="space-y-1 text-slate-600 dark:text-slate-400">
+                        <ul className="space-y-1.5 text-slate-600 dark:text-slate-400">
                             {order.shipments.map((sh) => (
-                                <li key={sh.id}>
+                                <li key={sh.id} className="rounded-md bg-slate-50 dark:bg-slate-800/60 px-2.5 py-1.5">
                                     {sh.carrier || '—'} · {sh.tracking_number || 'no tracking'} · {sh.status}
                                     {sh.tracking_url && (
                                         <>
@@ -412,7 +564,43 @@ function OrderDetailPanel({ order }) {
                     ) : (
                         <p className="text-slate-500">No shipments submitted yet. Use the truck icon to add tracking.</p>
                     )}
-                </DetailSection>
+                </InfoCard>
+
+                <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900/60 p-3.5">
+                    <p className="mb-2.5 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 text-right">
+                        Totals
+                    </p>
+                    <dl className="space-y-1.5 text-sm">
+                        {totals.subtotalCents != null && (
+                            <div className="flex justify-between gap-6">
+                                <dt className="text-slate-500 dark:text-slate-400">Subtotal</dt>
+                                <dd className="tabular-nums text-slate-900 dark:text-slate-100">{money(totals.subtotalCents, currency)}</dd>
+                            </div>
+                        )}
+                        {totals.shippingCents != null && (
+                            <div className="flex justify-between gap-6">
+                                <dt className="text-slate-500 dark:text-slate-400">Shipping</dt>
+                                <dd className="tabular-nums text-slate-900 dark:text-slate-100">{money(totals.shippingCents, currency)}</dd>
+                            </div>
+                        )}
+                        {totals.taxCents != null && (
+                            <div className="flex justify-between gap-6">
+                                <dt className="text-slate-500 dark:text-slate-400">Tax / GST</dt>
+                                <dd className="tabular-nums text-slate-900 dark:text-slate-100">{money(totals.taxCents, currency)}</dd>
+                            </div>
+                        )}
+                        {totals.discountCents != null && Number(totals.discountCents) !== 0 && (
+                            <div className="flex justify-between gap-6">
+                                <dt className="text-slate-500 dark:text-slate-400">Discount</dt>
+                                <dd className="tabular-nums text-slate-900 dark:text-slate-100">-{money(Math.abs(totals.discountCents), currency)}</dd>
+                            </div>
+                        )}
+                        <div className="flex justify-between gap-6 border-t border-slate-200 dark:border-slate-700 pt-2 mt-1 font-semibold text-slate-900 dark:text-slate-100">
+                            <dt>Total</dt>
+                            <dd className="tabular-nums">{money(totals.totalCents ?? order.total_amount_cents, currency)}</dd>
+                        </div>
+                    </dl>
+                </div>
             </div>
         </div>
     );
@@ -431,6 +619,8 @@ export default function Orders() {
     const [shippingOrder, setShippingOrder] = useState(null);
     const [shippingLoading, setShippingLoading] = useState(false);
     const [completingId, setCompletingId] = useState(null);
+    const [cancelOrderRow, setCancelOrderRow] = useState(null);
+    const [cancelLoading, setCancelLoading] = useState(false);
 
     useEffect(() => {
         getCatalogStores()
@@ -510,6 +700,28 @@ export default function Orders() {
             .finally(() => setShippingLoading(false));
     };
 
+    const handleCancelOrder = ({ reason }) => {
+        if (!cancelOrderRow) return;
+        setCancelLoading(true);
+        cancelOrder(selectedStore, cancelOrderRow.id, { reason })
+            .then((res) => {
+                const marketplaceOk = res.data?.marketplace_ok !== false;
+                setMessage({
+                    text: res.data?.message || 'Order cancelled.',
+                    variant: marketplaceOk ? 'success' : 'warning',
+                });
+                setCancelOrderRow(null);
+                loadOrders(false);
+            })
+            .catch((err) => {
+                setMessage({
+                    text: err.response?.data?.detail || err.response?.data?.message || 'Cancel failed.',
+                    variant: 'error',
+                });
+            })
+            .finally(() => setCancelLoading(false));
+    };
+
     const handleComplete = (order) => {
         setCompletingId(order.id);
         completeOrderShipping(selectedStore, order.id)
@@ -543,7 +755,9 @@ export default function Orders() {
                     className={`rounded-lg border px-4 py-3 text-sm ${
                         message.variant === 'error'
                             ? 'border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-900/20 text-rose-700 dark:text-rose-300'
-                            : 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300'
+                            : message.variant === 'warning'
+                              ? 'border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200'
+                              : 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300'
                     }`}
                 >
                     {message.text}
@@ -605,6 +819,7 @@ export default function Orders() {
                                         <th className="px-4 py-2.5">Invoice</th>
                                         <th className="px-4 py-2.5">Customer</th>
                                         <th className="px-4 py-2.5">Items</th>
+                                        <th className="px-4 py-2.5">Source</th>
                                         <th className="px-4 py-2.5">Total</th>
                                         <th className="px-4 py-2.5">Status</th>
                                         <th className="px-4 py-2.5">Ordered</th>
@@ -616,8 +831,8 @@ export default function Orders() {
                                         const currency = o.details?.totals?.currency || 'AUD';
                                         const orderedAt = o.details?.dates?.orderedAt || o.created_at;
                                         return (
-                                            <>
-                                                <tr key={o.id} className="border-t border-slate-100 dark:border-slate-800">
+                                            <Fragment key={o.id}>
+                                                <tr className="border-t border-slate-100 dark:border-slate-800">
                                                     <td className="px-4 py-2.5 font-medium text-slate-900 dark:text-slate-100">
                                                         {o.invoice_number || o.external_order_key || '—'}
                                                         <p className="text-[11px] font-normal capitalize text-slate-400">{o.environment}</p>
@@ -629,6 +844,9 @@ export default function Orders() {
                                                         )}
                                                     </td>
                                                     <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">{itemsSummary(o)}</td>
+                                                    <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">
+                                                        <SourceLinkCell order={o} />
+                                                    </td>
                                                     <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">
                                                         {money(o.details?.totals?.totalCents ?? o.total_amount_cents, currency)}
                                                     </td>
@@ -645,8 +863,9 @@ export default function Orders() {
                                                             <button
                                                                 type="button"
                                                                 title="Submit shipping / tracking"
-                                                                className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                                                                className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
                                                                 onClick={() => setShippingOrder(o)}
+                                                                disabled={['cancelled', 'refunded', 'shipping_complete'].includes(o.status)}
                                                             >
                                                                 <Truck className="h-4 w-4" />
                                                             </button>
@@ -661,6 +880,15 @@ export default function Orders() {
                                                             </button>
                                                             <button
                                                                 type="button"
+                                                                title="Cancel order"
+                                                                className="rounded-md p-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20 disabled:opacity-40"
+                                                                onClick={() => setCancelOrderRow(o)}
+                                                                disabled={['cancelled', 'refunded', 'shipping_complete'].includes(o.status)}
+                                                            >
+                                                                <Ban className="h-4 w-4" />
+                                                            </button>
+                                                            <button
+                                                                type="button"
                                                                 title="Show full order details"
                                                                 className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
                                                                 onClick={() => setExpandedId(expandedId === o.id ? null : o.id)}
@@ -671,13 +899,13 @@ export default function Orders() {
                                                     </td>
                                                 </tr>
                                                 {expandedId === o.id && (
-                                                    <tr key={`${o.id}-details`} className="border-t border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40">
-                                                        <td colSpan={7} className="px-4 py-4">
+                                                    <tr className="border-t border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40">
+                                                        <td colSpan={8} className="px-4 py-4">
                                                             <OrderDetailPanel order={o} />
                                                         </td>
                                                     </tr>
                                                 )}
-                                            </>
+                                            </Fragment>
                                         );
                                     })}
                                 </tbody>
@@ -693,6 +921,14 @@ export default function Orders() {
                 onClose={() => setShippingOrder(null)}
                 onSubmit={handleSubmitShipping}
                 loading={shippingLoading}
+            />
+            <CancelOrderModal
+                open={!!cancelOrderRow}
+                order={cancelOrderRow}
+                storeId={selectedStore}
+                onClose={() => setCancelOrderRow(null)}
+                onSubmit={handleCancelOrder}
+                loading={cancelLoading}
             />
         </div>
     );

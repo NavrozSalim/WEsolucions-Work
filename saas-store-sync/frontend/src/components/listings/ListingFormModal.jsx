@@ -15,6 +15,7 @@ const EMPTY_FORM = {
     category: '',
     sku: '',
     barcode: '',
+    vendor_url: '',
     image_urls: '',
     inventory: '0',
     infinite_quantity: false,
@@ -60,6 +61,7 @@ export default function ListingFormModal({ open, onClose, onSaved, storeId, list
                 category: listing.category || '',
                 sku: listing.sku || '',
                 barcode: listing.barcode || '',
+                vendor_url: listing.vendor_url || '',
                 image_urls: listing.image_urls || '',
                 inventory: String(listing.inventory ?? 0),
                 infinite_quantity: !!listing.infinite_quantity,
@@ -161,6 +163,15 @@ export default function ListingFormModal({ open, onClose, onSaved, storeId, list
                             </div>
                             <Input label="Category" placeholder="e.g. Apparel > T-Shirts" value={form.category} onChange={set('category')} />
                             <Input label="Barcode (optional)" value={form.barcode} onChange={set('barcode')} />
+                            <div className="sm:col-span-2">
+                                <Input
+                                    label="Vendor / source URL (optional)"
+                                    placeholder="https://… product page you source this from"
+                                    value={form.vendor_url}
+                                    onChange={set('vendor_url')}
+                                    type="url"
+                                />
+                            </div>
                             <div className="sm:col-span-2">
                                 <Textarea
                                     label="Image URLs (separate with | , ; or new lines)"

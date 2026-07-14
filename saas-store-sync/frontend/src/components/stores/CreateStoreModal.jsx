@@ -7,6 +7,7 @@ import { createStore, getMarketplaces, getVendors, testSearsConnection, testWalm
 import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
 import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
+import LasooConnectionFields from './LasooConnectionFields';
 
 const emptyPriceRange = () => ({ from_value: 0, to_value: null, margin_type: 'percentage', margin_percentage: 25 });
 const emptyInventoryRange = () => ({ from_value: 0, to_value: 999999999, range_type: 'multiplier', multiplier: 0.5, fixed_value: null });
@@ -364,8 +365,14 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             errs.push('Managed stores are only available for Reverb and Lasoo right now');
         }
         if (isLasoo) {
-            if (!form.lasoo_staging_auth_key?.trim()) errs.push('Lasoo staging AuthKey is required');
-            if (!form.lasoo_staging_base_url?.trim()) errs.push('Lasoo staging base URL is required');
+            const env = form.lasoo_environment || 'staging';
+            if (env === 'production') {
+                if (!form.lasoo_production_base_url?.trim()) errs.push('Lasoo production base URL is required');
+                if (!form.lasoo_production_auth_key?.trim()) errs.push('Lasoo production AuthKey is required');
+            } else {
+                if (!form.lasoo_staging_base_url?.trim()) errs.push('Lasoo staging base URL is required');
+                if (!form.lasoo_staging_auth_key?.trim()) errs.push('Lasoo staging AuthKey is required');
+            }
             return errs;
         }
         if (isKogan) {
@@ -801,50 +808,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                     </div>
                                     <div className="sm:col-span-2">
                                         {isLasoo ? (
-                                            <div className="space-y-3 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
-                                                <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">Lasoo connection</p>
-                                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                                    <Input
-                                                        label="Staging base URL"
-                                                        value={form.lasoo_staging_base_url}
-                                                        onChange={(e) => setForm((f) => ({ ...f, lasoo_staging_base_url: e.target.value }))}
-                                                        required
-                                                    />
-                                                    <Input
-                                                        label="Staging AuthKey"
-                                                        type="password"
-                                                        placeholder="Provided by Lasoo"
-                                                        value={form.lasoo_staging_auth_key}
-                                                        onChange={(e) => setForm((f) => ({ ...f, lasoo_staging_auth_key: e.target.value }))}
-                                                        required
-                                                    />
-                                                    <Input
-                                                        label="Production base URL (optional)"
-                                                        value={form.lasoo_production_base_url}
-                                                        onChange={(e) => setForm((f) => ({ ...f, lasoo_production_base_url: e.target.value }))}
-                                                    />
-                                                    <Input
-                                                        label="Production AuthKey (optional)"
-                                                        type="password"
-                                                        placeholder="Add later once staging is verified"
-                                                        value={form.lasoo_production_auth_key}
-                                                        onChange={(e) => setForm((f) => ({ ...f, lasoo_production_auth_key: e.target.value }))}
-                                                    />
-                                                </div>
-                                                <Select
-                                                    label="Active environment"
-                                                    value={form.lasoo_environment}
-                                                    onChange={(e) => setForm((f) => ({ ...f, lasoo_environment: e.target.value }))}
-                                                    options={[
-                                                        { value: 'staging', label: 'Staging (test first)' },
-                                                        { value: 'production', label: 'Production' },
-                                                    ]}
-                                                />
-                                                <p className="text-xs text-slate-500 dark:text-slate-400">
-                                                    Listings you create are pushed to the active environment; orders are pulled from it too.
-                                                    Start with staging, then switch to production once Lasoo approves your feed.
-                                                </p>
-                                            </div>
+                                            <LasooConnectionFields form={form} setForm={setForm} mode="create" />
                                         ) : isMydeal ? (
                                             <MydealSetupFields
                                                 setupMethod={mydealSetup}

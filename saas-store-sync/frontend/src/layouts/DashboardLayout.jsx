@@ -7,6 +7,7 @@ import {
     LayoutDashboard,
     Package,
     ShoppingCart,
+    MessageSquare,
     LogOut,
     Menu,
     X,
@@ -25,6 +26,7 @@ const navItems = [
     { path: '/store-settings', label: 'Stores', icon: Store },
     { path: '/catalog', label: 'Catalog', icon: Package },
     { path: '/orders', label: 'Orders', icon: ShoppingCart },
+    { path: '/tickets', label: 'Tickets', icon: MessageSquare },
 ];
 
 function DashboardLayoutInner() {

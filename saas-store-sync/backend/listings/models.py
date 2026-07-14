@@ -59,6 +59,8 @@ class StoreListing(models.Model):
     category = models.CharField(max_length=500, blank=True, default='')
     sku = models.CharField(max_length=255, blank=True, default='', db_index=True)
     barcode = models.CharField(max_length=255, blank=True, default='')
+    # Source URL (vendor / supplier product page) for order fulfillment lookup.
+    vendor_url = models.CharField(max_length=1000, blank=True, default='')
     image_urls = models.TextField(blank=True, default='')  # pipe-joined: a|b|c
     inventory = models.IntegerField(default=0)
     infinite_quantity = models.BooleanField(default=False)
@@ -183,3 +185,78 @@ class OrderShipment(models.Model):
 
     def __str__(self):
         return f"Shipment {self.tracking_number} for order {self.order_id}"
+
+
+class TicketStatus(models.TextChoices):
+    OPEN = 'open', 'Open'
+    PENDING = 'pending', 'Pending'
+    ANSWERED = 'answered', 'Answered'
+    CLOSED = 'closed', 'Closed'
+
+
+class TicketMessageDirection(models.TextChoices):
+    INBOUND = 'inbound', 'Inbound (customer)'
+    OUTBOUND = 'outbound', 'Outbound (seller)'
+    SYSTEM = 'system', 'System'
+
+
+class SupportTicket(models.Model):
+    """Customer support ticket / message thread for a managed marketplace store."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='support_tickets')
+    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='support_tickets', db_index=True)
+
+    external_ticket_key = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    subject = models.CharField(max_length=500, blank=True, default='')
+    customer_name = models.CharField(max_length=255, blank=True, default='')
+    customer_email = models.CharField(max_length=255, blank=True, default='')
+    related_order_key = models.CharField(max_length=255, blank=True, default='')
+    status = models.CharField(max_length=30, choices=TicketStatus.choices, default=TicketStatus.OPEN, db_index=True)
+    unread_count = models.IntegerField(default=0)
+    last_message_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_customer_message_at = models.DateTimeField(null=True, blank=True)
+    environment = models.CharField(max_length=20, choices=Environment.choices, default=Environment.STAGING)
+    raw_response_json = models.JSONField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'listings_supportticket'
+        ordering = ['-last_message_at', '-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['store', 'external_ticket_key', 'environment'],
+                name='uq_ticket_store_key_env',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['store', 'status'], name='ticket_store_status'),
+        ]
+
+    def __str__(self):
+        return self.subject or self.external_ticket_key or str(self.pk)
+
+
+class TicketMessage(models.Model):
+    """A single message inside a support ticket thread."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ticket = models.ForeignKey(SupportTicket, on_delete=models.CASCADE, related_name='messages')
+
+    external_message_key = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    direction = models.CharField(max_length=20, choices=TicketMessageDirection.choices, default=TicketMessageDirection.INBOUND)
+    body = models.TextField(blank=True, default='')
+    sender_name = models.CharField(max_length=255, blank=True, default='')
+    sender_type = models.CharField(max_length=50, blank=True, default='')  # customer | seller | operator | system
+    delivered_to_marketplace = models.BooleanField(default=False)
+    marketplace_request_json = models.JSONField(null=True, blank=True)
+    marketplace_response_json = models.JSONField(null=True, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'listings_ticketmessage'
+        ordering = ['sent_at', 'created_at']
+
+    def __str__(self):
+        return f"{self.direction} msg for ticket {self.ticket_id}"

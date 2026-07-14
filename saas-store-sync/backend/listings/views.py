@@ -10,14 +10,15 @@ from rest_framework.views import APIView
 
 from stores.models import Store
 
-from . import csv_import, listing_service, order_service, shipping_service
+from . import csv_import, listing_service, order_service, shipping_service, ticket_service
 from .errors import MarketplaceError
-from .models import ListingAction, ListingStatus, ListingUpload, MarketplaceOrder, StoreListing
+from .models import ListingAction, ListingStatus, ListingUpload, MarketplaceOrder, StoreListing, SupportTicket
 from .serializers import (
     ListingInputSerializer,
     ListingUploadSerializer,
     MarketplaceOrderSerializer,
     StoreListingSerializer,
+    SupportTicketSerializer,
 )
 
 logger = logging.getLogger("listings")
@@ -289,6 +290,96 @@ class StoreOrderShippingCompleteView(APIView):
         order = get_object_or_404(MarketplaceOrder, pk=pk, store=store, user=request.user)
         try:
             result = shipping_service.complete(order)
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY
+        return Response(result, status=code)
+
+
+class StoreOrderCancelView(APIView):
+    """Cancel an order (Lasoo Refunds_Create) and mark it cancelled locally."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk, pk):
+        store = _get_store(request, store_pk)
+        order = get_object_or_404(MarketplaceOrder, pk=pk, store=store, user=request.user)
+        reason = (request.data.get('reason') or '').strip()
+        try:
+            result = order_service.cancel(order, reason=reason)
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY
+        return Response(result, status=code)
+
+
+class StoreOrderCancelReasonsView(APIView):
+    """Marketplace-provided cancel/refund reason options for the Orders UI."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        try:
+            result = order_service.cancel_reasons(store)
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result)
+
+
+class StoreTicketsView(APIView):
+    """List support tickets. ``?refresh=1`` pulls from the marketplace first."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        refresh_result = None
+        if request.query_params.get('refresh') in ('1', 'true', 'yes'):
+            try:
+                refresh_result = ticket_service.fetch(request.user, store)
+            except MarketplaceError as exc:
+                refresh_result = {'ok': False, 'message': str(exc), 'fetched': 0}
+        tickets = (
+            SupportTicket.objects.filter(store=store, user=request.user)
+            .prefetch_related('messages')
+        )
+        return Response({
+            'refresh': refresh_result,
+            'tickets': SupportTicketSerializer(tickets, many=True).data,
+        })
+
+
+class StoreTicketTestView(APIView):
+    """Create a local sample ticket for UI testing (staging)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        try:
+            result = ticket_service.create_test_ticket(request.user, store)
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result)
+
+
+class StoreTicketReplyView(APIView):
+    """Reply to a ticket; attempts marketplace delivery to the customer."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk, pk):
+        store = _get_store(request, store_pk)
+        ticket = get_object_or_404(SupportTicket, pk=pk, store=store, user=request.user)
+        body = (request.data.get('body') or request.data.get('message') or '').strip()
+        if not body:
+            return Response({'detail': 'body is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            result = ticket_service.reply(
+                ticket,
+                body=body,
+                sender_name=(
+                    f"{getattr(request.user, 'first_name', '')} {getattr(request.user, 'last_name', '')}".strip()
+                    or getattr(request.user, 'email', '')
+                    or 'Seller'
+                ),
+            )
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY

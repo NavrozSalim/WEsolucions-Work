@@ -37,3 +37,14 @@ export const submitOrderShipping = (storeId, orderId, data) =>
     api.post(`/stores/${storeId}/orders/${orderId}/shipping/`, data);
 export const completeOrderShipping = (storeId, orderId) =>
     api.post(`/stores/${storeId}/orders/${orderId}/shipping/complete/`);
+export const cancelOrder = (storeId, orderId, data = {}) =>
+    api.post(`/stores/${storeId}/orders/${orderId}/cancel/`, data);
+export const getOrderCancelReasons = (storeId) =>
+    api.get(`/stores/${storeId}/orders/cancel-reasons/`);
+
+// --- Tickets / customer messages ---
+export const getTickets = (storeId, { refresh = false } = {}) =>
+    api.get(`/stores/${storeId}/tickets/`, { params: refresh ? { refresh: 1 } : {} });
+export const createTestTicket = (storeId) => api.post(`/stores/${storeId}/tickets/test/`);
+export const replyToTicket = (storeId, ticketId, data) =>
+    api.post(`/stores/${storeId}/tickets/${ticketId}/reply/`, data);

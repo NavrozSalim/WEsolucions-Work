@@ -34,6 +34,11 @@ app.conf.beat_schedule = {
         'task': 'vendor.prune_old_vendor_prices',
         'schedule': crontab(minute=30, hour=3),
     },
+    # Pull Lasoo customer tickets/messages into Tickets Management.
+    'fetch-marketplace-tickets-hourly': {
+        'task': 'listings.fetch_all_store_tickets',
+        'schedule': crontab(minute=15),
+    },
 }
 
 

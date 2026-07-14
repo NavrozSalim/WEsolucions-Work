@@ -54,6 +54,55 @@ QUERY_SPECS = {
         "name": "Shipments - Search : 1.0.0",
         "requires_auth": True,
     },
+    "refunds_create": {
+        "path": "/Refunds/Create/1.0.0",
+        "query": "Refunds_Create",
+        "name": "Refunds - Create : 1.0.0",
+        "requires_auth": True,
+    },
+    "refunds_search": {
+        "path": "/Refunds/Search/1.0.0",
+        "query": "Refunds_Search",
+        "name": "Refunds - Search : 1.0.0",
+        "requires_auth": True,
+    },
+    # Tickets / customer messaging — Lasoo Connect may enable these later.
+    "tickets_search": {
+        "path": "/Tickets/Search/1.0.0",
+        "query": "Tickets_Search",
+        "name": "Tickets - Search : 1.0.0",
+        "requires_auth": True,
+    },
+    "tickets_reply": {
+        "path": "/Tickets/Reply/1.0.0",
+        "query": "Tickets_Reply",
+        "name": "Tickets - Reply : 1.0.0",
+        "requires_auth": True,
+    },
+    "messages_search": {
+        "path": "/Messages/Search/1.0.0",
+        "query": "Messages_Search",
+        "name": "Messages - Search : 1.0.0",
+        "requires_auth": True,
+    },
+    "messages_create": {
+        "path": "/Messages/Create/1.0.0",
+        "query": "Messages_Create",
+        "name": "Messages - Create : 1.0.0",
+        "requires_auth": True,
+    },
+    "chat_messages_search": {
+        "path": "/ChatMessages/Search/1.0.0",
+        "query": "ChatMessages_Search",
+        "name": "ChatMessages - Search : 1.0.0",
+        "requires_auth": True,
+    },
+    "chat_messages_create": {
+        "path": "/ChatMessages/Create/1.0.0",
+        "query": "ChatMessages_Create",
+        "name": "ChatMessages - Create : 1.0.0",
+        "requires_auth": True,
+    },
 }
 
 DEFAULT_ENDPOINTS = {key: spec["path"] for key, spec in QUERY_SPECS.items()}

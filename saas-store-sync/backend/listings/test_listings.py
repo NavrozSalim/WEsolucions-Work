@@ -4,6 +4,7 @@ Covers the Lasoo mapper/validator port, CSV/XLSX bulk import parsing, and the
 listing service validation flow (no network calls).
 """
 import io
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -14,7 +15,8 @@ from stores.models import Store
 from . import csv_import, listing_service, order_service
 from .errors import MarketplaceError
 from .lasoo import mapper, validator
-from .models import ListingStatus, StoreListing
+from .lasoo.client import LasooResult
+from .models import ListingStatus, MarketplaceOrder, OrderStatus, StoreListing
 
 VALID_DATA = {
     "product_key": "TSHIRT-001",
@@ -232,6 +234,100 @@ class OrderNormalizeTests(TestCase):
         self.assertEqual(details["shipping"]["method"], "Standard")
         self.assertEqual(details["dates"]["orderedAt"], "2026-07-01T10:00:00Z")
 
+    def test_normalize_shipping_from_delivery_address(self):
+        details = order_service.build_order_details({
+            "invoiceNumber": "INV-SHIP",
+            "deliveryAddress": {
+                "address1": "12 Harbour St",
+                "suburb": "Melbourne",
+                "state": "VIC",
+                "postcode": "3000",
+                "country": "AU",
+            },
+            "customer": {"firstName": "Sam", "lastName": "Lee", "email": "sam@example.com"},
+        })
+        self.assertEqual(details["shippingAddress"]["city"], "Melbourne")
+        self.assertEqual(details["shippingAddress"]["line1"], "12 Harbour St")
+        self.assertEqual(details["customer"]["email"], "sam@example.com")
+
+    def test_normalize_shipping_from_flat_prefixed_fields(self):
+        details = order_service.build_order_details({
+            "shippingLine1": "9 Test Rd",
+            "shippingSuburb": "Brisbane",
+            "shippingState": "QLD",
+            "shippingPostcode": "4000",
+            "shippingCountry": "AU",
+            "customerName": "Alex Buyer",
+        })
+        self.assertEqual(details["shippingAddress"]["postcode"], "4000")
+        self.assertEqual(details["customer"]["name"], "Alex Buyer")
+
+    def test_enrich_order_line_items_from_store_listing(self):
+        User = get_user_model()
+        user = User.objects.create_user(username="enr", email="enr@example.com", password="pw")
+        lasoo, _ = Marketplace.objects.get_or_create(code="lasoo", defaults={"name": "Lasoo"})
+        store = Store.objects.create(
+            user=user, name="Enrich", region="AU", api_token="", marketplace=lasoo,
+            management_mode="full_store", lasoo_environment="staging",
+        )
+        StoreListing.objects.create(
+            user=user,
+            store=store,
+            external_product_key="TEE-1",
+            external_variant_key="TEE-1",
+            title="Black Tee",
+            sku="MKT-TEE-1",
+            vendor_url="https://vendor.example.com/tee-1",
+            environment="staging",
+        )
+        details = order_service.build_order_details({
+            "lineItems": [
+                {
+                    "title": "Black Tee",
+                    "externalVariantKey": "TEE-1",
+                    "quantity": 1,
+                    "priceCents": 2500,
+                }
+            ],
+        })
+        enriched = order_service.enrich_order_line_items(details, store)
+        item = enriched["lineItems"][0]
+        self.assertEqual(item["marketplaceSku"], "MKT-TEE-1")
+        self.assertEqual(item["vendorUrl"], "https://vendor.example.com/tee-1")
+        self.assertEqual(item["sku"], "MKT-TEE-1")
+        self.assertEqual(enriched["sourceLinks"], ["https://vendor.example.com/tee-1"])
+
+    def test_enrich_order_line_items_match_by_title(self):
+        User = get_user_model()
+        user = User.objects.create_user(username="enr2", email="enr2@example.com", password="pw")
+        lasoo, _ = Marketplace.objects.get_or_create(code="lasoo", defaults={"name": "Lasoo"})
+        store = Store.objects.create(
+            user=user, name="Enrich2", region="AU", api_token="", marketplace=lasoo,
+            management_mode="full_store", lasoo_environment="staging",
+        )
+        StoreListing.objects.create(
+            user=user,
+            store=store,
+            external_product_key="GOLF-1",
+            external_variant_key="GOLF-1",
+            title="Golf Storage Garage Organizer",
+            sku="GOLF-SKU",
+            vendor_url="https://vendor.example.com/golf",
+            environment="staging",
+        )
+        details = order_service.build_order_details({
+            "lineItems": [
+                {
+                    "title": "Golf Storage Garage Organizer",
+                    "quantity": 1,
+                    "priceCents": 1000,
+                }
+            ],
+        })
+        enriched = order_service.enrich_order_line_items(details, store)
+        self.assertEqual(enriched["lineItems"][0]["marketplaceSku"], "GOLF-SKU")
+        self.assertEqual(enriched["sourceLinks"], ["https://vendor.example.com/golf"])
+
     def test_upsert_persists_normalized_fields(self):
         User = get_user_model()
         user = User.objects.create_user(username="ord", email="o@example.com", password="pw")
@@ -255,3 +351,113 @@ class OrderNormalizeTests(TestCase):
         self.assertEqual(order.total_amount_cents, 1000)
         self.assertEqual(order.status, "paid")
         self.assertIsNotNone(order.raw_response_json)
+
+    def _make_cancel_order(self, suffix="1"):
+        User = get_user_model()
+        user = User.objects.create_user(
+            username=f"cancelu{suffix}",
+            email=f"c{suffix}@example.com",
+            password="pw",
+        )
+        lasoo, _ = Marketplace.objects.get_or_create(code="lasoo", defaults={"name": "Lasoo"})
+        store = Store.objects.create(
+            user=user, name=f"Cancel Store {suffix}", region="AU", api_token="", marketplace=lasoo,
+            management_mode="full_store", lasoo_environment="staging",
+            lasoo_staging_auth_key="test-key",
+        )
+        order = MarketplaceOrder.objects.create(
+            user=user,
+            store=store,
+            external_order_key=f"100099{suffix}",
+            invoice_number=f"100099{suffix}",
+            status=OrderStatus.PAID,
+            total_amount_cents=5000,
+            line_items_json=[
+                {
+                    "lineItemId": 55,
+                    "title": "Thing",
+                    "quantity": 2,
+                    "priceCents": 2500,
+                    "totalCents": 5000,
+                }
+            ],
+            environment="staging",
+        )
+        return order
+
+    @patch("listings.order_service.LasooClient")
+    def test_cancel_reasons_includes_lasoo_pre_dispatch_list(self, mock_client_cls):
+        order = self._make_cancel_order("3")
+        mock_client = MagicMock()
+        mock_client.auth_key = "test-key"
+        mock_client.send.return_value = LasooResult(
+            ok=True,
+            data={
+                "success": True,
+                "results": {
+                    "success": True,
+                    "refunds": [{"refundReason": "Warehouse damage"}],
+                },
+            },
+            message="Success.",
+            status=200,
+        )
+        mock_client_cls.return_value = mock_client
+
+        result = order_service.cancel_reasons(order.store)
+        labels = [r["label"] for r in result["reasons"]]
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["marketplace"], "lasoo")
+        self.assertIn("Out of stock", labels)
+        self.assertIn("Warehouse damage", labels)
+        self.assertEqual(labels[-1], "Other")
+
+    @patch("listings.order_service.LasooClient")
+    def test_cancel_marks_local_and_reports_marketplace_ok(self, mock_client_cls):
+        order = self._make_cancel_order("1")
+        mock_client = MagicMock()
+        mock_client.auth_key = "test-key"
+        mock_client.send.return_value = LasooResult(
+            ok=True,
+            data={"success": True, "results": {"success": True}},
+            message="Success.",
+            status=200,
+        )
+        mock_client_cls.return_value = mock_client
+
+        result = order_service.cancel(order, reason="Out of stock")
+        order.refresh_from_db()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["marketplace_ok"])
+        self.assertEqual(order.status, OrderStatus.CANCELLED)
+        mock_client.send.assert_called_once()
+        _, payload = mock_client.send.call_args[0]
+        self.assertEqual(payload["query"], "Refunds_Create")
+        self.assertEqual(payload["data"]["invoiceId"], int(order.external_order_key))
+        self.assertEqual(payload["data"]["refundReason"], "Out of stock")
+        self.assertEqual(payload["data"]["items"][0]["lineItemId"], 55)
+
+    @patch("listings.order_service.LasooClient")
+    def test_cancel_still_marks_local_when_lasoo_fails(self, mock_client_cls):
+        order = self._make_cancel_order("2")
+        mock_client = MagicMock()
+        mock_client.auth_key = "test-key"
+        mock_client.send.return_value = LasooResult(
+            ok=True,
+            data={
+                "success": True,
+                "results": {
+                    "success": False,
+                    "message": "Fatal error in Refunds_Create",
+                },
+            },
+            message="Success.",
+            status=200,
+        )
+        mock_client_cls.return_value = mock_client
+
+        result = order_service.cancel(order, reason="Damaged")
+        order.refresh_from_db()
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["marketplace_ok"])
+        self.assertEqual(order.status, OrderStatus.CANCELLED)
