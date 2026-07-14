@@ -446,9 +446,11 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          memory: 1024M
+          # 3GiB: Vevor XLSX ingest (~9k SKUs) can peak ~700–900MB; overlapping
+          # retries under 1GiB caused SIGKILL. Keep CELERY_LIGHT_CONCURRENCY=3.
+          memory: 3072M
         reservations:
-          memory: 256M
+          memory: 512M
 
   celery_beat:
     <<: *backend-image
