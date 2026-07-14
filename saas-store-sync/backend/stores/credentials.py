@@ -16,7 +16,7 @@ def marketplace_kind(marketplace) -> str:
         return ''
     code = (getattr(marketplace, 'code', None) or '').strip().lower()
     name = (getattr(marketplace, 'name', None) or '').strip().lower()
-    if code in ('sears', 'walmart', 'kogan', 'mydeal', 'reverb'):
+    if code in ('sears', 'walmart', 'kogan', 'mydeal', 'reverb', 'lasoo'):
         return code
     if 'walmart' in name:
         return 'walmart'
@@ -28,6 +28,8 @@ def marketplace_kind(marketplace) -> str:
         return 'mydeal'
     if 'reverb' in name:
         return 'reverb'
+    if 'lasoo' in name:
+        return 'lasoo'
     return code or name
 
 
@@ -83,11 +85,37 @@ def validate_api_token_shape(marketplace, api_token: str) -> str:
     return json.dumps(data, separators=(',', ':'))
 
 
+def verify_lasoo_connection(store) -> tuple[bool, str | None]:
+    """Verify Lasoo AuthKey by calling an authenticated Variants Search."""
+    from listings.errors import MarketplaceError
+    from listings.lasoo.client import LasooClient
+    from listings.lasoo.queries import build_payload
+
+    try:
+        client = LasooClient(store)
+    except MarketplaceError as exc:
+        return False, str(exc)
+
+    payload = build_payload(
+        'variants_search',
+        data={'page': 1, 'take': 1},
+        auth=client.auth_key,
+    )
+    result = client.send('variants_search', payload)
+    if result.ok:
+        return True, f'Lasoo {client.environment} connection successful.'
+    return False, result.message or 'Lasoo rejected these credentials.'
+
+
 def verify_store_connection(store) -> tuple[bool, str | None]:
     """Call the marketplace adapter to verify credentials. Returns (ok, error_message)."""
     from store_adapters import get_adapter
 
     marketplace = getattr(store, 'marketplace', None)
+    kind = marketplace_kind(marketplace)
+    if kind == 'lasoo':
+        return verify_lasoo_connection(store)
+
     if requires_structured_credentials(marketplace):
         try:
             validate_api_token_shape(marketplace, getattr(store, 'api_token', None) or '')
@@ -104,7 +132,6 @@ def verify_store_connection(store) -> tuple[bool, str | None]:
     try:
         adapter = get_adapter(store)
         adapter._validate_using_store_json_only = True
-        kind = marketplace_kind(marketplace)
         if kind == 'walmart' and hasattr(adapter, 'test_walmart_connection'):
             ok, msg, _code = adapter.test_walmart_connection()
             return ok, None if ok else msg

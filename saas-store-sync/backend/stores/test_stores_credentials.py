@@ -302,3 +302,41 @@ class WalmartStoreOnlyCredentialTests(SimpleTestCase):
         self.assertFalse(ok)
         self.assertEqual(msg, MSG_WALMART_FORBIDDEN)
         self.assertEqual(code, 403)
+
+
+class LasooConnectionTests(SimpleTestCase):
+    def test_marketplace_kind_lasoo(self):
+        from stores.credentials import marketplace_kind
+        self.assertEqual(marketplace_kind(_mkt('lasoo')), 'lasoo')
+        self.assertEqual(marketplace_kind(SimpleNamespace(code='', name='Lasoo')), 'lasoo')
+
+    @patch('listings.lasoo.client.LasooClient.send')
+    def test_verify_store_connection_lasoo_ok(self, mock_send):
+        mock_send.return_value = SimpleNamespace(ok=True, message='Success.')
+        store = SimpleNamespace(
+            name='P&P lesso',
+            marketplace=_mkt('lasoo'),
+            lasoo_environment='staging',
+            lasoo_staging_base_url='https://stage.api.lasoo.com.au',
+            lasoo_staging_auth_key='test-key',
+            lasoo_production_base_url='',
+            lasoo_production_auth_key='',
+        )
+        ok, msg = verify_store_connection(store)
+        self.assertTrue(ok)
+        self.assertIn('staging', msg or '')
+        mock_send.assert_called_once()
+
+    def test_verify_store_connection_lasoo_missing_key(self):
+        store = SimpleNamespace(
+            name='P&P lesso',
+            marketplace=_mkt('lasoo'),
+            lasoo_environment='staging',
+            lasoo_staging_base_url='https://stage.api.lasoo.com.au',
+            lasoo_staging_auth_key='',
+            lasoo_production_base_url='',
+            lasoo_production_auth_key='',
+        )
+        ok, msg = verify_store_connection(store)
+        self.assertFalse(ok)
+        self.assertIn('AuthKey', msg or '')

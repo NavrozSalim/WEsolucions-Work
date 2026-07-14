@@ -8,6 +8,9 @@ import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
 import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
 
+const LASOO_DEFAULT_STAGING_URL = 'https://stage.api.lasoo.com.au';
+const LASOO_DEFAULT_PRODUCTION_URL = 'https://api.lasoo.com.au';
+
 const emptyPriceRange = () => ({ from_value: 0, to_value: null, margin_type: 'percentage', margin_percentage: 25 });
 const emptyInventoryRange = () => ({ from_value: 0, to_value: 999999999, range_type: 'multiplier', multiplier: 0.5, fixed_value: null });
 
@@ -52,7 +55,22 @@ function frequencyToCrontab(freq, hour, minute) {
 }
 
 function storeToForm(store) {
-    if (!store) return { name: '', api_token: '', vendor_price_settings: [], vendor_inventory_settings: [], schedule_enabled: false, schedule_frequency: 'daily', schedule_hour: '10', schedule_minute: '00', schedule_timezone: 'America/New_York' };
+    if (!store) return {
+        name: '',
+        api_token: '',
+        lasoo_environment: 'staging',
+        lasoo_staging_base_url: LASOO_DEFAULT_STAGING_URL,
+        lasoo_staging_auth_key: '',
+        lasoo_production_base_url: LASOO_DEFAULT_PRODUCTION_URL,
+        lasoo_production_auth_key: '',
+        vendor_price_settings: [],
+        vendor_inventory_settings: [],
+        schedule_enabled: false,
+        schedule_frequency: 'daily',
+        schedule_hour: '10',
+        schedule_minute: '00',
+        schedule_timezone: 'America/New_York',
+    };
     const sched = store.sync_schedule;
     return {
         name: store.name || '',
@@ -62,6 +80,11 @@ function storeToForm(store) {
         kogan_tab_name: store.kogan_tab_name || '',
         kogan_service_account_json: '',
         mydeal_setup_method: store.mydeal_setup_method || 'upload',
+        lasoo_environment: store.lasoo_environment || 'staging',
+        lasoo_staging_base_url: store.lasoo_staging_base_url || LASOO_DEFAULT_STAGING_URL,
+        lasoo_staging_auth_key: '',
+        lasoo_production_base_url: store.lasoo_production_base_url || LASOO_DEFAULT_PRODUCTION_URL,
+        lasoo_production_auth_key: '',
         vendor_price_settings: (store.vendor_price_settings || []).map((vp) => ({
             vendor_id: vp.vendor || vp.vendor_id,
             purchase_tax_percentage: vp.purchase_tax_percentage ?? 0,
@@ -277,11 +300,14 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     };
 
     const regionTimezones = TIMEZONE_OPTIONS[store?.region] || TIMEZONE_OPTIONS.USA;
-    const isKogan = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'kogan';
-    const isMydeal = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'mydeal';
-    const isSears = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'sears';
-    const isWalmart = (store?.marketplace_name || '').toString().trim().toLowerCase() === 'walmart';
+    const isManaged = (store?.management_mode || '') === 'full_store';
+    const isKogan = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'kogan';
+    const isMydeal = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'mydeal';
+    const isSears = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'sears';
+    const isWalmart = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'walmart';
+    const isLasoo = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'lasoo';
     const showRrpDiscount = isMydeal || isSears || isKogan;
+    const maxStep = isManaged ? 1 : 3;
     const credentialsLabel = isSears
         ? 'Sears credentials (JSON)'
         : isWalmart
@@ -299,7 +325,37 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
         const cron = frequencyToCrontab(form.schedule_frequency, form.schedule_hour, form.schedule_minute);
         const payload = {
             name: form.name.trim(),
-        vendor_price_settings: form.vendor_price_settings.map((vp) => {
+            sync_schedule: form.schedule_enabled ? {
+                enabled: true,
+                schedule_type: 'crontab',
+                crontab_hour: cron.crontab_hour,
+                crontab_minute: cron.crontab_minute,
+                crontab_day_of_week: '*',
+                timezone: form.schedule_timezone,
+            } : { enabled: false },
+        };
+
+        if (isLasoo) {
+            payload.lasoo_environment = form.lasoo_environment || 'staging';
+            payload.lasoo_staging_base_url = form.lasoo_staging_base_url?.trim() || LASOO_DEFAULT_STAGING_URL;
+            payload.lasoo_production_base_url = form.lasoo_production_base_url?.trim() || '';
+            if (form.lasoo_staging_auth_key?.trim()) {
+                payload.lasoo_staging_auth_key = form.lasoo_staging_auth_key.trim();
+            }
+            if (form.lasoo_production_auth_key?.trim()) {
+                payload.lasoo_production_auth_key = form.lasoo_production_auth_key.trim();
+            }
+        }
+
+        // Managed stores (Lasoo/Reverb listings) don't require vendor price/inventory rules.
+        if (isManaged) {
+            if (!isLasoo && !isKogan && form.api_token?.trim()) {
+                payload.api_token = form.api_token.trim();
+            }
+            return payload;
+        }
+
+        payload.vendor_price_settings = form.vendor_price_settings.map((vp) => {
             const ranges = vp.range_margins || [];
             const allDirect = ranges.length > 0 && ranges.every((r) => r.margin_type === 'direct');
             return {
@@ -321,8 +377,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                     margin_percentage: parseFloat(r.margin_percentage) || 0,
                 })),
             };
-        }).filter((vp) => vp.vendor_id),
-        vendor_inventory_settings: form.vendor_inventory_settings.map((vi) => ({
+        }).filter((vp) => vp.vendor_id);
+        payload.vendor_inventory_settings = form.vendor_inventory_settings.map((vi) => ({
             vendor_id: vi.vendor_id ? String(vi.vendor_id) : undefined,
             range_multipliers: (vi.range_multipliers || []).map((r) => ({
                 from_value: parseFloat(r.from_value) || 0,
@@ -331,16 +387,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                 multiplier: parseFloat(r.multiplier) || 1,
                 fixed_value: r.range_type === 'fixed' ? (parseInt(r.fixed_value, 10) ?? 0) : null,
             })),
-        })).filter((vi) => vi.vendor_id),
-            sync_schedule: form.schedule_enabled ? {
-                enabled: true,
-                schedule_type: 'crontab',
-                crontab_hour: cron.crontab_hour,
-                crontab_minute: cron.crontab_minute,
-                crontab_day_of_week: '*',
-                timezone: form.schedule_timezone,
-            } : { enabled: false },
-        };
+        })).filter((vi) => vi.vendor_id);
+
         if (!isKogan && form.api_token?.trim()) payload.api_token = form.api_token.trim();
         if (isKogan && koganAuth === 'token') {
             if (form.api_token?.trim()) payload.api_token = form.api_token.trim();
@@ -359,10 +407,17 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const validateStep1 = () => {
         const errs = [];
         if (!form.name?.trim()) errs.push('Store name is required');
+        if (isLasoo) {
+            if (!form.lasoo_staging_base_url?.trim()) errs.push('Lasoo staging base URL is required');
+            if (form.lasoo_environment === 'production' && !form.lasoo_production_base_url?.trim() && !(store?.lasoo_production_base_url || '').trim()) {
+                errs.push('Lasoo production base URL is required when production is active');
+            }
+        }
         return errs;
     };
     const validateStep2 = () => {
         const errs = [];
+        if (isManaged && isLasoo) return errs;
         if (!form.vendor_price_settings.some((vp) => vp.vendor_id)) errs.push('Add at least one vendor with price settings');
         form.vendor_price_settings.forEach((vp) => {
             if (!vp.vendor_id) return;
@@ -381,6 +436,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     };
     const validateStep3 = () => {
         const errs = [];
+        if (isManaged && isLasoo) return errs;
         if (!form.vendor_inventory_settings.some((vi) => vi.vendor_id)) errs.push('Add at least one vendor with inventory ranges');
         if (priceVendorsMissingInventory.length) {
             const labels = priceVendorsMissingInventory.map(
@@ -403,7 +459,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
             setError(errs.join('. '));
             return;
         }
-        if (step < 3) {
+        if (step < maxStep) {
             setError('');
             if (step === 2) {
                 const priceIds = form.vendor_price_settings.map((v) => v.vendor_id).filter(Boolean);
@@ -431,7 +487,14 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
             })
             .catch((err) => {
                 const d = err.response?.data;
-                setError(d?.detail || 'Failed to update settings');
+                let msg = d?.detail;
+                if (!msg && typeof d === 'object' && d) {
+                    const parts = Object.entries(d).flatMap(([k, v]) =>
+                        (Array.isArray(v) ? v : [v]).map((x) => (typeof x === 'string' ? x : `${k}: ${JSON.stringify(x)}`))
+                    );
+                    msg = parts.length ? parts.join('. ') : null;
+                }
+                setError(msg || 'Failed to update settings');
             })
             .finally(() => setLoading(false));
     };
@@ -446,12 +509,16 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                     <div className="flex items-start justify-between gap-4 mb-4">
                     <div>
                             <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">Edit Store</h2>
-                        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{store.name}</p>
+                        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                            {store.name}
+                            {isManaged ? ' · Managed store' : ''}
+                        </p>
                     </div>
                     <button type="button" onClick={onClose} className="p-2 rounded-md hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200">
                         <X className="h-5 w-5" />
                     </button>
                     </div>
+                    {!isManaged && (
                     <div className="flex">
                         {[
                             { num: 1, label: 'Store' },
@@ -482,6 +549,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                             </button>
                         ))}
                     </div>
+                    )}
+                    {isManaged && <div className="pb-4" />}
                 </div>
                 <div className="flex-1 min-h-0 overflow-y-auto px-8 py-4 flex flex-col items-stretch" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(100,116,139,.35) transparent' }}>
                     {error && <p className="text-rose-600 dark:text-rose-400 text-sm mb-3 shrink-0">{error}</p>}
@@ -494,7 +563,50 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                     <Input label="Store Name" placeholder={isMydeal ? 'e.g. TFS or P&P' : undefined} value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} required />
                                 </div>
                                 <div className="sm:col-span-2">
-                                    {isMydeal ? (
+                                    {isLasoo ? (
+                                        <div className="space-y-3 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
+                                            <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">Lasoo connection</p>
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                                <Input
+                                                    label="Staging base URL"
+                                                    value={form.lasoo_staging_base_url}
+                                                    onChange={(e) => setForm((f) => ({ ...f, lasoo_staging_base_url: e.target.value }))}
+                                                    required
+                                                />
+                                                <Input
+                                                    label="Staging AuthKey"
+                                                    type="password"
+                                                    placeholder="Leave blank to keep current"
+                                                    value={form.lasoo_staging_auth_key}
+                                                    onChange={(e) => setForm((f) => ({ ...f, lasoo_staging_auth_key: e.target.value }))}
+                                                />
+                                                <Input
+                                                    label="Production base URL (optional)"
+                                                    value={form.lasoo_production_base_url}
+                                                    onChange={(e) => setForm((f) => ({ ...f, lasoo_production_base_url: e.target.value }))}
+                                                />
+                                                <Input
+                                                    label="Production AuthKey (optional)"
+                                                    type="password"
+                                                    placeholder="Leave blank to keep current"
+                                                    value={form.lasoo_production_auth_key}
+                                                    onChange={(e) => setForm((f) => ({ ...f, lasoo_production_auth_key: e.target.value }))}
+                                                />
+                                            </div>
+                                            <Select
+                                                label="Active environment"
+                                                value={form.lasoo_environment}
+                                                onChange={(e) => setForm((f) => ({ ...f, lasoo_environment: e.target.value }))}
+                                                options={[
+                                                    { value: 'staging', label: 'Staging (test first)' },
+                                                    { value: 'production', label: 'Production' },
+                                                ]}
+                                            />
+                                            <p className="text-xs text-slate-500 dark:text-slate-400">
+                                                AuthKeys are write-only. Leave blank to keep existing keys. Listings and orders use the active environment.
+                                            </p>
+                                        </div>
+                                    ) : isMydeal ? (
                                         <MydealSetupFields
                                             setupMethod={mydealSetup}
                                             onSetupMethodChange={(v) => setForm((f) => ({ ...f, mydeal_setup_method: v }))}
@@ -601,7 +713,11 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                     <Clock className="h-5 w-5 text-slate-500 dark:text-slate-400" />
                                     <div className="flex-1">
                                         <h3 className="text-sm font-medium text-slate-900 dark:text-slate-100">Scheduled Updates</h3>
-                                        <p className="text-xs text-slate-500 dark:text-slate-400">Automatically scrape and push price/inventory</p>
+                                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                                            {isManaged
+                                                ? 'Optional schedule for managed store maintenance jobs'
+                                                : 'Automatically scrape and push price/inventory'}
+                                        </p>
                                     </div>
                                     <label className="relative inline-flex items-center cursor-pointer">
                                         <input
@@ -916,20 +1032,24 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                     )}
                 </div>
                 <div className="flex-shrink-0 flex justify-between items-center border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-8 py-5">
-                    <Button variant="ghost" onClick={() => setStep((s) => s - 1)} disabled={step === 1}>Back</Button>
+                    {!isManaged ? (
+                        <Button variant="ghost" onClick={() => setStep((s) => s - 1)} disabled={step === 1}>Back</Button>
+                    ) : (
+                        <span />
+                    )}
                     <Button
                         variant="primary"
                         onClick={handleSubmit}
                         disabled={
                             loading
-                            || (step === 2 && !form.vendor_price_settings.some((vp) => vp.vendor_id))
-                            || (step === 3 && (
+                            || (!isManaged && step === 2 && !form.vendor_price_settings.some((vp) => vp.vendor_id))
+                            || (!isManaged && step === 3 && (
                                 !form.vendor_inventory_settings.some((vi) => vi.vendor_id)
                                 || priceVendorsMissingInventory.length > 0
                             ))
                         }
                     >
-                        {loading ? 'Saving…' : step < 3 ? 'Continue' : 'Save Settings'}
+                        {loading ? 'Saving…' : step < maxStep ? 'Continue' : 'Save Settings'}
                     </Button>
                 </div>
             </div>

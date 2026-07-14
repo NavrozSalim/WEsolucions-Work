@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence } from 'framer-motion';
-import { Search, Plus, DollarSign, Trash2, Copy, Store, Wifi, WifiOff, Clock, RefreshCw, MoreVertical } from 'lucide-react';
+import { Search, Plus, Pencil, Trash2, Copy, Store, Wifi, WifiOff, Clock, RefreshCw, MoreVertical } from 'lucide-react';
 import {
     getStores,
     getStore,
@@ -74,12 +74,12 @@ function ActionsDropdown({ store, conn, validatingId, updatingId, onValidate, on
             label: 'Update',
             icon: <RefreshCw className={`h-4 w-4 shrink-0 ${updatingId === store.id ? 'animate-spin' : ''}`} />,
             onClick: () => onUpdate(store),
-            disabled: updatingId === store.id || conn !== 'connected',
+            disabled: updatingId === store.id || conn !== 'connected' || store.management_mode === 'full_store',
             className: 'text-slate-700 dark:text-slate-300',
         },
         {
             label: 'Edit',
-            icon: <DollarSign className="h-4 w-4 shrink-0" />,
+            icon: <Pencil className="h-4 w-4 shrink-0" />,
             onClick: () => onEdit(store),
             className: 'text-accent-700 dark:text-accent-400',
         },
