@@ -81,8 +81,34 @@ class StoreListingSerializer(serializers.ModelSerializer):
             self._extras(obj).get('free_shipping')
         )
 
+    @staticmethod
+    def _format_price_multiplier(sale, vendor):
+        """Sale ÷ vendor as ×N (e.g. 2× cost → ×2)."""
+        try:
+            sale_f = float(sale or 0)
+            vendor_f = float(vendor) if vendor is not None else None
+        except (TypeError, ValueError):
+            return None
+        if vendor_f is None or vendor_f <= 0 or sale_f <= 0:
+            return None
+        return f'×{round(sale_f / vendor_f, 2):g}'
+
+    @staticmethod
+    def _format_percentage_tier_as_multiplier(margin_val, fee_pct=0.0):
+        """
+        Percentage tiers price as cost × 100 / (100 − margin − fee).
+        Show that factor so 50% margin reads as ×2, matching direct multipliers.
+        """
+        try:
+            denom = 100.0 - float(margin_val) - float(fee_pct or 0)
+        except (TypeError, ValueError):
+            return None
+        if denom <= 0:
+            return None
+        return f'×{round(100.0 / denom, 2):g}'
+
     def get_margin_pct(self, obj):
-        """Computed (sale − vendor) / sale × 100 — useful when no store tier is set."""
+        """Legacy: (sale − vendor) / sale × 100. Prefer margin_display (×N)."""
         try:
             sale = float(obj.sale_price or 0)
             vendor = float(obj.vendor_price) if obj.vendor_price is not None else None
@@ -93,14 +119,14 @@ class StoreListingSerializer(serializers.ModelSerializer):
         return round(((sale - vendor) / sale) * 100, 1)
 
     def get_margin_display(self, obj):
-        """Configured tier margin (same as catalog Product listings), else computed %."""
+        """Configured tier as ×N / +$ (same as catalog), else sale÷vendor ×N."""
         try:
             if obj.vendor_price is None:
                 return None
             cost = float(obj.vendor_price)
             store = obj.store
             if store is None:
-                return None
+                return self._format_price_multiplier(obj.sale_price, obj.vendor_price)
             from stores.models import StoreVendorPriceSettings
             from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
 
@@ -114,22 +140,26 @@ class StoreListingSerializer(serializers.ModelSerializer):
             if ps is None:
                 ps = StoreVendorPriceSettings.objects.filter(store=store).first()
             if not ps:
-                pct = self.get_margin_pct(obj)
-                return None if pct is None else f'+{pct:g}%'
+                return self._format_price_multiplier(obj.sale_price, obj.vendor_price)
             tier = resolve_margin_tier_for_raw_cost(ps, cost)
             if tier is None:
-                pct = self.get_margin_pct(obj)
-                return None if pct is None else f'+{pct:g}%'
+                return self._format_price_multiplier(obj.sale_price, obj.vendor_price)
             m_type = getattr(tier, 'margin_type', 'percentage') or 'percentage'
             val = float(tier.margin_percentage or 0)
             if m_type == 'direct':
                 return f'×{val:g}'
             if m_type == 'fixed':
                 return f'+${val:.2f}'
-            return f'+{val:g}%'
+            fee_pct = float(getattr(ps, 'marketplace_fees_percentage', 0) or 0)
+            return (
+                self._format_percentage_tier_as_multiplier(val, fee_pct)
+                or self._format_price_multiplier(obj.sale_price, obj.vendor_price)
+            )
         except Exception:  # noqa: BLE001
-            pct = self.get_margin_pct(obj)
-            return None if pct is None else f'+{pct:g}%'
+            return self._format_price_multiplier(
+                getattr(obj, 'sale_price', None),
+                getattr(obj, 'vendor_price', None),
+            )
 
 
 class ListingUploadSerializer(serializers.ModelSerializer):

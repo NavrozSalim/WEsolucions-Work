@@ -517,12 +517,14 @@ function formatLastStatus(product) {
     return '—';
 }
 
-/** Fallback when API does not send Excel-aligned margin_display (legacy). */
+/** Fallback when API does not send margin_display — show sale÷cost as ×N. */
 function calcMargin(vendorPrice, storePrice) {
     if (!vendorPrice || !storePrice || parseFloat(vendorPrice) === 0) return '—';
     const v = parseFloat(vendorPrice);
     const s = parseFloat(storePrice);
-    return `+${((s - v) / v * 100).toFixed(0)}%`;
+    if (!Number.isFinite(v) || !Number.isFinite(s) || v <= 0 || s <= 0) return '—';
+    const mult = Math.round((s / v) * 100) / 100;
+    return `×${mult}`;
 }
 
 function formatMarginCell(product) {
