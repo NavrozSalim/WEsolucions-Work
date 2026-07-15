@@ -23,14 +23,22 @@ class LoginView(APIView):
     throttle_classes = [LoginRateThrottle]
 
     def post(self, request):
-        email = (request.data.get('email') or '').strip()
+        # Frontend may send email; also accept username for local/dev convenience.
+        identifier = (
+            request.data.get('email')
+            or request.data.get('username')
+            or ''
+        ).strip()
         password = request.data.get('password') or ''
-        if not email or not password:
+        if not identifier or not password:
             return Response(
                 {'detail': 'Must include email and password.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        user = User.objects.filter(email__iexact=email).first()
+        user = (
+            User.objects.filter(email__iexact=identifier).first()
+            or User.objects.filter(username__iexact=identifier).first()
+        )
         if not user or not user.check_password(password):
             return Response(
                 {'detail': 'Invalid email or password.'},

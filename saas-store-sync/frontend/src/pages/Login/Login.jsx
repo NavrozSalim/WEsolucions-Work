@@ -81,11 +81,12 @@ const Login = () => {
                         </div>
                     )}
                     <Input
-                        type="email"
+                        type="text"
                         required
+                        autoComplete="username"
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
-                        placeholder="Email address"
+                        placeholder="Email or username"
                         label="Email"
                     />
                     <Input
