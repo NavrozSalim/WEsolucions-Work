@@ -42,21 +42,25 @@ export const cancelOrder = (storeId, orderId, data = {}) =>
 export const getOrderCancelReasons = (storeId) =>
     api.get(`/stores/${storeId}/orders/cancel-reasons/`);
 
-/** Download store orders as Excel (.xlsx). */
-export const exportOrdersExcel = (storeId, storeName = '') =>
-    api.get(`/stores/${storeId}/orders/export/`, { responseType: 'blob' }).then((res) => {
+/** Download store orders as Excel (.xlsx). Optional status filter (e.g. paid). */
+export const exportOrdersExcel = (storeId, storeName = '', { status } = {}) => {
+    const params = {};
+    if (status && status !== 'all') params.status = status;
+    return api.get(`/stores/${storeId}/orders/export/`, { params, responseType: 'blob' }).then((res) => {
         const safe = String(storeName || storeId).replace(/[^\w.-]+/g, '_').slice(0, 40) || 'store';
+        const suffix = status && status !== 'all' ? `_${status}` : '';
         const url = window.URL.createObjectURL(new Blob([res.data], {
             type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         }));
         const link = document.createElement('a');
         link.href = url;
-        link.setAttribute('download', `orders_${safe}.xlsx`);
+        link.setAttribute('download', `orders_${safe}${suffix}.xlsx`);
         document.body.appendChild(link);
         link.click();
         link.remove();
         window.URL.revokeObjectURL(url);
     });
+};
 
 // --- Tickets / customer messages ---
 export const getTickets = (storeId, { refresh = false } = {}) =>

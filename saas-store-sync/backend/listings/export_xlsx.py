@@ -15,6 +15,16 @@ def _workbook_response_bytes(wb: Workbook) -> bytes:
     return buf.getvalue()
 
 
+def _is_reverb(store) -> bool:
+    code = ""
+    try:
+        mp = getattr(store, "marketplace", None)
+        code = (getattr(mp, "code", None) or "").strip().lower()
+    except Exception:
+        code = ""
+    return code == "reverb"
+
+
 def _customer_name(details: dict, customer_info) -> str:
     c = details.get("customer") if isinstance(details.get("customer"), dict) else {}
     if not c and isinstance(customer_info, dict):
@@ -28,71 +38,93 @@ def _customer_name(details: dict, customer_info) -> str:
     return name or str(c.get("name") or c.get("email") or "").strip()
 
 
-def _format_address(addr) -> str:
-    if not isinstance(addr, dict):
-        return ""
-    parts = [
-        addr.get("name") or addr.get("fullName"),
-        addr.get("line1") or addr.get("street") or addr.get("address1"),
-        addr.get("line2") or addr.get("address2"),
-        ", ".join(
-            p for p in (
-                addr.get("city"),
-                addr.get("state") or addr.get("region"),
-                addr.get("postcode") or addr.get("postal_code") or addr.get("zip"),
-            ) if p
-        ),
-        addr.get("country") or addr.get("country_code"),
-    ]
-    return ", ".join(str(p).strip() for p in parts if p and str(p).strip())
+def _money_amount(value) -> float | None:
+    """Return decimal amount from cents int, float, str, or Reverb money dict."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, dict):
+        cents = value.get("amount_cents")
+        if cents is not None:
+            try:
+                return float(cents) / 100.0
+            except (TypeError, ValueError):
+                pass
+        amount = value.get("amount")
+        if amount is not None:
+            try:
+                return float(amount)
+            except (TypeError, ValueError):
+                return None
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
-def _items_text(details: dict, line_items_json) -> str:
-    items = details.get("lineItems") if isinstance(details.get("lineItems"), list) else None
-    if not items and isinstance(line_items_json, list):
-        items = line_items_json
-    if not items:
+def _cents_to_amount(cents) -> float | None:
+    if cents is None:
+        return None
+    try:
+        return float(cents) / 100.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_date_short(value) -> str:
+    """M/D/YYYY to match Reverb export style."""
+    if not value:
         return ""
-    parts = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        title = str(it.get("title") or it.get("name") or "").strip()
-        sku = str(it.get("sku") or it.get("externalVariantKey") or "").strip()
-        qty = it.get("quantity") if it.get("quantity") is not None else it.get("qty")
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).replace("Z", "+00:00")
         try:
-            qty = int(qty) if qty is not None else 1
-        except (TypeError, ValueError):
-            qty = 1
-        bit = title or sku or "item"
-        if sku and title:
-            bit = f"{title} ({sku})"
-        elif sku and not title:
-            bit = sku
-        parts.append(f"{qty}× {bit}")
-    return "; ".join(parts)
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return str(value)[:10]
+    return f"{dt.month}/{dt.day}/{dt.year}"
+
+
+def _reverb_raw(order) -> dict:
+    envelope = order.raw_response_json if isinstance(order.raw_response_json, dict) else {}
+    rev = envelope.get("_reverb")
+    return rev if isinstance(rev, dict) else {}
+
+
+def _autosize(ws) -> None:
+    for col in ws.columns:
+        max_len = 0
+        letter = col[0].column_letter
+        for cell in col:
+            val = "" if cell.value is None else str(cell.value)
+            max_len = max(max_len, min(len(val), 60))
+        ws.column_dimensions[letter].width = max(12, max_len + 2)
 
 
 def build_orders_xlsx(orders, store) -> bytes:
-    """Build an .xlsx workbook for a list of MarketplaceOrder instances."""
+    """
+    Build an .xlsx matching the seller's highlighted Reverb-style columns:
+    Order ID, Date, Quantity, Title, Buyer Name, Shipping Cost, Product Price,
+    Order Payout, Status.
+
+    One row per line item (Quantity / Title per item).
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Orders"
+    reverb = _is_reverb(store)
+    id_header = "Order ID" if reverb else "Invoice"
     headers = [
-        "Invoice",
-        "Order key",
-        "Customer",
-        "Email",
-        "Phone",
-        "Items",
-        "Total",
-        "Currency",
+        id_header,
+        "Date",
+        "Quantity",
+        "Title",
+        "Buyer Name",
+        "Shipping Cost",
+        "Product Price",
+        "Order Payout",
         "Status",
-        "Shipping status",
-        "Ordered at",
-        "Shipping address",
-        "Environment",
-        "Related tickets",
     ]
     ws.append(headers)
 
@@ -107,67 +139,81 @@ def build_orders_xlsx(orders, store) -> bytes:
             details = enrich_order_line_items(details, store)
         except Exception:
             pass
-        customer = details.get("customer") if isinstance(details.get("customer"), dict) else {}
-        if not customer and isinstance(order.customer_info_json, dict):
-            customer = order.customer_info_json
+
+        rev = _reverb_raw(order)
         totals = details.get("totals") if isinstance(details.get("totals"), dict) else {}
         dates = details.get("dates") if isinstance(details.get("dates"), dict) else {}
-        shipping = details.get("shipping") if isinstance(details.get("shipping"), dict) else {}
-        addr = details.get("shippingAddress") or shipping.get("address")
 
-        total_cents = totals.get("totalCents")
-        if total_cents is None:
-            total_cents = order.total_amount_cents
-        total_display = ""
-        if total_cents is not None:
-            try:
-                total_display = f"{float(total_cents) / 100:.2f}"
-            except (TypeError, ValueError):
-                total_display = str(total_cents)
-
-        ticket_keys = []
-        # related tickets may be attached via serializer context; fall back to blank
-        related = getattr(order, "_related_tickets_export", None)
-        if isinstance(related, list):
-            for t in related:
-                if isinstance(t, dict):
-                    ticket_keys.append(str(t.get("subject") or t.get("id") or "").strip())
-                else:
-                    ticket_keys.append(str(t))
-
+        order_id = order.invoice_number or order.external_order_key or ""
         ordered_at = dates.get("orderedAt") or order.created_at
-        if isinstance(ordered_at, datetime):
-            ordered_at = ordered_at.isoformat()
+        if not ordered_at and rev.get("created_at"):
+            ordered_at = rev.get("created_at")
+        date_str = _format_date_short(ordered_at)
+        buyer = _customer_name(details, order.customer_info_json)
 
-        ws.append([
-            order.invoice_number or "",
-            order.external_order_key or "",
-            _customer_name(details, order.customer_info_json),
-            str(customer.get("email") or ""),
-            str(customer.get("phone") or ""),
-            _items_text(details, order.line_items_json),
-            total_display,
-            str(totals.get("currency") or ""),
-            order.status or "",
-            order.shipping_status or "",
-            str(ordered_at or ""),
-            _format_address(addr) if isinstance(addr, dict) else "",
-            order.environment or "",
-            "; ".join(p for p in ticket_keys if p),
-        ])
+        shipping_cost = _money_amount(rev.get("shipping"))
+        if shipping_cost is None:
+            shipping_cost = _cents_to_amount(totals.get("shippingCents"))
 
-    for col in ws.columns:
-        max_len = 0
-        letter = col[0].column_letter
-        for cell in col:
-            val = "" if cell.value is None else str(cell.value)
-            max_len = max(max_len, min(len(val), 60))
-        ws.column_dimensions[letter].width = max(12, max_len + 2)
+        product_price = _money_amount(
+            rev.get("amount_product")
+            or rev.get("amount_product_subtotal")
+        )
+        if product_price is None:
+            product_price = _cents_to_amount(totals.get("subtotalCents"))
 
+        payout = _money_amount(
+            rev.get("direct_checkout_payout")
+            or rev.get("payout")
+            or rev.get("order_payout")
+            or rev.get("amount_payout")
+        )
+
+        items = details.get("lineItems") if isinstance(details.get("lineItems"), list) else None
+        if not items and isinstance(order.line_items_json, list):
+            items = order.line_items_json
+        if not items:
+            items = [{}]
+
+        marketplace_status = ""
+        if isinstance(details.get("marketplaceStatus"), str):
+            marketplace_status = details["marketplaceStatus"]
+        elif rev.get("status"):
+            marketplace_status = str(rev.get("status"))
+        status_out = marketplace_status or order.status or ""
+
+        for it in items:
+            if not isinstance(it, dict):
+                it = {}
+            title = str(it.get("title") or it.get("name") or rev.get("title") or "").strip()
+            qty = it.get("quantity") if it.get("quantity") is not None else it.get("qty")
+            if qty is None:
+                qty = rev.get("quantity")
+            try:
+                qty = int(qty) if qty is not None else 1
+            except (TypeError, ValueError):
+                qty = 1
+
+            item_price = _cents_to_amount(it.get("priceCents"))
+            row_product_price = item_price if item_price is not None else product_price
+
+            ws.append([
+                order_id,
+                date_str,
+                qty,
+                title,
+                buyer,
+                shipping_cost if shipping_cost is not None else 0,
+                row_product_price if row_product_price is not None else "",
+                payout if payout is not None else "",
+                status_out,
+            ])
+
+    _autosize(ws)
     return _workbook_response_bytes(wb)
 
 
-def build_tickets_xlsx(tickets) -> bytes:
+def build_tickets_xlsx(tickets, *, order_id_label: str = "Invoice") -> bytes:
     """Build an .xlsx workbook for SupportTicket queryset/list."""
     wb = Workbook()
     ws = wb.active
@@ -176,7 +222,7 @@ def build_tickets_xlsx(tickets) -> bytes:
         "Customer",
         "Email",
         "Subject",
-        "Invoice",
+        order_id_label,
         "Status",
         "Unread",
         "Last message",
@@ -211,12 +257,5 @@ def build_tickets_xlsx(tickets) -> bytes:
             str(created or ""),
         ])
 
-    for col in ws.columns:
-        max_len = 0
-        letter = col[0].column_letter
-        for cell in col:
-            val = "" if cell.value is None else str(cell.value)
-            max_len = max(max_len, min(len(val), 60))
-        ws.column_dimensions[letter].width = max(12, max_len + 2)
-
+    _autosize(ws)
     return _workbook_response_bytes(wb)

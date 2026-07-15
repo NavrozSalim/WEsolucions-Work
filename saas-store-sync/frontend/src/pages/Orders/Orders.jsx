@@ -383,7 +383,7 @@ function InfoRow({ label, children }) {
     );
 }
 
-function OrderDetailPanel({ order, onOpenTicket }) {
+function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice' }) {
     const d = orderDetails(order);
     const customer = d.customer || {};
     const shippingAddr = formatAddress(d.shippingAddress);
@@ -434,7 +434,7 @@ function OrderDetailPanel({ order, onOpenTicket }) {
 
                 <InfoCard title="Order info">
                     <dl className="space-y-1.5">
-                        <InfoRow label="Invoice">{order.invoice_number || '—'}</InfoRow>
+                        <InfoRow label={orderIdLabel}>{order.invoice_number || '—'}</InfoRow>
                         <InfoRow label="Order key">
                             <span className="font-mono text-xs">{order.external_order_key || '—'}</span>
                         </InfoRow>
@@ -659,6 +659,7 @@ export default function Orders() {
     const [cancelOrderRow, setCancelOrderRow] = useState(null);
     const [cancelLoading, setCancelLoading] = useState(false);
     const [exporting, setExporting] = useState(false);
+    const [statusFilter, setStatusFilter] = useState('all');
 
     useEffect(() => {
         getCatalogStores()
@@ -808,11 +809,43 @@ export default function Orders() {
         [stores, selectedStore]
     );
 
+    const isReverb = (selectedStoreData?.marketplace_code || '').toLowerCase() === 'reverb';
+    const orderIdLabel = isReverb ? 'Order ID' : 'Invoice';
+
+    const filteredOrders = useMemo(() => {
+        if (!statusFilter || statusFilter === 'all') return orders;
+        return orders.filter((o) => o.status === statusFilter);
+    }, [orders, statusFilter]);
+
+    const statusFilterOptions = useMemo(() => {
+        const present = new Set(orders.map((o) => o.status).filter(Boolean));
+        const opts = [{ value: 'all', label: 'All statuses' }];
+        Object.keys(STATUS_LABELS).forEach((key) => {
+            if (present.has(key) || key === statusFilter) {
+                opts.push({ value: key, label: STATUS_LABELS[key] });
+            }
+        });
+        // Include any unexpected statuses present in data
+        present.forEach((key) => {
+            if (!STATUS_LABELS[key]) {
+                opts.push({ value: key, label: key });
+            }
+        });
+        return opts;
+    }, [orders, statusFilter]);
+
     const handleExportExcel = () => {
         if (!selectedStore || exporting) return;
         setExporting(true);
-        exportOrdersExcel(selectedStore, selectedStoreData?.name || '')
-            .then(() => setMessage({ text: 'Orders Excel downloaded.', variant: 'success' }))
+        exportOrdersExcel(selectedStore, selectedStoreData?.name || '', {
+            status: statusFilter === 'all' ? undefined : statusFilter,
+        })
+            .then(() => {
+                const scope = statusFilter === 'all'
+                    ? 'all orders'
+                    : `status “${STATUS_LABELS[statusFilter] || statusFilter}”`;
+                setMessage({ text: `Excel downloaded (${scope}).`, variant: 'success' });
+            })
             .catch((err) => {
                 setMessage({
                     text: err.response?.data?.detail || 'Failed to export orders.',
@@ -848,7 +881,10 @@ export default function Orders() {
                     <Select
                         label="Managed store"
                         value={selectedStore}
-                        onChange={(e) => setSelectedStore(e.target.value)}
+                        onChange={(e) => {
+                            setSelectedStore(e.target.value);
+                            setStatusFilter('all');
+                        }}
                         options={[
                             { value: '', label: storesLoading ? 'Loading stores…' : 'Select a store' },
                             ...stores.map((s) => ({
@@ -859,6 +895,16 @@ export default function Orders() {
                     />
                 </div>
                 {selectedStore && (
+                    <div className="w-full max-w-[11rem]">
+                        <Select
+                            label="Status"
+                            value={statusFilter}
+                            onChange={(e) => setStatusFilter(e.target.value)}
+                            options={statusFilterOptions}
+                        />
+                    </div>
+                )}
+                {selectedStore && (
                     <div className="flex items-center gap-2 pb-0.5">
                         <Button variant="primary" size="sm" onClick={() => loadOrders(true)} disabled={refreshing}>
                             <RefreshCw className={`mr-1.5 h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
@@ -868,7 +914,7 @@ export default function Orders() {
                             variant="secondary"
                             size="sm"
                             onClick={handleExportExcel}
-                            disabled={exporting || loading || orders.length === 0}
+                            disabled={exporting || loading || filteredOrders.length === 0}
                         >
                             <FileDown className={`mr-1.5 h-4 w-4 ${exporting ? 'opacity-50' : ''}`} />
                             {exporting ? 'Exporting…' : 'Export Excel'}
@@ -896,15 +942,17 @@ export default function Orders() {
                     <div className="overflow-x-auto">
                         {loading ? (
                             <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">Loading orders…</p>
-                        ) : orders.length === 0 ? (
+                        ) : filteredOrders.length === 0 ? (
                             <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">
-                                No orders yet. Use “Fetch from marketplace” to pull the latest orders.
+                                {orders.length === 0
+                                    ? 'No orders yet. Use “Fetch from marketplace” to pull the latest orders.'
+                                    : 'No orders match this status filter.'}
                             </p>
                         ) : (
                             <table className="w-full text-left text-sm">
                                 <thead className="bg-slate-50 dark:bg-slate-800 text-xs uppercase text-slate-500 dark:text-slate-400">
                                     <tr>
-                                        <th className="px-4 py-2.5">Invoice</th>
+                                        <th className="px-4 py-2.5">{orderIdLabel}</th>
                                         <th className="px-4 py-2.5">Customer</th>
                                         <th className="px-4 py-2.5">Items</th>
                                         <th className="px-4 py-2.5">Source</th>
@@ -916,7 +964,7 @@ export default function Orders() {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {orders.map((o) => {
+                                    {filteredOrders.map((o) => {
                                         const currency = o.details?.totals?.currency || 'AUD';
                                         const orderedAt = o.details?.dates?.orderedAt || o.created_at;
                                         const tickets = Array.isArray(o.related_tickets) ? o.related_tickets : [];
@@ -1012,7 +1060,7 @@ export default function Orders() {
                                                 {expandedId === o.id && (
                                                     <tr className="border-t border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40">
                                                         <td colSpan={9} className="px-4 py-4">
-                                                            <OrderDetailPanel order={o} onOpenTicket={openTicket} />
+                                                            <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} onOpenTicket={openTicket} />
                                                         </td>
                                                     </tr>
                                                 )}

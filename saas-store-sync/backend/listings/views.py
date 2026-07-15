@@ -262,46 +262,28 @@ class StoreOrdersView(APIView):
 
 
 class StoreOrdersExportView(APIView):
-    """Download store orders as an Excel (.xlsx) file."""
+    """Download store orders as an Excel (.xlsx) file.
+
+    Optional ``?status=paid`` (or any local OrderStatus value) filters rows.
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk):
         store = _get_store(request, store_pk)
-        orders = list(
+        qs = (
             MarketplaceOrder.objects.filter(store=store, user=request.user)
             .prefetch_related('shipments')
             .order_by('-created_at')
         )
-        tickets_by_order_key: dict[str, list] = {}
-        for ticket in SupportTicket.objects.filter(store=store, user=request.user).exclude(
-            related_order_key='',
-        ).only('id', 'subject', 'related_order_key'):
-            key = (ticket.related_order_key or '').strip().lower()
-            if not key:
-                continue
-            tickets_by_order_key.setdefault(key, []).append({
-                'id': str(ticket.id),
-                'subject': ticket.subject or 'Customer message',
-            })
-        for order in orders:
-            keys = []
-            for candidate in (order.invoice_number, order.external_order_key):
-                text = str(candidate or '').strip().lower()
-                if text and text not in keys:
-                    keys.append(text)
-            related = []
-            seen = set()
-            for key in keys:
-                for ticket in tickets_by_order_key.get(key, []):
-                    tid = ticket.get('id')
-                    if tid and tid not in seen:
-                        seen.add(tid)
-                        related.append(ticket)
-            order._related_tickets_export = related  # noqa: SLF001
+        status_filter = (request.query_params.get('status') or '').strip().lower()
+        if status_filter and status_filter not in ('all', '*'):
+            qs = qs.filter(status=status_filter)
+        orders = list(qs)
 
         content = export_xlsx.build_orders_xlsx(orders, store)
         safe_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in (store.name or 'store'))[:40]
-        filename = f'orders_{safe_name}.xlsx'
+        suffix = f'_{status_filter}' if status_filter and status_filter not in ('all', '*') else ''
+        filename = f'orders_{safe_name}{suffix}.xlsx'
         response = HttpResponse(
             content,
             content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -426,7 +408,10 @@ class StoreTicketsExportView(APIView):
             SupportTicket.objects.filter(store=store, user=request.user)
             .order_by('-last_message_at', '-created_at')
         )
-        content = export_xlsx.build_tickets_xlsx(tickets)
+        content = export_xlsx.build_tickets_xlsx(
+            tickets,
+            order_id_label='Order ID' if (getattr(getattr(store, 'marketplace', None), 'code', '') or '').lower() == 'reverb' else 'Invoice',
+        )
         safe_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in (store.name or 'store'))[:40]
         filename = f'tickets_{safe_name}.xlsx'
         response = HttpResponse(
