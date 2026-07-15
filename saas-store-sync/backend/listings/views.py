@@ -10,7 +10,7 @@ from rest_framework.views import APIView
 
 from stores.models import Store
 
-from . import csv_import, listing_service, order_service, shipping_service, ticket_service
+from . import csv_import, export_xlsx, listing_service, order_service, shipping_service, ticket_service
 from .errors import MarketplaceError
 from .models import ListingAction, ListingStatus, ListingUpload, MarketplaceOrder, StoreListing, SupportTicket
 from .serializers import (
@@ -261,6 +261,55 @@ class StoreOrdersView(APIView):
         })
 
 
+class StoreOrdersExportView(APIView):
+    """Download store orders as an Excel (.xlsx) file."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        orders = list(
+            MarketplaceOrder.objects.filter(store=store, user=request.user)
+            .prefetch_related('shipments')
+            .order_by('-created_at')
+        )
+        tickets_by_order_key: dict[str, list] = {}
+        for ticket in SupportTicket.objects.filter(store=store, user=request.user).exclude(
+            related_order_key='',
+        ).only('id', 'subject', 'related_order_key'):
+            key = (ticket.related_order_key or '').strip().lower()
+            if not key:
+                continue
+            tickets_by_order_key.setdefault(key, []).append({
+                'id': str(ticket.id),
+                'subject': ticket.subject or 'Customer message',
+            })
+        for order in orders:
+            keys = []
+            for candidate in (order.invoice_number, order.external_order_key):
+                text = str(candidate or '').strip().lower()
+                if text and text not in keys:
+                    keys.append(text)
+            related = []
+            seen = set()
+            for key in keys:
+                for ticket in tickets_by_order_key.get(key, []):
+                    tid = ticket.get('id')
+                    if tid and tid not in seen:
+                        seen.add(tid)
+                        related.append(ticket)
+            order._related_tickets_export = related  # noqa: SLF001
+
+        content = export_xlsx.build_orders_xlsx(orders, store)
+        safe_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in (store.name or 'store'))[:40]
+        filename = f'orders_{safe_name}.xlsx'
+        response = HttpResponse(
+            content,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+
 class StoreOrderTestView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -365,6 +414,27 @@ class StoreTicketsView(APIView):
             'refresh': refresh_result,
             'tickets': SupportTicketSerializer(tickets, many=True).data,
         })
+
+
+class StoreTicketsExportView(APIView):
+    """Download store tickets as an Excel (.xlsx) file."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        tickets = list(
+            SupportTicket.objects.filter(store=store, user=request.user)
+            .order_by('-last_message_at', '-created_at')
+        )
+        content = export_xlsx.build_tickets_xlsx(tickets)
+        safe_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in (store.name or 'store'))[:40]
+        filename = f'tickets_{safe_name}.xlsx'
+        response = HttpResponse(
+            content,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
 
 
 class StoreTicketTestView(APIView):

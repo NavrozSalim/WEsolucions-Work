@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
+    FileDown,
     FlaskConical,
     Mail,
     MessageSquare,
@@ -16,6 +17,7 @@ import EmptyState from '../../components/design/EmptyState';
 import { getCatalogStores } from '../../services/catalogService';
 import {
     createTestTicket,
+    exportTicketsExcel,
     getTickets,
     replyToTicket,
 } from '../../services/listingService';
@@ -53,6 +55,7 @@ export default function Tickets() {
     const [selectedId, setSelectedId] = useState(initialTicket);
     const [replyBody, setReplyBody] = useState('');
     const [replyLoading, setReplyLoading] = useState(false);
+    const [exporting, setExporting] = useState(false);
 
     useEffect(() => {
         getCatalogStores()
@@ -175,6 +178,25 @@ export default function Tickets() {
             .finally(() => setReplyLoading(false));
     };
 
+    const selectedStoreData = useMemo(
+        () => stores.find((s) => s.id === selectedStore),
+        [stores, selectedStore]
+    );
+
+    const handleExportExcel = () => {
+        if (!selectedStore || exporting) return;
+        setExporting(true);
+        exportTicketsExcel(selectedStore, selectedStoreData?.name || '')
+            .then(() => setMessage({ text: 'Tickets Excel downloaded.', variant: 'success' }))
+            .catch((err) => {
+                setMessage({
+                    text: err.response?.data?.detail || 'Failed to export tickets.',
+                    variant: 'error',
+                });
+            })
+            .finally(() => setExporting(false));
+    };
+
     const storeOptions = [
         { value: '', label: storesLoading ? 'Loading stores…' : 'Select a store' },
         ...stores.map((s) => ({
@@ -222,6 +244,15 @@ export default function Tickets() {
                 >
                     <RefreshCw className={`mr-2 h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
                     {refreshing ? 'Syncing…' : 'Fetch from marketplace'}
+                </Button>
+                <Button
+                    variant="secondary"
+                    type="button"
+                    onClick={handleExportExcel}
+                    disabled={!selectedStore || exporting || loading || tickets.length === 0}
+                >
+                    <FileDown className={`mr-2 h-4 w-4 ${exporting ? 'opacity-50' : ''}`} />
+                    {exporting ? 'Exporting…' : 'Export Excel'}
                 </Button>
                 <Button
                     variant="secondary"

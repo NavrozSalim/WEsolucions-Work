@@ -42,9 +42,41 @@ export const cancelOrder = (storeId, orderId, data = {}) =>
 export const getOrderCancelReasons = (storeId) =>
     api.get(`/stores/${storeId}/orders/cancel-reasons/`);
 
+/** Download store orders as Excel (.xlsx). */
+export const exportOrdersExcel = (storeId, storeName = '') =>
+    api.get(`/stores/${storeId}/orders/export/`, { responseType: 'blob' }).then((res) => {
+        const safe = String(storeName || storeId).replace(/[^\w.-]+/g, '_').slice(0, 40) || 'store';
+        const url = window.URL.createObjectURL(new Blob([res.data], {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        }));
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', `orders_${safe}.xlsx`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+    });
+
 // --- Tickets / customer messages ---
 export const getTickets = (storeId, { refresh = false } = {}) =>
     api.get(`/stores/${storeId}/tickets/`, { params: refresh ? { refresh: 1 } : {} });
 export const createTestTicket = (storeId) => api.post(`/stores/${storeId}/tickets/test/`);
 export const replyToTicket = (storeId, ticketId, data) =>
     api.post(`/stores/${storeId}/tickets/${ticketId}/reply/`, data);
+
+/** Download store tickets as Excel (.xlsx). */
+export const exportTicketsExcel = (storeId, storeName = '') =>
+    api.get(`/stores/${storeId}/tickets/export/`, { responseType: 'blob' }).then((res) => {
+        const safe = String(storeName || storeId).replace(/[^\w.-]+/g, '_').slice(0, 40) || 'store';
+        const url = window.URL.createObjectURL(new Blob([res.data], {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        }));
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', `tickets_${safe}.xlsx`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+    });

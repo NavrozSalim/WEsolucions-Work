@@ -6,6 +6,7 @@ import {
     ChevronDown,
     ChevronUp,
     ExternalLink,
+    FileDown,
     FlaskConical,
     Mail,
     MapPin,
@@ -26,6 +27,7 @@ import {
     cancelOrder,
     completeOrderShipping,
     createTestOrder,
+    exportOrdersExcel,
     getOrderCancelReasons,
     getOrders,
     submitOrderShipping,
@@ -656,6 +658,7 @@ export default function Orders() {
     const [completingId, setCompletingId] = useState(null);
     const [cancelOrderRow, setCancelOrderRow] = useState(null);
     const [cancelLoading, setCancelLoading] = useState(false);
+    const [exporting, setExporting] = useState(false);
 
     useEffect(() => {
         getCatalogStores()
@@ -805,6 +808,20 @@ export default function Orders() {
         [stores, selectedStore]
     );
 
+    const handleExportExcel = () => {
+        if (!selectedStore || exporting) return;
+        setExporting(true);
+        exportOrdersExcel(selectedStore, selectedStoreData?.name || '')
+            .then(() => setMessage({ text: 'Orders Excel downloaded.', variant: 'success' }))
+            .catch((err) => {
+                setMessage({
+                    text: err.response?.data?.detail || 'Failed to export orders.',
+                    variant: 'error',
+                });
+            })
+            .finally(() => setExporting(false));
+    };
+
     return (
         <div className="space-y-4">
             <PageHeader
@@ -846,6 +863,15 @@ export default function Orders() {
                         <Button variant="primary" size="sm" onClick={() => loadOrders(true)} disabled={refreshing}>
                             <RefreshCw className={`mr-1.5 h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
                             {refreshing ? 'Fetching…' : 'Fetch from marketplace'}
+                        </Button>
+                        <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={handleExportExcel}
+                            disabled={exporting || loading || orders.length === 0}
+                        >
+                            <FileDown className={`mr-1.5 h-4 w-4 ${exporting ? 'opacity-50' : ''}`} />
+                            {exporting ? 'Exporting…' : 'Export Excel'}
                         </Button>
                         {(selectedStoreData?.marketplace_code || '').toLowerCase() === 'lasoo' && (
                             <Button variant="secondary" size="sm" onClick={handleCreateTestOrder} disabled={creatingTest}>
