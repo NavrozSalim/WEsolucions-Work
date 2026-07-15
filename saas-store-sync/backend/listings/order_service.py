@@ -1,4 +1,4 @@
-"""Retrieve and persist orders/invoices from the store's marketplace (Lasoo)."""
+"""Retrieve and persist orders/invoices from the store's marketplace (Lasoo / Reverb)."""
 import logging
 
 from stores.credentials import marketplace_kind
@@ -21,8 +21,21 @@ def _require_lasoo(store):
 
 
 def fetch(user, store, page: int = 1, take: int = 50) -> dict:
+    """Pull orders from the store's marketplace and upsert them locally."""
+    kind = marketplace_kind(store.marketplace)
+    if kind == "reverb":
+        from .reverb import orders as reverb_orders
+        return reverb_orders.fetch(user, store)
+    if kind != "lasoo":
+        raise MarketplaceError(
+            f'Order management is not supported yet for "{kind or "this marketplace"}". '
+            'Currently Lasoo and Reverb managed stores can fetch orders.'
+        )
+    return _fetch_lasoo(user, store, page=page, take=take)
+
+
+def _fetch_lasoo(user, store, page: int = 1, take: int = 50) -> dict:
     """Pull invoices from Lasoo (Invoices_Search) and upsert them locally."""
-    _require_lasoo(store)
     environment = store.lasoo_environment or 'staging'
     client = LasooClient(store, environment)
 
@@ -65,6 +78,12 @@ def _orders_search_data(*, page: int = 1, take: int = 50, **extra) -> dict:
 
 def create_test_order(user, store) -> dict:
     """Ask Lasoo to create a test order (staging) so the flow can be tested."""
+    kind = marketplace_kind(store.marketplace)
+    if kind == "reverb":
+        raise MarketplaceError(
+            "Reverb has no test-order API. Use Fetch orders to pull real selling orders "
+            "from api.reverb.com."
+        )
     _require_lasoo(store)
     environment = store.lasoo_environment or 'staging'
     client = LasooClient(store, environment)

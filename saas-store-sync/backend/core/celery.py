@@ -39,6 +39,11 @@ app.conf.beat_schedule = {
         'task': 'listings.fetch_all_store_tickets',
         'schedule': crontab(minute=15),
     },
+    # Pull Reverb selling orders (incremental by updated_at) into Orders.
+    'fetch-reverb-orders-hourly': {
+        'task': 'listings.fetch_all_reverb_orders',
+        'schedule': crontab(minute=20),
+    },
 }
 
 

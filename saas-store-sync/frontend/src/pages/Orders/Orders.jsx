@@ -747,7 +747,7 @@ export default function Orders() {
         <div className="space-y-4">
             <PageHeader
                 title="Orders"
-                description="Orders from your managed marketplace stores. Expand a row for full Lasoo customer, address, line items, and shipping details."
+                description="Orders from your managed marketplace stores (Lasoo, Reverb). Expand a row for customer, address, line items, and shipping details."
             />
 
             {message && (
@@ -810,7 +810,7 @@ export default function Orders() {
                             <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">Loading orders…</p>
                         ) : orders.length === 0 ? (
                             <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">
-                                No orders yet. Use “Fetch from marketplace” to pull the latest orders from Lasoo.
+                                No orders yet. Use “Fetch from marketplace” to pull the latest orders.
                             </p>
                         ) : (
                             <table className="w-full text-left text-sm">

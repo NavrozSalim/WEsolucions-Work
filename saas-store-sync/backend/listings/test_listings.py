@@ -461,3 +461,163 @@ class OrderNormalizeTests(TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["marketplace_ok"])
         self.assertEqual(order.status, OrderStatus.CANCELLED)
+
+
+class ReverbOrderNormalizeTests(TestCase):
+    def test_normalize_and_upsert_reverb_order(self):
+        from listings.reverb import orders as reverb_orders
+
+        User = get_user_model()
+        user = User.objects.create_user(username="rv", email="rv@example.com", password="pw")
+        reverb, _ = Marketplace.objects.get_or_create(code="reverb", defaults={"name": "Reverb"})
+        store = Store.objects.create(
+            user=user, name="Reverb Shop", region="USA",
+            api_token="reverb-token-1234567890", marketplace=reverb,
+            management_mode="full_store",
+        )
+        raw = {
+            "order_number": "RV-10025",
+            "order_bundle_id": "B-10025",
+            "product_id": "P-7731",
+            "sku": "PEDAL-BLUE-01",
+            "title": "Example Effects Pedal",
+            "quantity": 1,
+            "order_type": "instant",
+            "status": "paid",
+            "buyer_id": 5012,
+            "buyer_name": "Example Buyer",
+            "buyer_first_name": "Example",
+            "buyer_last_name": "Buyer",
+            "created_at": "2026-07-14T18:10:00-05:00",
+            "updated_at": "2026-07-14T18:15:00-05:00",
+            "paid_at": "2026-07-14T18:15:00-05:00",
+            "amount_product_subtotal": {
+                "amount": "125.00",
+                "amount_cents": 12500,
+                "currency": "USD",
+            },
+            "shipping": {
+                "amount": "10.00",
+                "amount_cents": 1000,
+                "currency": "USD",
+            },
+            "amount_tax": {
+                "amount": "0.00",
+                "amount_cents": 0,
+                "currency": "USD",
+                "display": "FREE",
+            },
+            "total": {
+                "amount": "135.00",
+                "amount_cents": 13500,
+                "currency": "USD",
+            },
+            "shipping_method": "shipped",
+            "local_pickup": False,
+            "shipping_address": {
+                "name": "Example Buyer",
+                "street_address": "100 Example Street",
+                "extended_address": None,
+                "locality": "Austin",
+                "region": "TX",
+                "postal_code": "78701",
+                "country_code": "US",
+                "complete_shipping_address": True,
+            },
+            "_links": {
+                "self": {"href": "https://api.reverb.com/api/my/orders/selling/RV-10025"},
+                "web": {"href": "https://reverb.com/my/selling/orders/RV-10025"},
+            },
+        }
+        order = reverb_orders.upsert_order(user, store, raw)
+        self.assertIsNotNone(order)
+        self.assertEqual(order.external_order_key, "RV-10025")
+        self.assertEqual(order.invoice_number, "RV-10025")
+        self.assertEqual(order.status, OrderStatus.PAID)
+        self.assertEqual(order.total_amount_cents, 13500)
+        self.assertEqual(order.environment, "production")
+        self.assertEqual(order.customer_info_json["name"], "Example Buyer")
+        self.assertEqual(order.customer_info_json["shippingAddress"]["city"], "Austin")
+        self.assertEqual(order.line_items_json[0]["sku"], "PEDAL-BLUE-01")
+        self.assertEqual(order.line_items_json[0]["priceCents"], 12500)
+
+        details = order_service.build_order_details(
+            order.raw_response_json,
+            customer_info=order.customer_info_json,
+            line_items=order.line_items_json,
+            total_cents=order.total_amount_cents,
+        )
+        self.assertEqual(details["customer"]["name"], "Example Buyer")
+        self.assertEqual(details["shippingAddress"]["city"], "Austin")
+        self.assertEqual(details["lineItems"][0]["title"], "Example Effects Pedal")
+        self.assertEqual(details["totals"]["totalCents"], 13500)
+
+        # Idempotent upsert by order_number
+        raw["status"] = "shipped"
+        order2 = reverb_orders.upsert_order(user, store, raw)
+        self.assertEqual(order2.id, order.id)
+        order.refresh_from_db()
+        self.assertEqual(order.status, OrderStatus.SENT)
+        self.assertEqual(MarketplaceOrder.objects.filter(store=store).count(), 1)
+
+    def test_map_reverb_status_blocks_unpaid(self):
+        from listings.reverb import orders as reverb_orders
+
+        self.assertEqual(reverb_orders.map_reverb_status("unpaid"), OrderStatus.NEW)
+        self.assertEqual(reverb_orders.map_reverb_status("payment_pending"), OrderStatus.NEW)
+        self.assertEqual(reverb_orders.map_reverb_status("pending_review"), OrderStatus.NEW)
+        self.assertEqual(reverb_orders.map_reverb_status("blocked"), OrderStatus.NEW)
+        self.assertEqual(reverb_orders.map_reverb_status("paid"), OrderStatus.PAID)
+        self.assertEqual(reverb_orders.map_reverb_status("cancelled"), OrderStatus.CANCELLED)
+
+    @patch("listings.reverb.orders.get_adapter")
+    def test_fetch_reverb_advances_sync_cursor(self, mock_get_adapter):
+        from listings.reverb import orders as reverb_orders
+
+        User = get_user_model()
+        user = User.objects.create_user(username="rv2", email="rv2@example.com", password="pw")
+        reverb, _ = Marketplace.objects.get_or_create(code="reverb", defaults={"name": "Reverb"})
+        store = Store.objects.create(
+            user=user, name="Reverb Shop 2", region="USA",
+            api_token="reverb-token-1234567890", marketplace=reverb,
+            management_mode="full_store",
+        )
+        adapter = MagicMock()
+        adapter.iter_orders_selling_all.return_value = iter([
+            {
+                "order_number": "RV-1",
+                "status": "paid",
+                "sku": "A",
+                "title": "Item A",
+                "quantity": 1,
+                "total": {"amount_cents": 1000, "currency": "USD"},
+                "amount_product_subtotal": {"amount_cents": 1000, "currency": "USD"},
+                "buyer_name": "Buyer",
+                "shipping_address": {
+                    "street_address": "1 St",
+                    "locality": "Austin",
+                    "region": "TX",
+                    "postal_code": "78701",
+                    "country_code": "US",
+                },
+            },
+        ])
+        mock_get_adapter.return_value = adapter
+
+        result = reverb_orders.fetch(user, store)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["fetched"], 1)
+        store.refresh_from_db()
+        self.assertIsNotNone(store.reverb_last_order_sync_at)
+        self.assertEqual(MarketplaceOrder.objects.filter(store=store).count(), 1)
+
+    def test_create_test_order_rejected_for_reverb(self):
+        User = get_user_model()
+        user = User.objects.create_user(username="rv3", email="rv3@example.com", password="pw")
+        reverb, _ = Marketplace.objects.get_or_create(code="reverb", defaults={"name": "Reverb"})
+        store = Store.objects.create(
+            user=user, name="Reverb Shop 3", region="USA",
+            api_token="tok", marketplace=reverb, management_mode="full_store",
+        )
+        with self.assertRaises(MarketplaceError):
+            order_service.create_test_order(user, store)

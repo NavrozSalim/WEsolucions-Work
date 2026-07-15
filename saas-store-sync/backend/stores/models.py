@@ -46,6 +46,15 @@ class Store(models.Model):
     lasoo_production_base_url = models.URLField(max_length=500, blank=True, default='')
     lasoo_staging_auth_key = EncryptedTextField(null=True, blank=True)
     lasoo_production_auth_key = EncryptedTextField(null=True, blank=True)
+    # --- Reverb (managed stores / order sync) ---
+    # Reverb has no staging API — always api.reverb.com. Cursor for incremental
+    # order pulls via updated_start_date / updated_end_date.
+    reverb_last_order_sync_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text='Last successful Reverb order sync cutoff (UTC). Used for incremental pulls.',
+    )
     # --- Kogan via Google Sheets ---
     # Users upload a Google Service Account JSON key; we use it to update a specific spreadsheet tab.
     kogan_service_account_json = EncryptedTextField(null=True, blank=True)
