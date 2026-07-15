@@ -177,7 +177,8 @@ class ListingServiceTests(TestCase):
         rows = csv_import.parse_upload("d.csv", content)
         self.assertEqual(rows[0]["action"], "delete")
 
-    def test_publish_requires_lasoo_marketplace(self):
+    def test_publish_skips_invalid_reverb_listings(self):
+        """Reverb stores can publish, but Lasoo-shaped rows fail Reverb validation."""
         reverb, _ = Marketplace.objects.get_or_create(code="reverb", defaults={"name": "Reverb"})
         store2 = Store.objects.create(
             user=self.user, name="Reverb Store", region="USA",
@@ -186,6 +187,18 @@ class ListingServiceTests(TestCase):
         listing_service.create(self.user, store2, dict(VALID_DATA))
         with self.assertRaises(MarketplaceError):
             listing_service.publish(self.user, store2)
+
+    def test_reverb_template_headers(self):
+        reverb, _ = Marketplace.objects.get_or_create(code="reverb", defaults={"name": "Reverb"})
+        store2 = Store.objects.create(
+            user=self.user, name="Reverb Store 2", region="USA",
+            api_token="tok", marketplace=reverb, management_mode="full_store",
+        )
+        csv_text = csv_import.build_template_csv("create", store=store2)
+        self.assertIn("Make", csv_text)
+        self.assertIn("Category UUID", csv_text)
+        self.assertNotIn("Product Key", csv_text)
+        self.assertNotIn("Variant Key", csv_text)
 
 
 class OrderNormalizeTests(TestCase):

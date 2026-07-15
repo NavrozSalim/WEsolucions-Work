@@ -10,8 +10,8 @@ const STATUS_STYLES = {
 };
 
 const STATUS_LABELS = {
-    uploaded_staging: 'On Lasoo (staging)',
-    uploaded_production: 'On Lasoo (production)',
+    uploaded_staging: 'On marketplace (staging)',
+    uploaded_production: 'On marketplace',
 };
 
 const ACTION_LABELS = {
@@ -20,7 +20,7 @@ const ACTION_LABELS = {
 };
 
 /** Live marketplace listings the user can edit inventory/price and re-publish. */
-export default function InventoryManagementPanel({ storeId, reloadNonce = 0, onMessage }) {
+export default function InventoryManagementPanel({ storeId, marketplaceCode = '', reloadNonce = 0, onMessage }) {
     const [listings, setListings] = useState([]);
     const [loading, setLoading] = useState(false);
     const [publishing, setPublishing] = useState(false);
@@ -187,6 +187,7 @@ export default function InventoryManagementPanel({ storeId, reloadNonce = 0, onM
                 onClose={() => setEditOpen(false)}
                 onSaved={() => load()}
                 storeId={storeId}
+                marketplaceCode={marketplaceCode}
                 listing={editListing}
             />
         </div>

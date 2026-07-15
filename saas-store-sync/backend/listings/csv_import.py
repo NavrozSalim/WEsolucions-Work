@@ -1,11 +1,12 @@
 """Parse uploaded CSV / Excel listing templates into normalized row dicts.
 
 Uses stdlib csv + openpyxl (no pandas dependency in this project).
+Supports Lasoo templates and Reverb-specific templates (by store marketplace).
 """
 import csv
 import io
 
-# Maps human template headers -> internal field names.
+# Maps human template headers -> internal field names (Lasoo + Reverb shared).
 COLUMN_MAP = {
     "action": "action",
     "product key": "product_key",
@@ -13,22 +14,35 @@ COLUMN_MAP = {
     "title": "title",
     "description": "description",
     "brand": "brand",
+    "make": "make",
+    "model": "model",
+    "finish": "finish",
+    "year": "year",
     "category": "category",
+    "category uuid": "category_uuid",
+    "condition": "condition",
+    "condition uuid": "condition_uuid",
     "sku": "sku",
     "barcode": "barcode",
+    "upc": "barcode",
+    "upc does not apply": "upc_does_not_apply",
+    "currency": "currency",
+    "price": "sale_price",
     "vendor url": "vendor_url",
     "vendor_url": "vendor_url",
     "source url": "vendor_url",
     "source link": "vendor_url",
     "image urls": "image_urls",
     "image url": "image_urls",
+    "photos": "image_urls",
+    "photo urls": "image_urls",
     "inventory": "inventory",
     "infinite quantity": "infinite_quantity",
     "original price": "original_price",
     "sale price": "sale_price",
 }
 
-TEMPLATE_HEADERS = [
+LASOO_TEMPLATE_HEADERS = [
     "Action",
     "Product Key",
     "Variant Key",
@@ -46,12 +60,42 @@ TEMPLATE_HEADERS = [
     "Sale Price",
 ]
 
+REVERB_TEMPLATE_HEADERS = [
+    "Action",
+    "SKU",
+    "Title",
+    "Make",
+    "Model",
+    "Description",
+    "Finish",
+    "Year",
+    "Condition",
+    "Category UUID",
+    "Price",
+    "Currency",
+    "Inventory",
+    "UPC",
+    "UPC Does Not Apply",
+    "Photo URLs",
+]
+
+# Back-compat alias
+TEMPLATE_HEADERS = LASOO_TEMPLATE_HEADERS
+
 # Delete files only need the SKU (enough to remove the listing).
 DELETE_TEMPLATE_HEADERS = ["Action", "SKU"]
 
 VALID_ACTIONS = {"create", "mapped", "delete"}
 
 _TRUE_VALUES = {"true", "1", "yes", "y", "t"}
+
+
+def _is_reverb_store(store) -> bool:
+    try:
+        code = (getattr(getattr(store, "marketplace", None), "code", None) or "").strip().lower()
+    except Exception:  # noqa: BLE001
+        code = ""
+    return code == "reverb"
 
 
 def _coerce_bool(value) -> bool:
@@ -112,6 +156,16 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
         if not any(normalized.values()):
             continue
         normalized["infinite_quantity"] = _coerce_bool(normalized.get("infinite_quantity", ""))
+        normalized["upc_does_not_apply"] = _coerce_bool(normalized.get("upc_does_not_apply", ""))
+        # Reverb aliases
+        if normalized.get("make") and not normalized.get("brand"):
+            normalized["brand"] = normalized["make"]
+        if normalized.get("condition") and not normalized.get("condition_uuid"):
+            normalized["condition_uuid"] = normalized["condition"]
+        if normalized.get("category_uuid") and not normalized.get("category"):
+            normalized["category"] = normalized["category_uuid"]
+        if normalized.get("sale_price") and not normalized.get("original_price"):
+            normalized["original_price"] = normalized["sale_price"]
         action = str(normalized.get("action", "")).strip().lower()
         normalized["action"] = action if action in VALID_ACTIONS else ""
         normalized["row_number"] = idx
@@ -119,14 +173,39 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
     return rows
 
 
-def build_template_csv(action: str = "create") -> str:
-    """Template CSV for the given action. Delete only needs Action + SKU."""
+def build_template_csv(action: str = "create", store=None) -> str:
+    """Template CSV for the given action. Reverb stores get Reverb columns."""
     action = (action or "create").strip().lower()
     if action == "delete":
         out = io.StringIO()
         writer = csv.DictWriter(out, fieldnames=DELETE_TEMPLATE_HEADERS, lineterminator="\n")
         writer.writeheader()
-        writer.writerow({"Action": "Delete", "SKU": "TSHIRT-001-BLACK-M"})
+        writer.writerow({"Action": "Delete", "SKU": "AMH-EXAMPLE-001"})
+        return out.getvalue()
+
+    if _is_reverb_store(store):
+        sample = {
+            "Action": "Mapped" if action == "mapped" else "Create",
+            "SKU": "AMH-EXAMPLE-001",
+            "Title": "Example Guitar Pedal",
+            "Make": "Unbranded",
+            "Model": "EXAMPLE-001",
+            "Description": "Great pedal in excellent condition.",
+            "Finish": "",
+            "Year": "",
+            "Condition": "Excellent",
+            "Category UUID": "paste-uuid-from-reverb-categories",
+            "Price": "49.99",
+            "Currency": "USD",
+            "Inventory": "1",
+            "UPC": "",
+            "UPC Does Not Apply": "true",
+            "Photo URLs": "https://example.com/photo1.jpg|https://example.com/photo2.jpg",
+        }
+        out = io.StringIO()
+        writer = csv.DictWriter(out, fieldnames=REVERB_TEMPLATE_HEADERS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(sample)
         return out.getvalue()
 
     sample = {
@@ -147,7 +226,7 @@ def build_template_csv(action: str = "create") -> str:
         "Sale Price": "24.99",
     }
     out = io.StringIO()
-    writer = csv.DictWriter(out, fieldnames=TEMPLATE_HEADERS, lineterminator="\n")
+    writer = csv.DictWriter(out, fieldnames=LASOO_TEMPLATE_HEADERS, lineterminator="\n")
     writer.writeheader()
     writer.writerow(sample)
     return out.getvalue()

@@ -1,7 +1,7 @@
 """Listing CRUD, validation, bulk import, and publish to the store's marketplace.
 
-Only Lasoo publishing is implemented for now; the dispatch point is
-``publish()`` so other managed marketplaces can be added marketplace-by-marketplace.
+Lasoo and Reverb managed stores are supported. Dispatch happens in
+``publish()`` / validation helpers by marketplace kind.
 """
 import logging
 from decimal import Decimal
@@ -10,6 +10,8 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from store_adapters import get_adapter
+from store_adapters.reverb_adapter import ReverbAPIError
 from stores.credentials import marketplace_kind
 
 from . import csv_import
@@ -23,6 +25,7 @@ from .models import (
     ListingUpload,
     StoreListing,
 )
+from .reverb import listings as reverb_listings
 
 logger = logging.getLogger("listings")
 
@@ -75,25 +78,70 @@ def _safe_decimal(value) -> Decimal:
         return Decimal("0")
 
 
+def _store_kind(store) -> str:
+    return marketplace_kind(getattr(store, "marketplace", None))
+
+
+def _listing_env(store) -> str:
+    """Reverb has no staging API — always production. Lasoo uses store setting."""
+    if _store_kind(store) == "reverb":
+        return Environment.PRODUCTION
+    return store.lasoo_environment or Environment.STAGING
+
+
+def _validate_listing(store, data: dict) -> list[str]:
+    if _store_kind(store) == "reverb":
+        return reverb_listings.validate_listing(data)
+    return validator.validate_listing(data)
+
+
+def _resolve_keys(store, data: dict) -> tuple[str, str]:
+    if _store_kind(store) == "reverb":
+        return reverb_listings.resolve_keys(data)
+    return mapper.resolve_keys(data)
+
+
 def _apply_fields(listing: StoreListing, data: dict):
-    product_key, variant_key = mapper.resolve_keys(data)
+    store = listing.store
+    product_key, variant_key = _resolve_keys(store, data)
     listing.external_product_key = product_key
     listing.external_variant_key = variant_key
     listing.title = (data.get("title") or "").strip()
     listing.description = (data.get("description") or "").strip()
-    listing.brand = (data.get("brand") or "").strip()
-    listing.category = (data.get("category") or "").strip()
+    # Reverb: brand column stores Make
+    make = (data.get("make") or data.get("brand") or "").strip()
+    listing.brand = make
+    category = (data.get("category_uuid") or data.get("category") or "").strip()
+    listing.category = category
     listing.sku = (data.get("sku") or "").strip()
-    listing.barcode = (data.get("barcode") or "").strip()
+    listing.barcode = (data.get("barcode") or data.get("upc") or "").strip()
     listing.vendor_url = (data.get("vendor_url") or "").strip()[:1000]
-    listing.image_urls = mapper.normalize_image_urls(data.get("image_urls"))
-    listing.infinite_quantity = bool(data.get("infinite_quantity"))
+    if _store_kind(store) == "reverb":
+        listing.image_urls = "|".join(
+            p for p in str(data.get("image_urls") or "").replace(";", "|").replace("\n", "|").replace(",", "|").split("|")
+            if p.strip()
+        )
+        listing.infinite_quantity = False
+        listing.external_data_object_json = reverb_listings.build_extras(data)
+    else:
+        listing.image_urls = mapper.normalize_image_urls(data.get("image_urls"))
+        listing.infinite_quantity = bool(data.get("infinite_quantity"))
     try:
         listing.inventory = 0 if listing.infinite_quantity else int(data.get("inventory") or 0)
     except (TypeError, ValueError):
         listing.inventory = 0
-    listing.original_price = _safe_decimal(data.get("original_price"))
-    listing.sale_price = _safe_decimal(data.get("sale_price"))
+    # Reverb uses a single Price → store as both original + sale
+    if _store_kind(store) == "reverb":
+        price = data.get("sale_price")
+        if price in (None, ""):
+            price = data.get("price")
+        if price in (None, ""):
+            price = data.get("original_price")
+        listing.original_price = _safe_decimal(price)
+        listing.sale_price = _safe_decimal(price)
+    else:
+        listing.original_price = _safe_decimal(data.get("original_price"))
+        listing.sale_price = _safe_decimal(data.get("sale_price"))
 
 
 def _uploaded_status(environment: str) -> str:
@@ -105,20 +153,31 @@ def _uploaded_status(environment: str) -> str:
 
 
 def _finalize_validation(listing: StoreListing, data: dict) -> list[str]:
-    errors = validator.validate_listing(data)
+    store = listing.store
+    errors = _validate_listing(store, data)
     if errors:
         listing.validation_errors_json = errors
         listing.status = ListingStatus.VALIDATION_FAILED
-        listing.external_data_object_json = ""
+        if _store_kind(store) != "reverb":
+            listing.external_data_object_json = ""
         listing.original_price_cents = 0
         listing.sale_price_cents = 0
     else:
         listing.validation_errors_json = None
-        listing.original_price_cents = mapper.dollars_to_cents(data.get("original_price"))
-        listing.sale_price_cents = mapper.dollars_to_cents(data.get("sale_price"))
-        listing.external_data_object_json = mapper.build_external_data_object(data)
-        # Mapped listings already exist on the marketplace: valid ones go
-        # straight to the uploaded status so they show under Inventory management.
+        if _store_kind(store) == "reverb":
+            price = data.get("sale_price")
+            if price in (None, ""):
+                price = data.get("price")
+            if price in (None, ""):
+                price = data.get("original_price")
+            cents = int((_safe_decimal(price) * 100))
+            listing.original_price_cents = cents
+            listing.sale_price_cents = cents
+            listing.external_data_object_json = reverb_listings.build_extras(data)
+        else:
+            listing.original_price_cents = mapper.dollars_to_cents(data.get("original_price"))
+            listing.sale_price_cents = mapper.dollars_to_cents(data.get("sale_price"))
+            listing.external_data_object_json = mapper.build_external_data_object(data)
         if listing.action == ListingAction.MAPPED:
             listing.status = _uploaded_status(listing.environment)
         else:
@@ -129,15 +188,15 @@ def _finalize_validation(listing: StoreListing, data: dict) -> list[str]:
 def create(user, store, data: dict, action: str = ListingAction.CREATE) -> StoreListing:
     if action not in (ListingAction.CREATE, ListingAction.MAPPED):
         action = ListingAction.CREATE
-    environment = store.lasoo_environment or Environment.STAGING
+    environment = _listing_env(store)
     listing = StoreListing(user=user, store=store, environment=environment, action=action)
     _apply_fields(listing, data)
-    _, variant_key = mapper.resolve_keys(data)
+    _, variant_key = _resolve_keys(store, data)
     if variant_key and StoreListing.objects.filter(
         store=store, external_variant_key=variant_key, environment=environment,
     ).exists():
         raise MarketplaceError(
-            f'A created product with variant key "{variant_key}" already exists for this store.'
+            f'A created product with SKU/variant "{variant_key}" already exists for this store.'
             + (' Use the Mapped action to update it.' if action == ListingAction.CREATE else '')
         )
     _finalize_validation(listing, data)
@@ -159,7 +218,8 @@ def delete(user, store, listing: StoreListing) -> dict:
         listing.status in ON_MARKETPLACE_STATUSES
         or listing.action == ListingAction.MAPPED
     )
-    if on_marketplace and marketplace_kind(store.marketplace) == "lasoo":
+    kind = marketplace_kind(store.marketplace)
+    if on_marketplace and kind == "lasoo":
         environment = listing.environment or store.lasoo_environment or Environment.STAGING
         client = LasooClient(store, environment)
         payload = mapper.build_bulk_delete_payload([listing.external_variant_key], client.auth_key)
@@ -168,12 +228,30 @@ def delete(user, store, listing: StoreListing) -> dict:
             raise MarketplaceError(
                 result.message or "Could not delete the listing on the marketplace."
             )
+    elif on_marketplace and kind == "reverb":
+        adapter = get_adapter(store)
+        listing_id = (listing.external_product_key or "").strip()
+        # Prefer Reverb listing id stored after publish; fall back to SKU lookup.
+        if not listing_id or listing_id == listing.sku:
+            try:
+                listing_id = adapter.lookup_listing_by_sku(listing.sku or listing.external_variant_key) or listing_id
+            except ReverbAPIError as exc:
+                raise MarketplaceError(str(exc) or "Could not look up Reverb listing.") from exc
+        if listing_id:
+            try:
+                adapter.delete_product(listing_id)
+            except ReverbAPIError as exc:
+                raise MarketplaceError(
+                    str(exc) or "Could not end the listing on Reverb."
+                ) from exc
     variant_key = listing.external_variant_key
     listing.delete()
     return {"ok": True, "variant_key": variant_key, "marketplace_deleted": on_marketplace}
 
 
 def _listing_to_data(listing: StoreListing) -> dict:
+    if _store_kind(listing.store) == "reverb":
+        return reverb_listings.listing_to_data(listing)
     return {
         "product_key": listing.external_product_key,
         "variant_key": listing.external_variant_key,
@@ -251,17 +329,30 @@ def _bulk_delete(user, store, filename: str, rows: list[dict]) -> dict:
 
     # One marketplace call for every listing that actually exists there.
     if marketplace_keys:
-        if marketplace_kind(store.marketplace) != "lasoo":
+        kind = marketplace_kind(store.marketplace)
+        if kind == "lasoo":
+            environment = store.lasoo_environment or Environment.STAGING
+            client = LasooClient(store, environment)
+            payload = mapper.build_bulk_delete_payload(marketplace_keys, client.auth_key)
+            result = client.send("bulk_delete", payload)
+            if not result.ok:
+                raise MarketplaceError(
+                    result.message or "Could not delete the listings on the marketplace."
+                )
+        elif kind == "reverb":
+            adapter = get_adapter(store)
+            for key in marketplace_keys:
+                try:
+                    lid = adapter.lookup_listing_by_sku(key) or key
+                    if lid:
+                        adapter.delete_product(lid)
+                except ReverbAPIError as exc:
+                    raise MarketplaceError(
+                        str(exc) or f"Could not end Reverb listing for SKU {key}."
+                    ) from exc
+        else:
             raise MarketplaceError(
-                "Deleting marketplace listings is currently only supported for Lasoo stores."
-            )
-        environment = store.lasoo_environment or Environment.STAGING
-        client = LasooClient(store, environment)
-        payload = mapper.build_bulk_delete_payload(marketplace_keys, client.auth_key)
-        result = client.send("bulk_delete", payload)
-        if not result.ok:
-            raise MarketplaceError(
-                result.message or "Could not delete the listings on the marketplace."
+                "Deleting marketplace listings is currently only supported for Lasoo and Reverb stores."
             )
 
     for listing, row_result in to_delete:
@@ -295,10 +386,10 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
     if file_action == ListingAction.DELETE:
         return _bulk_delete(user, store, filename, rows)
 
-    environment = store.lasoo_environment or Environment.STAGING
+    environment = _listing_env(store)
     preview, imported, error_rows = [], 0, 0
     for row in rows:
-        errors = validator.validate_listing(row)
+        errors = _validate_listing(store, row)
         row_result = {
             "row_number": row.get("row_number"),
             "sku": row.get("sku", ""),
@@ -308,7 +399,7 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
             "imported": False,
         }
 
-        _, variant_key = mapper.resolve_keys(row)
+        _, variant_key = _resolve_keys(store, row)
         if not variant_key:
             # Nothing to upsert by; keep the row purely in the upload report.
             error_rows += 1
@@ -321,7 +412,7 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
         if file_action == ListingAction.CREATE and existing and not errors:
             row_result["valid"] = False
             row_result["errors"] = [
-                f'A listing with variant key "{variant_key}" already exists. '
+                f'A listing with SKU "{variant_key}" already exists. '
                 'Use the Mapped action to update it.'
             ]
             error_rows += 1
@@ -358,17 +449,148 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
     return {"total_rows": len(rows), "imported": imported, "action": file_action, "rows": preview}
 
 
-@transaction.atomic
+def _collect_publishable(store, listings: list) -> list:
+    """Re-validate rows so stale payload data can't be pushed."""
+    publishable = []
+    for listing in listings:
+        data = _listing_to_data(listing)
+        errors = _validate_listing(store, data)
+        if errors:
+            listing.validation_errors_json = errors
+            listing.status = ListingStatus.VALIDATION_FAILED
+            listing.save(update_fields=["validation_errors_json", "status", "updated_at"])
+        else:
+            publishable.append(listing)
+    return publishable
+
+
+def _publish_lasoo(user, store, publishable: list) -> dict:
+    environment = store.lasoo_environment or Environment.STAGING
+    client = LasooClient(store, environment)
+    variants = [_listing_to_data(l) for l in publishable]
+    payload = mapper.build_bulk_upsert_payload(variants, client.auth_key)
+    result = client.send("bulk_upsert", payload)
+
+    now = timezone.now()
+    request_for_storage = {**payload, "auth": "***"}  # never persist the raw key
+    new_status = (
+        _uploaded_status(environment) if result.ok else ListingStatus.FAILED
+    )
+    for listing in publishable:
+        listing.status = new_status
+        listing.marketplace_request_json = request_for_storage
+        listing.marketplace_response_json = result.data if result.ok else result.error
+        if result.ok:
+            listing.last_uploaded_at = now
+        listing.save(
+            update_fields=[
+                "status",
+                "marketplace_request_json",
+                "marketplace_response_json",
+                "last_uploaded_at",
+                "updated_at",
+            ]
+        )
+    return {
+        "ok": result.ok,
+        "message": result.message
+        or (f"Published {len(publishable)} listing(s) to Lasoo {environment}." if result.ok else ""),
+        "published": len(publishable) if result.ok else 0,
+        "environment": environment,
+    }
+
+
+def _publish_reverb(user, store, publishable: list) -> dict:
+    """Create each listing on Reverb via POST /api/listings (one call per row)."""
+    adapter = get_adapter(store)
+    environment = Environment.PRODUCTION
+    now = timezone.now()
+    published = 0
+    failures = 0
+
+    for listing in publishable:
+        data = _listing_to_data(listing)
+        condition_raw = data.get("condition_uuid") or data.get("condition") or ""
+        condition_uuid = reverb_listings.resolve_condition_uuid(adapter, condition_raw)
+        if not condition_uuid:
+            listing.validation_errors_json = [
+                f'Could not resolve Reverb condition "{condition_raw}". '
+                "Use a condition UUID or a name like Brand New / Excellent."
+            ]
+            listing.status = ListingStatus.VALIDATION_FAILED
+            listing.save(update_fields=["validation_errors_json", "status", "updated_at"])
+            failures += 1
+            continue
+
+        payload = reverb_listings.build_create_payload(
+            data, condition_uuid=condition_uuid, publish=True,
+        )
+        try:
+            response = adapter.create_listing(payload)
+            listing_id = ""
+            if isinstance(response, dict):
+                listing_id = str(
+                    response.get("id")
+                    or (response.get("listing") or {}).get("id")
+                    or ""
+                ).strip()
+            listing.status = ListingStatus.UPLOADED_PRODUCTION
+            listing.marketplace_request_json = payload
+            listing.marketplace_response_json = response
+            listing.last_uploaded_at = now
+            if listing_id:
+                # Keep SKU as variant key for local upserts; store Reverb id on product key.
+                listing.external_product_key = listing_id
+            listing.save(
+                update_fields=[
+                    "status",
+                    "external_product_key",
+                    "marketplace_request_json",
+                    "marketplace_response_json",
+                    "last_uploaded_at",
+                    "updated_at",
+                ]
+            )
+            published += 1
+        except ReverbAPIError as exc:
+            listing.status = ListingStatus.FAILED
+            listing.marketplace_request_json = payload
+            listing.marketplace_response_json = {"error": str(exc)}
+            listing.save(
+                update_fields=[
+                    "status",
+                    "marketplace_request_json",
+                    "marketplace_response_json",
+                    "updated_at",
+                ]
+            )
+            failures += 1
+            logger.warning("Reverb publish failed for SKU %s: %s", listing.sku, exc)
+
+    ok = published > 0 and failures == 0
+    if published and failures:
+        message = f"Published {published} listing(s); {failures} failed."
+    elif published:
+        message = f"Published {published} listing(s) to Reverb."
+    else:
+        message = "Could not publish any listings to Reverb. Check validation errors."
+    return {
+        "ok": ok,
+        "message": message,
+        "published": published,
+        "environment": environment,
+    }
+
+
 def publish(user, store, listing_ids=None) -> dict:
     """Push READY (or previously uploaded) listings to the store's marketplace."""
     kind = marketplace_kind(store.marketplace)
-    if kind != "lasoo":
+    if kind not in ("lasoo", "reverb"):
         raise MarketplaceError(
             f'Publishing created products is not supported yet for "{kind or "this marketplace"}". '
-            'Currently only Lasoo stores can publish.'
+            "Currently only Lasoo and Reverb stores can publish."
         )
 
-    environment = store.lasoo_environment or Environment.STAGING
     qs = StoreListing.objects.filter(
         user=user,
         store=store,
@@ -385,56 +607,13 @@ def publish(user, store, listing_ids=None) -> dict:
     if not listings:
         raise MarketplaceError("No valid listings to publish. Fix validation errors first.")
 
-    # Re-validate FAILED rows so stale payload data can't be pushed.
-    publishable = []
-    for listing in listings:
-        data = _listing_to_data(listing)
-        errors = validator.validate_listing(data)
-        if errors:
-            listing.validation_errors_json = errors
-            listing.status = ListingStatus.VALIDATION_FAILED
-            listing.save(update_fields=["validation_errors_json", "status", "updated_at"])
-        else:
-            publishable.append(listing)
+    publishable = _collect_publishable(store, listings)
     if not publishable:
         raise MarketplaceError("All selected listings failed validation. Fix the errors and retry.")
 
-    client = LasooClient(store, environment)
-    variants = [_listing_to_data(l) for l in publishable]
-    payload = mapper.build_bulk_upsert_payload(variants, client.auth_key)
-    result = client.send("bulk_upsert", payload)
-
-    now = timezone.now()
-    request_for_storage = {**payload, "auth": "***"}  # never persist the raw key
-
-    if result.ok:
-        new_status = (
-            ListingStatus.UPLOADED_PRODUCTION
-            if environment == Environment.PRODUCTION
-            else ListingStatus.UPLOADED_STAGING
-        )
-    else:
-        new_status = ListingStatus.FAILED
-    for listing in publishable:
-        listing.status = new_status
-        listing.marketplace_request_json = request_for_storage
-        listing.marketplace_response_json = result.data if result.ok else result.error
-        if result.ok:
-            listing.last_uploaded_at = now
-        listing.save(
-            update_fields=[
-                "status",
-                "marketplace_request_json",
-                "marketplace_response_json",
-                "last_uploaded_at",
-                "updated_at",
-            ]
-        )
-
-    return {
-        "ok": result.ok,
-        "message": result.message
-        or (f"Published {len(publishable)} listing(s) to Lasoo {environment}." if result.ok else ""),
-        "published": len(publishable) if result.ok else 0,
-        "environment": environment,
-    }
+    # Reverb: one API call per listing — do not wrap in a single atomic block
+    # (partial remote success must still be persisted locally).
+    if kind == "reverb":
+        return _publish_reverb(user, store, publishable)
+    with transaction.atomic():
+        return _publish_lasoo(user, store, publishable)

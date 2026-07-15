@@ -159,9 +159,12 @@ class StoreListingTemplateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk):
-        _get_store(request, store_pk)
+        store = _get_store(request, store_pk)
         action = (request.query_params.get('action') or 'create').strip().lower()
-        resp = HttpResponse(csv_import.build_template_csv(action), content_type='text/csv')
+        resp = HttpResponse(
+            csv_import.build_template_csv(action, store=store),
+            content_type='text/csv',
+        )
         name = f'listing_template_{action}.csv'
         resp['Content-Disposition'] = f'attachment; filename="{name}"'
         return resp

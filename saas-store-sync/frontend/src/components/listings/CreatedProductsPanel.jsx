@@ -30,7 +30,7 @@ const FILTER_OPTIONS = [
 ];
 
 /** Staging queue: new/mapped listings before or after publish attempt. */
-export default function CreatedProductsPanel({ storeId, reloadNonce = 0, onMessage }) {
+export default function CreatedProductsPanel({ storeId, marketplaceCode = '', reloadNonce = 0, onMessage }) {
     const [listings, setListings] = useState([]);
     const [loading, setLoading] = useState(false);
     const [publishing, setPublishing] = useState(false);
@@ -211,6 +211,7 @@ export default function CreatedProductsPanel({ storeId, reloadNonce = 0, onMessa
                 onClose={() => setEditOpen(false)}
                 onSaved={() => load()}
                 storeId={storeId}
+                marketplaceCode={marketplaceCode}
                 listing={editListing}
             />
         </div>

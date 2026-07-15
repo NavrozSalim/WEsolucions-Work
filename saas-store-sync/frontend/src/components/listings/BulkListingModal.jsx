@@ -11,7 +11,8 @@ const ACTION_OPTIONS = [
 ];
 
 /** Bulk listing upload: one action per file (Create, Mapped, or Delete). */
-export default function BulkListingModal({ open, onClose, onImported, storeId }) {
+export default function BulkListingModal({ open, onClose, onImported, storeId, marketplaceCode = '' }) {
+    const isReverb = String(marketplaceCode || '').trim().toLowerCase() === 'reverb';
     const fileRef = useRef(null);
     const [file, setFile] = useState(null);
     const [action, setAction] = useState('create');
@@ -89,8 +90,12 @@ export default function BulkListingModal({ open, onClose, onImported, storeId })
 
                 <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
                     <p className="text-sm text-slate-600 dark:text-slate-400">
-                        Choose one action for the whole file, download the matching template, fill rows, then upload.
+                        Choose one action for the whole file, download the matching{' '}
+                        {isReverb ? 'Reverb' : 'marketplace'} template, fill rows, then upload.
                         Rows with errors appear under the <strong>Errors</strong> filter on Created products.
+                        {isReverb && (
+                            <> Reverb columns include Make, Model, Condition, Category UUID, Price, and Photo URLs.</>
+                        )}
                     </p>
 
                     <div className="mt-4">

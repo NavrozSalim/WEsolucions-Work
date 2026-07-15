@@ -1,9 +1,19 @@
 from rest_framework import serializers
 
 from .models import ListingUpload, MarketplaceOrder, OrderShipment, StoreListing, SupportTicket, TicketMessage
+from .reverb import listings as reverb_listings
 
 
 class StoreListingSerializer(serializers.ModelSerializer):
+    make = serializers.SerializerMethodField()
+    model = serializers.SerializerMethodField()
+    finish = serializers.SerializerMethodField()
+    year = serializers.SerializerMethodField()
+    condition_uuid = serializers.SerializerMethodField()
+    category_uuid = serializers.SerializerMethodField()
+    currency = serializers.SerializerMethodField()
+    upc_does_not_apply = serializers.SerializerMethodField()
+
     class Meta:
         model = StoreListing
         fields = [
@@ -11,6 +21,8 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'title', 'description', 'brand', 'category', 'sku', 'barcode',
             'vendor_url', 'image_urls', 'inventory', 'infinite_quantity',
             'original_price', 'sale_price',
+            'make', 'model', 'finish', 'year',
+            'condition_uuid', 'category_uuid', 'currency', 'upc_does_not_apply',
             'environment', 'action', 'status', 'validation_errors_json',
             'marketplace_response_json', 'last_uploaded_at',
             'created_at', 'updated_at',
@@ -20,7 +32,36 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'environment', 'action', 'status', 'validation_errors_json',
             'marketplace_response_json', 'last_uploaded_at',
             'created_at', 'updated_at',
+            'make', 'model', 'finish', 'year',
+            'condition_uuid', 'category_uuid', 'currency', 'upc_does_not_apply',
         ]
+
+    def _extras(self, obj):
+        return reverb_listings.parse_extras(obj)
+
+    def get_make(self, obj):
+        return self._extras(obj).get('make') or obj.brand or ''
+
+    def get_model(self, obj):
+        return self._extras(obj).get('model') or ''
+
+    def get_finish(self, obj):
+        return self._extras(obj).get('finish') or ''
+
+    def get_year(self, obj):
+        return self._extras(obj).get('year') or ''
+
+    def get_condition_uuid(self, obj):
+        return self._extras(obj).get('condition_uuid') or ''
+
+    def get_category_uuid(self, obj):
+        return self._extras(obj).get('category_uuid') or obj.category or ''
+
+    def get_currency(self, obj):
+        return self._extras(obj).get('currency') or 'USD'
+
+    def get_upc_does_not_apply(self, obj):
+        return bool(self._extras(obj).get('upc_does_not_apply', False))
 
 
 class ListingUploadSerializer(serializers.ModelSerializer):
@@ -61,6 +102,15 @@ class ListingInputSerializer(serializers.Serializer):
     action = serializers.ChoiceField(
         choices=['create', 'mapped'], required=False, default='create',
     )
+    # Reverb-specific (ignored by Lasoo validator / mapper)
+    make = serializers.CharField(required=False, allow_blank=True, default='')
+    model = serializers.CharField(required=False, allow_blank=True, default='')
+    finish = serializers.CharField(required=False, allow_blank=True, default='')
+    year = serializers.CharField(required=False, allow_blank=True, default='')
+    condition_uuid = serializers.CharField(required=False, allow_blank=True, default='')
+    category_uuid = serializers.CharField(required=False, allow_blank=True, default='')
+    currency = serializers.CharField(required=False, allow_blank=True, default='USD')
+    upc_does_not_apply = serializers.BooleanField(required=False, default=False)
 
 
 class OrderShipmentSerializer(serializers.ModelSerializer):

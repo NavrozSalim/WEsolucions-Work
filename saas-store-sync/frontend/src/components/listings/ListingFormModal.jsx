@@ -5,7 +5,7 @@ import Input from '../ui/Input';
 import Select from '../ui/Select';
 import { createListing, updateListing } from '../../services/listingService';
 
-const EMPTY_FORM = {
+const EMPTY_LASOO = {
     action: 'create',
     product_key: '',
     variant_key: '',
@@ -21,6 +21,25 @@ const EMPTY_FORM = {
     infinite_quantity: false,
     original_price: '',
     sale_price: '',
+};
+
+const EMPTY_REVERB = {
+    action: 'create',
+    sku: '',
+    title: '',
+    make: '',
+    model: '',
+    description: '',
+    finish: '',
+    year: '',
+    condition_uuid: '',
+    category_uuid: '',
+    sale_price: '',
+    currency: 'USD',
+    inventory: '1',
+    barcode: '',
+    upc_does_not_apply: true,
+    image_urls: '',
 };
 
 function Textarea({ label, rows = 3, ...props }) {
@@ -41,10 +60,19 @@ function Textarea({ label, rows = 3, ...props }) {
 /**
  * Create or edit a single managed-store listing ("created product").
  * Pass `listing` to edit; omit it to create.
+ * When marketplaceCode is "reverb", shows Reverb fields (Make/Model/Condition/etc.).
  */
-export default function ListingFormModal({ open, onClose, onSaved, storeId, listing = null }) {
+export default function ListingFormModal({
+    open,
+    onClose,
+    onSaved,
+    storeId,
+    listing = null,
+    marketplaceCode = '',
+}) {
     const isEdit = !!listing;
-    const [form, setForm] = useState(EMPTY_FORM);
+    const isReverb = String(marketplaceCode || '').trim().toLowerCase() === 'reverb';
+    const [form, setForm] = useState(isReverb ? EMPTY_REVERB : EMPTY_LASOO);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
 
@@ -52,26 +80,47 @@ export default function ListingFormModal({ open, onClose, onSaved, storeId, list
         if (!open) return;
         setError('');
         if (listing) {
-            setForm({
-                product_key: listing.external_product_key || '',
-                variant_key: listing.external_variant_key || '',
-                title: listing.title || '',
-                description: listing.description || '',
-                brand: listing.brand || '',
-                category: listing.category || '',
-                sku: listing.sku || '',
-                barcode: listing.barcode || '',
-                vendor_url: listing.vendor_url || '',
-                image_urls: listing.image_urls || '',
-                inventory: String(listing.inventory ?? 0),
-                infinite_quantity: !!listing.infinite_quantity,
-                original_price: String(listing.original_price ?? ''),
-                sale_price: String(listing.sale_price ?? ''),
-            });
+            if (isReverb) {
+                setForm({
+                    action: listing.action || 'create',
+                    sku: listing.sku || '',
+                    title: listing.title || '',
+                    make: listing.make || listing.brand || '',
+                    model: listing.model || '',
+                    description: listing.description || '',
+                    finish: listing.finish || '',
+                    year: listing.year || '',
+                    condition_uuid: listing.condition_uuid || '',
+                    category_uuid: listing.category_uuid || listing.category || '',
+                    sale_price: String(listing.sale_price ?? listing.original_price ?? ''),
+                    currency: listing.currency || 'USD',
+                    inventory: String(listing.inventory ?? 1),
+                    barcode: listing.barcode || '',
+                    upc_does_not_apply: listing.upc_does_not_apply !== false,
+                    image_urls: listing.image_urls || '',
+                });
+            } else {
+                setForm({
+                    product_key: listing.external_product_key || '',
+                    variant_key: listing.external_variant_key || '',
+                    title: listing.title || '',
+                    description: listing.description || '',
+                    brand: listing.brand || '',
+                    category: listing.category || '',
+                    sku: listing.sku || '',
+                    barcode: listing.barcode || '',
+                    vendor_url: listing.vendor_url || '',
+                    image_urls: listing.image_urls || '',
+                    inventory: String(listing.inventory ?? 0),
+                    infinite_quantity: !!listing.infinite_quantity,
+                    original_price: String(listing.original_price ?? ''),
+                    sale_price: String(listing.sale_price ?? ''),
+                });
+            }
         } else {
-            setForm(EMPTY_FORM);
+            setForm(isReverb ? EMPTY_REVERB : EMPTY_LASOO);
         }
-    }, [open, listing]);
+    }, [open, listing, isReverb]);
 
     if (!open) return null;
 
@@ -84,12 +133,38 @@ export default function ListingFormModal({ open, onClose, onSaved, storeId, list
         e.preventDefault();
         setSaving(true);
         setError('');
-        const payload = {
-            ...form,
-            inventory: parseInt(form.inventory, 10) || 0,
-            original_price: form.original_price === '' ? 0 : form.original_price,
-            sale_price: form.sale_price === '' ? 0 : form.sale_price,
-        };
+        let payload;
+        if (isReverb) {
+            const price = form.sale_price === '' ? 0 : form.sale_price;
+            payload = {
+                action: form.action,
+                sku: form.sku,
+                title: form.title,
+                make: form.make,
+                brand: form.make,
+                model: form.model,
+                description: form.description,
+                finish: form.finish,
+                year: form.year,
+                condition_uuid: form.condition_uuid,
+                category_uuid: form.category_uuid,
+                category: form.category_uuid,
+                sale_price: price,
+                original_price: price,
+                currency: form.currency || 'USD',
+                inventory: parseInt(form.inventory, 10) || 0,
+                barcode: form.barcode,
+                upc_does_not_apply: !!form.upc_does_not_apply,
+                image_urls: form.image_urls,
+            };
+        } else {
+            payload = {
+                ...form,
+                inventory: parseInt(form.inventory, 10) || 0,
+                original_price: form.original_price === '' ? 0 : form.original_price,
+                sale_price: form.sale_price === '' ? 0 : form.sale_price,
+            };
+        }
         const req = isEdit
             ? updateListing(storeId, listing.id, payload)
             : createListing(storeId, payload);
@@ -120,7 +195,11 @@ export default function ListingFormModal({ open, onClose, onSaved, storeId, list
             >
                 <div className="flex shrink-0 items-center justify-between border-b border-slate-200 dark:border-slate-700 px-6 py-4">
                     <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-                        {isEdit ? `Edit listing — ${listing.external_variant_key}` : 'Create listing'}
+                        {isEdit
+                            ? `Edit listing — ${listing.sku || listing.external_variant_key}`
+                            : isReverb
+                              ? 'Create Reverb listing'
+                              : 'Create listing'}
                     </h2>
                     <button type="button" className="rounded-md p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={onClose}>
                         <X className="h-5 w-5" />
@@ -152,84 +231,153 @@ export default function ListingFormModal({ open, onClose, onSaved, storeId, list
                                 {listing.validation_errors_json.join(' ')}
                             </div>
                         )}
-                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                            <Input label="SKU" value={form.sku} onChange={set('sku')} required />
-                            <Input label="Brand" value={form.brand} onChange={set('brand')} required />
-                            <div className="sm:col-span-2">
-                                <Input label="Title" value={form.title} onChange={set('title')} required />
-                            </div>
-                            <div className="sm:col-span-2">
-                                <Textarea label="Description" rows={4} value={form.description} onChange={set('description')} required />
-                            </div>
-                            <Input label="Category" placeholder="e.g. Apparel > T-Shirts" value={form.category} onChange={set('category')} />
-                            <Input label="Barcode (optional)" value={form.barcode} onChange={set('barcode')} />
-                            <div className="sm:col-span-2">
+
+                        {isReverb ? (
+                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                <Input label="SKU" value={form.sku} onChange={set('sku')} required />
+                                <Input label="Make" value={form.make} onChange={set('make')} required />
+                                <Input label="Model" value={form.model} onChange={set('model')} required />
+                                <div className="sm:col-span-2">
+                                    <Input label="Title" value={form.title} onChange={set('title')} required />
+                                </div>
+                                <div className="sm:col-span-2">
+                                    <Textarea label="Description" rows={4} value={form.description} onChange={set('description')} required />
+                                </div>
+                                <Input label="Finish (optional)" value={form.finish} onChange={set('finish')} />
+                                <Input label="Year (optional)" value={form.year} onChange={set('year')} />
                                 <Input
-                                    label="Vendor / source URL (optional)"
-                                    placeholder="https://… product page you source this from"
-                                    value={form.vendor_url}
-                                    onChange={set('vendor_url')}
-                                    type="url"
-                                />
-                            </div>
-                            <div className="sm:col-span-2">
-                                <Textarea
-                                    label="Image URLs (separate with | , ; or new lines)"
-                                    rows={2}
-                                    value={form.image_urls}
-                                    onChange={set('image_urls')}
+                                    label="Condition"
+                                    placeholder="Excellent, Brand New, or a condition UUID"
+                                    value={form.condition_uuid}
+                                    onChange={set('condition_uuid')}
                                     required
                                 />
-                            </div>
-                            <Input
-                                label="Product Key (defaults to SKU)"
-                                placeholder="Groups variants of the same product"
-                                value={form.product_key}
-                                onChange={set('product_key')}
-                            />
-                            <Input
-                                label="Variant Key (defaults to SKU)"
-                                placeholder="Unique per variant"
-                                value={form.variant_key}
-                                onChange={set('variant_key')}
-                            />
-                            <Input
-                                label="Original Price"
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                value={form.original_price}
-                                onChange={set('original_price')}
-                                required
-                            />
-                            <Input
-                                label="Sale Price (≤ original)"
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                value={form.sale_price}
-                                onChange={set('sale_price')}
-                                required
-                            />
-                            <Input
-                                label="Inventory"
-                                type="number"
-                                min="0"
-                                step="1"
-                                value={form.inventory}
-                                onChange={set('inventory')}
-                                disabled={form.infinite_quantity}
-                            />
-                            <label className="mt-6 flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
-                                <input
-                                    type="checkbox"
-                                    className="h-4 w-4 rounded border-slate-300"
-                                    checked={form.infinite_quantity}
-                                    onChange={set('infinite_quantity')}
+                                <Input
+                                    label="Category UUID"
+                                    placeholder="From Reverb /api/categories/flat"
+                                    value={form.category_uuid}
+                                    onChange={set('category_uuid')}
+                                    required
                                 />
-                                Infinite quantity (never out of stock)
-                            </label>
-                        </div>
+                                <Input
+                                    label="Price"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={form.sale_price}
+                                    onChange={set('sale_price')}
+                                    required
+                                />
+                                <Input label="Currency" value={form.currency} onChange={set('currency')} />
+                                <Input
+                                    label="Inventory"
+                                    type="number"
+                                    min="0"
+                                    step="1"
+                                    value={form.inventory}
+                                    onChange={set('inventory')}
+                                    required
+                                />
+                                <Input label="UPC (optional)" value={form.barcode} onChange={set('barcode')} />
+                                <label className="mt-6 flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 sm:col-span-2">
+                                    <input
+                                        type="checkbox"
+                                        className="h-4 w-4 rounded border-slate-300"
+                                        checked={!!form.upc_does_not_apply}
+                                        onChange={set('upc_does_not_apply')}
+                                    />
+                                    UPC does not apply
+                                </label>
+                                <div className="sm:col-span-2">
+                                    <Textarea
+                                        label="Photo URLs (separate with | , ; or new lines)"
+                                        rows={2}
+                                        value={form.image_urls}
+                                        onChange={set('image_urls')}
+                                        required
+                                    />
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                <Input label="SKU" value={form.sku} onChange={set('sku')} required />
+                                <Input label="Brand" value={form.brand} onChange={set('brand')} required />
+                                <div className="sm:col-span-2">
+                                    <Input label="Title" value={form.title} onChange={set('title')} required />
+                                </div>
+                                <div className="sm:col-span-2">
+                                    <Textarea label="Description" rows={4} value={form.description} onChange={set('description')} required />
+                                </div>
+                                <Input label="Category" placeholder="e.g. Apparel > T-Shirts" value={form.category} onChange={set('category')} />
+                                <Input label="Barcode (optional)" value={form.barcode} onChange={set('barcode')} />
+                                <div className="sm:col-span-2">
+                                    <Input
+                                        label="Vendor / source URL (optional)"
+                                        placeholder="https://… product page you source this from"
+                                        value={form.vendor_url}
+                                        onChange={set('vendor_url')}
+                                        type="url"
+                                    />
+                                </div>
+                                <div className="sm:col-span-2">
+                                    <Textarea
+                                        label="Image URLs (separate with | , ; or new lines)"
+                                        rows={2}
+                                        value={form.image_urls}
+                                        onChange={set('image_urls')}
+                                        required
+                                    />
+                                </div>
+                                <Input
+                                    label="Product Key (defaults to SKU)"
+                                    placeholder="Groups variants of the same product"
+                                    value={form.product_key}
+                                    onChange={set('product_key')}
+                                />
+                                <Input
+                                    label="Variant Key (defaults to SKU)"
+                                    placeholder="Unique per variant"
+                                    value={form.variant_key}
+                                    onChange={set('variant_key')}
+                                />
+                                <Input
+                                    label="Original Price"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={form.original_price}
+                                    onChange={set('original_price')}
+                                    required
+                                />
+                                <Input
+                                    label="Sale Price (≤ original)"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={form.sale_price}
+                                    onChange={set('sale_price')}
+                                    required
+                                />
+                                <Input
+                                    label="Inventory"
+                                    type="number"
+                                    min="0"
+                                    step="1"
+                                    value={form.inventory}
+                                    onChange={set('inventory')}
+                                    disabled={form.infinite_quantity}
+                                />
+                                <label className="mt-6 flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
+                                    <input
+                                        type="checkbox"
+                                        className="h-4 w-4 rounded border-slate-300"
+                                        checked={form.infinite_quantity}
+                                        onChange={set('infinite_quantity')}
+                                    />
+                                    Infinite quantity (never out of stock)
+                                </label>
+                            </div>
+                        )}
                     </div>
                     <div className="flex shrink-0 items-center justify-end gap-2 border-t border-slate-200 dark:border-slate-700 px-6 py-4">
                         <Button variant="secondary" type="button" onClick={onClose} disabled={saving}>

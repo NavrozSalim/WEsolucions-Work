@@ -272,8 +272,64 @@ class ReverbAdapter(BaseStoreAdapter):
             page = current + 1
 
     def create_product(self, sku, title, price, stock, **kwargs):
-        """Create listing. v1: deferred; use manual create then sync with Marketplace ID."""
-        raise NotImplementedError("Reverb create_product: v1 focuses on updating existing listings")
+        """Create a Reverb listing via POST /api/listings.
+
+        Prefer ``create_listing(payload)`` with a full Reverb body. This thin
+        wrapper exists for BaseStoreAdapter compatibility.
+        """
+        body = {
+            "sku": sku,
+            "title": title,
+            "price": {
+                "amount": str(Decimal(str(price)).quantize(Decimal("0.01"))),
+                "currency": kwargs.get("currency", "USD"),
+            },
+            "has_inventory": True,
+            "inventory": max(0, int(stock or 0)),
+            "make": kwargs.get("make") or "Unknown",
+            "model": kwargs.get("model") or title or "Unknown",
+            "publish": bool(kwargs.get("publish", True)),
+        }
+        if kwargs.get("description"):
+            body["description"] = kwargs["description"]
+        if kwargs.get("condition_uuid"):
+            body["condition"] = {"uuid": kwargs["condition_uuid"]}
+        if kwargs.get("category_uuid"):
+            body["categories"] = [{"uuid": kwargs["category_uuid"]}]
+        if kwargs.get("photos"):
+            body["photos"] = list(kwargs["photos"])
+        return self.create_listing(body)
+
+    def create_listing(self, payload: dict) -> dict:
+        """POST /api/listings — create (and optionally publish) a listing."""
+        data = self._request("POST", "/api/listings", json=payload or {})
+        return data if isinstance(data, dict) else {"raw": data}
+
+    def publish_listing(self, listing_id: str) -> dict | None:
+        """PUT /api/listings/{id} with state published if still a draft."""
+        lid = str(listing_id or "").strip()
+        if not lid:
+            raise ValueError("listing_id is required")
+        data = self._request(
+            "PUT",
+            f"/api/listings/{quote(lid)}",
+            json={"state": {"slug": "live"}},
+        )
+        return data if isinstance(data, dict) else None
+
+    def list_listing_conditions(self) -> list:
+        """GET /api/listing_conditions — condition UUID catalog."""
+        data = self._request("GET", "/api/listing_conditions")
+        if isinstance(data, dict):
+            conditions = data.get("conditions") or data.get("listing_conditions")
+            if isinstance(conditions, list):
+                return conditions
+            embedded = data.get("_embedded")
+            if isinstance(embedded, dict):
+                conditions = embedded.get("conditions") or embedded.get("listing_conditions")
+                if isinstance(conditions, list):
+                    return conditions
+        return data if isinstance(data, list) else []
 
     def update_product(self, external_id, price=None, stock=None, **kwargs):
         """Update listing price and/or inventory. PUT /api/listings/{id}."""

@@ -2569,6 +2569,7 @@ export default function Catalog() {
             {selectedStore && viewMode === 'created' && (
                 <CreatedProductsPanel
                     storeId={selectedStore}
+                    marketplaceCode={selectedStoreData?.marketplace_code}
                     reloadNonce={createdReloadNonce}
                     onMessage={(msg, variant) => {
                         setMessage(msg);
@@ -2581,6 +2582,7 @@ export default function Catalog() {
             {selectedStore && viewMode === 'products' && isManagedStore && (
                 <InventoryManagementPanel
                     storeId={selectedStore}
+                    marketplaceCode={selectedStoreData?.marketplace_code}
                     reloadNonce={createdReloadNonce}
                     onMessage={(msg, variant) => {
                         setMessage(msg);
@@ -3368,9 +3370,10 @@ export default function Catalog() {
             <ListingFormModal
                 open={createListingOpen && !!selectedStore}
                 storeId={selectedStore}
+                marketplaceCode={selectedStoreData?.marketplace_code}
                 onClose={() => setCreateListingOpen(false)}
                 onSaved={(listing) => {
-                    setMessage(`Listing "${listing?.external_variant_key || ''}" saved. Publish it from Created products.`);
+                    setMessage(`Listing "${listing?.sku || listing?.external_variant_key || ''}" saved. Publish it from Created products.`);
                     setFlowStatus('success');
                     setCreatedReloadNonce((n) => n + 1);
                     setUploadsReloadNonce((n) => n + 1);
@@ -3381,6 +3384,7 @@ export default function Catalog() {
             <BulkListingModal
                 open={bulkListingOpen && !!selectedStore}
                 storeId={selectedStore}
+                marketplaceCode={selectedStoreData?.marketplace_code}
                 onClose={() => setBulkListingOpen(false)}
                 onImported={() => {
                     setCreatedReloadNonce((n) => n + 1);
