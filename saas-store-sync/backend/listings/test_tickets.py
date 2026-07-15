@@ -153,6 +153,61 @@ class ReverbTicketServiceTests(TestCase):
         inbound = ticket.messages.filter(direction=TicketMessageDirection.INBOUND).first()
         self.assertEqual(inbound.body, "Is this still available?")
 
+    def test_upsert_uses_other_party_and_links_order_by_listing(self):
+        """Production Reverb payloads use other_party + listing.id (no order_number)."""
+        from listings.models import MarketplaceOrder
+        from listings.reverb import tickets as reverb_tickets
+
+        MarketplaceOrder.objects.create(
+            store=self.store,
+            user=self.user,
+            external_order_key="25430831",
+            invoice_number="25430831",
+            customer_info_json={"name": "Peter Conrey", "firstName": "Peter", "lastName": "Conrey"},
+            line_items_json=[{
+                "sku": "AMH-CABLE-1",
+                "externalProductKey": "94922669",
+                "lineItemId": "94922669",
+                "title": "Speakon Cable",
+                "_raw": {"product_id": "94922669", "sku": "AMH-CABLE-1"},
+            }],
+            status="paid",
+            environment="production",
+        )
+        raw = {
+            "_links": {"self": {"href": "https://api.reverb.com/api/my/conversations/24499999"}},
+            "other_party": {"name": "Peter Conrey", "uuid": "abc-123"},
+            "listing": {
+                "id": 94922669,
+                "sku": "AMH-CABLE-1",
+                "title": "Speakon Cable",
+            },
+            "read": True,
+            "messages": [
+                {
+                    "id": "m1",
+                    "body": "Where is my order?",
+                    "created_at": "2026-04-14T10:00:00Z",
+                    "authored": False,
+                    "author": {"name": "Peter Conrey"},
+                },
+                {
+                    "id": "m2",
+                    "body": "Shipped today",
+                    "created_at": "2026-04-14T11:00:00Z",
+                    "authored": True,
+                    "author": {"name": "Shop"},
+                },
+            ],
+        }
+        ticket = reverb_tickets.upsert_conversation(self.user, self.store, raw)
+        self.assertIsNotNone(ticket)
+        self.assertEqual(ticket.external_ticket_key, "24499999")
+        self.assertEqual(ticket.customer_name, "Peter Conrey")
+        self.assertEqual(ticket.related_order_key, "25430831")
+        outbound = ticket.messages.filter(direction=TicketMessageDirection.OUTBOUND).first()
+        self.assertEqual(outbound.body, "Shipped today")
+
     @patch("listings.reverb.tickets.get_adapter")
     def test_fetch_reverb_conversations(self, mock_get_adapter):
         adapter = MagicMock()

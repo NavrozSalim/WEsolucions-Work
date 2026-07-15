@@ -22,6 +22,7 @@ from store_adapters.reverb_adapter import ReverbAPIError
 from ..errors import MarketplaceError
 from ..models import (
     Environment,
+    MarketplaceOrder,
     SupportTicket,
     TicketMessage,
     TicketMessageDirection,
@@ -96,8 +97,12 @@ def _messages_from(raw: dict) -> list:
 
 
 def _other_party(raw: dict) -> dict:
-    """Buyer / other participant details from a conversation payload."""
-    for key in ("other_user", "buyer", "recipient", "participant", "user"):
+    """Buyer / other participant details from a conversation payload.
+
+    Production Reverb payloads use ``other_party`` (name, uuid, shop_id).
+    Older / alternate shapes may use ``other_user``, ``buyer``, etc.
+    """
+    for key in ("other_party", "other_user", "buyer", "recipient", "participant", "user"):
         node = raw.get(key)
         if isinstance(node, dict):
             return node
@@ -114,6 +119,12 @@ def _message_direction(msg: dict, shop_user_id=None) -> str:
     author = msg.get("author") if isinstance(msg.get("author"), dict) else {}
     sender = msg.get("sender") if isinstance(msg.get("sender"), dict) else {}
     party = author or sender
+
+    # Reverb conversation messages: authored=true means the shop wrote it.
+    if msg.get("authored") is True:
+        return TicketMessageDirection.OUTBOUND
+    if msg.get("authored") is False:
+        return TicketMessageDirection.INBOUND
 
     if msg.get("from_me") is True or msg.get("is_mine") is True or msg.get("mine") is True:
         return TicketMessageDirection.OUTBOUND
@@ -137,6 +148,158 @@ def _message_direction(msg: dict, shop_user_id=None) -> str:
     return TicketMessageDirection.INBOUND
 
 
+def _explicit_related_order(raw: dict) -> str:
+    related_order = str(
+        _first(
+            raw.get("order_number"),
+            raw.get("order_id"),
+            raw.get("orderNumber"),
+            raw.get("invoice_number"),
+            raw.get("invoiceNumber"),
+            _dig(raw, "order.order_number"),
+            _dig(raw, "order.id"),
+            _dig(raw, "order.number"),
+            _dig(raw, "about.order_number"),
+            _dig(raw, "about.order_id"),
+            (
+                str(_dig(raw, "_links.order.href") or "").rstrip("/").split("/")[-1]
+                if _dig(raw, "_links.order.href") else None
+            ),
+            "",
+        )
+        or ""
+    ).strip()[:255]
+    if related_order.lower() in ("orders", "selling", "order", "api", "my"):
+        return ""
+    return related_order
+
+
+def _order_line_product_ids(order: MarketplaceOrder) -> set[str]:
+    ids: set[str] = set()
+    items = order.line_items_json if isinstance(order.line_items_json, list) else []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        for key in ("externalProductKey", "lineItemId"):
+            val = str(it.get(key) or "").strip()
+            if val:
+                ids.add(val)
+        raw = it.get("_raw") if isinstance(it.get("_raw"), dict) else {}
+        pid = str(raw.get("product_id") or "").strip()
+        if pid:
+            ids.add(pid)
+    rev = None
+    envelope = order.raw_response_json if isinstance(order.raw_response_json, dict) else {}
+    if isinstance(envelope.get("_reverb"), dict):
+        rev = envelope["_reverb"]
+    if isinstance(rev, dict):
+        pid = str(rev.get("product_id") or "").strip()
+        if pid:
+            ids.add(pid)
+    return ids
+
+
+def _order_line_skus(order: MarketplaceOrder) -> set[str]:
+    skus: set[str] = set()
+    items = order.line_items_json if isinstance(order.line_items_json, list) else []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        for key in ("sku", "externalVariantKey"):
+            val = str(it.get(key) or "").strip()
+            if val:
+                skus.add(val)
+    envelope = order.raw_response_json if isinstance(order.raw_response_json, dict) else {}
+    rev = envelope.get("_reverb") if isinstance(envelope.get("_reverb"), dict) else {}
+    if isinstance(rev, dict):
+        sku = str(rev.get("sku") or "").strip()
+        if sku:
+            skus.add(sku)
+    return skus
+
+
+def _order_customer_name(order: MarketplaceOrder) -> str:
+    info = order.customer_info_json if isinstance(order.customer_info_json, dict) else {}
+    name = str(info.get("name") or "").strip()
+    if name:
+        return name
+    first = str(info.get("firstName") or info.get("first_name") or "").strip()
+    last = str(info.get("lastName") or info.get("last_name") or "").strip()
+    return " ".join(p for p in (first, last) if p).strip()
+
+
+def _resolve_related_order(
+    user,
+    store,
+    raw: dict,
+    *,
+    customer_name: str = "",
+) -> tuple[str, str]:
+    """
+    Return (invoice_or_order_key, customer_name_from_order).
+
+    Reverb conversations usually omit order_number; they include ``listing.id`` /
+    ``listing.sku``. Match those against synced MarketplaceOrder line items,
+    preferring buyer-name agreement when multiple orders share a listing.
+    """
+    explicit = _explicit_related_order(raw)
+    if explicit:
+        return explicit, ""
+
+    listing = raw.get("listing") if isinstance(raw.get("listing"), dict) else {}
+    listing_id = str(listing.get("id") or "").strip()
+    listing_sku = str(listing.get("sku") or "").strip()
+    want_name = (customer_name or "").strip().lower()
+
+    if not listing_id and not listing_sku and not want_name:
+        return "", ""
+
+    candidates: list[tuple[int, MarketplaceOrder]] = []
+    qs = MarketplaceOrder.objects.filter(store=store, user=user).only(
+        "id",
+        "invoice_number",
+        "external_order_key",
+        "customer_info_json",
+        "line_items_json",
+        "raw_response_json",
+        "created_at",
+    )
+    for order in qs.iterator():
+        pids = _order_line_product_ids(order)
+        skus = _order_line_skus(order)
+        name = _order_customer_name(order).lower()
+        product_hit = bool(listing_id and listing_id in pids)
+        sku_hit = bool(listing_sku and listing_sku in skus)
+        name_hit = bool(want_name and name and want_name == name)
+        if not (product_hit or sku_hit or name_hit):
+            continue
+        score = 0
+        if product_hit:
+            score += 40
+        if sku_hit:
+            score += 20
+        if name_hit:
+            score += 30
+        # Prefer newer orders when scores tie.
+        created = order.created_at.timestamp() if order.created_at else 0
+        candidates.append((score * 1_000_000_000 + int(created), order))
+
+    if not candidates:
+        return "", ""
+
+    best_score_key, best = max(candidates, key=lambda c: c[0])
+    best_score = best_score_key // 1_000_000_000
+
+    # Name-only matches are only safe when exactly one order shares that buyer name.
+    if best_score == 30:
+        same = [o for s, o in candidates if (s // 1_000_000_000) == 30]
+        if len(same) != 1:
+            return "", ""
+
+    key = str(best.invoice_number or best.external_order_key or "").strip()
+    return key[:255], _order_customer_name(best)
+
+
 def upsert_conversation(user, store, raw: dict, *, shop_user_id=None) -> SupportTicket | None:
     """Upsert one Reverb conversation (+ messages) into SupportTicket."""
     cid = _conversation_id(raw)
@@ -151,6 +314,7 @@ def upsert_conversation(user, store, raw: dict, *, shop_user_id=None) -> Support
             raw.get("title"),
             _dig(raw, "listing.title"),
             _dig(raw, "listing.name"),
+            _dig(raw, "listing.model"),
             "Reverb conversation",
         )
         or "Reverb conversation"
@@ -172,34 +336,18 @@ def upsert_conversation(user, store, raw: dict, *, shop_user_id=None) -> Support
         or ""
     )[:255]
     customer_email = str(_first(other.get("email"), other.get("email_address"), "") or "")[:255]
-    related_order = str(
-        _first(
-            raw.get("order_number"),
-            raw.get("order_id"),
-            raw.get("orderNumber"),
-            raw.get("invoice_number"),
-            raw.get("invoiceNumber"),
-            _dig(raw, "order.order_number"),
-            _dig(raw, "order.id"),
-            _dig(raw, "order.number"),
-            _dig(raw, "about.order_number"),
-            _dig(raw, "about.order_id"),
-            # HAL self/order links sometimes end with the order number
-            (
-                str(_dig(raw, "_links.order.href") or "").rstrip("/").split("/")[-1]
-                if _dig(raw, "_links.order.href") else None
-            ),
-            "",
-        )
-        or ""
-    )[:255]
-    # Ignore non-order path junk like "orders" or "selling"
-    if related_order.lower() in ("orders", "selling", "order", "api", "my"):
-        related_order = ""
+    related_order, order_customer = _resolve_related_order(
+        user, store, raw, customer_name=customer_name,
+    )
+    if not customer_name and order_customer:
+        customer_name = order_customer[:255]
 
     unread_flag = raw.get("unread")
     if unread_flag is None:
         unread_flag = raw.get("has_unread")
+    # List payloads use ``read``; treat unread missing + read=false as unread.
+    if unread_flag is None and "read" in raw:
+        unread_flag = not bool(raw.get("read"))
     status = TicketStatus.OPEN
     if raw.get("closed") or str(raw.get("state") or "").lower() in ("closed", "archived"):
         status = TicketStatus.CLOSED
@@ -306,6 +454,24 @@ def fetch(user, store) -> dict:
     adapter = get_adapter(store)
     if not hasattr(adapter, "iter_conversations"):
         raise MarketplaceError("Store adapter is not Reverb — cannot fetch conversations.")
+
+    # Re-link names/invoices from already-stored conversation JSON (e.g. after
+    # orders synced later, or after mapping fixes) before hitting the API.
+    for ticket in SupportTicket.objects.filter(store=store, user=user).exclude(
+        raw_response_json=None,
+    ).iterator():
+        raw = ticket.raw_response_json
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("source") == "create_test_ticket":
+            continue
+        try:
+            upsert_conversation(user, store, raw)
+        except Exception:
+            logger.exception(
+                "Reverb ticket re-enrich failed store=%s ticket=%s",
+                store.id, ticket.id,
+            )
 
     saved = 0
     try:
