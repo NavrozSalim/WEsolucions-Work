@@ -1,8 +1,9 @@
 """Unit tests for the Vevor AU feed parser (run: python -m unittest scrapers.test_vevor_au_ingest -v).
 
-The 2026 feed is a 36-column catalog export (price in "MAP (Minimum Advertised
-Price)", stock in "Inventory quantity"); the legacy feed used A=SKU, G=Price,
-I=Inventory. Both layouts must parse correctly.
+The live feed uses ``after coupon price`` (Excel col 35 / index 34) for cost,
+with ``MAP (Minimum Advertised Price)`` beside it; stock is ``Inventory
+quantity``. The legacy feed used A=SKU, G=Price, I=Inventory. Both layouts
+must parse correctly.
 """
 import os
 import tempfile
@@ -28,7 +29,7 @@ CURRENT_FEED_HEADER = [
     'attribute_name_1', 'attribute_2', 'attribute_1', 'goods_description_ad',
     'description_html', 'goods_size_unit', 'High', 'Wide', 'Long',
     'goods_weight_unit', 'Goods Weight', 'Shipping Weight', 'image_link1',
-    'goods_spu', 'MAP (Minimum Advertised Price)', 'Currency Code',
+    'goods_spu', 'after coupon price', 'MAP (Minimum Advertised Price)',
 ]
 
 
@@ -45,7 +46,7 @@ def _write_xlsx(rows) -> str:
     return tmp.name
 
 
-def _current_feed_row(sku, availability, inventory, weight_kg, map_price, currency='AUD'):
+def _current_feed_row(sku, availability, inventory, weight_kg, after_coupon_price, map_price=None):
     """Build a full-width row matching CURRENT_FEED_HEADER."""
     row = [''] * len(CURRENT_FEED_HEADER)
     row[0] = sku            # SKU
@@ -53,8 +54,8 @@ def _current_feed_row(sku, availability, inventory, weight_kg, map_price, curren
     row[6] = availability   # Availability  (legacy code misread this as price)
     row[7] = inventory      # Inventory quantity
     row[8] = weight_kg      # Product weight(KG)  (legacy code misread this as stock)
-    row[34] = map_price     # MAP (Minimum Advertised Price)
-    row[35] = currency      # Currency Code
+    row[34] = after_coupon_price  # after coupon price (Excel col 35)
+    row[35] = map_price if map_price is not None else after_coupon_price  # MAP
     return row
 
 
@@ -63,11 +64,26 @@ class ResolveColumnsTests(unittest.TestCase):
         sku_i, price_i, inv_i, mode = resolve_vevor_feed_columns(CURRENT_FEED_HEADER)
         self.assertEqual(mode, 'header')
         self.assertEqual(sku_i, 0)
-        self.assertEqual(price_i, 34)   # MAP (Minimum Advertised Price)
+        self.assertEqual(price_i, 34)   # after coupon price
         self.assertEqual(inv_i, 7)      # Inventory quantity
 
+    def test_prefers_after_coupon_over_map(self):
+        header = [
+            'SKU', 'after coupon price', 'MAP (Minimum Advertised Price)',
+            'Inventory quantity',
+        ]
+        sku_i, price_i, inv_i, mode = resolve_vevor_feed_columns(header)
+        self.assertEqual(mode, 'header')
+        self.assertEqual((sku_i, price_i, inv_i), (0, 1, 3))
+
+    def test_falls_back_to_map_when_after_coupon_missing(self):
+        header = ['SKU', 'MAP (Minimum Advertised Price)', 'Inventory Quantity']
+        sku_i, price_i, inv_i, mode = resolve_vevor_feed_columns(header)
+        self.assertEqual(mode, 'header')
+        self.assertEqual((sku_i, price_i, inv_i), (0, 1, 2))
+
     def test_header_matching_is_case_and_whitespace_tolerant(self):
-        header = ['  sku ', 'x', 'MAP  (Minimum Advertised Price)', 'Inventory Quantity']
+        header = ['  sku ', 'x', 'After  Coupon Price', 'Inventory Quantity']
         sku_i, price_i, inv_i, mode = resolve_vevor_feed_columns(header)
         self.assertEqual(mode, 'header')
         self.assertEqual((sku_i, price_i, inv_i), (0, 2, 3))
@@ -95,21 +111,21 @@ class LoadCurrentFeedTests(unittest.TestCase):
     def setUp(self):
         self.path = _write_xlsx([
             CURRENT_FEED_HEADER,
-            _current_feed_row('00PSIX5NJR2YV2MH3V0', 'in stock', '11', '11.20000', 189.99),
-            _current_feed_row('YMBYQ32YC4ZKTXLZPV0', 'in stock', 7, 3.5, '45.50'),
-            _current_feed_row('OUTOFSTOCKSKU00001', 'out of stock', 0, 2.0, 99.0),
-            _current_feed_row('NOPRICESKU00000001', 'in stock', 5, 1.0, ''),
+            _current_feed_row('00PSIX5NJR2YV2MH3V0', 'in stock', '11', '11.20000', 178.90, 189.99),
+            _current_feed_row('YMBYQ32YC4ZKTXLZPV0', 'in stock', 7, 3.5, '45.50', '55.00'),
+            _current_feed_row('OUTOFSTOCKSKU00001', 'out of stock', 0, 2.0, 99.0, 110.0),
+            _current_feed_row('NOPRICESKU00000001', 'in stock', 5, 1.0, '', 12.0),
         ])
 
     def tearDown(self):
         os.unlink(self.path)
 
-    def test_price_comes_from_map_column_not_availability(self):
+    def test_price_comes_from_after_coupon_not_map_or_availability(self):
         lookup, _, rows = load_veror_via_excel_positions(self.path)
         self.assertEqual(rows, 4)
         entry = lookup['00PSIX5NJR2YV2MH3V0']
-        # Legacy positional read produced 0.0 (col G = 'in stock'); MAP is 189.99.
-        self.assertEqual(entry['Posted Price'], 189.99)
+        # Availability (G) would yield 0; MAP is 189.99; after coupon is 178.90.
+        self.assertEqual(entry['Posted Price'], 178.90)
 
     def test_stock_comes_from_inventory_quantity_not_weight(self):
         lookup, _, _ = load_veror_via_excel_positions(self.path)
@@ -127,13 +143,14 @@ class LoadCurrentFeedTests(unittest.TestCase):
         lookup, _, _ = load_veror_via_excel_positions(self.path)
         self.assertEqual(lookup['OUTOFSTOCKSKU00001']['Posted Inventory'], 0)
         self.assertEqual(lookup['OUTOFSTOCKSKU00001']['Posted Price'], 99.0)
+        # Empty after-coupon cell → 0 even if MAP has a value.
         self.assertEqual(lookup['NOPRICESKU00000001']['Posted Price'], 0.0)
 
     def test_compact_lookup_matches_fuzzy_sku(self):
         lookup, lookup_compact, _ = load_veror_via_excel_positions(self.path)
         hit = lookup_sku(lookup, lookup_compact, '00psix5njr2yv2mh3v0')
         self.assertIsNotNone(hit)
-        self.assertEqual(hit['Posted Price'], 189.99)
+        self.assertEqual(hit['Posted Price'], 178.90)
 
 
 class LoadLegacyFeedTests(unittest.TestCase):
@@ -159,7 +176,7 @@ class LoadLegacyFeedTests(unittest.TestCase):
 
 class ShortRowTests(unittest.TestCase):
     """read_only worksheets omit trailing empty cells; rows shorter than the
-    MAP column index must not crash and must yield price 0."""
+    price column index must not crash and must yield price 0."""
 
     def test_row_shorter_than_price_column(self):
         rows = [

@@ -5,11 +5,11 @@ Unlike Amazon/eBay, Vevor AU publishes a live catalog feed on S3. Instead of
 scraping product pages (which gets rate-limited / Cloudflare-blocked), we:
 
   1. Download https://ads-feed.s3.us-west-2.amazonaws.com/ads/business/563/vevor-563.xlsx
-  2. Resolve columns from the header row: ``SKU``, ``MAP (Minimum Advertised
-     Price)`` and ``Inventory quantity``. If the header is unrecognizable we
-     fall back to the legacy positional layout A=SKU, G=Price, I=Inventory
-     (0-based 0, 6, 8) that the feed used before Vevor expanded it to a full
-     36-column catalog export.
+  2. Resolve columns from the header row: ``SKU``, ``after coupon price``
+     (preferred over ``MAP``) and ``Inventory quantity``. If the header is
+     unrecognizable we fall back to the legacy positional layout A=SKU,
+     G=Price, I=Inventory (0-based 0, 6, 8) that the feed used before Vevor
+     expanded it to a full catalog export.
   3. Build a SKU -> {price, stock} lookup.
   4. Update ``VendorPrice`` rows for matching products.
 
@@ -150,15 +150,17 @@ def resolve_vevor_feed_columns(header_row) -> tuple[int, int, int, str]:
     """
     Map the feed header row to ``(sku_idx, price_idx, inventory_idx, mode)``.
 
-    The 2026 Vevor AU feed is a 36-column catalog export where price lives in
-    ``MAP (Minimum Advertised Price)`` and stock in ``Inventory quantity``.
-    Column G is now ``Availability`` ("in stock") and column I is the product
-    weight, so the legacy positional read yields $0 prices and bogus stock.
+    The live Vevor AU feed uses ``after coupon price`` (Excel column 35 /
+    0-based index 34) as the sellable cost, with ``MAP (Minimum Advertised
+    Price)`` beside it. Stock is ``Inventory quantity``. Column G is
+    ``Availability`` and column I is product weight, so the legacy
+    positional read yields $0 prices and bogus stock.
 
     ``mode`` is ``"header"`` when all three columns were found by name, else
     ``"legacy"`` (positional fallback for the old A/G/I layout).
     """
     sku_idx = price_idx = inventory_idx = None
+    map_price_idx = None
     for idx, cell in enumerate(header_row or ()):
         name = _normalize_header(cell)
         if not name:
@@ -166,17 +168,24 @@ def resolve_vevor_feed_columns(header_row) -> tuple[int, int, int, str]:
         if sku_idx is None and name == "sku":
             sku_idx = idx
         elif price_idx is None and (
+            name == "after coupon price"
+            or ("after" in name and "coupon" in name and "price" in name)
+        ):
+            price_idx = idx
+        elif map_price_idx is None and (
             name == "map (minimum advertised price)"
             or ("map" in name and "price" in name)
             or name in ("price", "posted price")
         ):
-            price_idx = idx
+            map_price_idx = idx
         elif inventory_idx is None and name in (
             "inventory quantity",
             "inventory",
             "posted inventory",
         ):
             inventory_idx = idx
+    if price_idx is None:
+        price_idx = map_price_idx
     if sku_idx is not None and price_idx is not None and inventory_idx is not None:
         return sku_idx, price_idx, inventory_idx, "header"
     return LEGACY_SKU_COL, LEGACY_PRICE_COL, LEGACY_INVENTORY_COL, "legacy"
@@ -192,7 +201,7 @@ def load_veror_via_excel_positions(path: str) -> tuple[dict, dict, int]:
     Read the Vevor AU feed XLSX into SKU lookups.
 
     Columns are resolved from the header row via ``resolve_vevor_feed_columns``
-    (SKU / MAP price / Inventory quantity), falling back to the legacy
+    (SKU / after coupon price / Inventory quantity), falling back to the legacy
     positional layout A=0 SKU, G=6 Price, I=8 Inventory when the header is not
     recognizable.
 
