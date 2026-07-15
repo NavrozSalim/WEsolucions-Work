@@ -37,6 +37,53 @@ function formatAgo(iso) {
     return `${Math.round(sec / 86400)}d ago`;
 }
 
+function JobProgressStrip({ mode, count }) {
+    if (!mode) return null;
+    const isScrape = mode === 'scrape';
+    const title = isScrape ? 'Fetching vendor prices…' : 'Pushing price/stock to marketplace…';
+    const detail = isScrape
+        ? `Scraping ${count || 0} listing(s) with vendor links. Keep this page open until it finishes.`
+        : `Updating ${count || 0} listing(s) on Reverb. Keep this page open until it finishes.`;
+    const border = isScrape
+        ? 'border-sky-200 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/30'
+        : 'border-emerald-200 dark:border-emerald-800 bg-emerald-50/80 dark:bg-emerald-950/30';
+    const bar = isScrape ? 'bg-sky-500' : 'bg-emerald-500';
+    const pill = isScrape
+        ? 'bg-sky-200 text-sky-900 dark:bg-sky-800 dark:text-sky-200'
+        : 'bg-emerald-200 text-emerald-900 dark:bg-emerald-800 dark:text-emerald-200';
+
+    return (
+        <div className={`rounded-lg border ${border} p-4 mb-0 shadow-sm`}>
+            <div className="flex items-start gap-3">
+                <span className={`mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full ${bar} animate-pulse`} />
+                <div className="min-w-0 flex-1">
+                    <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                        {title}
+                        <span className={`ml-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${pill}`}>
+                            running
+                        </span>
+                    </h3>
+                    <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-300">{detail}</p>
+                    <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                        <div
+                            className={`h-full w-1/3 rounded-full ${bar}`}
+                            style={{
+                                animation: 'managedInvProgress 1.2s ease-in-out infinite',
+                            }}
+                        />
+                    </div>
+                </div>
+            </div>
+            <style>{`
+                @keyframes managedInvProgress {
+                    0% { transform: translateX(-100%); }
+                    100% { transform: translateX(400%); }
+                }
+            `}</style>
+        </div>
+    );
+}
+
 /** Managed-store inventory: same scrape/push/reset/export ideas as Product listings. */
 export default function InventoryManagementPanel({ storeId, marketplaceCode = '', reloadNonce = 0, onMessage }) {
     const isReverb = String(marketplaceCode || '').trim().toLowerCase() === 'reverb';
@@ -51,6 +98,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     const [editOpen, setEditOpen] = useState(false);
     const [search, setSearch] = useState('');
     const [syncFilter, setSyncFilter] = useState('all');
+    const [jobCount, setJobCount] = useState(0);
 
     const load = useCallback(() => {
         if (!storeId) return;
@@ -73,6 +121,10 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     );
 
     const handleScrape = (ids = null) => {
+        const targetCount = ids?.length
+            ? ids.length
+            : listings.filter((l) => (l.vendor_url || '').trim()).length;
+        setJobCount(targetCount);
         setScraping(true);
         scrapeListings(storeId, ids)
             .then((res) => {
@@ -83,10 +135,15 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                 onMessage?.(err.response?.data?.detail || 'Scrape failed.', 'error');
                 load();
             })
-            .finally(() => setScraping(false));
+            .finally(() => {
+                setScraping(false);
+                setJobCount(0);
+            });
     };
 
     const handlePush = (ids = null) => {
+        const targetCount = ids?.length || listings.length;
+        setJobCount(targetCount);
         setPushing(true);
         pushListingInventory(storeId, ids)
             .then((res) => {
@@ -97,7 +154,10 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                 onMessage?.(err.response?.data?.detail || err.response?.data?.message || 'Push failed.', 'error');
                 load();
             })
-            .finally(() => setPushing(false));
+            .finally(() => {
+                setPushing(false);
+                setJobCount(0);
+            });
     };
 
     const handleReset = (scope) => {
@@ -146,6 +206,14 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
 
     return (
         <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
+            {(scraping || pushing) && (
+                <div className="border-b border-slate-200 dark:border-slate-700 p-4">
+                    <JobProgressStrip
+                        mode={scraping ? 'scrape' : 'push'}
+                        count={jobCount}
+                    />
+                </div>
+            )}
             <div className="flex flex-col gap-3 border-b border-slate-200 dark:border-slate-700 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                     <div>
