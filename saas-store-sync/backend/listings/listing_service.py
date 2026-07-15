@@ -79,6 +79,43 @@ def _safe_decimal(value) -> Decimal:
         return Decimal("0")
 
 
+def _vendor_id_from_url(url: str, price_by_vendor_id: dict, inv_by_vendor_id: dict):
+    """Best-effort match of a vendor URL to a store-configured vendor.
+
+    Managed listings only store ``vendor_url`` (no vendor FK). Prefer a vendor
+    whose code appears in the URL host (e.g. amazon → amazonus); else None so
+    callers use the store's first configured settings as fallback.
+    """
+    if not url:
+        return None
+    url_l = url.lower()
+    vendor_ids = set(price_by_vendor_id) | set(inv_by_vendor_id)
+    if not vendor_ids:
+        return None
+    from vendor.models import Vendor
+
+    vendors = list(Vendor.objects.filter(id__in=vendor_ids).only("id", "code", "name"))
+    # Prefer longer codes first so amazonus wins over amazon when both exist.
+    vendors.sort(key=lambda v: len((v.code or "")), reverse=True)
+    for v in vendors:
+        code = (v.code or "").strip().lower()
+        name = (v.name or "").strip().lower()
+        if code and code in url_l:
+            return v.id
+        # Host fragments: amazon.com / ebay.com / aliexpress.com
+        for token in (code, name):
+            if not token:
+                continue
+            stem = token.replace(" ", "")
+            for suffix in ("us", "au", "uk", "ca"):
+                if stem.endswith(suffix) and len(stem) > len(suffix):
+                    stem = stem[: -len(suffix)]
+                    break
+            if stem and len(stem) >= 3 and stem in url_l:
+                return v.id
+    return None
+
+
 def _store_kind(store) -> str:
     return marketplace_kind(getattr(store, "marketplace", None))
 
@@ -635,8 +672,15 @@ def publish(user, store, listing_ids=None) -> dict:
 
 
 def scrape_listings(user, store, listing_ids=None) -> dict:
-    """Scrape vendor URLs on managed listings (same scrapers as catalog)."""
+    """Scrape vendor URLs on managed listings (same scrapers + pricing as catalog)."""
     from scrapers import close_amazon_session, get_price_and_stock
+    from sync.tasks import (
+        _apply_inventory,
+        _apply_pricing,
+        _build_store_vendor_pricing_inventory_caches,
+        _get_inventory_for_vendor_from_cache,
+        _get_pricing_for_vendor_from_cache,
+    )
 
     qs = StoreListing.objects.filter(user=user, store=store)
     if listing_ids:
@@ -657,6 +701,7 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
         )
 
     region = (getattr(store, "region", None) or "USA").strip() or "USA"
+    price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
     session = {}
     scraped = 0
     failed = 0
@@ -736,6 +781,12 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
                 rows.append(row)
                 continue
 
+            vendor_id = _vendor_id_from_url(url, price_by_vid, inv_by_vid)
+            pricing = _get_pricing_for_vendor_from_cache(vendor_id, price_by_vid, price_fb)
+            inventory_settings = _get_inventory_for_vendor_from_cache(
+                vendor_id, inv_by_vid, inv_fb
+            )
+
             update_fields = [
                 "updated_at",
                 "inventory_sync_status",
@@ -749,9 +800,13 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
             if price is not None:
                 vp = _safe_decimal(price)
                 listing.vendor_price = vp
-                listing.sale_price = vp
-                listing.original_price = vp
-                cents = int(vp * 100)
+                # Same pricing engine as catalog Product listings.
+                priced = _apply_pricing(vp, pricing)
+                if priced is None:
+                    priced = vp
+                listing.sale_price = priced
+                listing.original_price = priced
+                cents = int(priced * 100)
                 listing.sale_price_cents = cents
                 listing.original_price_cents = cents
                 update_fields.extend(
@@ -764,12 +819,14 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
                     ]
                 )
                 row["vendor_price"] = float(vp)
-                row["price"] = float(vp)
+                row["price"] = float(priced)
             if stock is not None:
                 try:
-                    listing.inventory = max(0, int(stock))
+                    raw_stock = max(0, int(stock))
                 except (TypeError, ValueError):
-                    listing.inventory = 0
+                    raw_stock = 0
+                # Same inventory ranges/multipliers as catalog Product listings.
+                listing.inventory = int(_apply_inventory(raw_stock, inventory_settings))
                 listing.infinite_quantity = False
                 update_fields.extend(["inventory", "infinite_quantity"])
                 row["inventory"] = listing.inventory

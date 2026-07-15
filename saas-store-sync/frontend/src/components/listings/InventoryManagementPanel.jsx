@@ -376,7 +376,8 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                                         </span>
                                     </td>
                                     <td className="px-3 py-2.5 text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                                        {l.margin_pct == null ? '—' : `${l.margin_pct > 0 ? '+' : ''}${l.margin_pct}%`}
+                                        {l.margin_display
+                                            || (l.margin_pct == null ? '—' : `${l.margin_pct > 0 ? '+' : ''}${l.margin_pct}%`)}
                                     </td>
                                     <td className="px-3 py-2.5 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">
                                         {l.last_scrape_at ? `Scrape · ${formatAgo(l.last_scrape_at)}` : '—'}

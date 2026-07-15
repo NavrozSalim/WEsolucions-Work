@@ -84,7 +84,13 @@ class StoreListingListCreateView(APIView):
 
     def get(self, request, store_pk):
         store = _get_store(request, store_pk)
-        qs = StoreListing.objects.filter(store=store, user=request.user)
+        qs = (
+            StoreListing.objects.filter(store=store, user=request.user)
+            .select_related('store')
+            .prefetch_related(
+                'store__vendor_price_settings__range_margins__price_range',
+            )
+        )
         qs = _filter_listings(qs, request)
         return Response(StoreListingSerializer(qs, many=True).data)
 
