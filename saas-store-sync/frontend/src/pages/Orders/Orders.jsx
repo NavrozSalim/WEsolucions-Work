@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
     Ban,
     CheckCircle2,
@@ -8,6 +9,7 @@ import {
     FlaskConical,
     Mail,
     MapPin,
+    MessageSquare,
     Phone,
     RefreshCw,
     Store as StoreIcon,
@@ -379,7 +381,7 @@ function InfoRow({ label, children }) {
     );
 }
 
-function OrderDetailPanel({ order }) {
+function OrderDetailPanel({ order, onOpenTicket }) {
     const d = orderDetails(order);
     const customer = d.customer || {};
     const shippingAddr = formatAddress(d.shippingAddress);
@@ -449,6 +451,34 @@ function OrderDetailPanel({ order }) {
                     </dl>
                 </InfoCard>
             </div>
+
+            {Array.isArray(order.related_tickets) && order.related_tickets.length > 0 && (
+                <InfoCard title="Related tickets">
+                    <ul className="space-y-2">
+                        {order.related_tickets.map((t) => (
+                            <li key={t.id}>
+                                <button
+                                    type="button"
+                                    onClick={() => onOpenTicket?.(t.id)}
+                                    className="inline-flex items-center gap-2 text-sm text-sky-600 hover:underline dark:text-sky-400"
+                                >
+                                    <MessageSquare className="h-4 w-4" />
+                                    <span className="font-medium">{t.customer_name || t.subject || 'Ticket'}</span>
+                                    <span className="text-xs text-slate-500 capitalize">· {t.status}</span>
+                                    {t.unread_count > 0 && (
+                                        <span className="rounded-full bg-sky-600 px-1.5 py-0.5 text-[10px] text-white">
+                                            {t.unread_count}
+                                        </span>
+                                    )}
+                                </button>
+                                {t.subject && (
+                                    <p className="mt-0.5 pl-6 text-xs text-slate-500">{t.subject}</p>
+                                )}
+                            </li>
+                        ))}
+                    </ul>
+                </InfoCard>
+            )}
 
             {billingAddr && (
                 <InfoCard title="Billing address">
@@ -607,9 +637,14 @@ function OrderDetailPanel({ order }) {
 }
 
 export default function Orders() {
+    const navigate = useNavigate();
+    const [searchParams, setSearchParams] = useSearchParams();
+    const initialStore = searchParams.get('store') || '';
+    const initialOrderKey = searchParams.get('order') || '';
+
     const [stores, setStores] = useState([]);
     const [storesLoading, setStoresLoading] = useState(true);
-    const [selectedStore, setSelectedStore] = useState('');
+    const [selectedStore, setSelectedStore] = useState(initialStore);
     const [orders, setOrders] = useState([]);
     const [loading, setLoading] = useState(false);
     const [refreshing, setRefreshing] = useState(false);
@@ -629,10 +664,15 @@ export default function Orders() {
                     (s) => s.management_mode === 'full_store'
                 );
                 setStores(managed);
-                if (managed.length === 1) setSelectedStore(managed[0].id);
+                if (initialStore && managed.some((s) => s.id === initialStore)) {
+                    setSelectedStore(initialStore);
+                } else if (!initialStore && managed.length === 1) {
+                    setSelectedStore(managed[0].id);
+                }
             })
             .catch(() => setMessage({ text: 'Failed to load stores.', variant: 'error' }))
             .finally(() => setStoresLoading(false));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const loadOrders = useCallback(
@@ -642,10 +682,20 @@ export default function Orders() {
             setter(true);
             getOrders(selectedStore, { refresh })
                 .then((res) => {
-                    setOrders(Array.isArray(res.data?.orders) ? res.data.orders : []);
+                    const list = Array.isArray(res.data?.orders) ? res.data.orders : [];
+                    setOrders(list);
                     const r = res.data?.refresh;
                     if (refresh && r) {
                         setMessage({ text: r.message || 'Orders refreshed.', variant: r.ok ? 'success' : 'error' });
+                    }
+                    if (initialOrderKey) {
+                        const match = list.find((o) => {
+                            const inv = String(o.invoice_number || '').toLowerCase();
+                            const key = String(o.external_order_key || '').toLowerCase();
+                            const want = initialOrderKey.toLowerCase();
+                            return inv === want || key === want;
+                        });
+                        if (match) setExpandedId(match.id);
                     }
                 })
                 .catch((err) => {
@@ -656,15 +706,27 @@ export default function Orders() {
                 })
                 .finally(() => setter(false));
         },
-        [selectedStore]
+        [selectedStore, initialOrderKey]
     );
 
     useEffect(() => {
         setOrders([]);
         setMessage(null);
         setExpandedId(null);
-        if (selectedStore) loadOrders(false);
-    }, [selectedStore, loadOrders]);
+        if (selectedStore) {
+            setSearchParams((prev) => {
+                const next = new URLSearchParams(prev);
+                next.set('store', selectedStore);
+                return next;
+            }, { replace: true });
+            loadOrders(false);
+        }
+    }, [selectedStore, loadOrders, setSearchParams]);
+
+    const openTicket = (ticketId) => {
+        if (!selectedStore || !ticketId) return;
+        navigate(`/tickets?store=${encodeURIComponent(selectedStore)}&ticket=${encodeURIComponent(ticketId)}`);
+    };
 
     const handleCreateTestOrder = () => {
         setCreatingTest(true);
@@ -822,6 +884,7 @@ export default function Orders() {
                                         <th className="px-4 py-2.5">Source</th>
                                         <th className="px-4 py-2.5">Total</th>
                                         <th className="px-4 py-2.5">Status</th>
+                                        <th className="px-4 py-2.5">Ticket</th>
                                         <th className="px-4 py-2.5">Ordered</th>
                                         <th className="px-4 py-2.5 text-right">Actions</th>
                                     </tr>
@@ -830,6 +893,8 @@ export default function Orders() {
                                     {orders.map((o) => {
                                         const currency = o.details?.totals?.currency || 'AUD';
                                         const orderedAt = o.details?.dates?.orderedAt || o.created_at;
+                                        const tickets = Array.isArray(o.related_tickets) ? o.related_tickets : [];
+                                        const primaryTicket = tickets[0] || null;
                                         return (
                                             <Fragment key={o.id}>
                                                 <tr className="border-t border-slate-100 dark:border-slate-800">
@@ -854,6 +919,26 @@ export default function Orders() {
                                                         <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[o.status] || STATUS_STYLES.new}`}>
                                                             {STATUS_LABELS[o.status] || o.status}
                                                         </span>
+                                                    </td>
+                                                    <td className="px-4 py-2.5">
+                                                        {primaryTicket ? (
+                                                            <button
+                                                                type="button"
+                                                                title={primaryTicket.subject || 'Open ticket'}
+                                                                onClick={() => openTicket(primaryTicket.id)}
+                                                                className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700 hover:bg-sky-100 dark:bg-sky-900/30 dark:text-sky-300 dark:hover:bg-sky-900/50"
+                                                            >
+                                                                <MessageSquare className="h-3.5 w-3.5" />
+                                                                {tickets.length > 1 ? `${tickets.length} tickets` : 'Open'}
+                                                                {primaryTicket.unread_count > 0 && (
+                                                                    <span className="rounded-full bg-sky-600 px-1 text-[10px] text-white">
+                                                                        {primaryTicket.unread_count}
+                                                                    </span>
+                                                                )}
+                                                            </button>
+                                                        ) : (
+                                                            <span className="text-xs text-slate-400">—</span>
+                                                        )}
                                                     </td>
                                                     <td className="px-4 py-2.5 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">
                                                         {formatDate(orderedAt)}
@@ -900,8 +985,8 @@ export default function Orders() {
                                                 </tr>
                                                 {expandedId === o.id && (
                                                     <tr className="border-t border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40">
-                                                        <td colSpan={8} className="px-4 py-4">
-                                                            <OrderDetailPanel order={o} />
+                                                        <td colSpan={9} className="px-4 py-4">
+                                                            <OrderDetailPanel order={o} onOpenTicket={openTicket} />
                                                         </td>
                                                     </tr>
                                                 )}

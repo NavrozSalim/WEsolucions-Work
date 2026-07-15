@@ -231,13 +231,33 @@ class StoreOrdersView(APIView):
                 refresh_result = order_service.fetch(request.user, store)
             except MarketplaceError as exc:
                 refresh_result = {'ok': False, 'message': str(exc), 'fetched': 0}
-        orders = (
+        orders = list(
             MarketplaceOrder.objects.filter(store=store, user=request.user)
             .prefetch_related('shipments')
         )
+        tickets_by_order_key: dict[str, list] = {}
+        for ticket in SupportTicket.objects.filter(store=store, user=request.user).exclude(
+            related_order_key='',
+        ).only(
+            'id', 'subject', 'status', 'unread_count', 'customer_name', 'related_order_key',
+        ):
+            key = (ticket.related_order_key or '').strip().lower()
+            if not key:
+                continue
+            tickets_by_order_key.setdefault(key, []).append({
+                'id': str(ticket.id),
+                'subject': ticket.subject or 'Customer message',
+                'status': ticket.status,
+                'unread_count': ticket.unread_count or 0,
+                'customer_name': ticket.customer_name or '',
+            })
         return Response({
             'refresh': refresh_result,
-            'orders': MarketplaceOrderSerializer(orders, many=True).data,
+            'orders': MarketplaceOrderSerializer(
+                orders,
+                many=True,
+                context={'tickets_by_order_key': tickets_by_order_key},
+            ).data,
         })
 
 

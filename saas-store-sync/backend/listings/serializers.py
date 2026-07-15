@@ -75,6 +75,7 @@ class OrderShipmentSerializer(serializers.ModelSerializer):
 class MarketplaceOrderSerializer(serializers.ModelSerializer):
     shipments = OrderShipmentSerializer(many=True, read_only=True)
     details = serializers.SerializerMethodField()
+    related_tickets = serializers.SerializerMethodField()
 
     class Meta:
         model = MarketplaceOrder
@@ -83,7 +84,7 @@ class MarketplaceOrderSerializer(serializers.ModelSerializer):
             'customer_info_json', 'line_items_json',
             'status', 'shipping_status', 'total_amount_cents',
             'environment', 'shipments', 'raw_response_json',
-            'details', 'created_at', 'updated_at',
+            'details', 'related_tickets', 'created_at', 'updated_at',
         ]
 
     def get_details(self, obj):
@@ -96,6 +97,24 @@ class MarketplaceOrderSerializer(serializers.ModelSerializer):
             total_cents=obj.total_amount_cents,
         )
         return enrich_order_line_items(details, obj.store)
+
+    def get_related_tickets(self, obj):
+        """Tickets whose related_order_key matches this order's invoice/key."""
+        by_key = self.context.get('tickets_by_order_key') or {}
+        keys = []
+        for candidate in (obj.invoice_number, obj.external_order_key):
+            text = str(candidate or '').strip().lower()
+            if text and text not in keys:
+                keys.append(text)
+        seen = set()
+        out = []
+        for key in keys:
+            for ticket in by_key.get(key, []):
+                tid = ticket.get('id')
+                if tid and tid not in seen:
+                    seen.add(tid)
+                    out.append(ticket)
+        return out
 
 
 class TicketMessageSerializer(serializers.ModelSerializer):

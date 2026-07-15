@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
     FlaskConical,
     Mail,
     MessageSquare,
+    Receipt,
     RefreshCw,
     Send,
+    User,
 } from 'lucide-react';
 import Button from '../../components/ui/Button';
 import Select from '../../components/ui/Select';
@@ -35,15 +38,19 @@ function formatDate(value) {
 }
 
 export default function Tickets() {
+    const [searchParams, setSearchParams] = useSearchParams();
+    const initialStore = searchParams.get('store') || '';
+    const initialTicket = searchParams.get('ticket') || null;
+
     const [stores, setStores] = useState([]);
     const [storesLoading, setStoresLoading] = useState(true);
-    const [selectedStore, setSelectedStore] = useState('');
+    const [selectedStore, setSelectedStore] = useState(initialStore);
     const [tickets, setTickets] = useState([]);
     const [loading, setLoading] = useState(false);
     const [refreshing, setRefreshing] = useState(false);
     const [creatingTest, setCreatingTest] = useState(false);
     const [message, setMessage] = useState(null);
-    const [selectedId, setSelectedId] = useState(null);
+    const [selectedId, setSelectedId] = useState(initialTicket);
     const [replyBody, setReplyBody] = useState('');
     const [replyLoading, setReplyLoading] = useState(false);
 
@@ -54,10 +61,15 @@ export default function Tickets() {
                     (s) => s.management_mode === 'full_store'
                 );
                 setStores(managed);
-                if (managed.length === 1) setSelectedStore(managed[0].id);
+                if (initialStore && managed.some((s) => s.id === initialStore)) {
+                    setSelectedStore(initialStore);
+                } else if (!initialStore && managed.length === 1) {
+                    setSelectedStore(managed[0].id);
+                }
             })
             .catch(() => setMessage({ text: 'Failed to load stores.', variant: 'error' }))
             .finally(() => setStoresLoading(false));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const loadTickets = useCallback(
@@ -79,7 +91,8 @@ export default function Tickets() {
                         setMessage({ text: r.message || 'Tickets refreshed.', variant });
                     }
                     setSelectedId((prev) => {
-                        if (prev && list.some((t) => t.id === prev)) return prev;
+                        const want = initialTicket || prev;
+                        if (want && list.some((t) => t.id === want)) return want;
                         return list[0]?.id || null;
                     });
                 })
@@ -91,16 +104,32 @@ export default function Tickets() {
                 })
                 .finally(() => setter(false));
         },
-        [selectedStore]
+        [selectedStore, initialTicket]
     );
 
     useEffect(() => {
         setTickets([]);
-        setSelectedId(null);
         setReplyBody('');
         setMessage(null);
-        if (selectedStore) loadTickets(false);
-    }, [selectedStore, loadTickets]);
+        if (selectedStore) {
+            setSearchParams((prev) => {
+                const next = new URLSearchParams(prev);
+                next.set('store', selectedStore);
+                return next;
+            }, { replace: true });
+            loadTickets(false);
+        }
+    }, [selectedStore, loadTickets, setSearchParams]);
+
+    useEffect(() => {
+        if (!selectedId || !selectedStore) return;
+        setSearchParams((prev) => {
+            const next = new URLSearchParams(prev);
+            next.set('store', selectedStore);
+            next.set('ticket', selectedId);
+            return next;
+        }, { replace: true });
+    }, [selectedId, selectedStore, setSearchParams]);
 
     const selected = useMemo(
         () => tickets.find((t) => t.id === selectedId) || null,
@@ -214,7 +243,7 @@ export default function Tickets() {
             ) : loading ? (
                 <p className="text-sm text-slate-500 dark:text-slate-400">Loading tickets…</p>
             ) : (
-                <div className="grid gap-4 lg:grid-cols-[22rem_1fr] min-h-[28rem]">
+                <div className="grid gap-4 lg:grid-cols-[26rem_1fr] min-h-[28rem]">
                     <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden">
                         <div className="border-b border-slate-200 dark:border-slate-700 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
                             Inbox ({tickets.length})
@@ -236,8 +265,8 @@ export default function Tickets() {
                                             }`}
                                         >
                                             <div className="flex items-start justify-between gap-2">
-                                                <p className="font-medium text-sm text-slate-900 dark:text-slate-100 line-clamp-1">
-                                                    {t.subject || 'Customer message'}
+                                                <p className="font-semibold text-sm text-slate-900 dark:text-slate-100 line-clamp-1">
+                                                    {t.customer_name || t.customer_email || 'Unknown customer'}
                                                 </p>
                                                 {t.unread_count > 0 && (
                                                     <span className="shrink-0 rounded-full bg-sky-600 text-white text-[10px] px-1.5 py-0.5">
@@ -245,14 +274,20 @@ export default function Tickets() {
                                                     </span>
                                                 )}
                                             </div>
-                                            <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400 line-clamp-1">
-                                                {t.customer_name || t.customer_email || 'Customer'}
+                                            <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-300 line-clamp-1">
+                                                {t.subject || 'Customer message'}
                                             </p>
-                                            <div className="mt-1.5 flex items-center justify-between gap-2">
-                                                <span className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-medium ${STATUS_STYLES[t.status] || STATUS_STYLES.open}`}>
+                                            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400">
+                                                <span className="inline-flex items-center gap-1">
+                                                    <Receipt className="h-3 w-3" />
+                                                    {t.related_order_key
+                                                        ? `Invoice ${t.related_order_key}`
+                                                        : 'No invoice linked'}
+                                                </span>
+                                                <span className={`inline-block rounded-full px-2 py-0.5 font-medium ${STATUS_STYLES[t.status] || STATUS_STYLES.open}`}>
                                                     {t.status}
                                                 </span>
-                                                <span className="text-[11px] text-slate-400">{formatDate(t.last_message_at || t.created_at)}</span>
+                                                <span className="ml-auto">{formatDate(t.last_message_at || t.created_at)}</span>
                                             </div>
                                         </button>
                                     </li>
@@ -272,16 +307,35 @@ export default function Tickets() {
                                     <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
                                         {selected.subject || 'Customer message'}
                                     </h2>
-                                    <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
-                                        <span className="inline-flex items-center gap-1">
+                                    <div className="mt-2 grid gap-1.5 text-sm text-slate-600 dark:text-slate-300 sm:grid-cols-2">
+                                        <p className="inline-flex items-center gap-1.5 min-w-0">
+                                            <User className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                                            <span className="font-medium text-slate-900 dark:text-slate-100 truncate">
+                                                {selected.customer_name || '—'}
+                                            </span>
+                                            {selected.customer_email ? (
+                                                <span className="text-xs text-slate-500 truncate">· {selected.customer_email}</span>
+                                            ) : null}
+                                        </p>
+                                        <p className="inline-flex items-center gap-1.5">
+                                            <Receipt className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                                            {selected.related_order_key ? (
+                                                <Link
+                                                    to={`/orders?store=${encodeURIComponent(selectedStore)}&order=${encodeURIComponent(selected.related_order_key)}`}
+                                                    className="font-medium text-sky-600 hover:underline dark:text-sky-400"
+                                                >
+                                                    Invoice {selected.related_order_key}
+                                                </Link>
+                                            ) : (
+                                                <span className="text-slate-500">No invoice linked</span>
+                                            )}
+                                        </p>
+                                        <p className="inline-flex items-center gap-1.5 text-xs text-slate-500 sm:col-span-2">
                                             <Mail className="h-3.5 w-3.5" />
-                                            {selected.customer_name || '—'}
-                                            {selected.customer_email ? ` · ${selected.customer_email}` : ''}
-                                        </span>
-                                        {selected.related_order_key && (
-                                            <span>Order {selected.related_order_key}</span>
-                                        )}
-                                        <span className="capitalize">{selected.environment}</span>
+                                            Status: <span className="capitalize">{selected.status}</span>
+                                            {' · '}
+                                            <span className="capitalize">{selected.environment}</span>
+                                        </p>
                                     </div>
                                 </div>
 
@@ -327,11 +381,10 @@ export default function Tickets() {
                                         onChange={(e) => setReplyBody(e.target.value)}
                                         rows={3}
                                         placeholder="Type your reply…"
-                                        className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-sm focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-none"
-                                        required
+                                        className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100"
                                     />
-                                    <div className="mt-3 flex justify-end">
-                                        <Button variant="primary" type="submit" disabled={replyLoading || !replyBody.trim()}>
+                                    <div className="mt-2 flex justify-end">
+                                        <Button type="submit" disabled={replyLoading || !replyBody.trim()}>
                                             <Send className="mr-2 h-4 w-4" />
                                             {replyLoading ? 'Sending…' : 'Send reply'}
                                         </Button>

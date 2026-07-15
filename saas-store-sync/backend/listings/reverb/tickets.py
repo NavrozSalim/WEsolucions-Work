@@ -176,12 +176,26 @@ def upsert_conversation(user, store, raw: dict, *, shop_user_id=None) -> Support
         _first(
             raw.get("order_number"),
             raw.get("order_id"),
+            raw.get("orderNumber"),
+            raw.get("invoice_number"),
+            raw.get("invoiceNumber"),
             _dig(raw, "order.order_number"),
             _dig(raw, "order.id"),
+            _dig(raw, "order.number"),
+            _dig(raw, "about.order_number"),
+            _dig(raw, "about.order_id"),
+            # HAL self/order links sometimes end with the order number
+            (
+                str(_dig(raw, "_links.order.href") or "").rstrip("/").split("/")[-1]
+                if _dig(raw, "_links.order.href") else None
+            ),
             "",
         )
         or ""
     )[:255]
+    # Ignore non-order path junk like "orders" or "selling"
+    if related_order.lower() in ("orders", "selling", "order", "api", "my"):
+        related_order = ""
 
     unread_flag = raw.get("unread")
     if unread_flag is None:
