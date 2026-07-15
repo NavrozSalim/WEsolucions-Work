@@ -308,7 +308,7 @@ function CancelOrderModal({ open, onClose, onSubmit, order, loading, storeId }) 
                         </div>
                     )}
                     <p className="text-sm text-slate-600 dark:text-slate-400">
-                        This marks the order cancelled here and requests a cancel/refund on Lasoo.
+                        This marks the order cancelled here and requests a cancel/refund on the marketplace.
                         Choose a reason from the marketplace list.
                     </p>
                     <Select
@@ -409,7 +409,7 @@ function OrderDetailPanel({ order }) {
                         </p>
                     )}
                     {!customer.email && !customer.phone && customerName(order) === '—' && (
-                        <p className="text-slate-500">No customer details from Lasoo.</p>
+                        <p className="text-slate-500">No customer details from the marketplace.</p>
                     )}
                 </InfoCard>
 
@@ -439,7 +439,7 @@ function OrderDetailPanel({ order }) {
                             <InfoRow label="Paid">{formatDate(dates.paidAt)}</InfoRow>
                         )}
                         {d.marketplaceStatus && (
-                            <InfoRow label="Lasoo status">
+                            <InfoRow label="Marketplace status">
                                 <span className="capitalize">{String(d.marketplaceStatus)}</span>
                             </InfoRow>
                         )}
@@ -508,7 +508,7 @@ function OrderDetailPanel({ order }) {
                         </table>
                     </div>
                 ) : (
-                    <p className="text-slate-500">No line item details from Lasoo.</p>
+                    <p className="text-slate-500">No line item details from the marketplace.</p>
                 )}
             </DetailSection>
 
@@ -517,7 +517,7 @@ function OrderDetailPanel({ order }) {
                     {(marketplaceShip.status || marketplaceShip.trackingNumber || marketplaceShip.carrier) ? (
                         <dl className="mb-3 space-y-1.5">
                             {marketplaceShip.status && (
-                                <InfoRow label="Lasoo shipping">
+                                <InfoRow label="Shipping status">
                                     <span className="capitalize">{String(marketplaceShip.status).replace(/_/g, ' ')}</span>
                                 </InfoRow>
                             )}
@@ -747,7 +747,7 @@ export default function Orders() {
         <div className="space-y-4">
             <PageHeader
                 title="Orders"
-                description="Orders from your managed marketplace stores (Lasoo, Reverb). Expand a row for customer, address, line items, and shipping details."
+                description="Orders from your managed marketplace stores. Expand a row for customer, address, line items, and shipping details."
             />
 
             {message && (
@@ -799,7 +799,7 @@ export default function Orders() {
                 <EmptyState
                     icon={StoreIcon}
                     title="No managed stores yet"
-                    description='Create a store with the "Managed store" option (Reverb or Lasoo) to manage orders here.'
+                    description='Create a store with the "Managed store" option to manage orders here.'
                 />
             )}
 
