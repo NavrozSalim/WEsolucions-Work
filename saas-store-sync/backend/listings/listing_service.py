@@ -515,7 +515,19 @@ def _publish_reverb(user, store, publishable: list) -> dict:
         if not condition_uuid:
             listing.validation_errors_json = [
                 f'Could not resolve Reverb condition "{condition_raw}". '
-                "Use a condition UUID or a name like Brand New / Excellent."
+                "Use a condition name like Brand New / Excellent, or pick from the dropdown."
+            ]
+            listing.status = ListingStatus.VALIDATION_FAILED
+            listing.save(update_fields=["validation_errors_json", "status", "updated_at"])
+            failures += 1
+            continue
+
+        category_raw = data.get("category_uuid") or data.get("category") or ""
+        category_uuid = reverb_listings.resolve_category_uuid(adapter, category_raw)
+        if not category_uuid:
+            listing.validation_errors_json = [
+                f'Could not resolve Reverb category "{category_raw}". '
+                "Use the exact Reverb category name (e.g. Accessories / Cables) or pick from the dropdown."
             ]
             listing.status = ListingStatus.VALIDATION_FAILED
             listing.save(update_fields=["validation_errors_json", "status", "updated_at"])
@@ -523,7 +535,9 @@ def _publish_reverb(user, store, publishable: list) -> dict:
             continue
 
         payload = reverb_listings.build_create_payload(
-            data, condition_uuid=condition_uuid,
+            data,
+            condition_uuid=condition_uuid,
+            category_uuid=category_uuid,
         )
         try:
             response = adapter.create_listing(payload)

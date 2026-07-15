@@ -10,10 +10,15 @@ from rest_framework.views import APIView
 
 from stores.models import Store
 
+from store_adapters import get_adapter
+from store_adapters.reverb_adapter import ReverbAPIError
+from stores.credentials import marketplace_kind
+
 from . import csv_import, export_xlsx, listing_service, order_service, photo_upload, shipping_service, ticket_service
 from .errors import MarketplaceError
 from .models import ListingAction, ListingStatus, ListingUpload, MarketplaceOrder, StoreListing, SupportTicket
 from .photo_upload import PhotoUploadError
+from .reverb import listings as reverb_listings
 from .serializers import (
     ListingInputSerializer,
     ListingUploadSerializer,
@@ -125,6 +130,57 @@ class StoreListingPhotoUploadView(APIView):
             'photos': results,
             'urls': [r['url'] for r in results],
         }, status=status.HTTP_201_CREATED)
+
+
+class StoreReverbCategoriesView(APIView):
+    """Reverb category catalog for dropdown / name→UUID mapping."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        if marketplace_kind(store.marketplace) != 'reverb':
+            return Response(
+                {'detail': 'Categories catalog is only available for Reverb stores.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        q = (request.query_params.get('q') or '').strip()
+        try:
+            adapter = get_adapter(store)
+            raw = adapter.list_categories_flat()
+        except (ReverbAPIError, Exception) as exc:  # noqa: BLE001
+            logger.warning('Reverb categories fetch failed: %s', exc)
+            return Response(
+                {'detail': str(exc) or 'Could not load Reverb categories.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        categories = reverb_listings.normalize_categories_for_ui(raw, q=q)
+        # Cap large unfiltered responses for the UI
+        if not q and len(categories) > 500:
+            categories = categories[:500]
+        return Response({'categories': categories})
+
+
+class StoreReverbConditionsView(APIView):
+    """Reverb condition catalog for dropdown."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        if marketplace_kind(store.marketplace) != 'reverb':
+            return Response(
+                {'detail': 'Conditions catalog is only available for Reverb stores.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            adapter = get_adapter(store)
+            raw = adapter.list_listing_conditions()
+        except (ReverbAPIError, Exception) as exc:  # noqa: BLE001
+            logger.warning('Reverb conditions fetch failed: %s', exc)
+            return Response(
+                {'detail': str(exc) or 'Could not load Reverb conditions.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response({'conditions': reverb_listings.normalize_conditions_for_ui(raw)})
 
 
 class StoreListingDetailView(APIView):

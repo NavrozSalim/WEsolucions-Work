@@ -196,7 +196,7 @@ class ListingServiceTests(TestCase):
         )
         csv_text = csv_import.build_template_csv("create", store=store2)
         self.assertIn("Make", csv_text)
-        self.assertIn("Category UUID", csv_text)
+        self.assertIn("Category", csv_text)
         self.assertIn("status", csv_text)
         self.assertIn("free_shipping", csv_text)
         self.assertNotIn("Product Key", csv_text)
@@ -204,6 +204,7 @@ class ListingServiceTests(TestCase):
         rows = csv_import.parse_upload("reverb.csv", csv_text.encode())
         self.assertEqual(rows[0]["publish_status"], "draft")
         self.assertTrue(rows[0]["free_shipping"])
+        self.assertTrue(rows[0].get("category") or rows[0].get("category_uuid"))
 
 
 class OrderNormalizeTests(TestCase):

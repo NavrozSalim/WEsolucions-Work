@@ -36,6 +36,16 @@ export const uploadListingPhotos = (storeId, files) => {
     });
 };
 
+/** Reverb category catalog (uuid + full_name). Optional search `q`. */
+export const getReverbCategories = (storeId, q = '') =>
+    api.get(`/stores/${storeId}/listings/reverb/categories/`, {
+        params: q ? { q } : {},
+    });
+
+/** Reverb condition catalog (uuid + display name). */
+export const getReverbConditions = (storeId) =>
+    api.get(`/stores/${storeId}/listings/reverb/conditions/`);
+
 export const getListingUploads = (storeId) =>
     api.get(`/stores/${storeId}/listings/uploads/`);
 

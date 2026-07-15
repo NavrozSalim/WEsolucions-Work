@@ -15,6 +15,8 @@ from .views import (
     StoreOrdersExportView,
     StoreOrdersView,
     StoreOrderTestView,
+    StoreReverbCategoriesView,
+    StoreReverbConditionsView,
     StoreTicketReplyView,
     StoreTicketsExportView,
     StoreTicketsView,
@@ -24,6 +26,8 @@ from .views import (
 urlpatterns = [
     path('stores/<uuid:store_pk>/listings/', StoreListingListCreateView.as_view(), name='store-listings'),
     path('stores/<uuid:store_pk>/listings/photos/', StoreListingPhotoUploadView.as_view(), name='store-listings-photos'),
+    path('stores/<uuid:store_pk>/listings/reverb/categories/', StoreReverbCategoriesView.as_view(), name='store-reverb-categories'),
+    path('stores/<uuid:store_pk>/listings/reverb/conditions/', StoreReverbConditionsView.as_view(), name='store-reverb-conditions'),
     path('stores/<uuid:store_pk>/listings/template/', StoreListingTemplateView.as_view(), name='store-listings-template'),
     path('stores/<uuid:store_pk>/listings/bulk-upload/', StoreListingBulkUploadView.as_view(), name='store-listings-bulk-upload'),
     path('stores/<uuid:store_pk>/listings/uploads/', StoreListingUploadHistoryView.as_view(), name='store-listings-uploads'),

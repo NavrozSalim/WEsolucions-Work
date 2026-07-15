@@ -76,7 +76,7 @@ REVERB_TEMPLATE_HEADERS = [
     "Finish",
     "Year",
     "Condition",
-    "Category UUID",
+    "Category",
     "Price",
     "Currency",
     "Inventory",
@@ -184,6 +184,8 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
             normalized["condition_uuid"] = normalized["condition"]
         if normalized.get("category_uuid") and not normalized.get("category"):
             normalized["category"] = normalized["category_uuid"]
+        if normalized.get("category") and not normalized.get("category_uuid"):
+            normalized["category_uuid"] = normalized["category"]
         if normalized.get("sale_price") and not normalized.get("original_price"):
             normalized["original_price"] = normalized["sale_price"]
         action = str(normalized.get("action", "")).strip().lower()
@@ -213,8 +215,8 @@ def build_template_csv(action: str = "create", store=None) -> str:
             "Description": "Great pedal in excellent condition.",
             "Finish": "",
             "Year": "",
-            "Condition": "Excellent",
-            "Category UUID": "paste-uuid-from-reverb-categories",
+            "Condition": "Brand New",
+            "Category": "Accessories / Cables",
             "Price": "49.99",
             "Currency": "USD",
             "Inventory": "1",

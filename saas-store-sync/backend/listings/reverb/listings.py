@@ -165,8 +165,8 @@ def validate_listing(data: dict) -> list[str]:
     category = str(data.get("category_uuid") or data.get("category") or "").strip()
     if not category:
         errors.append(
-            f"Category UUID is required for SKU {label} "
-            "(from Reverb /api/categories/flat)."
+            f"Category is required for SKU {label} "
+            "(Reverb category name from the catalog, or a category UUID)."
         )
 
     if not _photo_list(data.get("image_urls")):
@@ -206,13 +206,28 @@ def listing_to_data(listing) -> dict:
     }
 
 
+def _looks_like_uuid(text: str) -> bool:
+    t = str(text or "").strip()
+    return len(t) >= 32 and "-" in t
+
+
+def _norm_label(text: str) -> str:
+    return (
+        str(text or "")
+        .strip()
+        .lower()
+        .replace("_", " ")
+        .replace("/", " ")
+        .replace("  ", " ")
+    )
+
+
 def resolve_condition_uuid(adapter, condition_value: str) -> str | None:
     """Map a condition UUID or display name to a Reverb condition UUID."""
     text = str(condition_value or "").strip()
     if not text:
         return None
-    # Looks like a UUID already
-    if len(text) >= 32 and "-" in text:
+    if _looks_like_uuid(text):
         return text
     want = text.lower().replace("_", " ").strip()
     want = CONDITION_NAME_HINTS.get(want, want)
@@ -221,20 +236,98 @@ def resolve_condition_uuid(adapter, condition_value: str) -> str | None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not load Reverb listing conditions: %s", exc)
         return None
+    exact = None
+    partial = None
     for item in conditions:
         if not isinstance(item, dict):
             continue
         name = str(item.get("display_name") or item.get("name") or "").strip().lower()
         uuid = str(item.get("uuid") or item.get("id") or "").strip()
-        if name == want and uuid:
-            return uuid
-        # partial match e.g. "excellent" in "Excellent"
-        if want and name and (want in name or name in want) and uuid:
-            return uuid
-    return None
+        if not uuid:
+            continue
+        if name == want:
+            exact = uuid
+            break
+        if want and name and (want in name or name in want) and not partial:
+            partial = uuid
+    return exact or partial
 
 
-def build_create_payload(data: dict, *, condition_uuid: str, publish: bool | None = None) -> dict:
+def resolve_category_uuid(adapter, category_value: str) -> str | None:
+    """Map a category UUID or Reverb full_name (exact preferred) to a UUID."""
+    text = str(category_value or "").strip()
+    if not text:
+        return None
+    if _looks_like_uuid(text):
+        return text
+    want = _norm_label(text)
+    want_raw = text.lower().strip()
+    try:
+        categories = adapter.list_categories_flat()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load Reverb categories: %s", exc)
+        return None
+
+    exact = None
+    ends_with = None
+    contains = None
+    for item in categories:
+        if not isinstance(item, dict):
+            continue
+        uuid = str(item.get("uuid") or item.get("id") or "").strip()
+        if not uuid:
+            continue
+        full = str(item.get("full_name") or item.get("name") or "").strip()
+        full_l = full.lower()
+        full_n = _norm_label(full)
+        # leaf name after last slash, e.g. "Accessories / Cables" → "cables"
+        leaf = full_l.split("/")[-1].strip() if "/" in full_l else full_l
+
+        if full_l == want_raw or full_n == want:
+            exact = uuid
+            break
+        if leaf == want_raw or _norm_label(leaf) == want:
+            if not ends_with:
+                ends_with = uuid
+        elif want and (want in full_n or want_raw in full_l):
+            if not contains:
+                contains = uuid
+    return exact or ends_with or contains
+
+
+def normalize_conditions_for_ui(raw: list) -> list[dict]:
+    """[{uuid, name}] for condition dropdown."""
+    out = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        uuid = str(item.get("uuid") or item.get("id") or "").strip()
+        name = str(item.get("display_name") or item.get("name") or "").strip()
+        if uuid and name:
+            out.append({"uuid": uuid, "name": name})
+    return out
+
+
+def normalize_categories_for_ui(raw: list, *, q: str = "") -> list[dict]:
+    """[{uuid, name}] for category dropdown; optional search filter."""
+    needle = str(q or "").strip().lower()
+    out = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        uuid = str(item.get("uuid") or item.get("id") or "").strip()
+        name = str(item.get("full_name") or item.get("name") or "").strip()
+        if not uuid or not name:
+            continue
+        if needle and needle not in name.lower():
+            continue
+        out.append({"uuid": uuid, "name": name})
+    return out
+
+
+def build_create_payload(
+    data: dict, *, condition_uuid: str, category_uuid: str | None = None, publish: bool | None = None,
+) -> dict:
     """Body for POST /api/listings.
 
     ``publish`` defaults from the row's status column (live → true, draft → false).
@@ -248,7 +341,9 @@ def build_create_payload(data: dict, *, condition_uuid: str, publish: bool | Non
     currency = (str(data.get("currency") or "USD").strip().upper() or "USD")
     make = str(data.get("make") or data.get("brand") or "").strip()
     model = str(data.get("model") or "").strip()
-    category_uuid = str(data.get("category_uuid") or data.get("category") or "").strip()
+    cat_uuid = (category_uuid or "").strip() or str(
+        data.get("category_uuid") or data.get("category") or ""
+    ).strip()
     photos = _photo_list(data.get("image_urls"))
     try:
         inventory = int(data.get("inventory") or 0)
@@ -267,7 +362,7 @@ def build_create_payload(data: dict, *, condition_uuid: str, publish: bool | Non
         "sku": str(data.get("sku") or "").strip(),
         "price": {"amount": f"{price.quantize(Decimal('0.01'))}", "currency": currency},
         "condition": {"uuid": condition_uuid},
-        "categories": [{"uuid": category_uuid}],
+        "categories": [{"uuid": cat_uuid}],
         "photos": photos,
         "has_inventory": True,
         "inventory": max(0, inventory),

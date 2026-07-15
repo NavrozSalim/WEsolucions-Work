@@ -331,6 +331,20 @@ class ReverbAdapter(BaseStoreAdapter):
                     return conditions
         return data if isinstance(data, list) else []
 
+    def list_categories_flat(self) -> list:
+        """GET /api/categories/flat — category UUID + full_name catalog."""
+        data = self._request("GET", "/api/categories/flat")
+        if isinstance(data, dict):
+            categories = data.get("categories")
+            if isinstance(categories, list):
+                return categories
+            embedded = data.get("_embedded")
+            if isinstance(embedded, dict):
+                categories = embedded.get("categories")
+                if isinstance(categories, list):
+                    return categories
+        return data if isinstance(data, list) else []
+
     def update_product(self, external_id, price=None, stock=None, **kwargs):
         """Update listing price and/or inventory. PUT /api/listings/{id}."""
         body = {}

@@ -5,6 +5,7 @@ import Input from '../ui/Input';
 import Select from '../ui/Select';
 import { createListing, updateListing } from '../../services/listingService';
 import ListingPhotoUploader from './ListingPhotoUploader';
+import { ReverbCategorySelect, ReverbConditionSelect } from './ReverbCatalogSelects';
 
 const EMPTY_LASOO = {
     action: 'create',
@@ -261,18 +262,16 @@ export default function ListingFormModal({
                                 </div>
                                 <Input label="Finish (optional)" value={form.finish} onChange={set('finish')} />
                                 <Input label="Year (optional)" value={form.year} onChange={set('year')} />
-                                <Input
-                                    label="Condition"
-                                    placeholder="Excellent, Brand New, or a condition UUID"
+                                <ReverbConditionSelect
+                                    storeId={storeId}
                                     value={form.condition_uuid}
-                                    onChange={set('condition_uuid')}
+                                    onChange={(uuid) => setForm((f) => ({ ...f, condition_uuid: uuid }))}
                                     required
                                 />
-                                <Input
-                                    label="Category UUID"
-                                    placeholder="From Reverb /api/categories/flat"
+                                <ReverbCategorySelect
+                                    storeId={storeId}
                                     value={form.category_uuid}
-                                    onChange={set('category_uuid')}
+                                    onChange={(uuid) => setForm((f) => ({ ...f, category_uuid: uuid }))}
                                     required
                                 />
                                 <Input
