@@ -148,7 +148,10 @@ export default function Tickets() {
 
     const storeOptions = [
         { value: '', label: storesLoading ? 'Loading stores…' : 'Select a store' },
-        ...stores.map((s) => ({ value: s.id, label: s.name })),
+        ...stores.map((s) => ({
+            value: s.id,
+            label: `${s.name}${s.marketplace_name ? ` (${s.marketplace_name})` : ''}`,
+        })),
     ];
 
     return (
@@ -206,7 +209,7 @@ export default function Tickets() {
                 <EmptyState
                     icon={MessageSquare}
                     title="Select a store"
-                    description="Choose a managed Lasoo store to view and answer customer tickets."
+                    description="Choose a managed store to view and answer customer tickets."
                 />
             ) : loading ? (
                 <p className="text-sm text-slate-500 dark:text-slate-400">Loading tickets…</p>

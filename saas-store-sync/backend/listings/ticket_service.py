@@ -1,10 +1,8 @@
 """Customer support tickets: fetch from marketplace, store locally, reply.
 
-Lasoo Connect does not currently expose a public Tickets/Messages query in
-staging. This service still:
-- polls the known endpoint keys hourly / on demand
-- upserts any tickets/messages that appear when the API becomes available
-- stores seller replies locally and attempts marketplace delivery
+Supports:
+- Lasoo Connect (when Tickets/Messages queries exist)
+- Reverb conversations (GET /api/my/conversations + reply)
 """
 from __future__ import annotations
 
@@ -38,8 +36,45 @@ def _require_lasoo(store):
     if kind != "lasoo":
         raise MarketplaceError(
             f'Ticket management is not supported yet for "{kind or "this marketplace"}". '
-            "Currently only Lasoo managed stores are supported."
+            "Currently Lasoo and Reverb managed stores are supported."
         )
+
+
+def fetch(user, store, page: int = 1, take: int = 50) -> dict:
+    """Pull tickets/conversations from the store's marketplace and upsert locally."""
+    kind = marketplace_kind(store.marketplace)
+    if kind == "reverb":
+        from .reverb import tickets as reverb_tickets
+        return reverb_tickets.fetch(user, store)
+    if kind != "lasoo":
+        raise MarketplaceError(
+            f'Ticket management is not supported yet for "{kind or "this marketplace"}". '
+            "Currently Lasoo and Reverb managed stores are supported."
+        )
+    return _fetch_lasoo(user, store, page=page, take=take)
+
+
+def reply(ticket: SupportTicket, *, body: str, sender_name: str = "") -> dict:
+    """Store an outbound reply and attempt delivery to the marketplace/customer."""
+    kind = marketplace_kind(ticket.store.marketplace)
+    if kind == "reverb":
+        from .reverb import tickets as reverb_tickets
+        return reverb_tickets.reply(ticket, body=body, sender_name=sender_name)
+    if kind != "lasoo":
+        raise MarketplaceError(
+            f'Ticket replies are not supported yet for "{kind or "this marketplace"}".'
+        )
+    return _reply_lasoo(ticket, body=body, sender_name=sender_name)
+
+
+def create_test_ticket(user, store) -> dict:
+    """Create a local sample inbound ticket so the UI can be exercised."""
+    kind = marketplace_kind(store.marketplace)
+    if kind == "reverb":
+        from .reverb import tickets as reverb_tickets
+        return reverb_tickets.create_test_ticket(user, store)
+    _require_lasoo(store)
+    return _create_test_ticket_lasoo(user, store)
 
 
 def _query_missing(result) -> bool:
@@ -112,9 +147,8 @@ def _extract_list(data, *keys) -> list:
     return []
 
 
-def fetch(user, store, page: int = 1, take: int = 50) -> dict:
+def _fetch_lasoo(user, store, page: int = 1, take: int = 50) -> dict:
     """Pull tickets/messages from Lasoo and upsert them locally."""
-    _require_lasoo(store)
     environment = store.lasoo_environment or "staging"
     client = LasooClient(store, environment)
 
@@ -193,13 +227,12 @@ def fetch(user, store, page: int = 1, take: int = 50) -> dict:
     }
 
 
-def reply(ticket: SupportTicket, *, body: str, sender_name: str = "") -> dict:
-    """Store an outbound reply and attempt delivery to the marketplace/customer."""
+def _reply_lasoo(ticket: SupportTicket, *, body: str, sender_name: str = "") -> dict:
+    """Store an outbound reply and attempt delivery via Lasoo."""
     text = (body or "").strip()
     if not text:
         raise MarketplaceError("Reply body is required.")
 
-    _require_lasoo(ticket.store)
     client = LasooClient(ticket.store, ticket.environment)
     now = timezone.now()
 
@@ -272,7 +305,7 @@ def reply(ticket: SupportTicket, *, body: str, sender_name: str = "") -> dict:
             "marketplace_ok": True,
             "marketplace_supported": True,
             "endpoint": used_endpoint,
-            "message": "Reply sent to the customer via Lasoo.",
+            "message": "Reply sent to the customer via the marketplace.",
             "message_id": str(message.id),
         }
 
@@ -288,8 +321,8 @@ def reply(ticket: SupportTicket, *, body: str, sender_name: str = "") -> dict:
                 if used_endpoint
                 else (
                     "Lasoo Connect does not expose a ticket reply API yet, "
-                    "so the customer was not notified through Lasoo. "
-                    "Reply will sync when Lasoo enables messaging endpoints."
+                    "so the customer was not notified through the marketplace. "
+                    "Reply will sync when messaging endpoints are enabled."
                 )
             )
         ),
@@ -298,9 +331,8 @@ def reply(ticket: SupportTicket, *, body: str, sender_name: str = "") -> dict:
     }
 
 
-def create_test_ticket(user, store) -> dict:
+def _create_test_ticket_lasoo(user, store) -> dict:
     """Create a local sample inbound ticket so the UI can be exercised in staging."""
-    _require_lasoo(store)
     environment = store.lasoo_environment or "staging"
     now = timezone.now()
     key = f"local-test-{int(now.timestamp())}"
@@ -330,7 +362,7 @@ def create_test_ticket(user, store) -> dict:
     )
     return {
         "ok": True,
-        "message": "Test ticket created locally (Lasoo has no CreateTestTicket API).",
+        "message": "Test ticket created locally (marketplace has no CreateTestTicket API).",
         "ticket_id": str(ticket.id),
     }
 

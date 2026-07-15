@@ -102,3 +102,107 @@ class TicketServiceTests(TestCase):
         self.assertEqual(ticket.subject, "Where is my order?")
         self.assertEqual(ticket.customer_email, "sam@example.com")
         self.assertEqual(ticket.messages.count(), 1)
+
+
+class ReverbTicketServiceTests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(username="rvtick", email="rvt@example.com", password="pw")
+        reverb, _ = Marketplace.objects.get_or_create(code="reverb", defaults={"name": "Reverb"})
+        self.store = Store.objects.create(
+            user=self.user,
+            name="Reverb Ticket Store",
+            region="USA",
+            api_token="reverb-token-1234567890",
+            marketplace=reverb,
+            management_mode="full_store",
+        )
+
+    def test_upsert_conversation_with_messages(self):
+        from listings.reverb import tickets as reverb_tickets
+
+        raw = {
+            "id": "conv-42",
+            "subject": "About my pedal",
+            "unread": True,
+            "other_user": {"name": "Buyer Bob", "email": "bob@example.com"},
+            "order_number": "RV-99",
+            "messages": [
+                {
+                    "id": "m1",
+                    "body": "Is this still available?",
+                    "created_at": "2026-07-14T10:00:00Z",
+                    "from_me": False,
+                    "author": {"name": "Buyer Bob"},
+                },
+                {
+                    "id": "m2",
+                    "body": "Yes it is!",
+                    "created_at": "2026-07-14T11:00:00Z",
+                    "from_me": True,
+                    "author": {"name": "Seller"},
+                },
+            ],
+        }
+        ticket = reverb_tickets.upsert_conversation(self.user, self.store, raw)
+        self.assertIsNotNone(ticket)
+        self.assertEqual(ticket.external_ticket_key, "conv-42")
+        self.assertEqual(ticket.customer_name, "Buyer Bob")
+        self.assertEqual(ticket.related_order_key, "RV-99")
+        self.assertEqual(ticket.messages.count(), 2)
+        inbound = ticket.messages.filter(direction=TicketMessageDirection.INBOUND).first()
+        self.assertEqual(inbound.body, "Is this still available?")
+
+    @patch("listings.reverb.tickets.get_adapter")
+    def test_fetch_reverb_conversations(self, mock_get_adapter):
+        adapter = MagicMock()
+        adapter.iter_conversations.return_value = iter([
+            {"id": "c1", "subject": "Hello", "other_user": {"name": "Ann"}},
+        ])
+        adapter.get_conversation.return_value = {
+            "id": "c1",
+            "subject": "Hello",
+            "other_user": {"name": "Ann"},
+            "messages": [
+                {
+                    "id": "msg1",
+                    "body": "Hi there",
+                    "created_at": "2026-07-14T12:00:00Z",
+                    "from_me": False,
+                }
+            ],
+        }
+        mock_get_adapter.return_value = adapter
+
+        result = ticket_service.fetch(self.user, self.store)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["marketplace_ok"])
+        self.assertEqual(result["fetched"], 1)
+        ticket = SupportTicket.objects.get(external_ticket_key="c1")
+        self.assertEqual(ticket.subject, "Hello")
+        self.assertEqual(ticket.messages.count(), 1)
+
+    @patch("listings.reverb.tickets.get_adapter")
+    def test_reply_reverb_posts_message(self, mock_get_adapter):
+        from listings.reverb import tickets as reverb_tickets
+
+        ticket = reverb_tickets.create_test_ticket(self.user, self.store)
+        ticket_obj = SupportTicket.objects.get(id=ticket["ticket_id"])
+        # Use a real-looking external key for the reply path
+        ticket_obj.external_ticket_key = "conv-reply-1"
+        ticket_obj.save(update_fields=["external_ticket_key"])
+
+        adapter = MagicMock()
+        adapter.reply_to_conversation.return_value = {"id": "out-1", "body": "Thanks"}
+        adapter.mark_conversation_read.return_value = True
+        mock_get_adapter.return_value = adapter
+
+        result = ticket_service.reply(ticket_obj, body="Thanks for your message")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["marketplace_ok"])
+        adapter.reply_to_conversation.assert_called_once_with(
+            "conv-reply-1", "Thanks for your message"
+        )
+        outbound = ticket_obj.messages.filter(direction=TicketMessageDirection.OUTBOUND).first()
+        self.assertIsNotNone(outbound)
+        self.assertTrue(outbound.delivered_to_marketplace)

@@ -186,6 +186,91 @@ class ReverbAdapter(BaseStoreAdapter):
                 break
             page = current + 1
 
+    # --- Conversations / messages (Tickets) -------------------------------- #
+
+    def list_conversations(self, *, unread_only: bool = False, page: int | None = None) -> dict:
+        """GET /api/my/conversations."""
+        params: dict = {}
+        if unread_only:
+            params["unread_only"] = "true"
+        if page is not None:
+            params["page"] = int(page)
+        data = self._request("GET", "/api/my/conversations", params=params or None)
+        return data if isinstance(data, dict) else {"conversations": []}
+
+    def get_conversation(self, conversation_id: str) -> dict | None:
+        """GET /api/my/conversations/{id} — includes messages."""
+        cid = str(conversation_id or "").strip()
+        if not cid:
+            return None
+        data = self._request("GET", f"/api/my/conversations/{quote(cid)}")
+        return data if isinstance(data, dict) else None
+
+    def mark_conversation_read(self, conversation_id: str) -> bool:
+        """PUT /api/my/conversations/{id} with ``{"read": true}``."""
+        cid = str(conversation_id or "").strip()
+        if not cid:
+            return False
+        self._request("PUT", f"/api/my/conversations/{quote(cid)}", json={"read": True})
+        return True
+
+    def reply_to_conversation(self, conversation_id: str, body: str) -> dict | None:
+        """POST /api/my/conversations/{id}/messages with ``{"body": "..."}``."""
+        cid = str(conversation_id or "").strip()
+        text = (body or "").strip()
+        if not cid or not text:
+            raise ValueError("conversation_id and body are required")
+        data = self._request(
+            "POST",
+            f"/api/my/conversations/{quote(cid)}/messages",
+            json={"body": text},
+        )
+        return data if isinstance(data, dict) else None
+
+    def iter_conversations(self, *, unread_only: bool = False, max_pages: int = 50):
+        """Yield conversation summary objects across pages."""
+        page = 1
+        next_url = None
+        for _ in range(max_pages):
+            if next_url:
+                data = self._request("GET", next_url)
+            else:
+                data = self.list_conversations(unread_only=unread_only, page=page)
+            if not isinstance(data, dict):
+                break
+            conversations = data.get("conversations")
+            if not isinstance(conversations, list):
+                embedded = data.get("_embedded")
+                conversations = (
+                    embedded.get("conversations") if isinstance(embedded, dict) else None
+                )
+            if not isinstance(conversations, list):
+                conversations = []
+            for conv in conversations:
+                if isinstance(conv, dict):
+                    yield conv
+
+            links = data.get("_links") if isinstance(data.get("_links"), dict) else {}
+            next_link = links.get("next") if isinstance(links, dict) else None
+            next_href = None
+            if isinstance(next_link, dict):
+                next_href = next_link.get("href")
+            elif isinstance(next_link, str):
+                next_href = next_link
+
+            current = int(data.get("current_page") or page or 1)
+            total_pages = int(data.get("total_pages") or current)
+
+            if next_href:
+                next_url = next_href
+                page = current + 1
+                continue
+
+            next_url = None
+            if current >= total_pages or not conversations:
+                break
+            page = current + 1
+
     def create_product(self, sku, title, price, stock, **kwargs):
         """Create listing. v1: deferred; use manual create then sync with Marketplace ID."""
         raise NotImplementedError("Reverb create_product: v1 focuses on updating existing listings")
