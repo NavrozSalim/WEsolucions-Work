@@ -172,6 +172,15 @@ def validate_listing(data: dict) -> list[str]:
     if not _photo_list(data.get("image_urls")):
         errors.append(f"At least one photo URL is required for SKU {label}.")
 
+    vendor_url = str(data.get("vendor_url") or "").strip()
+    if not vendor_url:
+        errors.append(
+            f"Vendor URL is required for SKU {label} "
+            "(Amazon/eBay/etc. link used to scrape price and inventory)."
+        )
+    elif not vendor_url.lower().startswith(("http://", "https://")):
+        errors.append(f"Vendor URL must be a valid http(s) link for SKU {label}.")
+
     return errors
 
 

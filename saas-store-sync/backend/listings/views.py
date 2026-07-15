@@ -298,6 +298,47 @@ class StoreListingPublishView(APIView):
         return Response(result, status=code)
 
 
+class StoreListingScrapeView(APIView):
+    """Scrape vendor URLs on managed listings → update local price/stock."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        listing_ids = request.data.get('listing_ids') or None
+        try:
+            result = listing_service.scrape_listings(request.user, store, listing_ids)
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY
+        return Response(result, status=code)
+
+
+class StoreListingPushInventoryView(APIView):
+    """Push local price/stock to marketplace for already-uploaded listings."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        listing_ids = request.data.get('listing_ids') or None
+        try:
+            result = listing_service.push_inventory(request.user, store, listing_ids)
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY
+        if result.get('pushed'):
+            listing_service.record_activity(
+                request.user, store,
+                action=ListingAction.CREATE,
+                source=ListingUpload.Source.SINGLE,
+                filename='Push inventory to marketplace',
+                total=result.get('pushed', 0),
+                success=result.get('pushed', 0),
+                errors=result.get('failed', 0),
+                message=result.get('message') or '',
+            )
+        return Response(result, status=code)
+
+
 class StoreOrdersView(APIView):
     """List orders for a store. ``?refresh=1`` pulls fresh orders from the marketplace first."""
     permission_classes = [IsAuthenticated]

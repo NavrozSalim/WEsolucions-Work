@@ -41,6 +41,7 @@ const EMPTY_REVERB = {
     inventory: '1',
     barcode: '',
     upc_does_not_apply: true,
+    vendor_url: '',
     image_urls: '',
     publish_status: 'draft',
     free_shipping: true,
@@ -101,6 +102,7 @@ export default function ListingFormModal({
                     inventory: String(listing.inventory ?? 1),
                     barcode: listing.barcode || '',
                     upc_does_not_apply: listing.upc_does_not_apply !== false,
+                    vendor_url: listing.vendor_url || '',
                     image_urls: listing.image_urls || '',
                     publish_status: listing.publish_status === 'live' ? 'live' : 'draft',
                     free_shipping: listing.free_shipping !== false,
@@ -170,6 +172,7 @@ export default function ListingFormModal({
                 inventory: parseInt(form.inventory, 10) || 0,
                 barcode: form.barcode,
                 upc_does_not_apply: !!form.upc_does_not_apply,
+                vendor_url: form.vendor_url,
                 image_urls: form.image_urls,
                 publish_status: form.publish_status === 'live' ? 'live' : 'draft',
                 free_shipping: form.free_shipping !== false,
@@ -294,6 +297,16 @@ export default function ListingFormModal({
                                     required
                                 />
                                 <Input label="UPC (optional)" value={form.barcode} onChange={set('barcode')} />
+                                <div className="sm:col-span-2">
+                                    <Input
+                                        label="Vendor URL"
+                                        placeholder="https://www.amazon.com/dp/… (used to scrape price & stock)"
+                                        value={form.vendor_url}
+                                        onChange={set('vendor_url')}
+                                        type="url"
+                                        required
+                                    />
+                                </div>
                                 <label className="mt-6 flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 sm:col-span-2">
                                     <input
                                         type="checkbox"

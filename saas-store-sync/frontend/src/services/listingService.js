@@ -46,6 +46,14 @@ export const getReverbCategories = (storeId, q = '') =>
 export const getReverbConditions = (storeId) =>
     api.get(`/stores/${storeId}/listings/reverb/conditions/`);
 
+/** Scrape vendor URLs on managed listings → update local price/stock. */
+export const scrapeListings = (storeId, listingIds = null) =>
+    api.post(`/stores/${storeId}/listings/scrape/`, listingIds ? { listing_ids: listingIds } : {});
+
+/** Push local price/stock to marketplace for already-uploaded listings. */
+export const pushListingInventory = (storeId, listingIds = null) =>
+    api.post(`/stores/${storeId}/listings/push-inventory/`, listingIds ? { listing_ids: listingIds } : {});
+
 export const getListingUploads = (storeId) =>
     api.get(`/stores/${storeId}/listings/uploads/`);
 

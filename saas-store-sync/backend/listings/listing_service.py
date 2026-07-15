@@ -631,3 +631,226 @@ def publish(user, store, listing_ids=None) -> dict:
         return _publish_reverb(user, store, publishable)
     with transaction.atomic():
         return _publish_lasoo(user, store, publishable)
+
+
+def scrape_listings(user, store, listing_ids=None) -> dict:
+    """Scrape vendor URLs on managed listings and update local price/stock."""
+    from scrapers import close_amazon_session, get_price_and_stock
+
+    qs = StoreListing.objects.filter(user=user, store=store)
+    if listing_ids:
+        qs = qs.filter(id__in=listing_ids)
+    else:
+        # Default: inventory (on marketplace) + ready created rows with a vendor link
+        qs = qs.filter(
+            status__in=[
+                ListingStatus.UPLOADED_STAGING,
+                ListingStatus.UPLOADED_PRODUCTION,
+                ListingStatus.READY,
+                ListingStatus.FAILED,
+            ]
+        )
+    listings = [l for l in qs if (l.vendor_url or "").strip()]
+    if not listings:
+        raise MarketplaceError(
+            "No listings with a Vendor URL to scrape. Add a vendor link on each listing first."
+        )
+
+    region = (getattr(store, "region", None) or "USA").strip() or "USA"
+    session = {}
+    scraped = 0
+    failed = 0
+    rows = []
+    try:
+        for listing in listings:
+            url = (listing.vendor_url or "").strip()
+            row = {
+                "id": str(listing.id),
+                "sku": listing.sku or listing.external_variant_key,
+                "vendor_url": url,
+                "ok": False,
+                "price": None,
+                "inventory": None,
+                "error": "",
+            }
+            try:
+                result = get_price_and_stock(url, region, session) or {}
+            except Exception as exc:  # noqa: BLE001
+                row["error"] = str(exc) or "Scrape failed."
+                failed += 1
+                rows.append(row)
+                logger.warning("Listing scrape failed SKU %s: %s", listing.sku, exc)
+                continue
+
+            if result.get("ingest_only"):
+                row["error"] = "This vendor is ingest-only and cannot be scraped server-side."
+                failed += 1
+                rows.append(row)
+                continue
+
+            price = result.get("price")
+            stock = result.get("stock")
+            if result.get("inventory") is not None and stock is None:
+                stock = result.get("inventory")
+            err = result.get("error_message") or result.get("error") or ""
+            if price is None and stock is None:
+                row["error"] = str(err) or "No price or stock returned."
+                failed += 1
+                rows.append(row)
+                continue
+
+            update_fields = ["updated_at"]
+            if price is not None:
+                listing.sale_price = _safe_decimal(price)
+                listing.original_price = listing.sale_price
+                cents = int(listing.sale_price * 100)
+                listing.sale_price_cents = cents
+                listing.original_price_cents = cents
+                update_fields.extend(
+                    ["sale_price", "original_price", "sale_price_cents", "original_price_cents"]
+                )
+                row["price"] = float(listing.sale_price)
+            if stock is not None:
+                try:
+                    listing.inventory = max(0, int(stock))
+                except (TypeError, ValueError):
+                    listing.inventory = 0
+                listing.infinite_quantity = False
+                update_fields.extend(["inventory", "infinite_quantity"])
+                row["inventory"] = listing.inventory
+
+            # Keep scrape timestamp in Reverb extras JSON (no migration).
+            if _store_kind(store) == "reverb":
+                extras = reverb_listings.parse_extras(listing)
+                extras["last_scrape_at"] = timezone.now().isoformat()
+                extras["last_scrape_ok"] = True
+                listing.external_data_object_json = reverb_listings.build_extras(
+                    {
+                        **extras,
+                        "make": extras.get("make") or listing.brand,
+                        "model": extras.get("model") or "",
+                        "condition_uuid": extras.get("condition_uuid") or "",
+                        "category_uuid": extras.get("category_uuid") or listing.category,
+                        "currency": extras.get("currency") or "USD",
+                        "upc_does_not_apply": extras.get("upc_does_not_apply", False),
+                        "publish_status": extras.get("publish_status") or "draft",
+                        "free_shipping": extras.get("free_shipping", True),
+                        "finish": extras.get("finish") or "",
+                        "year": extras.get("year") or "",
+                    }
+                )
+                # Preserve last_scrape fields build_extras does not know about
+                import json as _json
+                payload = _json.loads(listing.external_data_object_json)
+                payload["last_scrape_at"] = extras["last_scrape_at"]
+                payload["last_scrape_ok"] = True
+                listing.external_data_object_json = _json.dumps(payload)
+                update_fields.append("external_data_object_json")
+
+            listing.save(update_fields=list(dict.fromkeys(update_fields)))
+            row["ok"] = True
+            scraped += 1
+            rows.append(row)
+    finally:
+        try:
+            close_amazon_session(session)
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {
+        "ok": scraped > 0,
+        "message": (
+            f"Scraped {scraped} listing(s)"
+            + (f"; {failed} failed." if failed else ".")
+        ),
+        "scraped": scraped,
+        "failed": failed,
+        "rows": rows,
+    }
+
+
+def push_inventory(user, store, listing_ids=None) -> dict:
+    """Push local price/stock to the marketplace for listings already uploaded."""
+    kind = marketplace_kind(store.marketplace)
+    if kind != "reverb":
+        raise MarketplaceError(
+            "Inventory push is currently supported for Reverb managed stores."
+        )
+
+    qs = StoreListing.objects.filter(
+        user=user,
+        store=store,
+        status__in=[
+            ListingStatus.UPLOADED_STAGING,
+            ListingStatus.UPLOADED_PRODUCTION,
+        ],
+    )
+    if listing_ids:
+        qs = qs.filter(id__in=listing_ids)
+    listings = list(qs)
+    if not listings:
+        raise MarketplaceError(
+            "No marketplace listings to push. Publish from Created products first."
+        )
+
+    adapter = get_adapter(store)
+    pushed = 0
+    failed = 0
+    rows = []
+    now = timezone.now()
+    for listing in listings:
+        row = {
+            "id": str(listing.id),
+            "sku": listing.sku or listing.external_variant_key,
+            "ok": False,
+            "error": "",
+        }
+        listing_id = (listing.external_product_key or "").strip()
+        if not listing_id or listing_id == listing.sku:
+            try:
+                listing_id = (
+                    adapter.lookup_listing_by_sku(listing.sku or listing.external_variant_key)
+                    or listing_id
+                )
+            except ReverbAPIError as exc:
+                row["error"] = str(exc) or "Could not look up Reverb listing."
+                failed += 1
+                rows.append(row)
+                continue
+        if not listing_id:
+            row["error"] = "No Reverb listing id. Publish the listing first."
+            failed += 1
+            rows.append(row)
+            continue
+
+        extras = reverb_listings.parse_extras(listing)
+        currency = extras.get("currency") or "USD"
+        price = listing.sale_price if listing.sale_price not in (None, Decimal("0")) else listing.original_price
+        try:
+            adapter.update_product(
+                listing_id,
+                price=price,
+                stock=listing.inventory,
+                currency=currency,
+            )
+            listing.external_product_key = listing_id
+            listing.last_uploaded_at = now
+            listing.save(update_fields=["external_product_key", "last_uploaded_at", "updated_at"])
+            row["ok"] = True
+            pushed += 1
+        except ReverbAPIError as exc:
+            row["error"] = str(exc) or "Reverb update failed."
+            failed += 1
+            logger.warning("Reverb inventory push failed SKU %s: %s", listing.sku, exc)
+        rows.append(row)
+
+    return {
+        "ok": pushed > 0 and failed == 0,
+        "message": (
+            f"Pushed price/stock for {pushed} listing(s)"
+            + (f"; {failed} failed." if failed else " to Reverb.")
+        ),
+        "pushed": pushed,
+        "failed": failed,
+        "rows": rows,
+    }
