@@ -4,6 +4,7 @@ from .views import (
     StoreListingBulkUploadView,
     StoreListingDetailView,
     StoreListingListCreateView,
+    StoreListingPhotoUploadView,
     StoreListingPublishView,
     StoreListingTemplateView,
     StoreListingUploadHistoryView,
@@ -22,6 +23,7 @@ from .views import (
 
 urlpatterns = [
     path('stores/<uuid:store_pk>/listings/', StoreListingListCreateView.as_view(), name='store-listings'),
+    path('stores/<uuid:store_pk>/listings/photos/', StoreListingPhotoUploadView.as_view(), name='store-listings-photos'),
     path('stores/<uuid:store_pk>/listings/template/', StoreListingTemplateView.as_view(), name='store-listings-template'),
     path('stores/<uuid:store_pk>/listings/bulk-upload/', StoreListingBulkUploadView.as_view(), name='store-listings-bulk-upload'),
     path('stores/<uuid:store_pk>/listings/uploads/', StoreListingUploadHistoryView.as_view(), name='store-listings-uploads'),

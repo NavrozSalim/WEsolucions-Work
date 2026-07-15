@@ -10,9 +10,10 @@ from rest_framework.views import APIView
 
 from stores.models import Store
 
-from . import csv_import, export_xlsx, listing_service, order_service, shipping_service, ticket_service
+from . import csv_import, export_xlsx, listing_service, order_service, photo_upload, shipping_service, ticket_service
 from .errors import MarketplaceError
 from .models import ListingAction, ListingStatus, ListingUpload, MarketplaceOrder, StoreListing, SupportTicket
+from .photo_upload import PhotoUploadError
 from .serializers import (
     ListingInputSerializer,
     ListingUploadSerializer,
@@ -105,6 +106,25 @@ class StoreListingListCreateView(APIView):
             message=f'Created listing {listing.external_variant_key}.',
         )
         return Response(StoreListingSerializer(listing).data, status=status.HTTP_201_CREATED)
+
+
+class StoreListingPhotoUploadView(APIView):
+    """Upload listing image files; returns public URLs for the photos field."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        uploads = request.FILES.getlist('photos') or request.FILES.getlist('files')
+        if not uploads and request.FILES.get('photo'):
+            uploads = [request.FILES['photo']]
+        try:
+            results = photo_upload.save_listing_photos(request, store, uploads)
+        except PhotoUploadError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'photos': results,
+            'urls': [r['url'] for r in results],
+        }, status=status.HTTP_201_CREATED)
 
 
 class StoreListingDetailView(APIView):

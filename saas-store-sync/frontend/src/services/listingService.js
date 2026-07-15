@@ -26,6 +26,16 @@ export const downloadListingTemplate = (storeId, action = 'create') =>
         responseType: 'blob',
     });
 
+/** Upload listing photo files; returns { urls: string[], photos: [...] }. */
+export const uploadListingPhotos = (storeId, files) => {
+    const fd = new FormData();
+    const list = Array.from(files || []);
+    list.forEach((file) => fd.append('photos', file));
+    return api.post(`/stores/${storeId}/listings/photos/`, fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+    });
+};
+
 export const getListingUploads = (storeId) =>
     api.get(`/stores/${storeId}/listings/uploads/`);
 

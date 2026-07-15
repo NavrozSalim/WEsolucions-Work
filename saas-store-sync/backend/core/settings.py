@@ -192,6 +192,10 @@ STATIC_ROOT = BASE_DIR / 'static'
 # User-uploaded catalog files (async ingest). Mount this path in Docker for multi-container workers.
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+# Absolute base for media URLs returned to clients / marketplaces (no trailing slash).
+# Example: https://api.yourdomain.com  → photos become https://api.yourdomain.com/media/...
+# Required in production so Reverb can fetch uploaded listing photos.
+PUBLIC_MEDIA_BASE_URL = os.getenv('PUBLIC_MEDIA_BASE_URL', '').strip().rstrip('/')
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 

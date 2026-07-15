@@ -4,6 +4,7 @@ import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
 import { createListing, updateListing } from '../../services/listingService';
+import ListingPhotoUploader from './ListingPhotoUploader';
 
 const EMPTY_LASOO = {
     action: 'create',
@@ -137,6 +138,15 @@ export default function ListingFormModal({
         e.preventDefault();
         setSaving(true);
         setError('');
+        const photoCount = String(form.image_urls || '')
+            .split(/[|;\n,]+/)
+            .map((s) => s.trim())
+            .filter(Boolean).length;
+        if (photoCount === 0) {
+            setError('Upload at least one photo.');
+            setSaving(false);
+            return;
+        }
         let payload;
         if (isReverb) {
             const price = form.sale_price === '' ? 0 : form.sale_price;
@@ -313,11 +323,10 @@ export default function ListingFormModal({
                                     Free shipping
                                 </label>
                                 <div className="sm:col-span-2">
-                                    <Textarea
-                                        label="Photo URLs (separate with | , ; or new lines)"
-                                        rows={2}
+                                    <ListingPhotoUploader
+                                        storeId={storeId}
                                         value={form.image_urls}
-                                        onChange={set('image_urls')}
+                                        onChange={(urls) => setForm((f) => ({ ...f, image_urls: urls }))}
                                         required
                                     />
                                 </div>
@@ -344,15 +353,13 @@ export default function ListingFormModal({
                                     />
                                 </div>
                                 <div className="sm:col-span-2">
-                                    <Textarea
-                                        label="Image URLs (separate with | , ; or new lines)"
-                                        rows={2}
+                                    <ListingPhotoUploader
+                                        storeId={storeId}
                                         value={form.image_urls}
-                                        onChange={set('image_urls')}
+                                        onChange={(urls) => setForm((f) => ({ ...f, image_urls: urls }))}
                                         required
                                     />
-                                </div>
-                                <Input
+                                </div>                                <Input
                                     label="Product Key (defaults to SKU)"
                                     placeholder="Groups variants of the same product"
                                     value={form.product_key}
