@@ -308,7 +308,10 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const isWalmart = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'walmart';
     const isLasoo = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'lasoo';
     const showRrpDiscount = isMydeal || isSears || isKogan;
-    const maxStep = isManaged ? 1 : 3;
+    // Same Store / Price / Inventory flow as inventory-only stores (including managed).
+    const maxStep = 3;
+    // Lasoo managed: vendors optional (same as create). Reverb managed: required.
+    const vendorsOptional = isManaged && isLasoo;
     const credentialsLabel = isSears
         ? 'Sears credentials (JSON)'
         : isWalmart
@@ -346,14 +349,6 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
             if (form.lasoo_production_auth_key?.trim()) {
                 payload.lasoo_production_auth_key = form.lasoo_production_auth_key.trim();
             }
-        }
-
-        // Managed stores (Lasoo/Reverb listings) don't require vendor price/inventory rules.
-        if (isManaged) {
-            if (!isLasoo && !isKogan && form.api_token?.trim()) {
-                payload.api_token = form.api_token.trim();
-            }
-            return payload;
         }
 
         payload.vendor_price_settings = form.vendor_price_settings.map((vp) => {
@@ -422,7 +417,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     };
     const validateStep2 = () => {
         const errs = [];
-        if (isManaged && isLasoo) return errs;
+        if (vendorsOptional && !form.vendor_price_settings.some((vp) => vp.vendor_id)) return errs;
         if (!form.vendor_price_settings.some((vp) => vp.vendor_id)) errs.push('Add at least one vendor with price settings');
         form.vendor_price_settings.forEach((vp) => {
             if (!vp.vendor_id) return;
@@ -441,7 +436,9 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     };
     const validateStep3 = () => {
         const errs = [];
-        if (isManaged && isLasoo) return errs;
+        if (vendorsOptional && !form.vendor_inventory_settings.some((vi) => vi.vendor_id) && !form.vendor_price_settings.some((vp) => vp.vendor_id)) {
+            return errs;
+        }
         if (!form.vendor_inventory_settings.some((vi) => vi.vendor_id)) errs.push('Add at least one vendor with inventory ranges');
         if (priceVendorsMissingInventory.length) {
             const labels = priceVendorsMissingInventory.map(
@@ -523,7 +520,6 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                         <X className="h-5 w-5" />
                     </button>
                     </div>
-                    {!isManaged && (
                     <div className="flex">
                         {[
                             { num: 1, label: 'Store' },
@@ -554,8 +550,6 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                             </button>
                         ))}
                     </div>
-                    )}
-                    {isManaged && <div className="pb-4" />}
                 </div>
                 <div className="flex-1 min-h-0 overflow-y-auto px-8 py-4 flex flex-col items-stretch" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(100,116,139,.35) transparent' }}>
                     {error && <p className="text-rose-600 dark:text-rose-400 text-sm mb-3 shrink-0">{error}</p>}
@@ -678,9 +672,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                     <div className="flex-1">
                                         <h3 className="text-sm font-medium text-slate-900 dark:text-slate-100">Scheduled Updates</h3>
                                         <p className="text-xs text-slate-500 dark:text-slate-400">
-                                            {isManaged
-                                                ? 'Optional schedule for managed store maintenance jobs'
-                                                : 'Automatically scrape and push price/inventory'}
+                                            Automatically scrape and push price/inventory
                                         </p>
                                     </div>
                                     <label className="relative inline-flex items-center cursor-pointer">
@@ -996,21 +988,18 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                     )}
                 </div>
                 <div className="flex-shrink-0 flex justify-between items-center border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-8 py-5">
-                    {!isManaged ? (
-                        <Button variant="ghost" onClick={() => setStep((s) => s - 1)} disabled={step === 1}>Back</Button>
-                    ) : (
-                        <span />
-                    )}
+                    <Button variant="ghost" onClick={() => setStep((s) => s - 1)} disabled={step === 1}>Back</Button>
                     <Button
                         variant="primary"
                         onClick={handleSubmit}
                         disabled={
                             loading
-                            || (!isManaged && step === 2 && !form.vendor_price_settings.some((vp) => vp.vendor_id))
-                            || (!isManaged && step === 3 && (
+                            || (!vendorsOptional && step === 2 && !form.vendor_price_settings.some((vp) => vp.vendor_id))
+                            || (!vendorsOptional && step === 3 && (
                                 !form.vendor_inventory_settings.some((vi) => vi.vendor_id)
                                 || priceVendorsMissingInventory.length > 0
                             ))
+                            || (vendorsOptional && step === 3 && priceVendorsMissingInventory.length > 0)
                         }
                     >
                         {loading ? 'Saving…' : step < maxStep ? 'Continue' : 'Save Settings'}
