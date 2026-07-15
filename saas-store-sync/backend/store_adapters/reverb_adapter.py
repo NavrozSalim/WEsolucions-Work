@@ -53,8 +53,27 @@ class ReverbAdapter(BaseStoreAdapter):
         except requests.RequestException as e:
             raise ReverbAPIError(str(e))
         if resp.status_code >= 400:
+            detail = ""
+            try:
+                body = resp.json() if resp.text else {}
+                if isinstance(body, dict):
+                    detail = (
+                        body.get("message")
+                        or body.get("error")
+                        or body.get("detail")
+                        or ""
+                    )
+                    if not detail and isinstance(body.get("errors"), dict):
+                        detail = "; ".join(
+                            f"{k}: {v}" for k, v in body["errors"].items()
+                        )
+            except Exception:  # noqa: BLE001
+                detail = (resp.text or "")[:300]
+            msg = f"Reverb API {method} {path}: {resp.status_code}"
+            if detail:
+                msg = f"{msg} — {detail}"
             raise ReverbAPIError(
-                f"Reverb API {method} {path}: {resp.status_code}",
+                msg,
                 status_code=resp.status_code,
                 response_body=resp.text[:500] if resp.text else None,
             )
@@ -364,10 +383,48 @@ class ReverbAdapter(BaseStoreAdapter):
         return self.update_product(external_id, stock=stock)
 
     def delete_product(self, external_id):
-        """End listing on Reverb. PUT /api/my/listings/{id}/state/end."""
-        self._request(
-            "PUT",
-            f"/api/my/listings/{external_id}/state/end",
-            json={"reason": "not_sold"},
-        )
-        return True
+        """Remove listing from Reverb.
+
+        Live listings: PUT /api/my/listings/{id}/state/end with reason not_sold.
+        Drafts cannot be "ended" (Reverb returns 422) — DELETE /api/listings/{id}.
+        """
+        lid = str(external_id or "").strip()
+        if not lid:
+            raise ValueError("listing id is required")
+
+        state_slug = ""
+        try:
+            data = self._request("GET", f"/api/listings/{quote(lid)}")
+            if isinstance(data, dict):
+                state = data.get("state")
+                if isinstance(state, dict):
+                    state_slug = str(state.get("slug") or state.get("name") or "").lower()
+                elif state:
+                    state_slug = str(state).lower()
+        except ReverbAPIError:
+            state_slug = ""
+
+        # Drafts / unpublished → delete resource; live → end listing
+        if state_slug in ("draft", "unpublished", "pending"):
+            self._request("DELETE", f"/api/listings/{quote(lid)}")
+            return True
+
+        try:
+            self._request(
+                "PUT",
+                f"/api/my/listings/{quote(lid)}/state/end",
+                json={"reason": "not_sold"},
+            )
+            return True
+        except ReverbAPIError as exc:
+            # Already ended, or was actually a draft — try DELETE as fallback
+            if exc.status_code in (404, 406, 422):
+                try:
+                    self._request("DELETE", f"/api/listings/{quote(lid)}")
+                    return True
+                except ReverbAPIError as del_exc:
+                    # If already gone, treat as success for local cleanup
+                    if del_exc.status_code == 404:
+                        return True
+                    raise
+            raise
