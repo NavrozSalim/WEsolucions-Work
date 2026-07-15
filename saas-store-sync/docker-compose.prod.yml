@@ -71,7 +71,7 @@ services:
     # When REDIS_PASSWORD is set, set REDIS_URL=redis://:PASSWORD@redis:6379/0 (URL-encode special chars in PASSWORD).
     # Remote workers: same URL with main host instead of `redis`.
     ports:
-      - "6379:6379"
+      - "${REDIS_PUBLISH_PORT:-6379}:6379"
     logging: *default-logging
     deploy:
       resources:
