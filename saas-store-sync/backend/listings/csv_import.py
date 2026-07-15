@@ -40,6 +40,12 @@ COLUMN_MAP = {
     "infinite quantity": "infinite_quantity",
     "original price": "original_price",
     "sale price": "sale_price",
+    # Reverb: draft vs live (publish flag); free shipping default true
+    "status": "publish_status",
+    "publish status": "publish_status",
+    "listing status": "publish_status",
+    "free_shipping": "free_shipping",
+    "free shipping": "free_shipping",
 }
 
 LASOO_TEMPLATE_HEADERS = [
@@ -77,6 +83,8 @@ REVERB_TEMPLATE_HEADERS = [
     "UPC",
     "UPC Does Not Apply",
     "Photo URLs",
+    "status",
+    "free_shipping",
 ]
 
 # Back-compat alias
@@ -157,6 +165,18 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
             continue
         normalized["infinite_quantity"] = _coerce_bool(normalized.get("infinite_quantity", ""))
         normalized["upc_does_not_apply"] = _coerce_bool(normalized.get("upc_does_not_apply", ""))
+        # free_shipping defaults to True when blank (usual Reverb practice)
+        fs_raw = normalized.get("free_shipping")
+        if fs_raw is None or str(fs_raw).strip() == "":
+            normalized["free_shipping"] = True
+        else:
+            normalized["free_shipping"] = _coerce_bool(fs_raw)
+        # status: draft | live (blank → draft)
+        ps = str(normalized.get("publish_status") or "").strip().lower()
+        if ps in ("live", "published", "publish"):
+            normalized["publish_status"] = "live"
+        else:
+            normalized["publish_status"] = "draft"
         # Reverb aliases
         if normalized.get("make") and not normalized.get("brand"):
             normalized["brand"] = normalized["make"]
@@ -201,6 +221,8 @@ def build_template_csv(action: str = "create", store=None) -> str:
             "UPC": "",
             "UPC Does Not Apply": "true",
             "Photo URLs": "https://example.com/photo1.jpg|https://example.com/photo2.jpg",
+            "status": "draft",
+            "free_shipping": "TRUE",
         }
         out = io.StringIO()
         writer = csv.DictWriter(out, fieldnames=REVERB_TEMPLATE_HEADERS, lineterminator="\n")

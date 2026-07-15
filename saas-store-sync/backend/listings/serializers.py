@@ -13,6 +13,8 @@ class StoreListingSerializer(serializers.ModelSerializer):
     category_uuid = serializers.SerializerMethodField()
     currency = serializers.SerializerMethodField()
     upc_does_not_apply = serializers.SerializerMethodField()
+    publish_status = serializers.SerializerMethodField()
+    free_shipping = serializers.SerializerMethodField()
 
     class Meta:
         model = StoreListing
@@ -23,6 +25,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'original_price', 'sale_price',
             'make', 'model', 'finish', 'year',
             'condition_uuid', 'category_uuid', 'currency', 'upc_does_not_apply',
+            'publish_status', 'free_shipping',
             'environment', 'action', 'status', 'validation_errors_json',
             'marketplace_response_json', 'last_uploaded_at',
             'created_at', 'updated_at',
@@ -34,6 +37,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
             'make', 'model', 'finish', 'year',
             'condition_uuid', 'category_uuid', 'currency', 'upc_does_not_apply',
+            'publish_status', 'free_shipping',
         ]
 
     def _extras(self, obj):
@@ -62,6 +66,16 @@ class StoreListingSerializer(serializers.ModelSerializer):
 
     def get_upc_does_not_apply(self, obj):
         return bool(self._extras(obj).get('upc_does_not_apply', False))
+
+    def get_publish_status(self, obj):
+        return reverb_listings.normalize_publish_status(
+            self._extras(obj).get('publish_status')
+        )
+
+    def get_free_shipping(self, obj):
+        return reverb_listings.free_shipping_enabled(
+            self._extras(obj).get('free_shipping')
+        )
 
 
 class ListingUploadSerializer(serializers.ModelSerializer):
@@ -111,6 +125,10 @@ class ListingInputSerializer(serializers.Serializer):
     category_uuid = serializers.CharField(required=False, allow_blank=True, default='')
     currency = serializers.CharField(required=False, allow_blank=True, default='USD')
     upc_does_not_apply = serializers.BooleanField(required=False, default=False)
+    publish_status = serializers.ChoiceField(
+        choices=['draft', 'live'], required=False, default='draft',
+    )
+    free_shipping = serializers.BooleanField(required=False, default=True)
 
 
 class OrderShipmentSerializer(serializers.ModelSerializer):

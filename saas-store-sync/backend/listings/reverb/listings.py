@@ -46,6 +46,29 @@ def parse_extras(listing_or_json) -> dict:
     return data
 
 
+def normalize_publish_status(value) -> str:
+    """draft (save unpublished) or live (publish immediately). Default draft."""
+    text = str(value or "").strip().lower()
+    if text in ("live", "published", "publish", "true", "1"):
+        return "live"
+    return "draft"
+
+
+def free_shipping_enabled(value) -> bool:
+    """Default True — we usually offer free shipping on Reverb."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return True
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "1", "yes", "y", "t")
+
+
+def should_publish(data: dict) -> bool:
+    """True when status is live (publish on create)."""
+    status = data.get("publish_status") or data.get("status")
+    return normalize_publish_status(status) == "live"
+
+
 def build_extras(data: dict) -> str:
     """Serialize Reverb-specific fields into external_data_object_json."""
     make = str(data.get("make") or data.get("brand") or "").strip()
@@ -60,6 +83,10 @@ def build_extras(data: dict) -> str:
         "category_uuid": str(data.get("category_uuid") or data.get("category") or "").strip(),
         "currency": (str(data.get("currency") or "USD").strip().upper() or "USD"),
         "upc_does_not_apply": _truthy(data.get("upc_does_not_apply")),
+        "publish_status": normalize_publish_status(
+            data.get("publish_status") or data.get("status")
+        ),
+        "free_shipping": free_shipping_enabled(data.get("free_shipping")),
     }
     return json.dumps(payload)
 
@@ -172,6 +199,9 @@ def listing_to_data(listing) -> dict:
         "original_price": listing.original_price or price,
         "currency": extras.get("currency") or "USD",
         "upc_does_not_apply": extras.get("upc_does_not_apply", False),
+        "publish_status": normalize_publish_status(extras.get("publish_status")),
+        "status": normalize_publish_status(extras.get("publish_status")),
+        "free_shipping": free_shipping_enabled(extras.get("free_shipping")),
         "vendor_url": listing.vendor_url,
     }
 
@@ -204,8 +234,12 @@ def resolve_condition_uuid(adapter, condition_value: str) -> str | None:
     return None
 
 
-def build_create_payload(data: dict, *, condition_uuid: str, publish: bool = True) -> dict:
-    """Body for POST /api/listings."""
+def build_create_payload(data: dict, *, condition_uuid: str, publish: bool | None = None) -> dict:
+    """Body for POST /api/listings.
+
+    ``publish`` defaults from the row's status column (live → true, draft → false).
+    ``free_shipping`` (default true) adds $0 rates for US + everywhere else.
+    """
     price = _to_decimal(data.get("sale_price"))
     if price is None:
         price = _to_decimal(data.get("original_price"))
@@ -223,6 +257,7 @@ def build_create_payload(data: dict, *, condition_uuid: str, publish: bool = Tru
 
     upc = str(data.get("barcode") or data.get("upc") or "").strip()
     upc_dna = _truthy(data.get("upc_does_not_apply")) or not upc
+    do_publish = bool(publish) if publish is not None else should_publish(data)
 
     body = {
         "make": make,
@@ -237,7 +272,7 @@ def build_create_payload(data: dict, *, condition_uuid: str, publish: bool = Tru
         "has_inventory": True,
         "inventory": max(0, inventory),
         "upc_does_not_apply": "true" if upc_dna else "false",
-        "publish": bool(publish),
+        "publish": do_publish,
     }
     if upc and not upc_dna:
         body["upc"] = upc
@@ -247,4 +282,14 @@ def build_create_payload(data: dict, *, condition_uuid: str, publish: bool = Tru
         body["finish"] = finish
     if year:
         body["year"] = year
+
+    if free_shipping_enabled(data.get("free_shipping")):
+        zero = {"amount": "0.00", "currency": currency}
+        body["shipping"] = {
+            "rates": [
+                {"rate": zero, "region_code": "US_CON"},
+                {"rate": zero, "region_code": "XX"},
+            ],
+            "local": True,
+        }
     return body

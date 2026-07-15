@@ -523,7 +523,7 @@ def _publish_reverb(user, store, publishable: list) -> dict:
             continue
 
         payload = reverb_listings.build_create_payload(
-            data, condition_uuid=condition_uuid, publish=True,
+            data, condition_uuid=condition_uuid,
         )
         try:
             response = adapter.create_listing(payload)

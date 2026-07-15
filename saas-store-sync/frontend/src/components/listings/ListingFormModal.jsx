@@ -40,6 +40,8 @@ const EMPTY_REVERB = {
     barcode: '',
     upc_does_not_apply: true,
     image_urls: '',
+    publish_status: 'draft',
+    free_shipping: true,
 };
 
 function Textarea({ label, rows = 3, ...props }) {
@@ -98,6 +100,8 @@ export default function ListingFormModal({
                     barcode: listing.barcode || '',
                     upc_does_not_apply: listing.upc_does_not_apply !== false,
                     image_urls: listing.image_urls || '',
+                    publish_status: listing.publish_status === 'live' ? 'live' : 'draft',
+                    free_shipping: listing.free_shipping !== false,
                 });
             } else {
                 setForm({
@@ -156,6 +160,8 @@ export default function ListingFormModal({
                 barcode: form.barcode,
                 upc_does_not_apply: !!form.upc_does_not_apply,
                 image_urls: form.image_urls,
+                publish_status: form.publish_status === 'live' ? 'live' : 'draft',
+                free_shipping: form.free_shipping !== false,
             };
         } else {
             payload = {
@@ -287,6 +293,24 @@ export default function ListingFormModal({
                                         onChange={set('upc_does_not_apply')}
                                     />
                                     UPC does not apply
+                                </label>
+                                <Select
+                                    label="Status on Reverb"
+                                    value={form.publish_status}
+                                    onChange={set('publish_status')}
+                                    options={[
+                                        { value: 'draft', label: 'Draft — save unpublished' },
+                                        { value: 'live', label: 'Live — publish immediately' },
+                                    ]}
+                                />
+                                <label className="mt-6 flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
+                                    <input
+                                        type="checkbox"
+                                        className="h-4 w-4 rounded border-slate-300"
+                                        checked={form.free_shipping !== false}
+                                        onChange={set('free_shipping')}
+                                    />
+                                    Free shipping
                                 </label>
                                 <div className="sm:col-span-2">
                                     <Textarea

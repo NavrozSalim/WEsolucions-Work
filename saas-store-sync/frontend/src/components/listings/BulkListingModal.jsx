@@ -94,7 +94,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                         {isReverb ? 'Reverb' : 'marketplace'} template, fill rows, then upload.
                         Rows with errors appear under the <strong>Errors</strong> filter on Created products.
                         {isReverb && (
-                            <> Reverb columns include Make, Model, Condition, Category UUID, Price, and Photo URLs.</>
+                            <> Reverb columns include Make, Model, Condition, Category UUID, Price, Photo URLs, status (draft/live), and free_shipping.</>
                         )}
                     </p>
 
