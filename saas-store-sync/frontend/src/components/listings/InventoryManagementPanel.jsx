@@ -1,52 +1,76 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Pencil, RefreshCw, Send, Trash2, Play } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { AlertTriangle, FileDown, Pencil, Play, RefreshCw, Send, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
 import {
+    criticalZeroListingInventory,
     deleteListing,
+    exportListingInventory,
     getListings,
     pushListingInventory,
+    resetListingInventory,
     scrapeListings,
 } from '../../services/listingService';
 import ListingFormModal from './ListingFormModal';
 
-const STATUS_STYLES = {
-    uploaded_staging: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300',
-    uploaded_production: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300',
+const SYNC_STYLES = {
+    pending: 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300',
+    scraped: 'bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300',
+    synced: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300',
+    failed: 'bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300',
 };
 
-const STATUS_LABELS = {
-    uploaded_staging: 'On marketplace (staging)',
-    uploaded_production: 'On marketplace',
+const SYNC_LABELS = {
+    pending: 'Pending',
+    scraped: 'Scraped',
+    synced: 'Synced',
+    failed: 'Failed',
 };
 
-const ACTION_LABELS = {
-    create: 'Create',
-    mapped: 'Mapped',
-};
+function formatAgo(iso) {
+    if (!iso) return '—';
+    const t = new Date(iso).getTime();
+    if (!Number.isFinite(t)) return '—';
+    const sec = Math.round((Date.now() - t) / 1000);
+    if (sec < 60) return `${sec}s ago`;
+    if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
+    if (sec < 86400) return `${Math.round(sec / 3600)}h ago`;
+    return `${Math.round(sec / 86400)}d ago`;
+}
 
-/** Live marketplace listings: scrape vendor links, edit price/stock, push to marketplace. */
+/** Managed-store inventory: same scrape/push/reset/export ideas as Product listings. */
 export default function InventoryManagementPanel({ storeId, marketplaceCode = '', reloadNonce = 0, onMessage }) {
     const isReverb = String(marketplaceCode || '').trim().toLowerCase() === 'reverb';
     const [listings, setListings] = useState([]);
     const [loading, setLoading] = useState(false);
     const [scraping, setScraping] = useState(false);
     const [pushing, setPushing] = useState(false);
+    const [resetting, setResetting] = useState(false);
+    const [criticalLoading, setCriticalLoading] = useState(false);
+    const [exporting, setExporting] = useState(false);
     const [editListing, setEditListing] = useState(null);
     const [editOpen, setEditOpen] = useState(false);
     const [search, setSearch] = useState('');
+    const [syncFilter, setSyncFilter] = useState('all');
 
     const load = useCallback(() => {
         if (!storeId) return;
         setLoading(true);
-        getListings(storeId, { view: 'inventory', search: search || undefined })
+        const params = { view: 'inventory', search: search || undefined };
+        if (syncFilter !== 'all') params.sync_status = syncFilter;
+        getListings(storeId, params)
             .then((res) => setListings(Array.isArray(res.data) ? res.data : []))
             .catch(() => onMessage?.('Failed to load inventory.', 'error'))
             .finally(() => setLoading(false));
-    }, [storeId, search, onMessage]);
+    }, [storeId, search, syncFilter, onMessage]);
 
     useEffect(() => {
         load();
     }, [load, reloadNonce]);
+
+    const withVendor = useMemo(
+        () => listings.filter((l) => (l.vendor_url || '').trim()).length,
+        [listings],
+    );
 
     const handleScrape = (ids = null) => {
         setScraping(true);
@@ -66,7 +90,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
         setPushing(true);
         pushListingInventory(storeId, ids)
             .then((res) => {
-                onMessage?.(res.data?.message || 'Pushed to marketplace.', res.data?.ok ? 'success' : 'error');
+                onMessage?.(res.data?.message || 'Manual sync finished.', res.data?.ok ? 'success' : 'error');
                 load();
             })
             .catch((err) => {
@@ -76,59 +100,146 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
             .finally(() => setPushing(false));
     };
 
+    const handleReset = (scope) => {
+        setResetting(true);
+        resetListingInventory(storeId, scope)
+            .then((res) => {
+                onMessage?.(res.data?.message || 'Status reset.', 'success');
+                load();
+            })
+            .catch((err) => onMessage?.(err.response?.data?.detail || 'Reset failed.', 'error'))
+            .finally(() => setResetting(false));
+    };
+
+    const handleCriticalZero = () => {
+        if (!window.confirm('Set stock to 0 on all marketplace listings and push to Reverb?')) return;
+        setCriticalLoading(true);
+        criticalZeroListingInventory(storeId)
+            .then((res) => {
+                onMessage?.(res.data?.message || 'Critical action finished.', res.data?.ok ? 'success' : 'error');
+                load();
+            })
+            .catch((err) => onMessage?.(err.response?.data?.detail || 'Critical action failed.', 'error'))
+            .finally(() => setCriticalLoading(false));
+    };
+
+    const handleExport = () => {
+        setExporting(true);
+        const status = syncFilter === 'all' ? '' : syncFilter;
+        exportListingInventory(storeId, status)
+            .then(() => onMessage?.('Inventory exported.', 'success'))
+            .catch(() => onMessage?.('Export failed.', 'error'))
+            .finally(() => setExporting(false));
+    };
+
     const handleDelete = (listing) => {
-        if (!window.confirm(`Remove "${listing.external_variant_key}" from the marketplace?`)) return;
+        if (!window.confirm(`Remove "${listing.sku || listing.external_variant_key}" from the marketplace?`)) return;
         deleteListing(storeId, listing.id)
             .then(() => {
-                onMessage?.(`Removed "${listing.external_variant_key}".`, 'success');
+                onMessage?.(`Removed "${listing.sku || listing.external_variant_key}".`, 'success');
                 load();
             })
             .catch((err) => onMessage?.(err.response?.data?.detail || 'Delete failed.', 'error'));
     };
 
-    const withVendor = listings.filter((l) => (l.vendor_url || '').trim()).length;
+    const busy = scraping || pushing || resetting || criticalLoading;
 
     return (
         <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-700 px-4 py-3">
-                <div>
-                    <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Inventory management</h2>
-                    <p className="text-xs text-slate-500 dark:text-slate-400">
-                        Listings on the marketplace. Scrape vendor links for price/stock, then push to Reverb.
-                    </p>
+            <div className="flex flex-col gap-3 border-b border-slate-200 dark:border-slate-700 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                        <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Inventory management</h2>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                            {loading && listings.length === 0
+                                ? 'Loading…'
+                                : `${listings.length.toLocaleString()} listing${listings.length === 1 ? '' : 's'} on the marketplace`}
+                        </p>
+                    </div>
                 </div>
+
                 <div className="flex flex-wrap items-center gap-2">
-                    <input
-                        type="search"
-                        placeholder="Search SKU or title…"
-                        value={search}
-                        onChange={(e) => setSearch(e.target.value)}
-                        className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm text-slate-900 dark:text-slate-100"
-                    />
-                    <Button variant="secondary" size="sm" onClick={load} disabled={loading}>
-                        <RefreshCw className={`mr-1.5 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-                        Refresh
+                    <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => handlePush()}
+                        disabled={busy || listings.length === 0}
+                        title="Push current price/stock to marketplace (no new vendor fetch)"
+                    >
+                        <RefreshCw className={`mr-1.5 h-4 w-4 ${pushing ? 'animate-spin' : ''}`} />
+                        Manual sync
                     </Button>
+
+                    <div className="relative">
+                        <Button
+                            variant="secondary"
+                            size="sm"
+                            disabled={busy || listings.length === 0}
+                            className="border-rose-300 text-rose-700 dark:border-rose-700 dark:text-rose-300"
+                            onClick={handleCriticalZero}
+                        >
+                            <AlertTriangle className="mr-1.5 h-4 w-4" />
+                            {criticalLoading ? 'Working…' : 'Critical action'}
+                        </Button>
+                    </div>
+
+                    <select
+                        className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-2 text-xs text-slate-900 dark:text-slate-100"
+                        disabled={busy}
+                        defaultValue=""
+                        onChange={(e) => {
+                            const v = e.target.value;
+                            e.target.value = '';
+                            if (v) handleReset(v);
+                        }}
+                        title="Reset scrape status so you can Start Scraping again"
+                    >
+                        <option value="" disabled>
+                            {resetting ? 'Resetting…' : 'Reset status'}
+                        </option>
+                        <option value="failed">Reset failed → Pending</option>
+                        <option value="scraped">Reset scraped → Pending</option>
+                        <option value="all">Reset all → Pending</option>
+                    </select>
+
+                    <Button variant="secondary" size="sm" onClick={handleExport} disabled={exporting || !storeId}>
+                        <FileDown className="mr-1.5 h-4 w-4" />
+                        {exporting ? 'Exporting…' : 'Export'}
+                    </Button>
+
                     {isReverb && (
                         <Button
                             variant="secondary"
                             size="sm"
                             onClick={() => handleScrape()}
-                            disabled={scraping || withVendor === 0}
-                            title={withVendor === 0 ? 'Add Vendor URL on each listing first' : undefined}
+                            disabled={busy || withVendor === 0}
+                            title={withVendor === 0 ? 'Add Vendor URL on each listing first' : 'Refresh vendor price and stock'}
                         >
-                            <Play className="mr-1.5 h-4 w-4" />
+                            <Play className={`mr-1.5 h-4 w-4 ${scraping ? 'animate-spin' : ''}`} />
                             {scraping ? 'Scraping…' : `Start Scraping (${withVendor})`}
                         </Button>
                     )}
-                    <Button
-                        variant="primary"
-                        size="sm"
-                        onClick={() => handlePush()}
-                        disabled={pushing || listings.length === 0}
+
+                    <input
+                        type="search"
+                        placeholder="Search SKU, title, vendor…"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        className="min-w-[12rem] flex-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm text-slate-900 dark:text-slate-100"
+                    />
+                    <select
+                        className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-2 text-xs text-slate-900 dark:text-slate-100"
+                        value={syncFilter}
+                        onChange={(e) => setSyncFilter(e.target.value)}
                     >
-                        <Send className="mr-1.5 h-4 w-4" />
-                        {pushing ? 'Pushing…' : `Push to marketplace (${listings.length})`}
+                        <option value="all">All statuses</option>
+                        <option value="pending">Pending</option>
+                        <option value="scraped">Scraped</option>
+                        <option value="synced">Synced</option>
+                        <option value="failed">Failed</option>
+                    </select>
+                    <Button variant="secondary" size="sm" onClick={load} disabled={loading}>
+                        <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
                     </Button>
                 </div>
             </div>
@@ -138,33 +249,34 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                     <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">Loading inventory…</p>
                 ) : listings.length === 0 ? (
                     <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">
-                        No listings on the marketplace yet. Create or map listings, publish them from Created products,
-                        then manage inventory here.
+                        No listings on the marketplace yet. Create listings, publish from Created products, then manage inventory here.
                     </p>
                 ) : (
                     <table className="w-full text-left text-sm">
                         <thead className="bg-slate-50 dark:bg-slate-800 text-xs uppercase text-slate-500 dark:text-slate-400">
                             <tr>
-                                <th className="px-4 py-2.5">SKU / Variant</th>
-                                <th className="px-4 py-2.5">Title</th>
-                                <th className="px-4 py-2.5">Vendor</th>
-                                <th className="px-4 py-2.5">Price</th>
-                                <th className="px-4 py-2.5">Stock</th>
-                                <th className="px-4 py-2.5">Status</th>
-                                <th className="px-4 py-2.5">Last push</th>
-                                <th className="px-4 py-2.5 text-right">Actions</th>
+                                <th className="px-3 py-2.5">SKU</th>
+                                <th className="px-3 py-2.5">Title</th>
+                                <th className="px-3 py-2.5">Vendor URL</th>
+                                <th className="px-3 py-2.5">Vendor price</th>
+                                <th className="px-3 py-2.5">Price</th>
+                                <th className="px-3 py-2.5">Stock</th>
+                                <th className="px-3 py-2.5">Status</th>
+                                <th className="px-3 py-2.5">Margin</th>
+                                <th className="px-3 py-2.5">Last scrape</th>
+                                <th className="px-3 py-2.5 text-right">Actions</th>
                             </tr>
                         </thead>
                         <tbody>
                             {listings.map((l) => (
                                 <tr key={l.id} className="border-t border-slate-100 dark:border-slate-800">
-                                    <td className="px-4 py-2.5">
-                                        <p className="font-medium text-slate-900 dark:text-slate-100">{l.sku || l.external_variant_key}</p>
+                                    <td className="px-3 py-2.5 font-medium text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                                        {l.sku || l.external_variant_key}
                                     </td>
-                                    <td className="max-w-[200px] truncate px-4 py-2.5 text-slate-700 dark:text-slate-300" title={l.title}>
+                                    <td className="max-w-[180px] truncate px-3 py-2.5 text-slate-700 dark:text-slate-300" title={l.title}>
                                         {l.title || '—'}
                                     </td>
-                                    <td className="max-w-[160px] truncate px-4 py-2.5 text-xs text-slate-500 dark:text-slate-400" title={l.vendor_url || ''}>
+                                    <td className="px-3 py-2.5 text-xs">
                                         {l.vendor_url ? (
                                             <a
                                                 href={l.vendor_url}
@@ -178,21 +290,30 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                                             <span className="text-amber-600 dark:text-amber-400">Missing</span>
                                         )}
                                     </td>
-                                    <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">
-                                        ${Number(l.sale_price).toFixed(2)}
+                                    <td className="px-3 py-2.5 text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                                        {l.vendor_price != null ? `$${Number(l.vendor_price).toFixed(2)}` : '—'}
                                     </td>
-                                    <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">
+                                    <td className="px-3 py-2.5 text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                                        ${Number(l.sale_price || 0).toFixed(2)}
+                                    </td>
+                                    <td className="px-3 py-2.5 text-slate-700 dark:text-slate-300">
                                         {l.infinite_quantity ? '∞' : l.inventory}
                                     </td>
-                                    <td className="px-4 py-2.5">
-                                        <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[l.status] || ''}`}>
-                                            {STATUS_LABELS[l.status] || l.status}
+                                    <td className="px-3 py-2.5">
+                                        <span
+                                            className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${SYNC_STYLES[l.inventory_sync_status] || SYNC_STYLES.pending}`}
+                                            title={l.last_scrape_error || undefined}
+                                        >
+                                            {SYNC_LABELS[l.inventory_sync_status] || l.inventory_sync_status || 'Pending'}
                                         </span>
                                     </td>
-                                    <td className="px-4 py-2.5 text-xs text-slate-500 dark:text-slate-400">
-                                        {l.last_uploaded_at ? new Date(l.last_uploaded_at).toLocaleString() : '—'}
+                                    <td className="px-3 py-2.5 text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                                        {l.margin_pct == null ? '—' : `${l.margin_pct > 0 ? '+' : ''}${l.margin_pct}%`}
                                     </td>
-                                    <td className="px-4 py-2.5">
+                                    <td className="px-3 py-2.5 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                                        {l.last_scrape_at ? `Scrape · ${formatAgo(l.last_scrape_at)}` : '—'}
+                                    </td>
+                                    <td className="px-3 py-2.5">
                                         <div className="flex items-center justify-end gap-1">
                                             {isReverb && (
                                                 <button
@@ -200,17 +321,17 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                                                     title="Scrape vendor URL"
                                                     className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
                                                     onClick={() => handleScrape([l.id])}
-                                                    disabled={scraping || !(l.vendor_url || '').trim()}
+                                                    disabled={busy || !(l.vendor_url || '').trim()}
                                                 >
                                                     <Play className="h-4 w-4" />
                                                 </button>
                                             )}
                                             <button
                                                 type="button"
-                                                title="Push price/stock to marketplace"
+                                                title="Manual sync (push price/stock)"
                                                 className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
                                                 onClick={() => handlePush([l.id])}
-                                                disabled={pushing}
+                                                disabled={busy}
                                             >
                                                 <Send className="h-4 w-4" />
                                             </button>

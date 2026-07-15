@@ -15,6 +15,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
     upc_does_not_apply = serializers.SerializerMethodField()
     publish_status = serializers.SerializerMethodField()
     free_shipping = serializers.SerializerMethodField()
+    margin_pct = serializers.SerializerMethodField()
 
     class Meta:
         model = StoreListing
@@ -22,10 +23,11 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'id', 'store', 'external_product_key', 'external_variant_key',
             'title', 'description', 'brand', 'category', 'sku', 'barcode',
             'vendor_url', 'image_urls', 'inventory', 'infinite_quantity',
-            'original_price', 'sale_price',
+            'original_price', 'sale_price', 'vendor_price',
             'make', 'model', 'finish', 'year',
             'condition_uuid', 'category_uuid', 'currency', 'upc_does_not_apply',
-            'publish_status', 'free_shipping',
+            'publish_status', 'free_shipping', 'margin_pct',
+            'inventory_sync_status', 'last_scrape_at', 'last_scrape_error',
             'environment', 'action', 'status', 'validation_errors_json',
             'marketplace_response_json', 'last_uploaded_at',
             'created_at', 'updated_at',
@@ -37,7 +39,8 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
             'make', 'model', 'finish', 'year',
             'condition_uuid', 'category_uuid', 'currency', 'upc_does_not_apply',
-            'publish_status', 'free_shipping',
+            'publish_status', 'free_shipping', 'margin_pct',
+            'vendor_price', 'inventory_sync_status', 'last_scrape_at', 'last_scrape_error',
         ]
 
     def _extras(self, obj):
@@ -76,6 +79,16 @@ class StoreListingSerializer(serializers.ModelSerializer):
         return reverb_listings.free_shipping_enabled(
             self._extras(obj).get('free_shipping')
         )
+
+    def get_margin_pct(self, obj):
+        try:
+            sale = float(obj.sale_price or 0)
+            vendor = float(obj.vendor_price) if obj.vendor_price is not None else None
+        except (TypeError, ValueError):
+            return None
+        if vendor is None or sale <= 0:
+            return None
+        return round(((sale - vendor) / sale) * 100, 1)
 
 
 class ListingUploadSerializer(serializers.ModelSerializer):

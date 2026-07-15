@@ -20,6 +20,7 @@ from .lasoo import mapper, validator
 from .lasoo.client import LasooClient
 from .models import (
     Environment,
+    InventorySyncStatus,
     ListingAction,
     ListingStatus,
     ListingUpload,
@@ -634,14 +635,13 @@ def publish(user, store, listing_ids=None) -> dict:
 
 
 def scrape_listings(user, store, listing_ids=None) -> dict:
-    """Scrape vendor URLs on managed listings and update local price/stock."""
+    """Scrape vendor URLs on managed listings (same scrapers as catalog)."""
     from scrapers import close_amazon_session, get_price_and_stock
 
     qs = StoreListing.objects.filter(user=user, store=store)
     if listing_ids:
         qs = qs.filter(id__in=listing_ids)
     else:
-        # Default: inventory (on marketplace) + ready created rows with a vendor link
         qs = qs.filter(
             status__in=[
                 ListingStatus.UPLOADED_STAGING,
@@ -661,6 +661,7 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
     scraped = 0
     failed = 0
     rows = []
+    now = timezone.now()
     try:
         for listing in listings:
             url = (listing.vendor_url or "").strip()
@@ -669,6 +670,7 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
                 "sku": listing.sku or listing.external_variant_key,
                 "vendor_url": url,
                 "ok": False,
+                "vendor_price": None,
                 "price": None,
                 "inventory": None,
                 "error": "",
@@ -676,14 +678,38 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
             try:
                 result = get_price_and_stock(url, region, session) or {}
             except Exception as exc:  # noqa: BLE001
-                row["error"] = str(exc) or "Scrape failed."
+                listing.inventory_sync_status = InventorySyncStatus.FAILED
+                listing.last_scrape_at = now
+                listing.last_scrape_error = (str(exc) or "Scrape failed.")[:500]
+                listing.save(
+                    update_fields=[
+                        "inventory_sync_status",
+                        "last_scrape_at",
+                        "last_scrape_error",
+                        "updated_at",
+                    ]
+                )
+                row["error"] = listing.last_scrape_error
                 failed += 1
                 rows.append(row)
                 logger.warning("Listing scrape failed SKU %s: %s", listing.sku, exc)
                 continue
 
             if result.get("ingest_only"):
-                row["error"] = "This vendor is ingest-only and cannot be scraped server-side."
+                listing.inventory_sync_status = InventorySyncStatus.FAILED
+                listing.last_scrape_at = now
+                listing.last_scrape_error = (
+                    "This vendor is ingest-only and cannot be scraped server-side."
+                )
+                listing.save(
+                    update_fields=[
+                        "inventory_sync_status",
+                        "last_scrape_at",
+                        "last_scrape_error",
+                        "updated_at",
+                    ]
+                )
+                row["error"] = listing.last_scrape_error
                 failed += 1
                 rows.append(row)
                 continue
@@ -694,22 +720,51 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
                 stock = result.get("inventory")
             err = result.get("error_message") or result.get("error") or ""
             if price is None and stock is None:
-                row["error"] = str(err) or "No price or stock returned."
+                listing.inventory_sync_status = InventorySyncStatus.FAILED
+                listing.last_scrape_at = now
+                listing.last_scrape_error = (str(err) or "No price or stock returned.")[:500]
+                listing.save(
+                    update_fields=[
+                        "inventory_sync_status",
+                        "last_scrape_at",
+                        "last_scrape_error",
+                        "updated_at",
+                    ]
+                )
+                row["error"] = listing.last_scrape_error
                 failed += 1
                 rows.append(row)
                 continue
 
-            update_fields = ["updated_at"]
+            update_fields = [
+                "updated_at",
+                "inventory_sync_status",
+                "last_scrape_at",
+                "last_scrape_error",
+            ]
+            listing.last_scrape_at = now
+            listing.last_scrape_error = ""
+            listing.inventory_sync_status = InventorySyncStatus.SCRAPED
+
             if price is not None:
-                listing.sale_price = _safe_decimal(price)
-                listing.original_price = listing.sale_price
-                cents = int(listing.sale_price * 100)
+                vp = _safe_decimal(price)
+                listing.vendor_price = vp
+                listing.sale_price = vp
+                listing.original_price = vp
+                cents = int(vp * 100)
                 listing.sale_price_cents = cents
                 listing.original_price_cents = cents
                 update_fields.extend(
-                    ["sale_price", "original_price", "sale_price_cents", "original_price_cents"]
+                    [
+                        "vendor_price",
+                        "sale_price",
+                        "original_price",
+                        "sale_price_cents",
+                        "original_price_cents",
+                    ]
                 )
-                row["price"] = float(listing.sale_price)
+                row["vendor_price"] = float(vp)
+                row["price"] = float(vp)
             if stock is not None:
                 try:
                     listing.inventory = max(0, int(stock))
@@ -718,34 +773,6 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
                 listing.infinite_quantity = False
                 update_fields.extend(["inventory", "infinite_quantity"])
                 row["inventory"] = listing.inventory
-
-            # Keep scrape timestamp in Reverb extras JSON (no migration).
-            if _store_kind(store) == "reverb":
-                extras = reverb_listings.parse_extras(listing)
-                extras["last_scrape_at"] = timezone.now().isoformat()
-                extras["last_scrape_ok"] = True
-                listing.external_data_object_json = reverb_listings.build_extras(
-                    {
-                        **extras,
-                        "make": extras.get("make") or listing.brand,
-                        "model": extras.get("model") or "",
-                        "condition_uuid": extras.get("condition_uuid") or "",
-                        "category_uuid": extras.get("category_uuid") or listing.category,
-                        "currency": extras.get("currency") or "USD",
-                        "upc_does_not_apply": extras.get("upc_does_not_apply", False),
-                        "publish_status": extras.get("publish_status") or "draft",
-                        "free_shipping": extras.get("free_shipping", True),
-                        "finish": extras.get("finish") or "",
-                        "year": extras.get("year") or "",
-                    }
-                )
-                # Preserve last_scrape fields build_extras does not know about
-                import json as _json
-                payload = _json.loads(listing.external_data_object_json)
-                payload["last_scrape_at"] = extras["last_scrape_at"]
-                payload["last_scrape_ok"] = True
-                listing.external_data_object_json = _json.dumps(payload)
-                update_fields.append("external_data_object_json")
 
             listing.save(update_fields=list(dict.fromkeys(update_fields)))
             row["ok"] = True
@@ -770,7 +797,7 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
 
 
 def push_inventory(user, store, listing_ids=None) -> dict:
-    """Push local price/stock to the marketplace for listings already uploaded."""
+    """Push local price/stock to the marketplace (Manual sync for managed stores)."""
     kind = marketplace_kind(store.marketplace)
     if kind != "reverb":
         raise MarketplaceError(
@@ -835,11 +862,22 @@ def push_inventory(user, store, listing_ids=None) -> dict:
             )
             listing.external_product_key = listing_id
             listing.last_uploaded_at = now
-            listing.save(update_fields=["external_product_key", "last_uploaded_at", "updated_at"])
+            listing.inventory_sync_status = InventorySyncStatus.SYNCED
+            listing.save(
+                update_fields=[
+                    "external_product_key",
+                    "last_uploaded_at",
+                    "inventory_sync_status",
+                    "updated_at",
+                ]
+            )
             row["ok"] = True
             pushed += 1
         except ReverbAPIError as exc:
             row["error"] = str(exc) or "Reverb update failed."
+            listing.inventory_sync_status = InventorySyncStatus.FAILED
+            listing.last_scrape_error = row["error"][:500]
+            listing.save(update_fields=["inventory_sync_status", "last_scrape_error", "updated_at"])
             failed += 1
             logger.warning("Reverb inventory push failed SKU %s: %s", listing.sku, exc)
         rows.append(row)
@@ -854,3 +892,121 @@ def push_inventory(user, store, listing_ids=None) -> dict:
         "failed": failed,
         "rows": rows,
     }
+
+
+def reset_inventory_status(user, store, scope: str = "failed") -> dict:
+    """Reset inventory_sync_status to pending so Start Scraping can run again."""
+    scope = (scope or "failed").strip().lower()
+    qs = StoreListing.objects.filter(
+        user=user,
+        store=store,
+        status__in=[
+            ListingStatus.UPLOADED_STAGING,
+            ListingStatus.UPLOADED_PRODUCTION,
+            ListingStatus.READY,
+            ListingStatus.FAILED,
+        ],
+    )
+    if scope == "failed":
+        qs = qs.filter(inventory_sync_status=InventorySyncStatus.FAILED)
+    elif scope == "scraped":
+        qs = qs.filter(inventory_sync_status=InventorySyncStatus.SCRAPED)
+    elif scope == "all":
+        pass
+    else:
+        raise MarketplaceError('Scope must be "failed", "scraped", or "all".')
+
+    updated = qs.update(
+        inventory_sync_status=InventorySyncStatus.PENDING,
+        last_scrape_error="",
+    )
+    return {
+        "ok": True,
+        "message": f"Reset {updated} listing(s) to Pending.",
+        "updated": updated,
+        "scope": scope,
+    }
+
+
+def critical_zero_inventory(user, store) -> dict:
+    """Set stock to 0 on all marketplace listings and push to Reverb."""
+    qs = StoreListing.objects.filter(
+        user=user,
+        store=store,
+        status__in=[
+            ListingStatus.UPLOADED_STAGING,
+            ListingStatus.UPLOADED_PRODUCTION,
+        ],
+    )
+    listings = list(qs)
+    if not listings:
+        raise MarketplaceError("No marketplace listings to zero.")
+
+    for listing in listings:
+        listing.inventory = 0
+        listing.infinite_quantity = False
+        listing.save(update_fields=["inventory", "infinite_quantity", "updated_at"])
+
+    push_result = push_inventory(user, store, listing_ids=[str(l.id) for l in listings])
+    return {
+        "ok": push_result.get("ok"),
+        "message": (
+            f"Set stock to 0 on {len(listings)} listing(s). "
+            + (push_result.get("message") or "")
+        ),
+        "zeroed": len(listings),
+        "pushed": push_result.get("pushed", 0),
+        "failed": push_result.get("failed", 0),
+        "rows": push_result.get("rows") or [],
+    }
+
+
+def export_inventory_xlsx(user, store, sync_status: str = "") -> bytes:
+    """Excel export of managed inventory listings."""
+    from openpyxl import Workbook
+
+    qs = StoreListing.objects.filter(
+        user=user,
+        store=store,
+        status__in=[
+            ListingStatus.UPLOADED_STAGING,
+            ListingStatus.UPLOADED_PRODUCTION,
+        ],
+    ).order_by("sku")
+    sync_status = (sync_status or "").strip().lower()
+    if sync_status in ("pending", "scraped", "synced", "failed"):
+        qs = qs.filter(inventory_sync_status=sync_status)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Inventory"
+    headers = [
+        "SKU",
+        "Title",
+        "Vendor URL",
+        "Vendor Price",
+        "Price",
+        "Stock",
+        "Inventory Sync",
+        "Marketplace Status",
+        "Last Scrape",
+        "Last Push",
+        "Scrape Error",
+    ]
+    ws.append(headers)
+    for listing in qs:
+        ws.append([
+            listing.sku or listing.external_variant_key,
+            listing.title,
+            listing.vendor_url,
+            float(listing.vendor_price) if listing.vendor_price is not None else "",
+            float(listing.sale_price) if listing.sale_price is not None else "",
+            listing.inventory,
+            listing.inventory_sync_status,
+            listing.status,
+            listing.last_scrape_at.isoformat() if listing.last_scrape_at else "",
+            listing.last_uploaded_at.isoformat() if listing.last_uploaded_at else "",
+            listing.last_scrape_error or "",
+        ])
+    from .export_xlsx import _workbook_response_bytes
+    return _workbook_response_bytes(wb)

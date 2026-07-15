@@ -60,6 +60,10 @@ def _filter_listings(qs, request):
     if status_filter:
         qs = qs.filter(status=status_filter)
 
+    sync_status = (request.query_params.get('sync_status') or '').strip().lower()
+    if sync_status in ('pending', 'scraped', 'synced', 'failed'):
+        qs = qs.filter(inventory_sync_status=sync_status)
+
     if request.query_params.get('errors') in ('1', 'true', 'yes'):
         qs = qs.filter(status=ListingStatus.VALIDATION_FAILED)
 
@@ -70,6 +74,7 @@ def _filter_listings(qs, request):
             Q(sku__icontains=search)
             | Q(title__icontains=search)
             | Q(external_variant_key__icontains=search)
+            | Q(vendor_url__icontains=search)
         )
     return qs
 
@@ -337,6 +342,55 @@ class StoreListingPushInventoryView(APIView):
                 message=result.get('message') or '',
             )
         return Response(result, status=code)
+
+
+class StoreListingResetInventoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        scope = (request.data.get('scope') or 'failed').strip().lower()
+        try:
+            result = listing_service.reset_inventory_status(request.user, store, scope=scope)
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result)
+
+
+class StoreListingCriticalInventoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        action = (request.data.get('action') or 'zero_inventory').strip().lower()
+        if action != 'zero_inventory':
+            return Response(
+                {'detail': 'Supported action: zero_inventory'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            result = listing_service.critical_zero_inventory(request.user, store)
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY
+        return Response(result, status=code)
+
+
+class StoreListingInventoryExportView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        sync_status = (request.query_params.get('sync_status') or '').strip()
+        content = listing_service.export_inventory_xlsx(
+            request.user, store, sync_status=sync_status,
+        )
+        resp = HttpResponse(
+            content,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        resp['Content-Disposition'] = 'attachment; filename="managed_inventory.xlsx"'
+        return resp
 
 
 class StoreOrdersView(APIView):

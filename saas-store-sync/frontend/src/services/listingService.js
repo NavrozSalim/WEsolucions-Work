@@ -54,6 +54,32 @@ export const scrapeListings = (storeId, listingIds = null) =>
 export const pushListingInventory = (storeId, listingIds = null) =>
     api.post(`/stores/${storeId}/listings/push-inventory/`, listingIds ? { listing_ids: listingIds } : {});
 
+/** Reset inventory sync status to pending. scope: failed | scraped | all */
+export const resetListingInventory = (storeId, scope = 'failed') =>
+    api.post(`/stores/${storeId}/listings/reset-inventory/`, { scope });
+
+/** Critical: zero stock on marketplace listings and push. */
+export const criticalZeroListingInventory = (storeId) =>
+    api.post(`/stores/${storeId}/listings/critical-inventory/`, { action: 'zero_inventory' });
+
+/** Download managed inventory Excel. */
+export const exportListingInventory = (storeId, syncStatus = '') =>
+    api.get(`/stores/${storeId}/listings/inventory-export/`, {
+        params: syncStatus ? { sync_status: syncStatus } : {},
+        responseType: 'blob',
+    }).then((res) => {
+        const url = window.URL.createObjectURL(new Blob([res.data], {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        }));
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', 'managed_inventory.xlsx');
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+    });
+
 export const getListingUploads = (storeId) =>
     api.get(`/stores/${storeId}/listings/uploads/`);
 

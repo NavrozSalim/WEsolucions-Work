@@ -27,6 +27,14 @@ class ListingStatus(models.TextChoices):
     FAILED = 'failed', 'Upload Failed'
 
 
+class InventorySyncStatus(models.TextChoices):
+    """Vendor scrape / marketplace inventory sync for managed listings."""
+    PENDING = 'pending', 'Pending'
+    SCRAPED = 'scraped', 'Scraped'
+    SYNCED = 'synced', 'Synced'
+    FAILED = 'failed', 'Failed'
+
+
 class ListingAction(models.TextChoices):
     """How a listing entered the system: newly created here, mapped to an
     existing marketplace listing, or (for uploads) a delete request."""
@@ -77,6 +85,17 @@ class StoreListing(models.Model):
     marketplace_request_json = models.JSONField(null=True, blank=True)
     marketplace_response_json = models.JSONField(null=True, blank=True)
     last_uploaded_at = models.DateTimeField(null=True, blank=True)
+
+    # Vendor scrape → listing price/stock (same scrapers as catalog inventory)
+    vendor_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    inventory_sync_status = models.CharField(
+        max_length=20,
+        choices=InventorySyncStatus.choices,
+        default=InventorySyncStatus.PENDING,
+        db_index=True,
+    )
+    last_scrape_at = models.DateTimeField(null=True, blank=True)
+    last_scrape_error = models.CharField(max_length=500, blank=True, default='')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
