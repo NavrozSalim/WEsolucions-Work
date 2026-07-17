@@ -1,25 +1,16 @@
-import { useEffect, useState } from 'react';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
 
 /**
  * Lasoo staging/production connection fields.
- * Shows only the active environment by default; optional toggle reveals the other.
+ * Shows only the AuthKey (and base URL) for the selected active environment.
  *
- * @param {'create'|'edit'} mode - create requires staging AuthKey; edit leaves blank = keep current
+ * @param {'create'|'edit'} mode - create requires AuthKey for active env; edit leaves blank = keep current
  */
 export default function LasooConnectionFields({ form, setForm, mode = 'edit' }) {
     const env = form.lasoo_environment || 'staging';
-    const [showOtherEnv, setShowOtherEnv] = useState(false);
-
-    useEffect(() => {
-        setShowOtherEnv(false);
-    }, [env]);
-
-    const showStaging = env === 'staging' || showOtherEnv;
-    const showProduction = env === 'production' || showOtherEnv;
-    const otherLabel = env === 'staging' ? 'production' : 'staging';
     const isCreate = mode === 'create';
+    const isStaging = env === 'staging';
 
     return (
         <div className="space-y-3 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
@@ -35,17 +26,16 @@ export default function LasooConnectionFields({ form, setForm, mode = 'edit' }) 
                 ]}
             />
 
-            {showStaging && (
+            {isStaging ? (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-md border border-slate-100 dark:border-slate-700/80 bg-slate-50/60 dark:bg-slate-800/40 p-3">
                     <p className="sm:col-span-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                        Staging
-                        {env === 'staging' ? ' · active' : ''}
+                        Staging · active
                     </p>
                     <Input
                         label="Staging base URL"
                         value={form.lasoo_staging_base_url}
                         onChange={(e) => setForm((f) => ({ ...f, lasoo_staging_base_url: e.target.value }))}
-                        required={env === 'staging'}
+                        required
                     />
                     <Input
                         label="Staging AuthKey"
@@ -53,52 +43,39 @@ export default function LasooConnectionFields({ form, setForm, mode = 'edit' }) 
                         placeholder={isCreate ? 'Provided by Lasoo' : 'Leave blank to keep current'}
                         value={form.lasoo_staging_auth_key}
                         onChange={(e) => setForm((f) => ({ ...f, lasoo_staging_auth_key: e.target.value }))}
-                        required={isCreate && env === 'staging'}
+                        required={isCreate}
                     />
                 </div>
-            )}
-
-            {showProduction && (
+            ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-md border border-slate-100 dark:border-slate-700/80 bg-slate-50/60 dark:bg-slate-800/40 p-3">
                     <p className="sm:col-span-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                        Production
-                        {env === 'production' ? ' · active' : ''}
+                        Production · active
                     </p>
                     <Input
                         label="Production base URL"
                         value={form.lasoo_production_base_url}
                         onChange={(e) => setForm((f) => ({ ...f, lasoo_production_base_url: e.target.value }))}
-                        required={env === 'production'}
+                        required
                     />
                     <Input
                         label="Production AuthKey"
                         type="password"
                         placeholder={
                             isCreate
-                                ? 'Add later once staging is verified'
+                                ? 'Provided by Lasoo'
                                 : 'Leave blank to keep current'
                         }
                         value={form.lasoo_production_auth_key}
                         onChange={(e) => setForm((f) => ({ ...f, lasoo_production_auth_key: e.target.value }))}
-                        required={isCreate && env === 'production'}
+                        required={isCreate}
                     />
                 </div>
             )}
 
-            <button
-                type="button"
-                className="text-xs font-medium text-accent-600 hover:underline dark:text-accent-400"
-                onClick={() => setShowOtherEnv((v) => !v)}
-            >
-                {showOtherEnv
-                    ? `Hide ${otherLabel} settings`
-                    : `Also configure ${otherLabel}`}
-            </button>
-
             <p className="text-xs text-slate-500 dark:text-slate-400">
                 {isCreate
-                    ? 'Listings and orders use the active environment. Start with staging, then switch to production once Lasoo approves your feed.'
-                    : 'AuthKeys are write-only. Leave blank to keep existing keys. Listings and orders use the active environment.'}
+                    ? 'Listings and orders use the selected environment only. Switch Active environment to enter the other AuthKey when ready.'
+                    : 'AuthKeys are write-only. Leave blank to keep the existing key. Only the selected environment is used for listings and orders.'}
             </p>
         </div>
     );
