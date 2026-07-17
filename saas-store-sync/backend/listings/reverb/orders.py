@@ -335,3 +335,177 @@ def fetch(user, store) -> dict:
         "message": f"Retrieved {saved} order(s) from Reverb.",
         "fetched": saved,
     }
+
+
+# Seller-initiated refund/cancel reasons required by Reverb API.
+# value = API code, label = UI text.
+REVERB_CANCEL_REASONS = [
+    ("sold_elsewhere", "Sold elsewhere / unable to fulfill"),
+    ("accidental_order", "Accidental order"),
+    ("buyer_return", "Buyer return"),
+    ("lost_shipment", "Lost shipment"),
+    ("shipping_damage", "Shipping damage"),
+    ("change_shipping_address", "Change shipping address"),
+    ("shipping_adjustments", "Shipping adjustments"),
+]
+
+_REVERB_REASON_CODES = {code for code, _ in REVERB_CANCEL_REASONS}
+_REVERB_REASON_BY_LABEL = {
+    label.lower(): code for code, label in REVERB_CANCEL_REASONS
+}
+
+
+def cancel_reasons() -> dict:
+    """Static Reverb refund reason codes for the Orders cancel modal."""
+    return {
+        "ok": True,
+        "marketplace": "reverb",
+        "environment": "production",
+        "source": "reverb_api_docs",
+        "reasons": [
+            {"value": code, "label": label}
+            for code, label in REVERB_CANCEL_REASONS
+        ],
+    }
+
+
+def normalize_cancel_reason(reason: str) -> str:
+    """Map UI selection / free text to a Reverb API reason code."""
+    text = (reason or "").strip()
+    if not text:
+        return "sold_elsewhere"
+    key = text.lower().replace(" ", "_").replace("-", "_")
+    if key in _REVERB_REASON_CODES:
+        return key
+    by_label = _REVERB_REASON_BY_LABEL.get(text.lower())
+    if by_label:
+        return by_label
+    # Common seller phrasing → closest Reverb code
+    lowered = text.lower()
+    if any(w in lowered for w in ("stock", "fulfill", "inventory", "sold")):
+        return "sold_elsewhere"
+    if "accident" in lowered or "mistake" in lowered:
+        return "accidental_order"
+    if "return" in lowered:
+        return "buyer_return"
+    if "lost" in lowered:
+        return "lost_shipment"
+    if "damage" in lowered:
+        return "shipping_damage"
+    if "address" in lowered:
+        return "change_shipping_address"
+    if "shipping" in lowered:
+        return "shipping_adjustments"
+    return "sold_elsewhere"
+
+
+def _refund_money(order: MarketplaceOrder) -> tuple[str, str]:
+    """Return (amount_str, currency) for a full refund from the local order."""
+    raw = order.raw_response_json if isinstance(order.raw_response_json, dict) else {}
+    reverb = raw.get("_reverb") if isinstance(raw.get("_reverb"), dict) else {}
+    currency = (
+        (raw.get("currency") or "")
+        or ((reverb.get("total") or {}).get("currency") if isinstance(reverb.get("total"), dict) else "")
+        or "USD"
+    )
+    cents = order.total_amount_cents
+    if cents is None and isinstance(reverb.get("total"), dict):
+        try:
+            cents = int(reverb["total"].get("amount_cents"))
+        except (TypeError, ValueError):
+            cents = None
+    if cents is None and isinstance(reverb.get("fully_refundable_amount"), dict):
+        try:
+            cents = int(reverb["fully_refundable_amount"].get("amount_cents"))
+        except (TypeError, ValueError):
+            cents = None
+    if cents is None:
+        # Prefer display amount from Reverb when cents missing
+        for key in ("fully_refundable_amount", "total"):
+            block = reverb.get(key)
+            if isinstance(block, dict) and block.get("amount") is not None:
+                return str(block["amount"]), str(currency or "USD").upper()
+        raise MarketplaceError(
+            "Cannot cancel on Reverb: order total is missing. Fetch orders again and retry."
+        )
+    amount = f"{int(cents) / 100:.2f}"
+    return amount, str(currency or "USD").upper()
+
+
+def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
+    """Cancel a Reverb order via seller-initiated refund request; mark local cancelled."""
+    if order.status in (
+        OrderStatus.CANCELLED,
+        OrderStatus.REFUNDED,
+        OrderStatus.SHIPPING_COMPLETE,
+    ):
+        return {
+            "ok": True,
+            "marketplace_ok": True,
+            "message": f"Order is already {order.status.replace('_', ' ')}.",
+        }
+
+    store = order.store
+    if not (getattr(store, "api_token", None) or "").strip():
+        raise MarketplaceError(
+            "No Reverb API token configured for this store. Add it in store settings."
+        )
+
+    reason_code = normalize_cancel_reason(reason)
+    amount, currency = _refund_money(order)
+    adapter = get_adapter(store)
+    marketplace_ok = False
+    marketplace_message = None
+
+    try:
+        adapter.create_seller_refund_request(
+            order.external_order_key or order.invoice_number,
+            reason=reason_code,
+            amount=amount,
+            currency=currency,
+            state="approved",
+            note_to_buyer=(reason or "").strip()[:500],
+        )
+        marketplace_ok = True
+    except ReverbAPIError as exc:
+        marketplace_message = str(exc)[:400]
+        logger.warning(
+            "Reverb cancel/refund failed order=%s: %s",
+            order.external_order_key,
+            marketplace_message,
+        )
+    except Exception as exc:  # noqa: BLE001
+        marketplace_message = str(exc)[:400]
+        logger.exception("Reverb cancel unexpected error order=%s", order.external_order_key)
+
+    order.status = OrderStatus.CANCELLED
+    raw = order.raw_response_json if isinstance(order.raw_response_json, dict) else {}
+    order.raw_response_json = {
+        **raw,
+        "_local_cancel": {
+            "reason": reason_code,
+            "reason_text": (reason or "").strip(),
+            "marketplace_ok": marketplace_ok,
+            "marketplace_message": marketplace_message,
+            "refund_amount": amount,
+            "currency": currency,
+        },
+    }
+    order.save(update_fields=["status", "raw_response_json", "updated_at"])
+
+    if marketplace_ok:
+        return {
+            "ok": True,
+            "marketplace_ok": True,
+            "message": "Order refunded/cancelled on Reverb and marked cancelled here.",
+        }
+
+    return {
+        "ok": True,
+        "marketplace_ok": False,
+        "message": (
+            "Order marked cancelled here. "
+            f"{marketplace_message or 'Reverb refund request failed.'} "
+            "If the order is unpaid, cancel it in the Reverb seller portal."
+        ),
+    }

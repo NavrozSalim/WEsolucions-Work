@@ -785,7 +785,7 @@ class StoreOrderShippingCompleteView(APIView):
 
 
 class StoreOrderCancelView(APIView):
-    """Cancel an order (Lasoo Refunds_Create) and mark it cancelled locally."""
+    """Cancel an order (Lasoo refund / Reverb seller refund) and mark cancelled locally."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, store_pk, pk):

@@ -930,6 +930,96 @@ class OrderNormalizeTests(TestCase):
         self.assertFalse(result["marketplace_ok"])
         self.assertEqual(order.status, OrderStatus.CANCELLED)
 
+    def test_cancel_reasons_reverb_returns_api_codes(self):
+        User = get_user_model()
+        user = User.objects.create_user(username="rvcancel", email="rvc@example.com", password="pw")
+        reverb, _ = Marketplace.objects.get_or_create(code="reverb", defaults={"name": "Reverb"})
+        store = Store.objects.create(
+            user=user, name="Reverb Cancel Store", region="USA",
+            api_token="reverb-token-1234567890", marketplace=reverb,
+            management_mode="full_store",
+        )
+        result = order_service.cancel_reasons(store)
+        values = [r["value"] for r in result["reasons"]]
+        labels = [r["label"] for r in result["reasons"]]
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["marketplace"], "reverb")
+        self.assertIn("sold_elsewhere", values)
+        self.assertIn("accidental_order", values)
+        self.assertTrue(any("Sold elsewhere" in lbl for lbl in labels))
+        self.assertNotIn("Other", values)
+
+    @patch("listings.reverb.orders.get_adapter")
+    def test_cancel_reverb_issues_refund_request(self, mock_get_adapter):
+        User = get_user_model()
+        user = User.objects.create_user(username="rvcancel2", email="rvc2@example.com", password="pw")
+        reverb, _ = Marketplace.objects.get_or_create(code="reverb", defaults={"name": "Reverb"})
+        store = Store.objects.create(
+            user=user, name="Reverb Cancel Store 2", region="USA",
+            api_token="reverb-token-1234567890", marketplace=reverb,
+            management_mode="full_store",
+        )
+        order = MarketplaceOrder.objects.create(
+            user=user,
+            store=store,
+            external_order_key="25137835",
+            invoice_number="25137835",
+            status=OrderStatus.PAID,
+            total_amount_cents=13500,
+            raw_response_json={"currency": "USD", "_reverb": {"total": {"amount": "135.00", "amount_cents": 13500, "currency": "USD"}}},
+            environment="production",
+        )
+        adapter = MagicMock()
+        adapter.create_seller_refund_request.return_value = {"id": 99, "state": "approved"}
+        mock_get_adapter.return_value = adapter
+
+        result = order_service.cancel(order, reason="sold_elsewhere")
+        order.refresh_from_db()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["marketplace_ok"])
+        self.assertEqual(order.status, OrderStatus.CANCELLED)
+        adapter.create_seller_refund_request.assert_called_once_with(
+            "25137835",
+            reason="sold_elsewhere",
+            amount="135.00",
+            currency="USD",
+            state="approved",
+            note_to_buyer="sold_elsewhere",
+        )
+
+    @patch("listings.reverb.orders.get_adapter")
+    def test_cancel_reverb_still_marks_local_on_api_error(self, mock_get_adapter):
+        from store_adapters.reverb_adapter import ReverbAPIError
+
+        User = get_user_model()
+        user = User.objects.create_user(username="rvcancel3", email="rvc3@example.com", password="pw")
+        reverb, _ = Marketplace.objects.get_or_create(code="reverb", defaults={"name": "Reverb"})
+        store = Store.objects.create(
+            user=user, name="Reverb Cancel Store 3", region="USA",
+            api_token="reverb-token-1234567890", marketplace=reverb,
+            management_mode="full_store",
+        )
+        order = MarketplaceOrder.objects.create(
+            user=user,
+            store=store,
+            external_order_key="25137836",
+            invoice_number="25137836",
+            status=OrderStatus.PAID,
+            total_amount_cents=5000,
+            raw_response_json={"currency": "USD"},
+            environment="production",
+        )
+        adapter = MagicMock()
+        adapter.create_seller_refund_request.side_effect = ReverbAPIError("Reverb API POST: 422 — unpaid")
+        mock_get_adapter.return_value = adapter
+
+        result = order_service.cancel(order, reason="Out of stock")
+        order.refresh_from_db()
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["marketplace_ok"])
+        self.assertEqual(order.status, OrderStatus.CANCELLED)
+        self.assertEqual(order.raw_response_json["_local_cancel"]["reason"], "sold_elsewhere")
+
 
 class ReverbOrderNormalizeTests(TestCase):
     def test_normalize_and_upsert_reverb_order(self):

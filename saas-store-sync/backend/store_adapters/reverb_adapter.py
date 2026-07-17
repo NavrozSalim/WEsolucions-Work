@@ -428,3 +428,37 @@ class ReverbAdapter(BaseStoreAdapter):
                         return True
                     raise
             raise
+
+    def create_seller_refund_request(
+        self,
+        order_number: str,
+        *,
+        reason: str,
+        amount: str,
+        currency: str = "USD",
+        state: str = "approved",
+        note_to_buyer: str = "",
+    ) -> dict | None:
+        """POST /api/my/orders/selling/{order_number}/refund_requests.
+
+        Seller-initiated refund (used to cancel a paid order). ``reason`` must be
+        one of Reverb's documented codes (e.g. sold_elsewhere, accidental_order).
+        """
+        oid = str(order_number or "").strip()
+        if not oid:
+            raise ValueError("order_number is required")
+        body = {
+            "state": state or "approved",
+            "reason": reason,
+            "refund_amount": {
+                "amount": str(amount),
+                "currency": (currency or "USD").upper(),
+            },
+        }
+        if note_to_buyer:
+            body["note_to_buyer"] = note_to_buyer
+        return self._request(
+            "POST",
+            f"/api/my/orders/selling/{quote(oid)}/refund_requests",
+            json=body,
+        )

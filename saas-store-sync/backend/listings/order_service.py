@@ -865,6 +865,9 @@ def _lasoo_reasons_from_refunds(client: LasooClient) -> list[str]:
 def cancel_reasons(store) -> dict:
     """Return cancel/refund reasons for the store's marketplace (for the Orders UI)."""
     kind = marketplace_kind(store.marketplace)
+    if kind == "reverb":
+        from .reverb import orders as reverb_orders
+        return reverb_orders.cancel_reasons()
     if kind != "lasoo":
         raise MarketplaceError(
             f'Cancel reasons are not available for "{kind or "this marketplace"}" yet.'
@@ -901,12 +904,17 @@ def cancel_reasons(store) -> dict:
 
 
 def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
-    """Cancel an order via Lasoo Refunds_Create and mark it cancelled locally.
+    """Cancel an order on the marketplace and mark it cancelled locally.
 
-    Lasoo uses Refunds_Create for pre-dispatch cancellations. The order is always
-    marked cancelled in Store Sync so fulfillment can stop; ``marketplace_ok``
-    reports whether Lasoo accepted the request.
+    Lasoo: Refunds_Create. Reverb: seller-initiated refund_requests (full refund).
+    The order is always marked cancelled locally so fulfillment can stop;
+    ``marketplace_ok`` reports whether the marketplace accepted the request.
     """
+    kind = marketplace_kind(order.store.marketplace)
+    if kind == "reverb":
+        from .reverb import orders as reverb_orders
+        return reverb_orders.cancel(order, reason=reason)
+
     _require_lasoo(order.store)
 
     if order.status in _CANCEL_BLOCKED:
