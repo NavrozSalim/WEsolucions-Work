@@ -54,6 +54,18 @@ class MapperTests(TestCase):
         product_key, variant_key = mapper.resolve_keys({"sku": "ABC-1"})
         self.assertEqual((product_key, variant_key), ("ABC-1", "ABC-1"))
 
+    def test_keys_treat_na_variant_as_blank(self):
+        product_key, variant_key = mapper.resolve_keys({
+            "sku": "JJ-XH1899BK-FCBY",
+            "product_key": "JJ-XH1899BK-FCBY",
+            "variant_key": "N/A",
+        })
+        self.assertEqual(product_key, "JJ-XH1899BK-FCBY")
+        self.assertEqual(variant_key, "JJ-XH1899BK-FCBY")
+        for placeholder in ("NA", "n/a", "None", "null", "-", ""):
+            _, vk = mapper.resolve_keys({"sku": "SKU-1", "variant_key": placeholder})
+            self.assertEqual(vk, "SKU-1", msg=f"placeholder={placeholder!r}")
+
     def test_build_variant_prices_in_cents(self):
         variant = mapper.build_variant(VALID_DATA)
         self.assertEqual(variant["variantOriginalPriceCents"], 2999)

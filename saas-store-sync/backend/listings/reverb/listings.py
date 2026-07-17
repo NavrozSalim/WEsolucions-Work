@@ -116,7 +116,13 @@ def _photo_list(image_urls) -> list[str]:
 
 
 def resolve_keys(data: dict) -> tuple[str, str]:
-    sku = str(data.get("sku") or data.get("variant_key") or data.get("product_key") or "").strip()
+    from listings.lasoo.mapper import clean_key
+
+    sku = (
+        clean_key(data.get("sku"))
+        or clean_key(data.get("variant_key"))
+        or clean_key(data.get("product_key"))
+    )
     return sku, sku
 
 

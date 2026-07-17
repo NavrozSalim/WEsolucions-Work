@@ -57,15 +57,38 @@ def build_external_data_object(data: dict) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
 
+_BLANK_KEY_TOKENS = frozenset({
+    "",
+    "n/a",
+    "na",
+    "n.a",
+    "n.a.",
+    "none",
+    "null",
+    "nil",
+    "-",
+    "--",
+    ".",
+})
+
+
+def clean_key(value) -> str:
+    """Normalize a product/variant key; treat N/A-style placeholders as blank."""
+    text = str(value or "").strip()
+    if not text or text.lower() in _BLANK_KEY_TOKENS:
+        return ""
+    return text
+
+
 def resolve_keys(data: dict) -> tuple[str, str]:
     """Resolve (externalProductKey, externalVariantKey).
 
     Falls back to SKU for single-variant products where the user left the
-    product/variant key blank.
+    product/variant key blank (or put N/A / NA / none).
     """
-    sku = (data.get("sku") or "").strip()
-    product_key = (data.get("product_key") or "").strip() or sku
-    variant_key = (data.get("variant_key") or "").strip() or sku
+    sku = clean_key(data.get("sku"))
+    product_key = clean_key(data.get("product_key")) or sku
+    variant_key = clean_key(data.get("variant_key")) or sku
     return product_key, variant_key
 
 
