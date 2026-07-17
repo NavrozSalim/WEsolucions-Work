@@ -260,6 +260,68 @@ class ListingServiceTests(TestCase):
         self.assertIn("BAD-1", body)
         self.assertIn("Missing title", body)
         self.assertNotIn("OK-1", body)
+        self.assertIn("Error", body)
+
+    def test_upload_export_shows_uploaded_vs_created(self):
+        StoreListing.objects.create(
+            user=self.user,
+            store=self.store,
+            external_product_key="UP-1",
+            external_variant_key="UP-1",
+            sku="UP-1",
+            title="On marketplace",
+            description="d",
+            brand="b",
+            image_urls="https://img.example.com/a.jpg",
+            original_price="10",
+            sale_price="9",
+            status=ListingStatus.UPLOADED_PRODUCTION,
+            action="create",
+        )
+        StoreListing.objects.create(
+            user=self.user,
+            store=self.store,
+            external_product_key="CR-1",
+            external_variant_key="CR-1",
+            sku="CR-1",
+            title="Ready only",
+            description="d",
+            brand="b",
+            image_urls="https://img.example.com/b.jpg",
+            original_price="10",
+            sale_price="9",
+            status=ListingStatus.READY,
+            action="create",
+        )
+        upload = ListingUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            filename="mix.csv",
+            source=ListingUpload.Source.FILE,
+            action="create",
+            status=ListingUpload.Status.COMPLETED,
+            total_rows=3,
+            success_rows=2,
+            error_rows=1,
+            rows_json=[
+                {"row_number": 2, "sku": "UP-1", "valid": True, "imported": True, "errors": []},
+                {"row_number": 3, "sku": "CR-1", "valid": True, "imported": True, "errors": []},
+                {
+                    "row_number": 4,
+                    "sku": "BAD-1",
+                    "valid": False,
+                    "imported": False,
+                    "errors": ['A listing with SKU "NA" already exists. Use the Mapped action to update it.'],
+                },
+            ],
+        )
+        resp = _listing_upload_csv_response(upload, errors_only=False)
+        body = resp.content.decode()
+        self.assertIn("Row,SKU,Status,Error Logs", body)
+        self.assertIn("UP-1,Uploaded", body)
+        self.assertIn("CR-1,Created", body)
+        self.assertIn("BAD-1,Error", body)
+        self.assertIn("already exists", body)
 
     def test_delete_upload_history_only(self):
         content = csv_import.build_template_csv("create").encode()

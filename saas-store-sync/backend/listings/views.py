@@ -2,6 +2,7 @@
 import csv
 import logging
 
+from django.db.models import Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import status
@@ -298,8 +299,36 @@ def _listing_upload_row_error_text(row: dict) -> str:
     return str(errs).replace('\n', ' ') if errs else ''
 
 
+def _listing_upload_status_label(listing, *, row_ok: bool, imported: bool) -> str:
+    """Human status for upload export: Created / Uploaded / Error / Skipped."""
+    if not row_ok:
+        return 'Error'
+    if listing is not None:
+        if listing.status in (
+            ListingStatus.UPLOADED_STAGING,
+            ListingStatus.UPLOADED_PRODUCTION,
+        ) or listing.action == ListingAction.MAPPED:
+            return 'Uploaded'
+        if listing.status == ListingStatus.VALIDATION_FAILED:
+            return 'Error'
+        if listing.status == ListingStatus.FAILED:
+            return 'Error'
+        # ready / draft — in system but not pushed to marketplace yet
+        return 'Created'
+    if imported:
+        return 'Created'
+    return 'Skipped'
+
+
 def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) -> HttpResponse:
-    """Build CSV from ListingUpload.rows_json (per-row import report)."""
+    """Build CSV from ListingUpload.rows_json (per-row import report).
+
+    Columns: Row, SKU, Status, Error Logs.
+    Status reflects current listing state when possible:
+      Created  — saved in system, not yet on marketplace
+      Uploaded — on marketplace (or Mapped)
+      Error    — import/validation/publish failure (reason in Error Logs)
+    """
     rows = upload.rows_json if isinstance(upload.rows_json, list) else []
     if errors_only:
         rows = [r for r in rows if not r.get('valid', True) or r.get('errors')]
@@ -321,14 +350,50 @@ def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) ->
             writer.writerow(['', upload.filename or '', status_label, msg])
         return response
 
+    # Batch-load current listings so Status can show Uploaded vs Created.
+    keys = set()
     for r in rows:
-        sku = r.get('sku') or r.get('variant_key') or ''
+        for field in ('sku', 'variant_key'):
+            val = (r.get(field) or '').strip()
+            if val:
+                keys.add(val)
+    listings_by_key = {}
+    if keys:
+        qs = StoreListing.objects.filter(store_id=upload.store_id).filter(
+            Q(sku__in=keys) | Q(external_variant_key__in=keys)
+        ).only('sku', 'external_variant_key', 'status', 'action', 'validation_errors_json')
+        for listing in qs:
+            for key in (listing.sku, listing.external_variant_key):
+                k = (key or '').strip()
+                if k:
+                    listings_by_key[k] = listing
+
+    for r in rows:
+        sku = (r.get('sku') or r.get('variant_key') or '').strip()
+        variant = (r.get('variant_key') or r.get('sku') or '').strip()
         err_text = _listing_upload_row_error_text(r)
-        ok = r.get('valid', True) and not err_text
+        row_ok = r.get('valid', True) and not err_text
+        listing = listings_by_key.get(sku) or listings_by_key.get(variant)
+
+        # Prefer live listing validation errors when row report has none.
+        if listing and listing.status == ListingStatus.VALIDATION_FAILED and not err_text:
+            errs = listing.validation_errors_json or []
+            if isinstance(errs, list):
+                err_text = '; '.join(str(e).replace('\n', ' ') for e in errs if e)
+            row_ok = False
+
+        status_label = _listing_upload_status_label(
+            listing, row_ok=row_ok, imported=bool(r.get('imported')),
+        )
+        # Marketplace publish failure stored on the listing
+        if listing and listing.status == ListingStatus.FAILED and not err_text:
+            err_text = 'Marketplace upload failed.'
+            status_label = 'Error'
+
         writer.writerow([
             r.get('row_number') or '',
-            sku,
-            'Created' if ok and r.get('imported') else ('Error' if not ok else 'Skipped'),
+            sku or variant,
+            status_label,
             err_text,
         ])
     return response
