@@ -93,6 +93,64 @@ class CsvImportTests(TestCase):
         self.assertEqual(rows[0]["action"], "create")
         self.assertEqual(rows[0]["row_number"], 2)
         self.assertFalse(rows[0]["infinite_quantity"])
+        self.assertEqual(rows[0]["vendor_name"], "Nora Inventory")
+        self.assertEqual(rows[0]["marketplace_name"], "Lasoo")
+
+    def test_parse_action_instructional_text(self):
+        content = (
+            "Action,SKU,Title,Original Price,Sale Price,Inventory,Image URLs,Brand,Description\n"
+            "Create - This will Create Item On Marketplace,ABC-1,Tee,10,9,1,"
+            "https://img.example.com/a.jpg,Brand,Desc\n"
+        ).encode()
+        rows = csv_import.parse_upload("listings.csv", content)
+        self.assertEqual(rows[0]["action"], "create")
+
+    def test_parse_xlsx_with_banner_header(self):
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["System Required Headers", None, None, "Marketplace Required Headers"])
+        ws.append(
+            [
+                "Vendor Name",
+                "Marketplace Name",
+                "Store Name",
+                "Action",
+                "SKU",
+                "Title",
+                "Description",
+                "Brand",
+                "Image URLs",
+                "Inventory",
+                "Original Price",
+                "Sale Price",
+            ]
+        )
+        ws.append(
+            [
+                "Amazon AU",
+                "Lasoo",
+                "KTFS",
+                "Mapped - bring old items",
+                "ABC-1",
+                "Test product",
+                "Desc",
+                "Brand",
+                "https://img.example.com/a.jpg",
+                3,
+                19.99,
+                15.5,
+            ]
+        )
+        buf = io.BytesIO()
+        wb.save(buf)
+        rows = csv_import.parse_upload("listings.xlsx", buf.getvalue())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sku"], "ABC-1")
+        self.assertEqual(rows[0]["action"], "mapped")
+        self.assertEqual(rows[0]["vendor_name"], "Amazon AU")
+        self.assertEqual(rows[0]["store_name"], "KTFS")
 
     def test_parse_xlsx(self):
         from openpyxl import Workbook
@@ -247,6 +305,62 @@ class ListingServiceTests(TestCase):
         listing = StoreListing.objects.get(store=self.store)
         self.assertEqual(listing.action, "mapped")
         self.assertEqual(listing.status, ListingStatus.UPLOADED_STAGING)
+        self.assertEqual(listing.source_vendor_code, "noraau")
+
+    def test_bulk_import_rejects_wrong_marketplace_name(self):
+        content = (
+            "Action,SKU,Title,Description,Brand,Image URLs,Inventory,Original Price,Sale Price,"
+            "Marketplace Name\n"
+            "Create,ABC-1,Tee,Desc,Brand,https://img.example.com/a.jpg,1,10,9,Reverb\n"
+        ).encode()
+        result = listing_service.bulk_import(self.user, self.store, "bad-mp.csv", content, action="create")
+        self.assertEqual(result["imported"], 0)
+        self.assertTrue(any("Marketplace Name" in e for e in result["rows"][0]["errors"]))
+
+    def test_bulk_import_accepts_lesso_alias_and_store_name(self):
+        content = (
+            "Action,SKU,Title,Description,Brand,Image URLs,Inventory,Original Price,Sale Price,"
+            "Marketplace Name,Store Name,Vendor Name,Vendor ID\n"
+            "Create,ABC-2,Tee,Desc,Brand,https://img.example.com/a.jpg,1,10,9,"
+            "Lesso,Lasoo Test Store,Nora Inventory,NORA-1\n"
+        ).encode()
+        result = listing_service.bulk_import(self.user, self.store, "ok-route.csv", content, action="create")
+        self.assertEqual(result["imported"], 1)
+        listing = StoreListing.objects.get(sku="ABC-2")
+        self.assertEqual(listing.source_vendor_code, "noraau")
+        self.assertEqual(listing.vendor_id, "NORA-1")
+
+    def test_bulk_import_routes_to_named_store(self):
+        other = Store.objects.create(
+            user=self.user,
+            name="KTFS (Vevor)",
+            region="AU",
+            api_token="",
+            marketplace=self.store.marketplace,
+            management_mode="full_store",
+            lasoo_environment="staging",
+            lasoo_staging_auth_key="test-key",
+        )
+        content = (
+            "Action,SKU,Title,Description,Brand,Image URLs,Inventory,Original Price,Sale Price,"
+            "Store Name,Marketplace Name\n"
+            "Create,ROUTE-1,Tee,Desc,Brand,https://img.example.com/a.jpg,1,10,9,"
+            "KTFS (Vevor),Lasoo\n"
+        ).encode()
+        result = listing_service.bulk_import(self.user, self.store, "route.csv", content, action="create")
+        self.assertEqual(result["imported"], 1)
+        self.assertEqual(StoreListing.objects.filter(store=other, sku="ROUTE-1").count(), 1)
+        self.assertEqual(StoreListing.objects.filter(store=self.store, sku="ROUTE-1").count(), 0)
+
+    def test_bulk_import_nora_requires_vendor_id(self):
+        content = (
+            "Action,SKU,Title,Description,Brand,Image URLs,Inventory,Original Price,Sale Price,"
+            "Vendor Name\n"
+            "Create,ABC-3,Tee,Desc,Brand,https://img.example.com/a.jpg,1,10,9,Nora Inventory\n"
+        ).encode()
+        result = listing_service.bulk_import(self.user, self.store, "nora.csv", content, action="create")
+        self.assertEqual(result["imported"], 0)
+        self.assertTrue(any("Vendor ID" in e for e in result["rows"][0]["errors"]))
 
     def test_delete_template_only_needs_sku(self):
         content = csv_import.build_template_csv("delete").encode()

@@ -77,6 +77,14 @@ class StoreListing(models.Model):
         db_index=True,
         help_text='Supplier Vendor ID (Nora BarCode after -G1/-V* normalization).',
     )
+    # Template "Vendor Name" resolved to a vendor code (e.g. noraau, amazonus, amazonau).
+    source_vendor_code = models.CharField(
+        max_length=50,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text='Canonical source vendor code from the Vendor Name template column.',
+    )
     image_urls = models.TextField(blank=True, default='')  # pipe-joined: a|b|c
     inventory = models.IntegerField(default=0)
     infinite_quantity = models.BooleanField(default=False)

@@ -15,6 +15,7 @@ from store_adapters.reverb_adapter import ReverbAPIError
 from stores.credentials import marketplace_kind
 
 from . import csv_import
+from . import template_routing
 from .errors import MarketplaceError
 from .lasoo import mapper, validator
 from .lasoo.client import LasooClient
@@ -157,6 +158,10 @@ def _apply_fields(listing: StoreListing, data: dict):
     listing.barcode = (data.get("barcode") or data.get("upc") or "").strip()
     listing.vendor_url = (data.get("vendor_url") or "").strip()[:1000]
     listing.vendor_id = (data.get("vendor_id") or "").strip()[:255]
+    source_code = (data.get("source_vendor_code") or data.get("vendor_code") or "").strip()
+    if not source_code and (data.get("vendor_name") or "").strip():
+        source_code = template_routing.resolve_vendor_code(data.get("vendor_name")) or ""
+    listing.source_vendor_code = (source_code or "")[:50]
     if _store_kind(store) == "reverb":
         listing.image_urls = "|".join(
             p for p in str(data.get("image_urls") or "").replace(";", "|").replace("\n", "|").replace(",", "|").split("|")
@@ -407,6 +412,8 @@ def _listing_to_data(listing: StoreListing) -> dict:
         "barcode": listing.barcode,
         "vendor_url": listing.vendor_url,
         "vendor_id": listing.vendor_id,
+        "source_vendor_code": listing.source_vendor_code,
+        "vendor_name": listing.source_vendor_code,
         "image_urls": listing.image_urls,
         "inventory": listing.inventory,
         "infinite_quantity": listing.infinite_quantity,
@@ -522,7 +529,12 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
     """Import listings from a CSV/XLSX template. One action per file:
     Create (new listings), Mapped (already on the store), Delete (SKU only).
     Invalid Create/Mapped rows are saved with validation_failed status so they
-    show under the Error filter on Created products."""
+    show under the Error filter on Created products.
+
+    Optional template columns Vendor Name / Marketplace Name / Store Name are
+    validated and used for routing (Store Name may target another of the user's
+    stores).
+    """
     rows = csv_import.parse_upload(filename, content)
     if not rows:
         raise MarketplaceError("No data rows found in the uploaded file.")
@@ -531,20 +543,29 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
     if file_action == ListingAction.DELETE:
         return _bulk_delete(user, store, filename, rows)
 
-    environment = _listing_env(store)
     preview, imported, error_rows = [], 0, 0
+    # Activity is recorded against the UI store; rows may land on other stores.
+    activity_store = store
     for row in rows:
-        errors = _validate_listing(store, row)
+        target_store, route_errors = template_routing.resolve_row_store(user, store, row)
+        vendor_code, vendor_errors = template_routing.validate_vendor_name_row(row)
+        if vendor_code:
+            row["source_vendor_code"] = vendor_code
+
+        field_errors = _validate_listing(target_store, row)
+        errors = list(route_errors) + list(vendor_errors) + list(field_errors)
         row_result = {
             "row_number": row.get("row_number"),
             "sku": row.get("sku", ""),
             "variant_key": row.get("variant_key") or row.get("sku", ""),
+            "store_name": getattr(target_store, "name", "") or "",
             "errors": errors,
             "valid": not errors,
             "imported": False,
         }
 
-        _, variant_key = _resolve_keys(store, row)
+        environment = _listing_env(target_store)
+        _, variant_key = _resolve_keys(target_store, row)
         if not variant_key:
             # Nothing to upsert by; keep the row purely in the upload report.
             error_rows += 1
@@ -552,7 +573,7 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
             continue
 
         existing = StoreListing.objects.filter(
-            store=store, external_variant_key=variant_key, environment=environment,
+            store=target_store, external_variant_key=variant_key, environment=environment,
         ).first()
         if file_action == ListingAction.CREATE and existing and not errors:
             row_result["valid"] = False
@@ -565,7 +586,7 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
             continue
 
         listing = existing or StoreListing(
-            user=user, store=store,
+            user=user, store=target_store,
             external_variant_key=variant_key,
             external_product_key=variant_key,
             environment=environment,
@@ -573,6 +594,12 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
         listing.action = file_action
         _apply_fields(listing, row)
         _finalize_validation(listing, row)
+        if route_errors or vendor_errors:
+            merged = list(route_errors) + list(vendor_errors) + list(
+                listing.validation_errors_json or []
+            )
+            listing.validation_errors_json = merged
+            listing.status = ListingStatus.VALIDATION_FAILED
         listing.save()
         if errors:
             # Persisted with validation_failed status -> Error filter on Created products.
@@ -583,7 +610,7 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
         preview.append(row_result)
 
     record_activity(
-        user, store,
+        user, activity_store,
         action=file_action,
         source=ListingUpload.Source.FILE,
         filename=filename,

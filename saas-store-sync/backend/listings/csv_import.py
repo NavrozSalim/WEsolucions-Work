@@ -35,6 +35,15 @@ COLUMN_MAP = {
     "vendor link": "vendor_url",
     "vendor id": "vendor_id",
     "vendor_id": "vendor_id",
+    "vendor name": "vendor_name",
+    "vendor_name": "vendor_name",
+    "source vendor": "vendor_name",
+    "marketplace name": "marketplace_name",
+    "marketplace_name": "marketplace_name",
+    "marketplace": "marketplace_name",
+    "store name": "store_name",
+    "store_name": "store_name",
+    "store": "store_name",
     "image urls": "image_urls",
     "image url": "image_urls",
     "photos": "image_urls",
@@ -51,7 +60,11 @@ COLUMN_MAP = {
     "free shipping": "free_shipping",
 }
 
+# System routing columns first, then marketplace payload fields.
 LASOO_TEMPLATE_HEADERS = [
+    "Vendor Name",
+    "Marketplace Name",
+    "Store Name",
     "Action",
     "Product Key",
     "Variant Key",
@@ -71,6 +84,9 @@ LASOO_TEMPLATE_HEADERS = [
 ]
 
 REVERB_TEMPLATE_HEADERS = [
+    "Vendor Name",
+    "Marketplace Name",
+    "Store Name",
     "Action",
     "SKU",
     "Title",
@@ -102,6 +118,21 @@ VALID_ACTIONS = {"create", "mapped", "delete"}
 
 _TRUE_VALUES = {"true", "1", "yes", "y", "t"}
 
+# Headers that strongly indicate the real column row (vs a banner like
+# "System Required Headers").
+_HEADER_MARKERS = {
+    "action",
+    "sku",
+    "product key",
+    "variant key",
+    "vendor name",
+    "marketplace name",
+    "store name",
+    "title",
+    "sale price",
+    "original price",
+}
+
 
 def _is_reverb_store(store) -> bool:
     try:
@@ -125,25 +156,90 @@ def _cell_text(value) -> str:
     return str(value).strip()
 
 
+def _normalize_action(raw: str) -> str:
+    """Accept plain Create/Mapped/Delete or instructional cells like 'Create - …'."""
+    action = str(raw or "").strip().lower()
+    if action in VALID_ACTIONS:
+        return action
+    for valid in ("create", "mapped", "delete"):
+        if action.startswith(valid):
+            return valid
+    return ""
+
+
+def _header_score(cells: list[str]) -> int:
+    score = 0
+    for cell in cells:
+        key = str(cell or "").strip().lower()
+        if key in _HEADER_MARKERS or key in COLUMN_MAP:
+            score += 1
+    return score
+
+
+def _pick_header_row(raw_rows: list[tuple]) -> tuple[list[str], list[tuple]]:
+    """Return (headers, data_rows). Skips banner rows used in Excel templates."""
+    if not raw_rows:
+        return [], []
+    best_idx, best_score = 0, -1
+    scan_limit = min(5, len(raw_rows))
+    for idx in range(scan_limit):
+        cells = [_cell_text(c) for c in raw_rows[idx]]
+        score = _header_score(cells)
+        if score > best_score:
+            best_idx, best_score = idx, score
+    if best_score < 2:
+        best_idx = 0
+    headers = [_cell_text(c) for c in raw_rows[best_idx]]
+    return headers, raw_rows[best_idx + 1 :]
+
+
+def _records_from_header_and_rows(headers: list[str], data_rows: list[tuple]) -> list[dict]:
+    """Build row dicts. Duplicate headers keep the last non-empty value."""
+    records = []
+    for row in data_rows:
+        record: dict[str, str] = {}
+        for i, header in enumerate(headers):
+            if not header:
+                continue
+            value = _cell_text(row[i]) if i < len(row) else ""
+            if header in record and not value:
+                continue
+            record[header] = value
+        records.append(record)
+    return records
+
+
 def _read_xlsx_rows(content: bytes) -> list[dict]:
     from openpyxl import load_workbook
 
     wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     try:
         ws = wb.active
-        rows_iter = ws.iter_rows(values_only=True)
-        header = next(rows_iter, None) or ()
-        headers = [_cell_text(h) for h in header]
-        records = []
-        for row in rows_iter:
-            records.append({headers[i]: _cell_text(cell) for i, cell in enumerate(row) if i < len(headers)})
-        return records
+        raw_rows = [tuple(row) for row in ws.iter_rows(values_only=True)]
+        headers, data_rows = _pick_header_row(raw_rows)
+        return _records_from_header_and_rows(headers, data_rows)
     finally:
         wb.close()
 
 
 def _read_csv_rows(content: bytes) -> list[dict]:
     text = content.decode("utf-8-sig", errors="replace")
+    # Detect banner: if first line isn't a real header, use the highest-scoring line.
+    sample = text.splitlines()[:5]
+    if len(sample) >= 2:
+        scored = []
+        for i, line in enumerate(sample):
+            try:
+                cells = next(csv.reader([line]))
+            except Exception:  # noqa: BLE001
+                cells = [line]
+            scored.append((_header_score([_cell_text(c) for c in cells]), i))
+        scored.sort(reverse=True)
+        best_score, best_idx = scored[0]
+        if best_score >= 2 and best_idx > 0:
+            # Rebuild CSV without the banner lines.
+            lines = text.splitlines(keepends=True)
+            text = "".join(lines[best_idx:])
     reader = csv.DictReader(io.StringIO(text))
     return [
         {(k or "").strip(): (v or "").strip() for k, v in raw.items()}
@@ -165,6 +261,13 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
         for header, value in raw.items():
             key = COLUMN_MAP.get(str(header).strip().lower())
             if key:
+                # Prefer first non-empty when duplicate logical columns collide.
+                existing = normalized.get(key)
+                if existing and not str(value).strip():
+                    continue
+                if existing and str(value).strip():
+                    normalized[key] = str(value).strip()
+                    continue
                 normalized[key] = str(value).strip()
         if not any(normalized.values()):
             continue
@@ -193,11 +296,15 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
             normalized["category_uuid"] = normalized["category"]
         if normalized.get("sale_price") and not normalized.get("original_price"):
             normalized["original_price"] = normalized["sale_price"]
-        action = str(normalized.get("action", "")).strip().lower()
-        normalized["action"] = action if action in VALID_ACTIONS else ""
+        normalized["action"] = _normalize_action(normalized.get("action", ""))
         normalized["row_number"] = idx
         rows.append(normalized)
     return rows
+
+
+def _marketplace_label(store) -> str:
+    mp = getattr(store, "marketplace", None)
+    return (getattr(mp, "name", None) or getattr(mp, "code", None) or "").strip()
 
 
 def build_template_csv(action: str = "create", store=None) -> str:
@@ -210,8 +317,14 @@ def build_template_csv(action: str = "create", store=None) -> str:
         writer.writerow({"Action": "Delete", "SKU": "AMH-EXAMPLE-001"})
         return out.getvalue()
 
+    store_name = (getattr(store, "name", None) or "").strip()
+    marketplace_name = _marketplace_label(store) if store is not None else ""
+
     if _is_reverb_store(store):
         sample = {
+            "Vendor Name": "Amazon US",
+            "Marketplace Name": marketplace_name or "Reverb",
+            "Store Name": store_name,
             "Action": "Mapped" if action == "mapped" else "Create",
             "SKU": "AMH-EXAMPLE-001",
             "Title": "Example Guitar Pedal",
@@ -239,6 +352,9 @@ def build_template_csv(action: str = "create", store=None) -> str:
         return out.getvalue()
 
     sample = {
+        "Vendor Name": "Nora Inventory",
+        "Marketplace Name": marketplace_name or "Lasoo",
+        "Store Name": store_name,
         "Action": "Mapped" if action == "mapped" else "Create",
         "Product Key": "TSHIRT-001",
         "Variant Key": "TSHIRT-001-BLACK-M",

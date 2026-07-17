@@ -23,7 +23,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'store', 'external_product_key', 'external_variant_key',
             'title', 'description', 'brand', 'category', 'sku', 'barcode',
-            'vendor_url', 'vendor_id', 'image_urls', 'inventory', 'infinite_quantity',
+            'vendor_url', 'vendor_id', 'source_vendor_code', 'image_urls', 'inventory', 'infinite_quantity',
             'original_price', 'sale_price', 'vendor_price',
             'make', 'model', 'finish', 'year',
             'condition_uuid', 'category_uuid', 'currency', 'upc_does_not_apply',
