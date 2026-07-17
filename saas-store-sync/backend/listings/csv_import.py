@@ -85,6 +85,7 @@ LASOO_TEMPLATE_HEADERS = [
 
 REVERB_TEMPLATE_HEADERS = [
     "Vendor Name",
+    "Vendor URL",
     "Marketplace Name",
     "Store Name",
     "Action",
@@ -102,7 +103,6 @@ REVERB_TEMPLATE_HEADERS = [
     "Inventory",
     "UPC",
     "UPC Does Not Apply",
-    "Vendor URL",
     "Photo URLs",
     "status",
     "free_shipping",

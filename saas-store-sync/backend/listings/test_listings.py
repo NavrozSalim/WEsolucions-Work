@@ -393,6 +393,9 @@ class ListingServiceTests(TestCase):
             api_token="tok", marketplace=reverb, management_mode="full_store",
         )
         csv_text = csv_import.build_template_csv("create", store=store2)
+        cols = csv_text.splitlines()[0].split(",")
+        self.assertEqual(cols[0], "Vendor Name")
+        self.assertEqual(cols[1], "Vendor URL")
         self.assertIn("Make", csv_text)
         self.assertIn("Category", csv_text)
         self.assertIn("status", csv_text)
