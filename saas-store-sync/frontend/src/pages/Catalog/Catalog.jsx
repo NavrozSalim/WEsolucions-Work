@@ -88,12 +88,35 @@ const uploadStatusLabel = {
     processing: 'Processing', partial: 'Partial', failed: 'Failed',
     completed: 'Success',
 };
-/** Managed-store Upload history: all OK → Created; any failure → Error. */
-const managedUploadStatusLabel = {
-    completed: 'Created',
-    partial: 'Error',
-    failed: 'Error',
-};
+/** Managed-store Upload history status badge text. */
+function managedUploadStatusText(u) {
+    if (u.status === 'partial' || u.status === 'failed') return 'Error';
+    if (u.action === 'delete') return 'Deleted';
+    if (u.action === 'mapped') return 'Mapped';
+    return 'Created';
+}
+
+function formatListingLogActionType(upload) {
+    const name = (upload.filename || '').trim();
+    if (name.startsWith('Edit ')) return 'edit';
+    if (name === 'Publish to marketplace') return 'publish';
+    if (name === 'Push inventory to marketplace') return 'push inventory';
+    return (upload.action || 'event').replace(/_/g, ' ');
+}
+
+/** Merge scrape/sync CatalogActivityLog rows with listing Edit/Publish/Push uploads. */
+function mergeActivityLogs(catalogLogs, listingUploads) {
+    const fromUploads = (listingUploads || []).map((u) => ({
+        id: `listing-upload-${u.id}`,
+        created_at: u.created_at,
+        action_type: formatListingLogActionType(u),
+        message: u.message || u.filename || 'Listing activity',
+        user_email: u.user_name || '',
+    }));
+    return [...(catalogLogs || []), ...fromUploads].sort(
+        (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
+    );
+}
 
 function formatDate(iso) {
     if (!iso) return '—';
@@ -1282,6 +1305,23 @@ export default function Catalog() {
             .catch(() => { /* silent — next scheduled re-fetch will retry */ });
     }, [selectedStore, viewMode, currentPage, debouncedSearch, statusFilter]);
 
+    const refreshActivityLogs = useCallback(() => {
+        if (!selectedStore) return Promise.resolve();
+        const storeData = storeList.find((s) => s.id === selectedStore);
+        const managed = storeData?.management_mode === 'full_store';
+        const catalogReq = getCatalogActivityLogs(selectedStore)
+            .then((res) => (Array.isArray(res.data) ? res.data : []))
+            .catch(() => []);
+        const listingReq = managed
+            ? getListingUploads(selectedStore, { scope: 'logs' })
+                .then((res) => (Array.isArray(res.data) ? res.data : []))
+                .catch(() => [])
+            : Promise.resolve([]);
+        return Promise.all([catalogReq, listingReq]).then(([catalog, listing]) => {
+            setActivityLogs(mergeActivityLogs(catalog, listing));
+        });
+    }, [selectedStore, storeList]);
+
     const refreshLiveData = useCallback((opts = {}) => {
         if (!selectedStore) return;
         const skipStores = Boolean(opts.skipStores);
@@ -1291,17 +1331,21 @@ export default function Catalog() {
             getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
         }
         if (!skipUploads && viewMode === 'history') {
-            getCatalogUploads(selectedStore)
+            const storeData = storeList.find((s) => s.id === selectedStore);
+            const managed = storeData?.management_mode === 'full_store';
+            const req = managed
+                ? getListingUploads(selectedStore, { scope: 'history' })
+                : getCatalogUploads(selectedStore);
+            req
                 .then((r) => setUploads(Array.isArray(r.data) ? r.data : []))
                 .catch(() => {});
         }
         if (viewMode === 'products' && !skipProducts) {
             refreshProducts();
         } else if (viewMode === 'logs') {
-            getCatalogActivityLogs(selectedStore).then((r) =>
-                setActivityLogs(Array.isArray(r.data) ? r.data : []));
+            refreshActivityLogs().catch(() => {});
         }
-    }, [selectedStore, selectedMarketplace, viewMode, refreshProducts]);
+    }, [selectedStore, selectedMarketplace, viewMode, refreshProducts, refreshActivityLogs, storeList]);
 
     const fetchUploadHistory = useCallback((storeId, signal) => {
         const id = ++uploadsFetchGenRef.current;
@@ -1310,7 +1354,7 @@ export default function Catalog() {
         setUploadsLoading(true);
         setUploadsError('');
         const req = managed
-            ? getListingUploads(storeId)
+            ? getListingUploads(storeId, { scope: 'history' })
             : getCatalogUploads(storeId, { signal });
         req
             .then((res) => {
@@ -1409,14 +1453,13 @@ export default function Catalog() {
         if (!selectedStore || viewMode !== 'logs') return;
         setLogsLoading(true);
         setMessage('');
-        getCatalogActivityLogs(selectedStore)
-            .then((res) => setActivityLogs(Array.isArray(res.data) ? res.data : []))
+        refreshActivityLogs()
             .catch((err) => {
                 setActivityLogs([]);
                 setMessage(formatCatalogError(err));
             })
             .finally(() => setLogsLoading(false));
-    }, [selectedStore, viewMode]);
+    }, [selectedStore, viewMode, refreshActivityLogs]);
 
     useEffect(() => {
         if (loading && !selectedStore) {
@@ -2070,8 +2113,7 @@ export default function Catalog() {
                         refreshProducts();
                     }
                     if (viewMode === 'logs') {
-                        getCatalogActivityLogs(selectedStore).then((r) =>
-                            setActivityLogs(Array.isArray(r.data) ? r.data : []));
+                        refreshActivityLogs().catch(() => {});
                     }
                 });
         };
@@ -2211,9 +2253,7 @@ export default function Catalog() {
             if (viewMode === 'products') {
                 refreshProducts();
             }
-            getCatalogActivityLogs(selectedStore)
-                .then((r) => setActivityLogs(Array.isArray(r.data) ? r.data : []))
-                .catch(() => {});
+            refreshActivityLogs().catch(() => {});
             getCatalogStores(selectedMarketplace || null)
                 .then((r) => setStoreList(Array.isArray(r.data) ? r.data : []))
                 .catch(() => {});
@@ -2383,8 +2423,7 @@ export default function Catalog() {
                 }
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
                 if (viewMode === 'logs') {
-                    getCatalogActivityLogs(selectedStore).then((r) =>
-                        setActivityLogs(Array.isArray(r.data) ? r.data : []));
+                    refreshActivityLogs().catch(() => {});
                 }
             })
             .catch((err) => {
@@ -2449,8 +2488,7 @@ export default function Catalog() {
                         setScrapeProgress(data);
                     })
                     .catch(() => {});
-                getCatalogActivityLogs(selectedStore).then((r) =>
-                    setActivityLogs(Array.isArray(r.data) ? r.data : [])).catch(() => {});
+                refreshActivityLogs().catch(() => {});
             })
             .catch((err) => {
                 setFlowStatus('failed');
@@ -2554,7 +2592,7 @@ export default function Catalog() {
                 } else {
                     setMessage('Upload removed from history.');
                 }
-                getListingUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
+                getListingUploads(selectedStore, { scope: 'history' }).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
             })
             .catch((err) => setMessage(formatCatalogError(err) || 'Failed to delete upload'))
             .finally(() => setDeletingListingUploadId(null));
@@ -2786,7 +2824,7 @@ export default function Catalog() {
                         <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Upload history</h2>
                         <p className="text-xs text-slate-500 dark:text-slate-400">
                             {isManagedStore
-                                ? 'Bulk listing files and single listing create/edit/delete/publish actions.'
+                                ? 'Bulk Create / Mapped / Delete files and single Create / Delete. Edit, publish, and inventory push are under Logs.'
                                 : 'Files uploaded for this store; sync or scrape per row.'}
                         </p>
                     </div>
@@ -2853,7 +2891,7 @@ export default function Catalog() {
                                 title="No uploads yet"
                                 description={
                                     isManagedStore
-                                        ? 'Use Bulk Listing or Create Listing in the toolbar above. All file and single-product changes appear here.'
+                                        ? 'Use Bulk Listing or Create Listing above. File uploads and single create/delete show here; other actions are under Logs.'
                                         : 'Upload a catalog file with Upload Catalog in the bar above, then Ready to Upload below when it appears.'
                                 }
                                 action={
@@ -2911,7 +2949,7 @@ export default function Catalog() {
                                             <td className="text-right text-sm tabular-nums align-middle">{u.error_rows ?? '—'}</td>
                                             <td className="align-middle whitespace-nowrap">
                                                 <Badge variant={uploadStatusVariant[u.status] || 'warning'}>
-                                                    {managedUploadStatusLabel[u.status] || uploadStatusLabel[u.status] || u.status}
+                                                    {managedUploadStatusText(u)}
                                                 </Badge>
                                             </td>
                                             <td className="text-right align-middle whitespace-nowrap">
@@ -3432,7 +3470,9 @@ export default function Catalog() {
                         <div>
                             <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Activity log</h2>
                             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                                Scrape and marketplace sync messages from the last 24 hours. Older entries are removed automatically.
+                                {isManagedStore
+                                    ? 'Edit, publish, inventory push, scrape, and sync messages. Create/Delete uploads stay under Upload history.'
+                                    : 'Scrape and marketplace sync messages from the last 24 hours. Older entries are removed automatically.'}
                             </p>
                         </div>
                     </div>
@@ -3445,7 +3485,11 @@ export default function Catalog() {
                             <EmptyState
                                 icon={ScrollText}
                                 title="No activity yet"
-                                description="Run Start Scraping, Manual sync, or scheduled updates — events will appear here."
+                                description={
+                                    isManagedStore
+                                        ? 'Edit a listing, publish, push inventory, or run scrape/sync — those events appear here.'
+                                        : 'Run Start Scraping, Manual sync, or scheduled updates — events will appear here.'
+                                }
                             />
                         ) : (
                             <ul className="divide-y divide-slate-100 dark:divide-slate-700/80">

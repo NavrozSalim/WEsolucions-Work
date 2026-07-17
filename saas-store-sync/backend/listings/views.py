@@ -279,11 +279,21 @@ class StoreListingBulkUploadView(APIView):
 
 
 class StoreListingUploadHistoryView(APIView):
+    """List managed listing activity.
+
+    Query ``?scope=history`` (default): bulk Create/Mapped/Delete files and
+    single Create/Delete. ``?scope=logs``: Edit / Publish / Push inventory and
+    other non-history rows. ``?scope=all``: everything.
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk):
         store = _get_store(request, store_pk)
-        qs = ListingUpload.objects.filter(store=store, user=request.user)
+        scope = request.query_params.get('scope', 'history')
+        qs = listing_service.filter_listing_uploads(
+            ListingUpload.objects.filter(store=store, user=request.user),
+            scope=scope,
+        )
         return Response(ListingUploadSerializer(qs, many=True).data)
 
 
@@ -299,17 +309,19 @@ def _listing_upload_row_error_text(row: dict) -> str:
     return str(errs).replace('\n', ' ') if errs else ''
 
 
-def _listing_upload_status_text(listing, *, row_ok: bool, imported: bool, err_text: str = '') -> str:
-    """Status cell for template-style export."""
+def _listing_upload_status_text(
+    listing,
+    *,
+    row_ok: bool,
+    imported: bool,
+    err_text: str = '',
+    upload_action: str = '',
+) -> str:
+    """Status cell for template-style export: Created / Mapped / Deleted / Error."""
     if not row_ok:
         reason = (err_text or 'Import failed.').strip()
         return f'Error: {reason}' if not reason.lower().startswith('error') else reason
     if listing is not None:
-        if listing.status in (
-            ListingStatus.UPLOADED_STAGING,
-            ListingStatus.UPLOADED_PRODUCTION,
-        ) or listing.action == ListingAction.MAPPED:
-            return 'Uploaded on the marketplace'
         if listing.status == ListingStatus.VALIDATION_FAILED:
             errs = listing.validation_errors_json or []
             if isinstance(errs, list):
@@ -319,8 +331,12 @@ def _listing_upload_status_text(listing, *, row_ok: bool, imported: bool, err_te
             return f'Error: {reason}' if reason else 'Error: Validation failed.'
         if listing.status == ListingStatus.FAILED:
             return 'Error: Marketplace upload failed.'
-        return 'Created'
-    if imported:
+    action = (upload_action or getattr(listing, 'action', '') or '').lower()
+    if action == ListingAction.MAPPED:
+        return 'Mapped'
+    if action == ListingAction.DELETE:
+        return 'Deleted'
+    if imported or row_ok:
         return 'Created'
     return 'Skipped'
 
@@ -332,13 +348,11 @@ def _listing_upload_has_template_fields(rows: list) -> bool:
 def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) -> HttpResponse:
     """Export upload rows.
 
-    Preferred format (Create/Mapped file uploads that stored full input):
+    Preferred format (Create/Mapped/Delete file uploads that stored full input):
       <same columns as input template> + Status
 
     Status values:
-      Created
-      Uploaded on the marketplace
-      Error: <reason>
+      Created | Mapped | Deleted | Error: <reason>
 
     Legacy / non-file activities fall back to Row, SKU, Status, Error Logs.
     """
@@ -417,7 +431,11 @@ def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) ->
             row_ok = False
 
         status_text = _listing_upload_status_text(
-            listing, row_ok=row_ok, imported=bool(r.get('imported')), err_text=err_text,
+            listing,
+            row_ok=row_ok,
+            imported=bool(r.get('imported')),
+            err_text=err_text,
+            upload_action=upload.action or '',
         )
 
         if use_template:
@@ -441,8 +459,6 @@ def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) ->
             short = status_text
             if short.startswith('Error: '):
                 short_status, short_err = 'Error', short[7:]
-            elif short == 'Uploaded on the marketplace':
-                short_status, short_err = 'Uploaded', ''
             else:
                 short_status, short_err = short, err_text
             writer.writerow([

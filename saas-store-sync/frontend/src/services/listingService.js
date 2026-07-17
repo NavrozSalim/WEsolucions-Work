@@ -84,8 +84,9 @@ export const exportListingInventory = (storeId, syncStatus = '') =>
         window.URL.revokeObjectURL(url);
     });
 
-export const getListingUploads = (storeId) =>
-    api.get(`/stores/${storeId}/listings/uploads/`);
+/** Managed upload history. scope: 'history' (default) | 'logs' | 'all' */
+export const getListingUploads = (storeId, { scope = 'history' } = {}) =>
+    api.get(`/stores/${storeId}/listings/uploads/`, { params: { scope } });
 
 /** Download failed rows from a managed Upload history entry as CSV. */
 export const downloadListingUploadErrors = (storeId, uploadId, filename = '') =>

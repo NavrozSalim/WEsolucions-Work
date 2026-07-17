@@ -37,6 +37,39 @@ ON_MARKETPLACE_STATUSES = (
     ListingStatus.UPLOADED_PRODUCTION,
 )
 
+# Single-action rows that belong on Logs, not Upload history.
+SYSTEM_LOG_FILENAMES = frozenset({
+    'Publish to marketplace',
+    'Push inventory to marketplace',
+})
+
+HISTORY_ACTIONS = (
+    ListingAction.CREATE,
+    ListingAction.MAPPED,
+    ListingAction.DELETE,
+)
+
+
+def listing_upload_history_q() -> Q:
+    """Upload history: bulk Create/Mapped/Delete files + single Create/Delete."""
+    return (
+        Q(action__in=HISTORY_ACTIONS)
+        & Q(source__in=(ListingUpload.Source.FILE, ListingUpload.Source.SINGLE))
+        & ~Q(filename__in=SYSTEM_LOG_FILENAMES)
+        & ~Q(filename__startswith='Edit ')
+    )
+
+
+def filter_listing_uploads(qs, scope: str = 'history'):
+    """Split ListingUpload rows between Upload history and Logs."""
+    scope = (scope or 'history').strip().lower()
+    history_q = listing_upload_history_q()
+    if scope == 'logs':
+        return qs.exclude(history_q)
+    if scope == 'all':
+        return qs
+    return qs.filter(history_q)
+
 
 def record_activity(
     user,

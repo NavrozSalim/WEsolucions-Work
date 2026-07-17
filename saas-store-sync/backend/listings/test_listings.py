@@ -262,22 +262,7 @@ class ListingServiceTests(TestCase):
         self.assertNotIn("OK-1", body)
         self.assertIn("Error", body)
 
-    def test_upload_export_shows_uploaded_vs_created(self):
-        StoreListing.objects.create(
-            user=self.user,
-            store=self.store,
-            external_product_key="UP-1",
-            external_variant_key="UP-1",
-            sku="UP-1",
-            title="On marketplace",
-            description="d",
-            brand="b",
-            image_urls="https://img.example.com/a.jpg",
-            original_price="10",
-            sale_price="9",
-            status=ListingStatus.UPLOADED_PRODUCTION,
-            action="create",
-        )
+    def test_upload_export_status_created_mapped_error(self):
         StoreListing.objects.create(
             user=self.user,
             store=self.store,
@@ -293,20 +278,35 @@ class ListingServiceTests(TestCase):
             status=ListingStatus.READY,
             action="create",
         )
-        upload = ListingUpload.objects.create(
+        StoreListing.objects.create(
             user=self.user,
             store=self.store,
-            filename="mix.csv",
+            external_product_key="MP-1",
+            external_variant_key="MP-1",
+            sku="MP-1",
+            title="Mapped row",
+            description="d",
+            brand="b",
+            image_urls="https://img.example.com/a.jpg",
+            original_price="10",
+            sale_price="9",
+            status=ListingStatus.UPLOADED_PRODUCTION,
+            action="mapped",
+        )
+        create_upload = ListingUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            filename="create.csv",
             source=ListingUpload.Source.FILE,
             action="create",
             status=ListingUpload.Status.COMPLETED,
-            total_rows=3,
-            success_rows=2,
+            total_rows=2,
+            success_rows=1,
             error_rows=1,
             rows_json=[
                 {
                     "row_number": 2,
-                    "sku": "UP-1",
+                    "sku": "CR-1",
                     "valid": True,
                     "imported": True,
                     "errors": [],
@@ -317,35 +317,14 @@ class ListingServiceTests(TestCase):
                         "marketplace_name": "Lasoo",
                         "store_name": "Lasoo Test Store",
                         "action": "Create",
-                        "product_key": "UP-1",
-                        "variant_key": "UP-1",
-                        "title": "On marketplace",
+                        "product_key": "CR-1",
+                        "variant_key": "CR-1",
+                        "title": "Ready only",
                         "description": "d",
                         "brand": "b",
                         "category": "",
-                        "sku": "UP-1",
-                        "barcode": "",
-                        "image_urls": "https://img.example.com/a.jpg",
-                        "inventory": "1",
-                        "infinite_quantity": "false",
-                        "original_price": "10",
-                        "sale_price": "9",
-                    },
-                },
-                {
-                    "row_number": 3,
-                    "sku": "CR-1",
-                    "valid": True,
-                    "imported": True,
-                    "errors": [],
-                    "fields": {
                         "sku": "CR-1",
-                        "title": "Ready only",
-                        "action": "Create",
-                        "product_key": "CR-1",
-                        "variant_key": "CR-1",
-                        "description": "d",
-                        "brand": "b",
+                        "barcode": "",
                         "image_urls": "https://img.example.com/b.jpg",
                         "inventory": "1",
                         "infinite_quantity": "false",
@@ -354,7 +333,7 @@ class ListingServiceTests(TestCase):
                     },
                 },
                 {
-                    "row_number": 4,
+                    "row_number": 3,
                     "sku": "BAD-1",
                     "valid": False,
                     "imported": False,
@@ -376,15 +355,93 @@ class ListingServiceTests(TestCase):
                 },
             ],
         )
-        resp = _listing_upload_csv_response(upload, errors_only=False)
-        body = resp.content.decode()
-        self.assertIn("Vendor Name", body)
-        self.assertIn("Sale Price", body)
-        self.assertIn(",Status", body)
-        self.assertIn("Uploaded on the marketplace", body)
-        self.assertIn(",Created", body)
-        self.assertIn("Error: A listing with SKU", body)
-        self.assertIn("Nora Inventory", body)
+        mapped_upload = ListingUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            filename="mapped.csv",
+            source=ListingUpload.Source.FILE,
+            action="mapped",
+            status=ListingUpload.Status.COMPLETED,
+            total_rows=1,
+            success_rows=1,
+            error_rows=0,
+            rows_json=[
+                {
+                    "row_number": 2,
+                    "sku": "MP-1",
+                    "valid": True,
+                    "imported": True,
+                    "errors": [],
+                    "fields": {
+                        "sku": "MP-1",
+                        "title": "Mapped row",
+                        "action": "Mapped",
+                        "product_key": "MP-1",
+                        "variant_key": "MP-1",
+                        "description": "d",
+                        "brand": "b",
+                        "image_urls": "https://img.example.com/a.jpg",
+                        "inventory": "1",
+                        "infinite_quantity": "false",
+                        "original_price": "10",
+                        "sale_price": "9",
+                    },
+                },
+            ],
+        )
+        create_body = _listing_upload_csv_response(create_upload, errors_only=False).content.decode()
+        self.assertIn("Vendor Name", create_body)
+        self.assertIn(",Status", create_body)
+        self.assertIn(",Created", create_body)
+        self.assertIn("Error: A listing with SKU", create_body)
+        self.assertNotIn("Uploaded on the marketplace", create_body)
+        mapped_body = _listing_upload_csv_response(mapped_upload, errors_only=False).content.decode()
+        self.assertIn(",Mapped", mapped_body)
+
+    def test_upload_history_scope_excludes_publish_edit_push(self):
+        ListingUpload.objects.create(
+            user=self.user, store=self.store, filename="bulk.csv",
+            source=ListingUpload.Source.FILE, action="create",
+            status=ListingUpload.Status.COMPLETED, total_rows=1, success_rows=1,
+        )
+        ListingUpload.objects.create(
+            user=self.user, store=self.store, filename="Single listing",
+            source=ListingUpload.Source.SINGLE, action="create",
+            status=ListingUpload.Status.COMPLETED, total_rows=1, success_rows=1,
+        )
+        ListingUpload.objects.create(
+            user=self.user, store=self.store, filename="Delete SKU-1",
+            source=ListingUpload.Source.SINGLE, action="delete",
+            status=ListingUpload.Status.COMPLETED, total_rows=1, success_rows=1,
+        )
+        ListingUpload.objects.create(
+            user=self.user, store=self.store, filename="Edit SKU-1",
+            source=ListingUpload.Source.SINGLE, action="create",
+            status=ListingUpload.Status.COMPLETED, total_rows=1, success_rows=1,
+        )
+        ListingUpload.objects.create(
+            user=self.user, store=self.store, filename="Publish to marketplace",
+            source=ListingUpload.Source.SINGLE, action="create",
+            status=ListingUpload.Status.COMPLETED, total_rows=1, success_rows=1,
+        )
+        ListingUpload.objects.create(
+            user=self.user, store=self.store, filename="Push inventory to marketplace",
+            source=ListingUpload.Source.SINGLE, action="create",
+            status=ListingUpload.Status.COMPLETED, total_rows=1, success_rows=1,
+        )
+        hist = listing_service.filter_listing_uploads(
+            ListingUpload.objects.filter(store=self.store), scope="history",
+        )
+        logs = listing_service.filter_listing_uploads(
+            ListingUpload.objects.filter(store=self.store), scope="logs",
+        )
+        hist_names = set(hist.values_list("filename", flat=True))
+        log_names = set(logs.values_list("filename", flat=True))
+        self.assertEqual(hist_names, {"bulk.csv", "Single listing", "Delete SKU-1"})
+        self.assertEqual(
+            log_names,
+            {"Edit SKU-1", "Publish to marketplace", "Push inventory to marketplace"},
+        )
 
     def test_bulk_import_stores_fields_for_export(self):
         content = csv_import.build_template_csv("create", store=self.store).encode()
