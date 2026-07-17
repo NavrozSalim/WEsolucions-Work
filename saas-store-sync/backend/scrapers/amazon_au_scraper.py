@@ -35,6 +35,22 @@ _USD_COOKIES = {
     "lc-main": "en_US",
 }
 
+# Red error under spacing-base (e.g. temporarily unavailable) → force inventory 0.
+AU_OOS_ERROR_SELECTOR = ".a-spacing-base span.a-color-error"
+
+
+def apply_au_error_stock(soup: BeautifulSoup, stock):
+    """If Amazon AU shows ``.a-spacing-base span.a-color-error``, force stock to 0.
+
+    Price is left unchanged by the caller.
+    """
+    try:
+        if soup is not None and soup.select_one(AU_OOS_ERROR_SELECTOR) is not None:
+            return 0
+    except Exception:
+        pass
+    return stock
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # HTTP-based scraper (primary)
@@ -126,6 +142,7 @@ class AmazonAUHTTP:
         price = AmazonParser.extract_price(soup, html)
         stock = AmazonParser.extract_stock(soup)
         title = AmazonParser.extract_title(soup)
+        stock = apply_au_error_stock(soup, stock)
 
         if price is None:
             return ScrapeResult.fail("no_price", "Price not found via HTTP", html, vendor, url)
@@ -265,9 +282,13 @@ def _selenium_scrape_page(url: str, driver) -> ScrapeResult:
         price = AmazonParser.extract_price(soup, html)
         stock = AmazonParser.extract_stock(soup)
         title = AmazonParser.extract_title(soup)
+        stock = apply_au_error_stock(soup, stock)
 
         if price is None:
             return ScrapeResult.fail("no_price", "Price not found", html, "amazon_au", url)
+
+        if stock is None and price is not None:
+            stock = 2
 
         return ScrapeResult.ok(price=price, stock=stock, title=title)
 
