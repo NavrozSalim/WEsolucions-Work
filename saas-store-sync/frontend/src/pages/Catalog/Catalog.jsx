@@ -2789,7 +2789,7 @@ export default function Catalog() {
                                             Loading upload history
                                         </p>
                                         <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                                            Requesting the list from the server (up to 90s for slow connections).
+                                            Fetching recent uploads for this store…
                                         </p>
                                     </div>
                                     <div className="flex items-center gap-1.5" aria-hidden>

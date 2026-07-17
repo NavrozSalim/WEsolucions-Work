@@ -51,25 +51,79 @@ from vendor.models import VendorPrice
 logger = logging.getLogger(__name__)
 
 
+def _normalize_upload_action_label(action_raw) -> str:
+    raw = (action_raw or 'Add').strip().lower()
+    if 'delete' in raw:
+        return 'Delete'
+    if 'update' in raw:
+        return 'Update'
+    return 'Add'
+
+
+def _upload_action_reason_from_counts(label_counts) -> str:
+    """Summarize Add / Update / Delete mix from ``{label: count}``."""
+    from collections import Counter
+
+    cnt = Counter({k: int(v) for k, v in (label_counts or {}).items() if int(v or 0) > 0})
+    if not cnt:
+        return '—'
+    if len(cnt) == 1:
+        return list(cnt.keys())[0]
+    return ', '.join(f'{k} ({v})' for k, v in sorted(cnt.items(), key=lambda x: (-x[1], x[0])))
+
+
 def _upload_action_reason_from_rows(rows):
     """Summarize Add / Update / Delete mix from upload rows (prefetched)."""
     from collections import Counter
 
-    labels = []
-    for r in rows:
-        raw = (r.action_raw or 'Add').strip().lower()
-        if 'delete' in raw:
-            labels.append('Delete')
-        elif 'update' in raw:
-            labels.append('Update')
-        else:
-            labels.append('Add')
-    if not labels:
-        return '—'
-    cnt = Counter(labels)
-    if len(cnt) == 1:
-        return list(cnt.keys())[0]
-    return ', '.join(f'{k} ({v})' for k, v in sorted(cnt.items(), key=lambda x: (-x[1], x[0])))
+    return _upload_action_reason_from_counts(
+        Counter(_normalize_upload_action_label(getattr(r, 'action_raw', None)) for r in rows)
+    )
+
+
+def _catalog_upload_history_extras(upload_ids):
+    """Batch row stats for upload history without loading every CatalogUploadRow.
+
+    Returns ``(vendor_by_upload_id, error_count_by_upload_id, reason_by_upload_id)``.
+    """
+    from collections import Counter, defaultdict
+
+    if not upload_ids:
+        return {}, {}, {}
+
+    vendor_by_id = {}
+    for upload_id, vendor_name in (
+        CatalogUploadRow.objects.filter(catalog_upload_id__in=upload_ids)
+        .exclude(vendor_name_raw='')
+        .values_list('catalog_upload_id', 'vendor_name_raw')
+        .distinct()
+    ):
+        vendor_by_id.setdefault(upload_id, vendor_name)
+
+    error_by_id = dict(
+        CatalogUploadRow.objects.filter(
+            catalog_upload_id__in=upload_ids,
+            sync_status=CatalogUploadRow.SyncStatus.ERROR,
+        )
+        .values('catalog_upload_id')
+        .annotate(c=Count('id'))
+        .values_list('catalog_upload_id', 'c')
+    )
+
+    action_counts = defaultdict(Counter)
+    for upload_id, action_raw, count in (
+        CatalogUploadRow.objects.filter(catalog_upload_id__in=upload_ids)
+        .values('catalog_upload_id', 'action_raw')
+        .annotate(c=Count('id'))
+        .values_list('catalog_upload_id', 'action_raw', 'c')
+    ):
+        action_counts[upload_id][_normalize_upload_action_label(action_raw)] += int(count or 0)
+
+    reason_by_id = {
+        upload_id: _upload_action_reason_from_counts(counts)
+        for upload_id, counts in action_counts.items()
+    }
+    return vendor_by_id, error_by_id, reason_by_id
 
 
 class CatalogStoresView(APIView):
@@ -360,29 +414,23 @@ class CatalogUploadListView(APIView):
             id=store_pk,
             user=request.user,
         )
-        uploads = (
+        uploads = list(
             CatalogUpload.objects.filter(store=store)
             .select_related('user', 'store', 'store__marketplace')
             .defer('store__api_token', 'store__kogan_service_account_json')
-            .prefetch_related(
-                Prefetch('rows', queryset=CatalogUploadRow.objects.only('action_raw')),
-            )
             .order_by('-created_at')[:50]
+        )
+        vendor_by_id, error_by_id, reason_by_id = _catalog_upload_history_extras(
+            [u.id for u in uploads]
         )
         data = []
         for u in uploads:
-            vendor_raw = list(
-                CatalogUploadRow.objects.filter(catalog_upload=u)
-                .values_list('vendor_name_raw', flat=True)
-                .distinct()
-            )
-            vendor_source = next((x for x in vendor_raw if x), None)
+            error_row_count = int(error_by_id.get(u.id) or 0)
             has_errors = (
                 u.status in (CatalogUpload.Status.FAILED, CatalogUpload.Status.PARTIAL)
                 or bool(u.error_summary)
-                or u.rows.filter(sync_status=CatalogUploadRow.SyncStatus.ERROR).exists()
+                or error_row_count > 0
             )
-            error_row_count = u.rows.filter(sync_status=CatalogUploadRow.SyncStatus.ERROR).count() if has_errors else 0
             data.append({
                 "id": str(u.id),
                 "original_filename": u.original_filename,
@@ -393,10 +441,10 @@ class CatalogUploadListView(APIView):
                 "created_at": u.created_at.isoformat() if u.created_at else None,
                 "user_name": getattr(u.user, 'email', None) or getattr(u.user, 'username', None) if u.user else None,
                 "marketplace": store.marketplace.name if store.marketplace else None,
-                "vendor_source": vendor_source,
+                "vendor_source": vendor_by_id.get(u.id),
                 "has_errors": has_errors,
-                "error_row_count": error_row_count,
-                "reason": _upload_action_reason_from_rows(u.rows.all()),
+                "error_row_count": error_row_count if has_errors else 0,
+                "reason": reason_by_id.get(u.id, '—'),
             })
         return Response(data)
 
