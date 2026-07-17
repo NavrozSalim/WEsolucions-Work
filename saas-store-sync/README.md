@@ -44,6 +44,8 @@ saas-store-sync/
 ├── docker-compose.prod.yml     # Production (Gunicorn, Nginx, etc.)
 ├── docker-compose.us-scraper.prod.yml   # US-only Celery worker (queue heavy-us)
 ├── docker-compose.au-scraper.prod.yml   # AU-only Celery worker (queue heavy-au)
+├── docker-compose.us-orders.prod.yml    # US orders/tickets worker (queue orders-us)
+├── docker-compose.au-orders.prod.yml    # AU orders/tickets worker (queue orders-au)
 ├── .env.example                # Dev template (commit or copy)
 ├── .env.prod.example           # Production template
 ├── backend/                    # Django project (API, Celery, scrapers, store_adapters)
@@ -67,6 +69,8 @@ saas-store-sync/
 | **Production** (main server) | `docker-compose.prod.yml` | `.env.prod` | `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d` |
 | **Production** (US Celery only) | `docker-compose.us-scraper.prod.yml` | `.env.prod` | `docker compose -f docker-compose.us-scraper.prod.yml --env-file .env.prod up -d` |
 | **Production** (AU Celery only) | `docker-compose.au-scraper.prod.yml` | `.env.prod` | `docker compose -f docker-compose.au-scraper.prod.yml --env-file .env.prod up -d` |
+| **Production** (US orders/tickets) | `docker-compose.us-orders.prod.yml` | `.env.prod` | `docker compose -f docker-compose.us-orders.prod.yml --env-file .env.prod up -d` |
+| **Production** (AU orders/tickets) | `docker-compose.au-orders.prod.yml` | `.env.prod` | `docker compose -f docker-compose.au-orders.prod.yml --env-file .env.prod up -d` |
 
 Copy **`.env.example` → `.env`** (dev) and **`.env.prod.example` → `.env.prod`** (prod). Real `.env` / `.env.prod` files are not committed.
 
@@ -134,7 +138,7 @@ Ensure TLS certificate files exist on the host and Nginx points at them before d
 **Catalog bulk uploads and workers**
 
 - Large CSV/XLSX uploads are stored under **`MEDIA_ROOT`** (`/app/media` in Docker). The **backend** and the three main Celery worker services share a **`catalog_media`** volume so the ingest task can read the file after the API saves it. Apply migrations after pull (`catalog.0023_*` for hot-path indexes).
-- Celery **queues** (see `core/settings.py` and `catalog/celery_routing.py`): **`ingest`** (chunked `bulk_create` of upload rows), **`light`** (catalog DB sync, scrape chord finalizers), **`heavy-us`** / **`heavy-au`** (US vs AU browser scrapes — Amazon/eBay — plus **`heavy-au`** for **`catalog.run_vevor_au_ingest`** / Vevor AU feed), **`celery`** (default, e.g. `sync` beat tasks). **`docker-compose.prod.yml`** runs **three** workers: **`celery_worker_celery`** (**`-Q celery`**), **`celery_worker_ingest`** (**`-Q ingest`**), **`celery_worker_light`** (**`-Q light`**), each with **`--prefetch-multiplier=1 -O fair`** (no `heavy-au` / `heavy-us` on the main host). Run **`docker-compose.us-scraper.prod.yml`** on a US VPS with **`-Q heavy-us`** and **`docker-compose.au-scraper.prod.yml`** on an AU VPS with **`-Q heavy-au`**. Each regional worker uses the same **`REDIS_URL`** (broker on the main host) and **`DATABASE_URL`** as the app. **Costco AU** remains desktop ingest → API, not a Celery scrape queue.
+- Celery **queues** (see `core/settings.py` and `catalog/celery_routing.py`): **`ingest`** (chunked `bulk_create` of upload rows), **`light`** (catalog DB sync, scrape chord finalizers), **`heavy-us`** / **`heavy-au`** (US vs AU browser scrapes — Amazon/eBay), **`orders-us`** / **`orders-au`** (managed-store order + ticket sync by `Store.region`), **`celery`** (default, e.g. analytics). **`docker-compose.prod.yml`** runs main workers (**`-Q celery`**, **`-Q ingest`**, **`-Q sync`**, **`-Q light`**) with no heavy/orders queues. Run **`docker-compose.us-scraper.prod.yml`** (`-Q heavy-us`), **`docker-compose.au-scraper.prod.yml`** (`-Q heavy-au`), **`docker-compose.us-orders.prod.yml`** (`-Q orders-us`), and **`docker-compose.au-orders.prod.yml`** (`-Q orders-au`) on the regional VPS hosts. Each remote worker uses the same **`REDIS_URL`** (broker on main) and **`DATABASE_URL`**. **Costco AU** remains desktop ingest → API, not a Celery scrape queue. **Vevor AU** feed ingest stays on main **`light`**.
 - **Dedicated Postgres:** set **`DATABASE_URL`** in `.env.prod` to your DB host URL; if unset, production compose defaults to the bundled `db` service. Remote workers (US/AU) must use that same database URL (often a dedicated EU host, not `db` as hostname). The bundled **`db`** service still starts when `DATABASE_URL` points elsewhere (so `depends_on` health checks keep working); it is redundant until you edit compose to drop `db` and those dependencies (advanced).
 - Tunables: **`CATALOG_UPLOAD_CHUNK_SIZE`** (default 1000), **`CATALOG_SYNC_LOG_BATCH`**, **`CATALOG_SYNC_PROGRESS_EVERY`**, **`PG_CONN_MAX_AGE`** (use `0` with **PgBouncer** transaction pooling).
 

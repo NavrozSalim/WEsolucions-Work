@@ -34,14 +34,21 @@ app.conf.beat_schedule = {
         'task': 'vendor.prune_old_vendor_prices',
         'schedule': crontab(minute=30, hour=3),
     },
-    # Pull Lasoo customer tickets/messages into Tickets Management.
-    'fetch-marketplace-tickets-hourly': {
-        'task': 'listings.fetch_all_store_tickets',
+    # Orders / tickets: region-split queues (US VPS → orders-us, AU VPS → orders-au).
+    'fetch-marketplace-tickets-us-hourly': {
+        'task': 'listings.fetch_us_store_tickets',
         'schedule': crontab(minute=15),
     },
-    # Pull Reverb selling orders (incremental by updated_at) into Orders.
-    'fetch-reverb-orders-hourly': {
-        'task': 'listings.fetch_all_reverb_orders',
+    'fetch-marketplace-tickets-au-hourly': {
+        'task': 'listings.fetch_au_store_tickets',
+        'schedule': crontab(minute=15),
+    },
+    'fetch-managed-orders-us-hourly': {
+        'task': 'listings.fetch_us_store_orders',
+        'schedule': crontab(minute=20),
+    },
+    'fetch-managed-orders-au-hourly': {
+        'task': 'listings.fetch_au_store_orders',
         'schedule': crontab(minute=20),
     },
 }

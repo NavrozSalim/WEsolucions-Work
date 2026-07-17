@@ -349,6 +349,7 @@ if sys.platform == 'win32':
 # - ``light``: scrape chord finalizers, resume-after-stop, Beat ``check_scheduled_updates``.
 # - ``celery``: default (analytics, vendor price prune).
 # US VPS: -Q heavy-us. AU VPS: -Q heavy-au. Vevor AU feed → ``light`` (no browser).
+# Orders/tickets VPS: -Q orders-us (USA stores) / -Q orders-au (AU stores).
 from kombu import Queue  # noqa: E402
 
 from catalog.celery_routing import CatalogScrapeTaskRouter  # noqa: E402
@@ -361,6 +362,8 @@ CELERY_TASK_QUEUES = (
     Queue('light'),
     Queue('heavy-us'),
     Queue('heavy-au'),
+    Queue('orders-us'),
+    Queue('orders-au'),
 )
 CELERY_TASK_DEFAULT_QUEUE = 'celery'
 CELERY_TASK_ROUTES = (
@@ -380,6 +383,12 @@ CELERY_TASK_ROUTES = (
         'sync.tasks.run_store_failed_zero_inventory': {'queue': 'sync'},
         # Minute tick enqueues ``run_store_update`` → ``sync`` queue.
         'sync.tasks.check_scheduled_updates': {'queue': 'light'},
+        # Orders + tickets: dedicated regional workers (not main ``light``).
+        'listings.fetch_us_store_tickets': {'queue': 'orders-us'},
+        'listings.fetch_au_store_tickets': {'queue': 'orders-au'},
+        'listings.fetch_us_store_orders': {'queue': 'orders-us'},
+        'listings.fetch_au_store_orders': {'queue': 'orders-au'},
+        # Legacy all-region tasks (local/dev fallback) stay on ``light``.
         'listings.fetch_all_store_tickets': {'queue': 'light'},
         'listings.fetch_all_reverb_orders': {'queue': 'light'},
         'listings.scrape_store_listings': {'queue': 'sync'},
