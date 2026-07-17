@@ -140,7 +140,12 @@ class CatalogStoresView(APIView):
             .defer('api_token', 'kogan_service_account_json')
             .select_related('marketplace')
             .annotate(
-                product_count=Count('products', filter=Q(products__is_active=True)),
+                # Inventory-only / catalog stores: active catalog ProductMappings.
+                catalog_product_count=Count(
+                    'products', filter=Q(products__is_active=True),
+                ),
+                # Managed (full_store) Lasoo/Reverb: Create + Mapped listings.
+                listing_count=Count('managed_listings'),
             )
             .order_by('name')
         )
@@ -187,7 +192,11 @@ class CatalogStoresView(APIView):
                 'marketplace_name': s.marketplace.name if s.marketplace else None,
                 'marketplace_code': (s.marketplace.code or '').strip() if s.marketplace else None,
                 'management_mode': s.management_mode,
-                'product_count': s.product_count,
+                'product_count': (
+                    int(s.listing_count or 0)
+                    if (s.management_mode or '') == 'full_store'
+                    else int(s.catalog_product_count or 0)
+                ),
                 'schedule_active': sch.is_active if sch else None,
                 'has_fixed_tier': s.id in fixed_tier_store_ids,
             }

@@ -4,8 +4,8 @@ Usage (inside the backend container on Main):
 
   python manage.py lasoo_check_variant --sku ABC-123
   python manage.py lasoo_check_variant --sku ABC-123 --store "Lasoo - P&P"
-  python manage.py lasoo_check_variant --sku ABC-123 --env production
-  python manage.py lasoo_check_variant --sku ABC-123 --product-key AAA --variant-key BBB
+  python manage.py lasoo_check_variant --sku ABC-123 --verbose
+  python manage.py lasoo_check_variant --sku ABC-123 --json
 
 Exit codes:
   0 = found on Lasoo
@@ -37,7 +37,6 @@ def _collect_result_rows(body) -> list:
             val = results.get(key)
             if isinstance(val, list):
                 candidates.append(val)
-        # Some Lasoo shapes nest again under results.body / results.data
         for nest_key in ("body", "data"):
             nested = results.get(nest_key)
             if isinstance(nested, dict):
@@ -111,6 +110,11 @@ class Command(BaseCommand):
             action="store_true",
             help="Print the raw Lasoo JSON response.",
         )
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="Show technical details (keys, env, local listing status).",
+        )
 
     def handle(self, *args, **options):
         sku = (options["sku"] or "").strip()
@@ -122,6 +126,7 @@ class Command(BaseCommand):
         product_override = (options.get("product_key") or "").strip()
         variant_override = (options.get("variant_key") or "").strip()
         dump_json = bool(options.get("json"))
+        verbose = bool(options.get("verbose")) or dump_json
 
         qs = (
             Store.objects.filter(management_mode="full_store")
@@ -170,20 +175,33 @@ class Command(BaseCommand):
             auth=client.auth_key,
         )
 
-        self.stdout.write(
-            f"store={store.name} env={client.environment} base={client.base_url}\n"
-            f"sku={sku} product_key={product_key} variant_key={variant_key}\n"
-            f"local_listing={'yes' if listing else 'no'}"
-            + (f" status={listing.status}" if listing else "")
-        )
+        # Always show a simple header first.
+        self.stdout.write(f"Store: {store.name}")
+        self.stdout.write(f"SKU:   {sku}")
+        self.stdout.write("")
+
+        if verbose:
+            self.stdout.write(
+                f"(details) env={client.environment} base={client.base_url}\n"
+                f"(details) product_key={product_key} variant_key={variant_key}\n"
+                f"(details) in_our_system={'yes' if listing else 'no'}"
+                + (f" status={listing.status}" if listing else "")
+            )
+            self.stdout.write("")
 
         result = client.send("variants_search", payload)
         if not result.ok:
-            self.stderr.write(
-                self.style.ERROR(
-                    f"Lasoo API error: status={result.status} message={result.message}"
-                )
+            self.stdout.write(self.style.ERROR("Result: ERROR checking Lasoo"))
+            self.stdout.write(
+                "Could not check the marketplace. "
+                "Check the store AuthKey / environment and try again."
             )
+            if verbose:
+                self.stderr.write(
+                    self.style.ERROR(
+                        f"(details) status={result.status} message={result.message}"
+                    )
+                )
             if dump_json:
                 self.stdout.write(json.dumps(result.data, indent=2, default=str))
             raise SystemExit(2)
@@ -197,29 +215,32 @@ class Command(BaseCommand):
             if v == variant_key or p == product_key or v == sku or p == sku:
                 matched.append(row)
 
-        # If Lasoo returned any rows for this filtered search, treat as found
-        # even when key field names differ.
         found = bool(matched) or bool(rows)
 
         if dump_json:
             self.stdout.write(json.dumps(result.data, indent=2, default=str))
+            self.stdout.write("")
 
         if found:
-            self.stdout.write(
-                self.style.SUCCESS(
-                    f"FOUND on Lasoo — {len(matched) or len(rows)} row(s) "
-                    f"(variant_key={variant_key})"
-                )
-            )
-            for row in (matched or rows)[:5]:
-                if isinstance(row, dict):
-                    p, v = _row_keys(row)
-                    self.stdout.write(f"  - product={p or '?'} variant={v or '?'}")
+            self.stdout.write(self.style.SUCCESS("Result: FOUND on Lasoo"))
+            self.stdout.write("This product is on the marketplace.")
+            if verbose:
+                for row in (matched or rows)[:5]:
+                    if isinstance(row, dict):
+                        p, v = _row_keys(row)
+                        self.stdout.write(f"  (details) product={p or '?'} variant={v or '?'}")
             raise SystemExit(0)
 
-        self.stdout.write(
-            self.style.WARNING(
-                f"NOT FOUND on Lasoo for product_key={product_key} variant_key={variant_key}"
+        self.stdout.write(self.style.WARNING("Result: NOT FOUND on Lasoo"))
+        self.stdout.write("This product was not found on the marketplace.")
+        if not listing:
+            self.stdout.write(
+                "Tip: this SKU is not in our system for this store — "
+                "double-check the spelling."
             )
-        )
+        else:
+            self.stdout.write(
+                "Tip: it may have been removed on Lasoo, or the product/variant "
+                "keys may differ. Re-run with --verbose for details."
+            )
         raise SystemExit(1)
