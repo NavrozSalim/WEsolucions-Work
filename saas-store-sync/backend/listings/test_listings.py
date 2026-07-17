@@ -408,6 +408,58 @@ class ListingServiceTests(TestCase):
         self.assertTrue(rows[0].get("category") or rows[0].get("category_uuid"))
 
 
+class ListingServiceVendorSelectTests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(username="vsel", email="vsel@example.com", password="pw")
+        lasoo, _ = Marketplace.objects.get_or_create(code="lasoo", defaults={"name": "Lasoo"})
+        self.store = Store.objects.create(
+            user=self.user,
+            name="Vendor Select Store",
+            region="AU",
+            api_token="",
+            marketplace=lasoo,
+            management_mode="full_store",
+            lasoo_environment="staging",
+            lasoo_staging_auth_key="test-key",
+        )
+        from vendor.models import Vendor
+        from stores.models import StoreVendorPriceSettings
+
+        self.nora, _ = Vendor.objects.get_or_create(
+            code="noraau", defaults={"name": "Nora Inventory"},
+        )
+        StoreVendorPriceSettings.objects.create(
+            store=self.store,
+            vendor=self.nora,
+            purchase_tax_percentage=10,
+            marketplace_fees_percentage=15,
+        )
+
+    def test_create_with_store_vendor_persists_source_code(self):
+        data = {
+            **VALID_DATA,
+            "source_vendor_code": "noraau",
+            "vendor_id": "8FNZ100-DL-G1",
+            "vendor_url": "",
+        }
+        listing = listing_service.create(self.user, self.store, data)
+        self.assertEqual(listing.source_vendor_code, "noraau")
+        self.assertEqual(listing.vendor_id, "8FNZ100-DL-G1")
+        self.assertEqual(listing.status, ListingStatus.READY)
+
+    def test_create_rejects_vendor_not_on_store(self):
+        data = {
+            **VALID_DATA,
+            "source_vendor_code": "amazonau",
+            "vendor_url": "https://www.amazon.com.au/dp/B00TEST",
+        }
+        listing = listing_service.create(self.user, self.store, data)
+        self.assertEqual(listing.status, ListingStatus.VALIDATION_FAILED)
+        joined = " ".join(listing.validation_errors_json or [])
+        self.assertIn("not configured", joined)
+
+
 class OrderNormalizeTests(TestCase):
     def test_build_order_details_from_lasoo_shape(self):
         raw = {

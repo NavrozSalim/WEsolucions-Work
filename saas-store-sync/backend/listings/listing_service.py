@@ -131,9 +131,10 @@ def _listing_env(store) -> str:
 
 
 def _validate_listing(store, data: dict) -> list[str]:
+    source_errors = template_routing.validate_source_vendor_for_store(store, data)
     if _store_kind(store) == "reverb":
-        return reverb_listings.validate_listing(data)
-    return validator.validate_listing(data)
+        return source_errors + reverb_listings.validate_listing(data)
+    return source_errors + validator.validate_listing(data)
 
 
 def _resolve_keys(store, data: dict) -> tuple[str, str]:
@@ -548,12 +549,8 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
     activity_store = store
     for row in rows:
         target_store, route_errors = template_routing.resolve_row_store(user, store, row)
-        vendor_code, vendor_errors = template_routing.validate_vendor_name_row(row)
-        if vendor_code:
-            row["source_vendor_code"] = vendor_code
-
         field_errors = _validate_listing(target_store, row)
-        errors = list(route_errors) + list(vendor_errors) + list(field_errors)
+        errors = list(route_errors) + list(field_errors)
         row_result = {
             "row_number": row.get("row_number"),
             "sku": row.get("sku", ""),
@@ -594,10 +591,8 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
         listing.action = file_action
         _apply_fields(listing, row)
         _finalize_validation(listing, row)
-        if route_errors or vendor_errors:
-            merged = list(route_errors) + list(vendor_errors) + list(
-                listing.validation_errors_json or []
-            )
+        if route_errors:
+            merged = list(route_errors) + list(listing.validation_errors_json or [])
             listing.validation_errors_json = merged
             listing.status = ListingStatus.VALIDATION_FAILED
         listing.save()
@@ -1027,7 +1022,15 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
                 )
                 url = (listing.vendor_url or "").strip()
                 nora_key = (listing.vendor_id or "").strip()
-                uses_nora = nora_map is not None and bool(nora_key)
+                src_code = (listing.source_vendor_code or "").strip()
+                from scrapers.nora_au_ingest import is_nora_vendor_code
+                from .template_routing import is_nora_like
+
+                explicit_nora = is_nora_like(src_code) or is_nora_vendor_code(src_code)
+                # vendor_id alone still means Nora when no source vendor was set (legacy rows)
+                uses_nora = nora_map is not None and bool(nora_key) and (
+                    explicit_nora or not src_code
+                )
                 row = {
                     "id": str(listing.id),
                     "sku": listing.sku or listing.external_variant_key,
@@ -1044,7 +1047,9 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
                 stock = None
                 if url:
                     try:
-                        result = get_price_and_stock(url, region, session) or {}
+                        result = get_price_and_stock(
+                            url, region, session, vendor_code=src_code or None,
+                        ) or {}
                     except Exception as exc:  # noqa: BLE001
                         if not uses_nora:
                             listing.inventory_sync_status = InventorySyncStatus.FAILED

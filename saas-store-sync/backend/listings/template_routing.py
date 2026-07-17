@@ -164,21 +164,23 @@ def validate_vendor_name_row(row: dict) -> tuple[str, list[str]]:
     url = (row.get("vendor_url") or "").strip().lower()
     vendor_id = (row.get("vendor_id") or "").strip()
 
-    if code in ("noraau", "nora", "nora_au", "nora-au") or "nora" in code:
+    if is_nora_like(code):
         if not vendor_id:
             errors.append(
-                'Vendor ID is required when Vendor Name is Nora Inventory '
+                "Vendor ID is required when Vendor Name is Nora Inventory "
                 "(supplier barcode)."
             )
-    elif code in ("amazonus", "amazon") or code.startswith("amazon") and "au" not in code:
+    elif code in ("amazonus", "amazon") or (
+        code.startswith("amazon") and "au" not in code
+    ):
         if url and "amazon." in url and "amazon.com.au" in url:
             errors.append(
-                'Vendor Name is Amazon US but Vendor URL looks like Amazon AU '
+                "Vendor Name is Amazon US but Vendor URL looks like Amazon AU "
                 "(amazon.com.au)."
             )
         elif url and "amazon." not in url and url.startswith("http"):
             errors.append(
-                f'Vendor Name is Amazon US but Vendor URL does not look like Amazon: {url[:80]}'
+                f"Vendor Name is Amazon US but Vendor URL does not look like Amazon: {url[:80]}"
             )
     elif "amazonau" in code or code in ("amazon_au", "amazon-au"):
         if url and "amazon." in url and "amazon.com.au" not in url:
@@ -187,7 +189,107 @@ def validate_vendor_name_row(row: dict) -> tuple[str, list[str]]:
             )
         elif url and "amazon." not in url and url.startswith("http"):
             errors.append(
-                f'Vendor Name is Amazon AU but Vendor URL does not look like Amazon: {url[:80]}'
+                f"Vendor Name is Amazon AU but Vendor URL does not look like Amazon: {url[:80]}"
             )
 
     return code, errors
+
+
+def store_price_vendor_codes(store) -> set[str]:
+    """Canonical vendor codes configured on the store's Price step."""
+    from stores.models import StoreVendorPriceSettings
+
+    codes = set()
+    for ps in StoreVendorPriceSettings.objects.filter(store=store).select_related("vendor"):
+        code = (getattr(ps.vendor, "code", None) or "").strip().lower()
+        if code:
+            codes.add(code)
+    return codes
+
+
+def is_nora_like(code: str | None) -> bool:
+    c = (code or "").strip().lower()
+    return "nora" in c
+
+
+def validate_source_vendor_for_store(store, data: dict) -> list[str]:
+    """Ensure source_vendor_code (or Vendor Name) matches a store price vendor.
+
+    Mutates ``data`` to set ``source_vendor_code`` when resolved from Vendor Name.
+    Blank is allowed only when the store has no price vendors configured.
+    """
+    errors: list[str] = []
+    raw_code = (data.get("source_vendor_code") or data.get("vendor_code") or "").strip()
+    raw_name = (data.get("vendor_name") or "").strip()
+
+    if raw_name and not raw_code:
+        resolved = resolve_vendor_code(raw_name)
+        if not resolved:
+            errors.append(
+                f'Unknown Vendor Name "{raw_name}". '
+                "Use a vendor configured on this store's Price settings."
+            )
+            return errors
+        data["source_vendor_code"] = resolved
+        raw_code = resolved
+
+    code = (raw_code or "").strip().lower()
+    allowed = store_price_vendor_codes(store)
+
+    if not code:
+        return errors
+
+    data["source_vendor_code"] = code
+
+    if allowed and code not in allowed:
+        preferred = VENDOR_NAME_ALIASES.get(_norm(raw_name or code))
+        alias_hit = None
+        if preferred and preferred in allowed:
+            alias_hit = preferred
+        else:
+            for a in allowed:
+                if code == a or code in a or a in code:
+                    alias_hit = a
+                    break
+        if alias_hit:
+            data["source_vendor_code"] = alias_hit
+            code = alias_hit
+        else:
+            labels = ", ".join(sorted(allowed))
+            errors.append(
+                f'Vendor "{raw_name or raw_code}" is not configured on this store. '
+                f"Configured vendors: {labels}."
+            )
+            return errors
+
+    if is_nora_like(code):
+        if not (data.get("vendor_id") or "").strip():
+            errors.append(
+                "Vendor ID is required when Vendor is Nora Inventory "
+                "(supplier barcode)."
+            )
+    else:
+        url = (data.get("vendor_url") or "").strip()
+        if not url:
+            errors.append("Vendor URL is required for the selected vendor.")
+        else:
+            url_l = url.lower()
+            if code in ("amazonus", "amazon") or (
+                code.startswith("amazon") and "au" not in code
+            ):
+                if "amazon.com.au" in url_l:
+                    errors.append(
+                        "Vendor is Amazon US but Vendor URL looks like Amazon AU."
+                    )
+            elif "amazonau" in code or code in ("amazon_au", "amazon-au"):
+                if "amazon." in url_l and "amazon.com.au" not in url_l:
+                    errors.append(
+                        "Vendor is Amazon AU but Vendor URL is not an amazon.com.au link."
+                    )
+            elif "ebayau" in code or code in ("ebay_au", "ebay-au"):
+                if "ebay." in url_l and "ebay.com.au" not in url_l:
+                    errors.append(
+                        "Vendor is eBay AU but Vendor URL is not an ebay.com.au link."
+                    )
+
+    return errors

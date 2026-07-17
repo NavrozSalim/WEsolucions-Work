@@ -193,6 +193,8 @@ class ListingInputSerializer(serializers.Serializer):
     barcode = serializers.CharField(required=False, allow_blank=True, default='')
     vendor_url = serializers.CharField(required=False, allow_blank=True, default='', max_length=1000)
     vendor_id = serializers.CharField(required=False, allow_blank=True, default='', max_length=255)
+    source_vendor_code = serializers.CharField(required=False, allow_blank=True, default='', max_length=50)
+    vendor_name = serializers.CharField(required=False, allow_blank=True, default='', max_length=255)
     image_urls = serializers.CharField(required=False, allow_blank=True, default='')
     inventory = serializers.IntegerField(required=False, default=0)
     infinite_quantity = serializers.BooleanField(required=False, default=False)

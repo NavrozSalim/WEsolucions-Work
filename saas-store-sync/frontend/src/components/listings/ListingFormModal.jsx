@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
 import { createListing, updateListing } from '../../services/listingService';
+import { getStore } from '../../services/storeService';
 import ListingPhotoUploader from './ListingPhotoUploader';
 import { ReverbCategorySelect, ReverbConditionSelect } from './ReverbCatalogSelects';
 
@@ -17,6 +18,7 @@ const EMPTY_LASOO = {
     category: '',
     sku: '',
     barcode: '',
+    source_vendor_code: '',
     vendor_url: '',
     vendor_id: '',
     image_urls: '',
@@ -42,11 +44,43 @@ const EMPTY_REVERB = {
     inventory: '1',
     barcode: '',
     upc_does_not_apply: true,
+    source_vendor_code: '',
     vendor_url: '',
+    vendor_id: '',
     image_urls: '',
     publish_status: 'draft',
     free_shipping: true,
 };
+
+function isNoraCode(code) {
+    return /nora/i.test(String(code || ''));
+}
+
+function vendorUrlPlaceholder(code) {
+    const c = String(code || '').toLowerCase();
+    if (c.includes('amazonau') || c.includes('amazon_au') || c.includes('amazon-au')) {
+        return 'https://www.amazon.com.au/dp/…';
+    }
+    if (c.includes('amazon')) return 'https://www.amazon.com/dp/…';
+    if (c.includes('ebayau') || c.includes('ebay_au') || c.includes('ebay-au')) {
+        return 'https://www.ebay.com.au/itm/…';
+    }
+    if (c.includes('ebay')) return 'https://www.ebay.com/itm/…';
+    if (c.includes('costco')) return 'https://www.costco.com.au/…';
+    if (c.includes('vevor')) return 'https://www.vevor.com.au/…';
+    if (c.includes('heb')) return 'https://www.heb.com/…';
+    return 'https://… (product page used for price & stock scrape)';
+}
+
+function vendorUrlLabel(code) {
+    const c = String(code || '').toLowerCase();
+    if (!c) return 'Vendor / source URL';
+    if (c.includes('amazonau') || c.includes('amazon_au')) return 'Vendor URL (Amazon AU)';
+    if (c.includes('amazon')) return 'Vendor URL (Amazon US)';
+    if (c.includes('ebayau') || c.includes('ebay_au')) return 'Vendor URL (eBay AU)';
+    if (c.includes('ebay')) return 'Vendor URL (eBay)';
+    return 'Vendor / source URL';
+}
 
 function Textarea({ label, rows = 3, ...props }) {
     return (
@@ -81,6 +115,31 @@ export default function ListingFormModal({
     const [form, setForm] = useState(isReverb ? EMPTY_REVERB : EMPTY_LASOO);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
+    const [storeVendors, setStoreVendors] = useState([]);
+
+    useEffect(() => {
+        if (!open || !storeId) return;
+        let cancelled = false;
+        getStore(storeId)
+            .then((res) => {
+                if (cancelled) return;
+                const settings = res.data?.vendor_price_settings || [];
+                const opts = settings
+                    .filter((vp) => vp.vendor_code || vp.vendor)
+                    .map((vp) => ({
+                        code: String(vp.vendor_code || '').trim().toLowerCase(),
+                        name: vp.vendor_name || vp.vendor_code || 'Vendor',
+                    }))
+                    .filter((v) => v.code);
+                setStoreVendors(opts);
+            })
+            .catch(() => {
+                if (!cancelled) setStoreVendors([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [open, storeId]);
 
     useEffect(() => {
         if (!open) return;
@@ -103,7 +162,9 @@ export default function ListingFormModal({
                     inventory: String(listing.inventory ?? 1),
                     barcode: listing.barcode || '',
                     upc_does_not_apply: listing.upc_does_not_apply !== false,
+                    source_vendor_code: listing.source_vendor_code || '',
                     vendor_url: listing.vendor_url || '',
+                    vendor_id: listing.vendor_id || '',
                     image_urls: listing.image_urls || '',
                     publish_status: listing.publish_status === 'live' ? 'live' : 'draft',
                     free_shipping: listing.free_shipping !== false,
@@ -118,6 +179,7 @@ export default function ListingFormModal({
                     category: listing.category || '',
                     sku: listing.sku || '',
                     barcode: listing.barcode || '',
+                    source_vendor_code: listing.source_vendor_code || '',
                     vendor_url: listing.vendor_url || '',
                     vendor_id: listing.vendor_id || '',
                     image_urls: listing.image_urls || '',
@@ -132,11 +194,34 @@ export default function ListingFormModal({
         }
     }, [open, listing, isReverb]);
 
+    const vendorOptions = useMemo(() => {
+        const opts = [{ value: '', label: storeVendors.length ? 'Select vendor…' : 'No vendors on store Price settings' }];
+        storeVendors.forEach((v) => {
+            opts.push({ value: v.code, label: v.name });
+        });
+        return opts;
+    }, [storeVendors]);
+
+    const selectedVendor = form.source_vendor_code || '';
+    const noraSelected = isNoraCode(selectedVendor);
+
     if (!open) return null;
 
     const set = (field) => (e) => {
         const value = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
         setForm((f) => ({ ...f, [field]: value }));
+    };
+
+    const setVendor = (e) => {
+        const code = e.target.value;
+        setForm((f) => ({
+            ...f,
+            source_vendor_code: code,
+            // Clear the other source field when switching Nora ↔ URL vendors
+            ...(isNoraCode(code)
+                ? { vendor_url: f.vendor_url }
+                : { vendor_id: isNoraCode(f.source_vendor_code) ? '' : f.vendor_id }),
+        }));
     };
 
     const handleSubmit = (e) => {
@@ -149,6 +234,21 @@ export default function ListingFormModal({
             .filter(Boolean).length;
         if (photoCount === 0) {
             setError('Upload at least one photo.');
+            setSaving(false);
+            return;
+        }
+        if (storeVendors.length > 0 && !String(form.source_vendor_code || '').trim()) {
+            setError('Select a Vendor from this store’s Price settings.');
+            setSaving(false);
+            return;
+        }
+        if (noraSelected && !String(form.vendor_id || '').trim()) {
+            setError('Vendor ID is required for Nora Inventory.');
+            setSaving(false);
+            return;
+        }
+        if (selectedVendor && !noraSelected && !String(form.vendor_url || '').trim()) {
+            setError('Vendor URL is required for the selected vendor.');
             setSaving(false);
             return;
         }
@@ -174,7 +274,9 @@ export default function ListingFormModal({
                 inventory: parseInt(form.inventory, 10) || 0,
                 barcode: form.barcode,
                 upc_does_not_apply: !!form.upc_does_not_apply,
+                source_vendor_code: form.source_vendor_code || '',
                 vendor_url: form.vendor_url,
+                vendor_id: form.vendor_id || '',
                 image_urls: form.image_urls,
                 publish_status: form.publish_status === 'live' ? 'live' : 'draft',
                 free_shipping: form.free_shipping !== false,
@@ -182,6 +284,7 @@ export default function ListingFormModal({
         } else {
             payload = {
                 ...form,
+                source_vendor_code: form.source_vendor_code || '',
                 inventory: parseInt(form.inventory, 10) || 0,
                 original_price: form.original_price === '' ? 0 : form.original_price,
                 sale_price: form.sale_price === '' ? 0 : form.sale_price,
@@ -207,6 +310,47 @@ export default function ListingFormModal({
             })
             .finally(() => setSaving(false));
     };
+
+    const vendorFields = (
+        <>
+            <div className="sm:col-span-2">
+                <Select
+                    label="Vendor (from store Price settings)"
+                    value={form.source_vendor_code || ''}
+                    onChange={setVendor}
+                    options={vendorOptions}
+                    required={storeVendors.length > 0}
+                />
+                {storeVendors.length === 0 && (
+                    <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                        Add vendors under Edit Store → Price, then create listings for scrape routing.
+                    </p>
+                )}
+            </div>
+            {noraSelected ? (
+                <div className="sm:col-span-2">
+                    <Input
+                        label="Vendor ID (Nora BarCode after cleaning, e.g. 8FNZ100-DL-G1)"
+                        placeholder="Matches Nora inventory Excel BarCode"
+                        value={form.vendor_id}
+                        onChange={set('vendor_id')}
+                        required
+                    />
+                </div>
+            ) : (
+                <div className="sm:col-span-2">
+                    <Input
+                        label={vendorUrlLabel(selectedVendor)}
+                        placeholder={vendorUrlPlaceholder(selectedVendor)}
+                        value={form.vendor_url}
+                        onChange={set('vendor_url')}
+                        type="url"
+                        required={!!selectedVendor}
+                    />
+                </div>
+            )}
+        </>
+    );
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -299,16 +443,7 @@ export default function ListingFormModal({
                                     required
                                 />
                                 <Input label="UPC (optional)" value={form.barcode} onChange={set('barcode')} />
-                                <div className="sm:col-span-2">
-                                    <Input
-                                        label="Vendor URL"
-                                        placeholder="https://www.amazon.com/dp/… (used to scrape price & stock)"
-                                        value={form.vendor_url}
-                                        onChange={set('vendor_url')}
-                                        type="url"
-                                        required
-                                    />
-                                </div>
+                                {vendorFields}
                                 <label className="mt-6 flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 sm:col-span-2">
                                     <input
                                         type="checkbox"
@@ -357,23 +492,7 @@ export default function ListingFormModal({
                                 </div>
                                 <Input label="Category" placeholder="e.g. Apparel > T-Shirts" value={form.category} onChange={set('category')} />
                                 <Input label="Barcode (optional)" value={form.barcode} onChange={set('barcode')} />
-                                <div className="sm:col-span-2">
-                                    <Input
-                                        label="Vendor / source URL (eBay AU for price scrape)"
-                                        placeholder="https://www.ebay.com.au/itm/…"
-                                        value={form.vendor_url}
-                                        onChange={set('vendor_url')}
-                                        type="url"
-                                    />
-                                </div>
-                                <div className="sm:col-span-2">
-                                    <Input
-                                        label="Vendor ID (Nora BarCode after cleaning, e.g. 8FNZ100-DL-G1)"
-                                        placeholder="Matches Nora inventory Excel BarCode"
-                                        value={form.vendor_id}
-                                        onChange={set('vendor_id')}
-                                    />
-                                </div>
+                                {vendorFields}
                                 <div className="sm:col-span-2">
                                     <ListingPhotoUploader
                                         storeId={storeId}
@@ -381,7 +500,8 @@ export default function ListingFormModal({
                                         onChange={(urls) => setForm((f) => ({ ...f, image_urls: urls }))}
                                         required
                                     />
-                                </div>                                <Input
+                                </div>
+                                <Input
                                     label="Product Key (defaults to SKU)"
                                     placeholder="Groups variants of the same product"
                                     value={form.product_key}

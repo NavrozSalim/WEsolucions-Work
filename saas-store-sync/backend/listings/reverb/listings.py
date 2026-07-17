@@ -173,7 +173,16 @@ def validate_listing(data: dict) -> list[str]:
         errors.append(f"At least one photo URL is required for SKU {label}.")
 
     vendor_url = str(data.get("vendor_url") or "").strip()
-    if not vendor_url:
+    source_code = str(
+        data.get("source_vendor_code") or data.get("vendor_code") or ""
+    ).strip().lower()
+    nora_source = "nora" in source_code
+    if nora_source:
+        if not str(data.get("vendor_id") or "").strip():
+            errors.append(
+                f"Vendor ID is required for SKU {label} when Vendor is Nora Inventory."
+            )
+    elif not vendor_url:
         errors.append(
             f"Vendor URL is required for SKU {label} "
             "(Amazon/eBay/etc. link used to scrape price and inventory)."
