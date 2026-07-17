@@ -12,6 +12,7 @@ from rest_framework.views import APIView
 
 from stores.models import Store
 
+from core.throttles import ProgressReadRateThrottle
 from store_adapters import get_adapter
 from store_adapters.reverb_adapter import ReverbAPIError
 from stores.credentials import marketplace_kind
@@ -83,6 +84,11 @@ def _filter_listings(qs, request):
 
 class StoreListingListCreateView(APIView):
     permission_classes = [IsAuthenticated]
+
+    def get_throttles(self):
+        if self.request.method == 'GET':
+            return [ProgressReadRateThrottle()]
+        return super().get_throttles()
 
     def get(self, request, store_pk):
         store = _get_store(request, store_pk)
@@ -286,6 +292,7 @@ class StoreListingUploadHistoryView(APIView):
     other non-history rows. ``?scope=all``: everything.
     """
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ProgressReadRateThrottle]
 
     def get(self, request, store_pk):
         store = _get_store(request, store_pk)
@@ -564,6 +571,7 @@ class StoreListingScrapeProgressView(APIView):
     Counts come from listing statuses when a scrape is active (catalog-style).
     """
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ProgressReadRateThrottle]
 
     def get(self, request, store_pk):
         store = _get_store(request, store_pk)

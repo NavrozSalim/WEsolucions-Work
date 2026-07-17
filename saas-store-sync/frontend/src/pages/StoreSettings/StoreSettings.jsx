@@ -186,7 +186,6 @@ export default function StoreSettings() {
                 setMarketplaces(Array.isArray(mktRes.data) ? mktRes.data : []);
             })
             .catch((err) => {
-                setStores([]);
                 if (err.response?.status === 429) {
                     const detail = err.response?.data?.detail;
                     showToast(
@@ -196,7 +195,9 @@ export default function StoreSettings() {
                         'error',
                         10000,
                     );
+                    return;
                 }
+                setStores([]);
             })
             .finally(() => setLoading(false));
     }, []);

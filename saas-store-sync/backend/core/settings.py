@@ -289,12 +289,13 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.UserRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
-        'user': '1000/hour',
-        'anon': '100/hour',
+        # Catalog/store UI polls while scrapes run; keep headroom for multi-tab use.
+        'user': '5000/hour',
+        'anon': '200/hour',
         'login': '5/minute',
         'sync_trigger': '10/minute',
-        # Progress/scrape/job polls during multi-hour Sears sync (UI polls ~every 15s).
-        'progress_read': '300/minute',
+        # Progress/scrape/job polls during multi-hour sync (UI polls ~every 15s).
+        'progress_read': '600/minute',
     },
 }
 

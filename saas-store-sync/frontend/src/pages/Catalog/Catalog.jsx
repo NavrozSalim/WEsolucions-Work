@@ -1364,6 +1364,11 @@ export default function Catalog() {
             .catch((err) => {
                 if (err.code === 'ERR_CANCELED' || err.name === 'CanceledError' || err.name === 'AbortError') return;
                 if (id !== uploadsFetchGenRef.current) return;
+                // Keep existing rows on throttle — clearing looks like data was deleted.
+                if (err.response?.status === 429) {
+                    setUploadsError(formatCatalogError(err));
+                    return;
+                }
                 setUploads([]);
                 setUploadsError(formatCatalogError(err) || 'Could not load upload history.');
             })
@@ -1383,7 +1388,13 @@ export default function Catalog() {
         setLoading(true);
         getCatalogStores(selectedMarketplace || null)
             .then((res) => setStoreList(Array.isArray(res.data) ? res.data : []))
-            .catch(() => setStoreList([]))
+            .catch((err) => {
+                if (err.response?.status === 429) {
+                    setMessage(formatCatalogError(err));
+                    return;
+                }
+                setStoreList([]);
+            })
             .finally(() => setLoading(false));
     }, [selectedMarketplace]);
 
@@ -1439,6 +1450,10 @@ export default function Catalog() {
             .catch((err) => {
                 if (ac.signal.aborted) return;
                 if (gen !== productsFetchGenRef.current) return;
+                if (err.response?.status === 429) {
+                    setMessage(formatCatalogError(err));
+                    return;
+                }
                 setProducts([]);
                 setTotalProductCount(0);
                 setMessage(formatCatalogError(err));
@@ -1455,7 +1470,9 @@ export default function Catalog() {
         setMessage('');
         refreshActivityLogs()
             .catch((err) => {
-                setActivityLogs([]);
+                if (err.response?.status !== 429) {
+                    setActivityLogs([]);
+                }
                 setMessage(formatCatalogError(err));
             })
             .finally(() => setLogsLoading(false));
@@ -1595,9 +1612,8 @@ export default function Catalog() {
                 })
                 .catch((err) => {
                     if (cancelled) return;
-                    if (err.response?.status === 429) {
-                        setMessage(formatCatalogError(err));
-                    }
+                    // Poll quietly on throttle — avoid toast spam every 15s.
+                    if (err.response?.status === 429) return;
                 });
             const manualActive = trackingManualPushRef.current;
             // During live scrape: poll progress every tick; refresh product rows

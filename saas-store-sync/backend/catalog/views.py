@@ -212,6 +212,12 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     pagination_class = CatalogProductPagination
 
+    def get_throttles(self):
+        # Live Catalog polls product list during scrape; use progress bucket.
+        if getattr(self, 'action', None) in ('list', 'retrieve'):
+            return [ProgressReadRateThrottle()]
+        return super().get_throttles()
+
     def _base_queryset(self):
         """Filter + order only (no VendorPrice subqueries) for cheap COUNT/pagination."""
         store_id = self.kwargs.get('store_pk')
@@ -442,6 +448,7 @@ class StoreCatalogUploadView(APIView):
 class CatalogUploadListView(APIView):
     """List catalog uploads for a store (upload history)."""
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ProgressReadRateThrottle]
 
     def get(self, request, store_pk):
         store = get_object_or_404(
