@@ -50,10 +50,12 @@ def record_activity(
     rows=None,
     message: str = "",
 ) -> ListingUpload:
-    """Persist an Upload-history row for a file or single-listing change."""
-    if errors and success:
-        status = ListingUpload.Status.PARTIAL
-    elif errors:
+    """Persist an Upload-history row for a file or single-listing change.
+
+    Any row error marks the upload as Failed (shown as Error in the UI).
+    All rows OK → Completed (shown as Created).
+    """
+    if errors:
         status = ListingUpload.Status.FAILED
     else:
         status = ListingUpload.Status.COMPLETED
@@ -154,6 +156,7 @@ def _apply_fields(listing: StoreListing, data: dict):
     listing.sku = (data.get("sku") or "").strip()
     listing.barcode = (data.get("barcode") or data.get("upc") or "").strip()
     listing.vendor_url = (data.get("vendor_url") or "").strip()[:1000]
+    listing.vendor_id = (data.get("vendor_id") or "").strip()[:255]
     if _store_kind(store) == "reverb":
         listing.image_urls = "|".join(
             p for p in str(data.get("image_urls") or "").replace(";", "|").replace("\n", "|").replace(",", "|").split("|")
@@ -287,6 +290,109 @@ def delete(user, store, listing: StoreListing) -> dict:
     return {"ok": True, "variant_key": variant_key, "marketplace_deleted": on_marketplace}
 
 
+def _keys_from_upload_rows(upload: ListingUpload) -> list[str]:
+    """Collect SKU / variant keys referenced by an upload history row."""
+    keys: list[str] = []
+    seen: set[str] = set()
+    rows = upload.rows_json if isinstance(upload.rows_json, list) else []
+    for r in rows:
+        for field in ("sku", "variant_key"):
+            val = (r.get(field) or "").strip() if isinstance(r, dict) else ""
+            if val and val not in seen:
+                seen.add(val)
+                keys.append(val)
+    return keys
+
+
+def _delete_listings_marketplace(store, listings: list) -> None:
+    """Remove listings from Lasoo/Reverb when they exist on the marketplace."""
+    marketplace_keys = [
+        listing.external_variant_key
+        for listing in listings
+        if listing.status in ON_MARKETPLACE_STATUSES or listing.action == ListingAction.MAPPED
+    ]
+    if not marketplace_keys:
+        return
+    kind = marketplace_kind(store.marketplace)
+    if kind == "lasoo":
+        environment = store.lasoo_environment or Environment.STAGING
+        client = LasooClient(store, environment)
+        payload = mapper.build_bulk_delete_payload(marketplace_keys, client.auth_key)
+        result = client.send("bulk_delete", payload)
+        if not result.ok:
+            raise MarketplaceError(
+                result.message or "Could not delete the listings on the marketplace."
+            )
+    elif kind == "reverb":
+        adapter = get_adapter(store)
+        for key in marketplace_keys:
+            try:
+                lid = adapter.lookup_listing_by_sku(key) or key
+                if lid:
+                    adapter.delete_product(lid)
+            except ReverbAPIError as exc:
+                raise MarketplaceError(
+                    str(exc) or f"Could not end Reverb listing for SKU {key}."
+                ) from exc
+    else:
+        raise MarketplaceError(
+            "Deleting marketplace listings is currently only supported for Lasoo and Reverb stores."
+        )
+
+
+def delete_upload(
+    user,
+    store,
+    upload: ListingUpload,
+    *,
+    delete_system: bool = False,
+    delete_marketplace: bool = False,
+) -> dict:
+    """Delete an Upload history entry, optionally its listings from system and marketplace.
+
+    - Always removes the history row (Upload history).
+    - ``delete_system`` removes matching StoreListing rows for SKUs in the upload.
+    - ``delete_marketplace`` also removes those listings from the store marketplace
+      (implies ``delete_system``).
+    """
+    if delete_marketplace:
+        delete_system = True
+
+    listings_deleted = 0
+    marketplace_deleted = 0
+    if delete_system:
+        keys = _keys_from_upload_rows(upload)
+        listings = []
+        if keys:
+            listings = list(
+                StoreListing.objects.filter(store=store, user=user).filter(
+                    Q(sku__in=keys) | Q(external_variant_key__in=keys)
+                )
+            )
+        if delete_marketplace and listings:
+            on_mp = [
+                L
+                for L in listings
+                if L.status in ON_MARKETPLACE_STATUSES or L.action == ListingAction.MAPPED
+            ]
+            _delete_listings_marketplace(store, listings)
+            marketplace_deleted = len(on_mp)
+        listings_deleted = len(listings)
+        for listing in listings:
+            listing.delete()
+
+    upload_id = str(upload.id)
+    upload.delete()
+    return {
+        "ok": True,
+        "upload_id": upload_id,
+        "listings_deleted": listings_deleted,
+        "marketplace_deleted": marketplace_deleted,
+        "delete_system": delete_system,
+        "delete_marketplace": delete_marketplace,
+    }
+
+
 def _listing_to_data(listing: StoreListing) -> dict:
     if _store_kind(listing.store) == "reverb":
         return reverb_listings.listing_to_data(listing)
@@ -300,6 +406,7 @@ def _listing_to_data(listing: StoreListing) -> dict:
         "sku": listing.sku,
         "barcode": listing.barcode,
         "vendor_url": listing.vendor_url,
+        "vendor_id": listing.vendor_id,
         "image_urls": listing.image_urls,
         "inventory": listing.inventory,
         "infinite_quantity": listing.infinite_quantity,
@@ -671,17 +778,8 @@ def publish(user, store, listing_ids=None) -> dict:
         return _publish_lasoo(user, store, publishable)
 
 
-def scrape_listings(user, store, listing_ids=None) -> dict:
-    """Scrape vendor URLs on managed listings (same scrapers + pricing as catalog)."""
-    from scrapers import close_amazon_session, get_price_and_stock
-    from sync.tasks import (
-        _apply_inventory,
-        _apply_pricing,
-        _build_store_vendor_pricing_inventory_caches,
-        _get_inventory_for_vendor_from_cache,
-        _get_pricing_for_vendor_from_cache,
-    )
-
+def _scrapeable_listings_qs(user, store, listing_ids=None):
+    """Base queryset for managed inventory scrapes."""
     qs = StoreListing.objects.filter(user=user, store=store)
     if listing_ids:
         qs = qs.filter(id__in=listing_ids)
@@ -694,11 +792,191 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
                 ListingStatus.FAILED,
             ]
         )
-    listings = [l for l in qs if (l.vendor_url or "").strip()]
+    return qs
+
+
+def _estimate_scrape_total(user, store, listing_ids=None) -> int:
+    """Count rows that will be scraped (Vendor URL and/or Nora Vendor ID).
+
+    Used so the progress bar shows X/Y as soon as scrape is queued.
+    """
+    from stores.nora import load_store_nora_stock_map
+
+    qs = _scrapeable_listings_qs(user, store, listing_ids)
+    nora_map = None
+    try:
+        nora_map = load_store_nora_stock_map(store)
+    except Exception:  # noqa: BLE001
+        nora_map = None
+
+    total = 0
+    for listing in qs.only("id", "vendor_url", "vendor_id"):
+        has_url = bool((listing.vendor_url or "").strip())
+        has_nora_id = bool((listing.vendor_id or "").strip()) and nora_map is not None
+        if has_url or has_nora_id:
+            total += 1
+    return total
+
+
+def start_scrape_async(user, store, listing_ids=None) -> dict:
+    """Start a managed-listing scrape in a background thread.
+
+    Progress is stored in cache and live counts are derived from StoreListing
+    statuses (pending → scraped/failed), matching catalog Inventory management.
+    """
+    import threading
+
+    from . import scrape_progress as scrape_prog
+
+    existing = scrape_prog.get_scrape_progress(store.id)
+    if existing.get("active"):
+        live = scrape_prog.enrich_progress_from_listings(store.id)
+        return {
+            "started": False,
+            "already_running": True,
+            "ok": True,
+            "message": "Scrape already running. Progress continues on the server.",
+            **{k: live.get(k) for k in ("total", "processed", "scraped", "failed", "pct", "phase", "message")},
+        }
+
+    ids = list(listing_ids) if listing_ids else None
+
+    from stores.nora import load_store_nora_stock_map
+
+    qs = _scrapeable_listings_qs(user, store, ids)
+    nora_map = None
+    try:
+        nora_map = load_store_nora_stock_map(store)
+    except Exception:  # noqa: BLE001
+        nora_map = None
+
+    batch = []
+    for listing in qs.only("id", "vendor_url", "vendor_id"):
+        has_url = bool((listing.vendor_url or "").strip())
+        has_nora_id = bool((listing.vendor_id or "").strip()) and nora_map is not None
+        if has_url or has_nora_id:
+            batch.append(listing)
+
+    if not batch:
+        raise MarketplaceError(
+            "No listings with a Vendor URL (or Nora Vendor ID) to scrape. "
+            "Add a vendor link / Vendor ID on each listing first."
+        )
+
+    batch_ids = [l.id for l in batch]
+    total = len(batch_ids)
+    StoreListing.objects.filter(id__in=batch_ids).update(
+        inventory_sync_status=InventorySyncStatus.PENDING,
+        last_scrape_error="",
+    )
+    scrape_prog.begin_scrape_progress(
+        store.id,
+        total=total,
+        listing_ids=batch_ids,
+        phase="running",
+        message=f"Scraping 0 of {total}…",
+    )
+
+    user_id = user.id
+    store_id = str(store.id)
+    id_strs = [str(x) for x in batch_ids]
+
+    def _run():
+        from django.contrib.auth import get_user_model
+        from stores.models import Store
+
+        User = get_user_model()
+        try:
+            u = User.objects.get(pk=user_id)
+            s = Store.objects.select_related("marketplace", "user").get(pk=store_id)
+            scrape_listings(u, s, id_strs)
+        except MarketplaceError as err:
+            scrape_prog.finish_scrape_progress(store_id, message=str(err)[:200])
+        except Exception as err:  # noqa: BLE001
+            logger.exception("Managed scrape failed store=%s", store_id)
+            scrape_prog.finish_scrape_progress(
+                store_id,
+                message=(str(err) or "Scrape failed.")[:200],
+            )
+        finally:
+            scrape_prog.enrich_progress_from_listings(store_id)
+
+    threading.Thread(target=_run, daemon=True, name=f"listing-scrape-{store_id}").start()
+
+    return {
+        "started": True,
+        "async": True,
+        "via": "thread",
+        "ok": True,
+        "total": total,
+        "processed": 0,
+        "message": f"Scrape started for {total} listing(s). Progress updates as each listing finishes.",
+    }
+
+
+def scrape_listings(user, store, listing_ids=None) -> dict:
+    """Scrape vendor URLs on managed listings; Nora stock overrides when configured.
+
+    Price comes from Vendor URL scrape (e.g. eBay AU). Inventory comes from the
+    Nora Excel map when the store has Nora Inventory uploaded and the listing
+    has a Vendor ID — unmatched Vendor IDs get stock 0.
+    """
+    from scrapers import close_amazon_session, get_price_and_stock
+    from stores.nora import (
+        get_nora_inventory_settings,
+        load_store_nora_stock_map,
+        lookup_nora_stock,
+    )
+    from sync.tasks import (
+        _apply_inventory,
+        _apply_pricing,
+        _build_store_vendor_pricing_inventory_caches,
+        _get_inventory_for_vendor_from_cache,
+        _get_pricing_for_vendor_from_cache,
+    )
+
+    qs = _scrapeable_listings_qs(user, store, listing_ids)
+
+    nora_map = None
+    nora_vendor_pk = None
+    try:
+        nora_map = load_store_nora_stock_map(store)
+        nora_inv = get_nora_inventory_settings(store)
+        if nora_inv is not None:
+            nora_vendor_pk = nora_inv.vendor_id
+    except Exception as nora_err:
+        logger.warning("Nora map unavailable for managed scrape store=%s: %s", store.id, nora_err)
+        nora_map = None
+
+    listings = []
+    for listing in qs:
+        has_url = bool((listing.vendor_url or "").strip())
+        has_nora_id = bool((listing.vendor_id or "").strip()) and nora_map is not None
+        if has_url or has_nora_id:
+            listings.append(listing)
+
     if not listings:
         raise MarketplaceError(
-            "No listings with a Vendor URL to scrape. Add a vendor link on each listing first."
+            "No listings with a Vendor URL (or Nora Vendor ID) to scrape. "
+            "Add a vendor link / Vendor ID on each listing first."
         )
+
+    from . import scrape_progress as scrape_prog
+
+    total = len(listings)
+    listing_ids_batch = [l.id for l in listings]
+    # Mark batch pending so the inventory table / progress bar move with each row.
+    StoreListing.objects.filter(id__in=listing_ids_batch).update(
+        inventory_sync_status=InventorySyncStatus.PENDING,
+        last_scrape_error="",
+    )
+    scrape_prog.begin_scrape_progress(
+        store.id,
+        total=total,
+        listing_ids=listing_ids_batch,
+        phase="running",
+        message=f"Scraping 0 of {total}…",
+    )
 
     region = (getattr(store, "region", None) or "USA").strip() or "USA"
     price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
@@ -708,157 +986,269 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
     rows = []
     now = timezone.now()
     try:
-        for listing in listings:
-            url = (listing.vendor_url or "").strip()
-            row = {
-                "id": str(listing.id),
-                "sku": listing.sku or listing.external_variant_key,
-                "vendor_url": url,
-                "ok": False,
-                "vendor_price": None,
-                "price": None,
-                "inventory": None,
-                "error": "",
-            }
-            try:
-                result = get_price_and_stock(url, region, session) or {}
-            except Exception as exc:  # noqa: BLE001
-                listing.inventory_sync_status = InventorySyncStatus.FAILED
-                listing.last_scrape_at = now
-                listing.last_scrape_error = (str(exc) or "Scrape failed.")[:500]
-                listing.save(
-                    update_fields=[
-                        "inventory_sync_status",
-                        "last_scrape_at",
-                        "last_scrape_error",
-                        "updated_at",
-                    ]
+        try:
+            for idx, listing in enumerate(listings):
+                scrape_prog.set_scrape_progress(
+                    store.id,
+                    total=total,
+                    processed=idx,
+                    scraped=scraped,
+                    failed=failed,
+                    phase="running",
+                    current_sku=(listing.sku or listing.external_variant_key or "")[:80],
+                    message=f"Scraping {idx + 1} of {total}…",
                 )
-                row["error"] = listing.last_scrape_error
-                failed += 1
-                rows.append(row)
-                logger.warning("Listing scrape failed SKU %s: %s", listing.sku, exc)
-                continue
+                url = (listing.vendor_url or "").strip()
+                nora_key = (listing.vendor_id or "").strip()
+                uses_nora = nora_map is not None and bool(nora_key)
+                row = {
+                    "id": str(listing.id),
+                    "sku": listing.sku or listing.external_variant_key,
+                    "vendor_url": url,
+                    "vendor_id": nora_key,
+                    "ok": False,
+                    "vendor_price": None,
+                    "price": None,
+                    "inventory": None,
+                    "error": "",
+                }
+                result = {}
+                price = None
+                stock = None
+                if url:
+                    try:
+                        result = get_price_and_stock(url, region, session) or {}
+                    except Exception as exc:  # noqa: BLE001
+                        if not uses_nora:
+                            listing.inventory_sync_status = InventorySyncStatus.FAILED
+                            listing.last_scrape_at = now
+                            listing.last_scrape_error = (str(exc) or "Scrape failed.")[:500]
+                            listing.save(
+                                update_fields=[
+                                    "inventory_sync_status",
+                                    "last_scrape_at",
+                                    "last_scrape_error",
+                                    "updated_at",
+                                ]
+                            )
+                            row["error"] = listing.last_scrape_error
+                            failed += 1
+                            rows.append(row)
+                            scrape_prog.set_scrape_progress(
+                                store.id,
+                                processed=idx + 1,
+                                scraped=scraped,
+                                failed=failed,
+                                current_sku=row["sku"] or "",
+                            )
+                            logger.warning("Listing scrape failed SKU %s: %s", listing.sku, exc)
+                            continue
+                        logger.warning(
+                            "Listing scrape failed SKU %s (Nora stock still applied): %s",
+                            listing.sku,
+                            exc,
+                        )
+                        result = {}
 
-            if result.get("ingest_only"):
-                listing.inventory_sync_status = InventorySyncStatus.FAILED
-                listing.last_scrape_at = now
-                listing.last_scrape_error = (
-                    "This vendor is ingest-only and cannot be scraped server-side."
-                )
-                listing.save(
-                    update_fields=[
-                        "inventory_sync_status",
-                        "last_scrape_at",
-                        "last_scrape_error",
-                        "updated_at",
-                    ]
-                )
-                row["error"] = listing.last_scrape_error
-                failed += 1
-                rows.append(row)
-                continue
+                    if result.get("ingest_only") and not uses_nora:
+                        listing.inventory_sync_status = InventorySyncStatus.FAILED
+                        listing.last_scrape_at = now
+                        listing.last_scrape_error = (
+                            "This vendor is ingest-only and cannot be scraped server-side."
+                        )
+                        listing.save(
+                            update_fields=[
+                                "inventory_sync_status",
+                                "last_scrape_at",
+                                "last_scrape_error",
+                                "updated_at",
+                            ]
+                        )
+                        row["error"] = listing.last_scrape_error
+                        failed += 1
+                        rows.append(row)
+                        scrape_prog.set_scrape_progress(
+                            store.id,
+                            processed=idx + 1,
+                            scraped=scraped,
+                            failed=failed,
+                            current_sku=row["sku"] or "",
+                        )
+                        continue
 
-            price = result.get("price")
-            stock = result.get("stock")
-            if result.get("inventory") is not None and stock is None:
-                stock = result.get("inventory")
-            err = result.get("error_message") or result.get("error") or ""
-            if price is None and stock is None:
-                listing.inventory_sync_status = InventorySyncStatus.FAILED
-                listing.last_scrape_at = now
-                listing.last_scrape_error = (str(err) or "No price or stock returned.")[:500]
-                listing.save(
-                    update_fields=[
-                        "inventory_sync_status",
-                        "last_scrape_at",
-                        "last_scrape_error",
-                        "updated_at",
-                    ]
-                )
-                row["error"] = listing.last_scrape_error
-                failed += 1
-                rows.append(row)
-                continue
+                    price = result.get("price")
+                    stock = result.get("stock")
+                    if result.get("inventory") is not None and stock is None:
+                        stock = result.get("inventory")
 
-            vendor_id = _vendor_id_from_url(url, price_by_vid, inv_by_vid)
-            pricing = _get_pricing_for_vendor_from_cache(vendor_id, price_by_vid, price_fb)
-            inventory_settings = _get_inventory_for_vendor_from_cache(
-                vendor_id, inv_by_vid, inv_fb
+                if uses_nora:
+                    stock = lookup_nora_stock(nora_map, nora_key) or 0
+
+                err = result.get("error_message") or result.get("error") or ""
+                if price is None and stock is None and not uses_nora:
+                    listing.inventory_sync_status = InventorySyncStatus.FAILED
+                    listing.last_scrape_at = now
+                    listing.last_scrape_error = (str(err) or "No price or stock returned.")[:500]
+                    listing.save(
+                        update_fields=[
+                            "inventory_sync_status",
+                            "last_scrape_at",
+                            "last_scrape_error",
+                            "updated_at",
+                        ]
+                    )
+                    row["error"] = listing.last_scrape_error
+                    failed += 1
+                    rows.append(row)
+                    scrape_prog.set_scrape_progress(
+                        store.id,
+                        processed=idx + 1,
+                        scraped=scraped,
+                        failed=failed,
+                        current_sku=row["sku"] or "",
+                    )
+                    continue
+
+                vendor_id = _vendor_id_from_url(url, price_by_vid, inv_by_vid)
+                pricing = _get_pricing_for_vendor_from_cache(vendor_id, price_by_vid, price_fb)
+                inventory_settings = (
+                    _get_inventory_for_vendor_from_cache(nora_vendor_pk, inv_by_vid, inv_fb)
+                    if (uses_nora and nora_vendor_pk)
+                    else _get_inventory_for_vendor_from_cache(vendor_id, inv_by_vid, inv_fb)
+                )
+
+                update_fields = [
+                    "updated_at",
+                    "inventory_sync_status",
+                    "last_scrape_at",
+                    "last_scrape_error",
+                ]
+                listing.last_scrape_at = now
+                listing.last_scrape_error = ""
+                listing.inventory_sync_status = InventorySyncStatus.SCRAPED
+
+                if price is not None:
+                    vp = _safe_decimal(price)
+                    listing.vendor_price = vp
+                    priced = _apply_pricing(vp, pricing)
+                    if priced is None:
+                        priced = vp
+                    listing.sale_price = priced
+                    listing.original_price = priced
+                    cents = int(priced * 100)
+                    listing.sale_price_cents = cents
+                    listing.original_price_cents = cents
+                    update_fields.extend(
+                        [
+                            "vendor_price",
+                            "sale_price",
+                            "original_price",
+                            "sale_price_cents",
+                            "original_price_cents",
+                        ]
+                    )
+                    row["vendor_price"] = float(vp)
+                    row["price"] = float(priced)
+                elif uses_nora and price is None:
+                    listing.last_scrape_error = (
+                        "Nora stock applied; eBay price unavailable"
+                        + (f" ({url[:80]})" if url else " (no Vendor URL)")
+                    )[:500]
+
+                if stock is not None:
+                    try:
+                        raw_stock = max(0, int(stock))
+                    except (TypeError, ValueError):
+                        raw_stock = 0
+                    listing.inventory = int(_apply_inventory(raw_stock, inventory_settings))
+                    listing.infinite_quantity = False
+                    update_fields.extend(["inventory", "infinite_quantity"])
+                    row["inventory"] = listing.inventory
+
+                listing.save(update_fields=list(dict.fromkeys(update_fields)))
+                row["ok"] = True
+                scraped += 1
+                rows.append(row)
+                scrape_prog.set_scrape_progress(
+                    store.id,
+                    processed=idx + 1,
+                    scraped=scraped,
+                    failed=failed,
+                    current_sku=row["sku"] or "",
+                    message=f"Scraped {scraped} of {total}…",
+                )
+        except Exception as scrape_exc:  # noqa: BLE001
+            scrape_prog.finish_scrape_progress(
+                store.id,
+                scraped=scraped,
+                failed=failed + max(0, total - scraped - failed),
+                message=(str(scrape_exc) or "Scrape failed.")[:200],
             )
-
-            update_fields = [
-                "updated_at",
-                "inventory_sync_status",
-                "last_scrape_at",
-                "last_scrape_error",
-            ]
-            listing.last_scrape_at = now
-            listing.last_scrape_error = ""
-            listing.inventory_sync_status = InventorySyncStatus.SCRAPED
-
-            if price is not None:
-                vp = _safe_decimal(price)
-                listing.vendor_price = vp
-                # Same pricing engine as catalog Product listings.
-                priced = _apply_pricing(vp, pricing)
-                if priced is None:
-                    priced = vp
-                listing.sale_price = priced
-                listing.original_price = priced
-                cents = int(priced * 100)
-                listing.sale_price_cents = cents
-                listing.original_price_cents = cents
-                update_fields.extend(
-                    [
-                        "vendor_price",
-                        "sale_price",
-                        "original_price",
-                        "sale_price_cents",
-                        "original_price_cents",
-                    ]
-                )
-                row["vendor_price"] = float(vp)
-                row["price"] = float(priced)
-            if stock is not None:
-                try:
-                    raw_stock = max(0, int(stock))
-                except (TypeError, ValueError):
-                    raw_stock = 0
-                # Same inventory ranges/multipliers as catalog Product listings.
-                listing.inventory = int(_apply_inventory(raw_stock, inventory_settings))
-                listing.infinite_quantity = False
-                update_fields.extend(["inventory", "infinite_quantity"])
-                row["inventory"] = listing.inventory
-
-            listing.save(update_fields=list(dict.fromkeys(update_fields)))
-            row["ok"] = True
-            scraped += 1
-            rows.append(row)
+            raise
     finally:
         try:
             close_amazon_session(session)
         except Exception:  # noqa: BLE001
             pass
 
+    # Scrape only — leave status Scraped. Manual sync / schedule pushes to marketplace
+    # (same flow as Reverb managed inventory).
+    msg = (
+        f"Scraped {scraped} listing(s)"
+        + (f"; {failed} failed" if failed else "")
+        + ". Use Manual sync or your schedule to push price/stock to the marketplace."
+    )
+    scrape_prog.finish_scrape_progress(
+        store.id,
+        scraped=scraped,
+        failed=failed,
+        message=msg,
+    )
     return {
         "ok": scraped > 0,
-        "message": (
-            f"Scraped {scraped} listing(s)"
-            + (f"; {failed} failed." if failed else ".")
-        ),
+        "message": msg,
         "scraped": scraped,
         "failed": failed,
+        "pushed": 0,
         "rows": rows,
     }
+
 
 
 def push_inventory(user, store, listing_ids=None) -> dict:
     """Push local price/stock to the marketplace (Manual sync for managed stores)."""
     kind = marketplace_kind(store.marketplace)
+    if kind == "lasoo":
+        qs = StoreListing.objects.filter(
+            user=user,
+            store=store,
+            status__in=[
+                ListingStatus.UPLOADED_STAGING,
+                ListingStatus.UPLOADED_PRODUCTION,
+            ],
+        )
+        if listing_ids:
+            qs = qs.filter(id__in=listing_ids)
+        listings = list(qs)
+        if not listings:
+            raise MarketplaceError(
+                "No marketplace listings to push. Publish from Created products first."
+            )
+        pub = _publish_lasoo(user, store, listings)
+        if pub.get("ok"):
+            StoreListing.objects.filter(id__in=[l.id for l in listings]).update(
+                inventory_sync_status=InventorySyncStatus.SYNCED,
+            )
+        return {
+            "ok": bool(pub.get("ok")),
+            "message": pub.get("message") or f"Pushed {len(listings)} listing(s) to Lasoo.",
+            "pushed": pub.get("published") or (len(listings) if pub.get("ok") else 0),
+            "failed": 0 if pub.get("ok") else len(listings),
+            "rows": [],
+        }
     if kind != "reverb":
         raise MarketplaceError(
-            "Inventory push is currently supported for Reverb managed stores."
+            "Inventory push is currently supported for Reverb and Lasoo managed stores."
         )
 
     qs = StoreListing.objects.filter(
@@ -986,7 +1376,7 @@ def reset_inventory_status(user, store, scope: str = "failed") -> dict:
 
 
 def critical_zero_inventory(user, store) -> dict:
-    """Set stock to 0 on all marketplace listings and push to Reverb."""
+    """Set stock to 0 on all marketplace listings and push (Reverb / Lasoo)."""
     qs = StoreListing.objects.filter(
         user=user,
         store=store,

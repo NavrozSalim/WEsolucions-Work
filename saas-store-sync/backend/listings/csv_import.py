@@ -32,6 +32,9 @@ COLUMN_MAP = {
     "vendor_url": "vendor_url",
     "source url": "vendor_url",
     "source link": "vendor_url",
+    "vendor link": "vendor_url",
+    "vendor id": "vendor_id",
+    "vendor_id": "vendor_id",
     "image urls": "image_urls",
     "image url": "image_urls",
     "photos": "image_urls",
@@ -64,6 +67,7 @@ LASOO_TEMPLATE_HEADERS = [
     "Infinite Quantity",
     "Original Price",
     "Sale Price",
+    "Vendor ID",
 ]
 
 REVERB_TEMPLATE_HEADERS = [
@@ -250,6 +254,7 @@ def build_template_csv(action: str = "create", store=None) -> str:
         "Infinite Quantity": "false",
         "Original Price": "29.99",
         "Sale Price": "24.99",
+        "Vendor ID": "8FNZ100-DL-G1",
     }
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=LASOO_TEMPLATE_HEADERS, lineterminator="\n")

@@ -23,7 +23,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'store', 'external_product_key', 'external_variant_key',
             'title', 'description', 'brand', 'category', 'sku', 'barcode',
-            'vendor_url', 'image_urls', 'inventory', 'infinite_quantity',
+            'vendor_url', 'vendor_id', 'image_urls', 'inventory', 'infinite_quantity',
             'original_price', 'sale_price', 'vendor_price',
             'make', 'model', 'finish', 'year',
             'condition_uuid', 'category_uuid', 'currency', 'upc_does_not_apply',
@@ -192,6 +192,7 @@ class ListingInputSerializer(serializers.Serializer):
     sku = serializers.CharField(required=False, allow_blank=True, default='')
     barcode = serializers.CharField(required=False, allow_blank=True, default='')
     vendor_url = serializers.CharField(required=False, allow_blank=True, default='', max_length=1000)
+    vendor_id = serializers.CharField(required=False, allow_blank=True, default='', max_length=255)
     image_urls = serializers.CharField(required=False, allow_blank=True, default='')
     inventory = serializers.IntegerField(required=False, default=0)
     infinite_quantity = serializers.BooleanField(required=False, default=False)

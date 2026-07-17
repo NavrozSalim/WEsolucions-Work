@@ -829,6 +829,126 @@ def _run_browser_scrape_for_scheduled_update(store, source: str) -> dict:
     return {'error': 'browser_scrape_timeout', 'task_id': task_id}
 
 
+def _run_managed_store_update(store, *, source='beat'):
+    """Scheduled/manual update for managed (full_store) Reverb/Lasoo stores.
+
+    Same UX as Inventory management: reset → Start Scraping → Manual sync (push).
+    """
+    import logging
+    from listings import listing_service
+    from listings.errors import MarketplaceError
+    from sync.models import SyncSchedule
+
+    logger = logging.getLogger(__name__)
+    user = store.user
+    if user is None:
+        return {
+            'store_id': str(store.id),
+            'skipped': True,
+            'reason': 'no_store_user',
+            'hint': 'Managed store has no owner user.',
+        }
+
+    marketplace_push_enabled = _store_can_push_to_marketplace(store.id)
+    sync_run = StoreSyncRun.objects.create(store=store, status='running')
+    scraped = failed = pushed = push_failed = reset_n = 0
+    error_summary = None
+
+    try:
+        reset = listing_service.reset_inventory_status(user, store, scope='all')
+        reset_n = int(reset.get('updated') or 0)
+    except MarketplaceError as exc:
+        error_summary = str(exc)
+        logger.warning("Managed reset failed store=%s: %s", store.id, exc)
+
+    try:
+        scrape = listing_service.scrape_listings(user, store)
+        scraped = int(scrape.get('scraped') or 0)
+        failed = int(scrape.get('failed') or 0)
+        if not scrape.get('ok') and scrape.get('message'):
+            error_summary = error_summary or scrape.get('message')
+    except MarketplaceError as exc:
+        error_summary = str(exc)
+        logger.warning("Managed scrape failed store=%s: %s", store.id, exc)
+    except Exception as exc:  # noqa: BLE001
+        error_summary = str(exc) or 'Managed scrape failed'
+        logger.exception("Managed scrape error store=%s", store.id)
+
+    if marketplace_push_enabled and scraped > 0:
+        try:
+            push = listing_service.push_inventory(user, store)
+            pushed = int(push.get('pushed') or 0)
+            push_failed = int(push.get('failed') or 0)
+            if not push.get('ok') and push.get('message'):
+                error_summary = error_summary or push.get('message')
+        except MarketplaceError as exc:
+            error_summary = str(exc)
+            push_failed = scraped
+            logger.warning("Managed push failed store=%s: %s", store.id, exc)
+        except Exception as exc:  # noqa: BLE001
+            error_summary = str(exc) or 'Managed push failed'
+            push_failed = scraped
+            logger.exception("Managed push error store=%s", store.id)
+    elif scraped > 0 and not marketplace_push_enabled:
+        error_summary = error_summary or (
+            'Scraped locally; marketplace push skipped (store not connected).'
+        )
+
+    sync_run.status = 'success' if scraped > 0 and not push_failed else ('partial' if scraped > 0 else 'failed')
+    sync_run.finished_at = timezone.now()
+    sync_run.listings_processed = reset_n or scraped + failed
+    sync_run.listings_updated = scraped
+    sync_run.error_summary = (error_summary or '')[:2000] or None
+    sync_run.save()
+
+    try:
+        sched = SyncSchedule.objects.get(store=store)
+        sched.last_run = timezone.now()
+        sched.save(update_fields=['last_run'])
+    except SyncSchedule.DoesNotExist:
+        pass
+
+    try:
+        from catalog.activity_log import append_catalog_log
+
+        append_catalog_log(
+            store.id,
+            (
+                f"Managed store update ({source}): reset {reset_n}, scraped {scraped}"
+                + (f", {failed} failed" if failed else "")
+                + (f", pushed {pushed}" if pushed else "")
+                + (f", push failed {push_failed}" if push_failed else "")
+                + (" (push skipped — not connected)" if scraped and not marketplace_push_enabled else "")
+                + "."
+            ),
+            action_type='managed_store_update',
+            metadata={
+                'source': source,
+                'reset': reset_n,
+                'scraped': scraped,
+                'failed': failed,
+                'pushed': pushed,
+                'push_failed': push_failed,
+                'marketplace_push_enabled': marketplace_push_enabled,
+            },
+        )
+    except Exception:
+        logger.exception('append_catalog_log failed for managed_store_update')
+
+    return {
+        'store_id': str(store.id),
+        'managed': True,
+        'source': source,
+        'reset': reset_n,
+        'scraped': scraped,
+        'failed': failed,
+        'pushed': pushed,
+        'push_failed': push_failed,
+        'marketplace_push_enabled': marketplace_push_enabled,
+        'error_summary': error_summary,
+    }
+
+
 @shared_task(bind=True, max_retries=3)
 def run_store_update(self, store_id, source='beat'):
     """
@@ -838,6 +958,9 @@ def run_store_update(self, store_id, source='beat'):
     Flow (beat/manual): reset active listings to Pending, refresh ingest vendors (Vevor AU
     XLSX feed inline; HEB/Costco desktop jobs queued), browser-scrape other pending rows,
     then push ``scraped`` rows when ``connection_status`` is ``connected``.
+
+    Managed (full_store) Reverb/Lasoo stores use StoreListing scrape + push instead of
+    catalog ProductMapping sync.
 
     Scheduled runs always reset + ingest/scrape even when the store is not connected;
     marketplace sync is skipped until connection is restored.
@@ -849,7 +972,7 @@ def run_store_update(self, store_id, source='beat'):
     logger = logging.getLogger(__name__)
 
     try:
-        store = Store.objects.select_related('marketplace').get(id=store_id)
+        store = Store.objects.select_related('marketplace', 'user').get(id=store_id)
     except Store.DoesNotExist:
         return {
             'store_id': str(store_id),
@@ -857,6 +980,9 @@ def run_store_update(self, store_id, source='beat'):
             'reason': 'store_not_found',
             'hint': 'Store no longer exists.',
         }
+
+    if getattr(store, 'management_mode', '') == 'full_store':
+        return _run_managed_store_update(store, source=source)
 
     marketplace_push_enabled = _store_can_push_to_marketplace(store_id)
     if not marketplace_push_enabled:

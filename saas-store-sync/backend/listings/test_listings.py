@@ -16,7 +16,8 @@ from . import csv_import, listing_service, order_service
 from .errors import MarketplaceError
 from .lasoo import mapper, validator
 from .lasoo.client import LasooResult
-from .models import ListingStatus, MarketplaceOrder, OrderStatus, StoreListing
+from .models import ListingStatus, ListingUpload, MarketplaceOrder, OrderStatus, StoreListing
+from .views import _listing_upload_csv_response
 
 VALID_DATA = {
     "product_key": "TSHIRT-001",
@@ -162,6 +163,82 @@ class ListingServiceTests(TestCase):
         result2 = listing_service.bulk_import(self.user, self.store, "l.csv", content, action="create")
         self.assertEqual(result2["imported"], 0)
         self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 1)
+        upload = ListingUpload.objects.filter(store=self.store).order_by("-created_at").first()
+        self.assertEqual(upload.status, ListingUpload.Status.FAILED)
+        self.assertGreater(upload.error_rows, 0)
+
+    def test_upload_history_completed_when_all_ok(self):
+        content = csv_import.build_template_csv("create").encode()
+        listing_service.bulk_import(self.user, self.store, "ok.csv", content, action="create")
+        upload = ListingUpload.objects.get(store=self.store, filename="ok.csv")
+        self.assertEqual(upload.status, ListingUpload.Status.COMPLETED)
+        self.assertEqual(upload.error_rows, 0)
+
+    def test_upload_error_csv_contains_failed_rows(self):
+        upload = ListingUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            filename="bad.csv",
+            source=ListingUpload.Source.FILE,
+            action="create",
+            status=ListingUpload.Status.FAILED,
+            total_rows=2,
+            success_rows=1,
+            error_rows=1,
+            rows_json=[
+                {"row_number": 2, "sku": "OK-1", "valid": True, "imported": True, "errors": []},
+                {"row_number": 3, "sku": "BAD-1", "valid": False, "imported": False, "errors": ["Missing title"]},
+            ],
+        )
+        resp = _listing_upload_csv_response(upload, errors_only=True)
+        body = resp.content.decode()
+        self.assertIn("BAD-1", body)
+        self.assertIn("Missing title", body)
+        self.assertNotIn("OK-1", body)
+
+    def test_delete_upload_history_only(self):
+        content = csv_import.build_template_csv("create").encode()
+        listing_service.bulk_import(self.user, self.store, "keep.csv", content, action="create")
+        upload = ListingUpload.objects.get(store=self.store, filename="keep.csv")
+        result = listing_service.delete_upload(self.user, self.store, upload)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["listings_deleted"], 0)
+        self.assertFalse(ListingUpload.objects.filter(pk=upload.id).exists())
+        self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 1)
+
+    def test_delete_upload_with_system(self):
+        content = csv_import.build_template_csv("create").encode()
+        listing_service.bulk_import(self.user, self.store, "sys.csv", content, action="create")
+        upload = ListingUpload.objects.get(store=self.store, filename="sys.csv")
+        result = listing_service.delete_upload(
+            self.user, self.store, upload, delete_system=True,
+        )
+        self.assertEqual(result["listings_deleted"], 1)
+        self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 0)
+        self.assertFalse(ListingUpload.objects.filter(pk=upload.id).exists())
+
+    @patch("listings.listing_service.LasooClient")
+    def test_delete_upload_with_marketplace(self, mock_client_cls):
+        content = csv_import.build_template_csv("create").encode()
+        listing_service.bulk_import(self.user, self.store, "mp.csv", content, action="create")
+        listing = StoreListing.objects.get(store=self.store)
+        listing.status = ListingStatus.UPLOADED_STAGING
+        listing.save(update_fields=["status"])
+        upload = ListingUpload.objects.get(store=self.store, filename="mp.csv")
+
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.return_value = LasooResult(ok=True, message="ok", data={})
+
+        result = listing_service.delete_upload(
+            self.user, self.store, upload,
+            delete_system=True, delete_marketplace=True,
+        )
+        self.assertEqual(result["listings_deleted"], 1)
+        self.assertEqual(result["marketplace_deleted"], 1)
+        mock_client.send.assert_called_once()
+        self.assertEqual(mock_client.send.call_args[0][0], "bulk_delete")
+        self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 0)
 
     def test_bulk_import_mapped_sets_uploaded_status(self):
         content = csv_import.build_template_csv("mapped").encode()

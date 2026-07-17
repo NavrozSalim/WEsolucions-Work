@@ -382,6 +382,7 @@ CELERY_TASK_ROUTES = (
         'sync.tasks.check_scheduled_updates': {'queue': 'light'},
         'listings.fetch_all_store_tickets': {'queue': 'light'},
         'listings.fetch_all_reverb_orders': {'queue': 'light'},
+        'listings.scrape_store_listings': {'queue': 'sync'},
         'vendor.prune_old_vendor_prices': {'queue': 'celery'},
     },
 )

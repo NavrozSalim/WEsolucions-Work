@@ -1,4 +1,5 @@
 """DRF endpoints for managed-store listings (created products) and orders."""
+import csv
 import logging
 
 from django.http import HttpResponse
@@ -285,6 +286,104 @@ class StoreListingUploadHistoryView(APIView):
         return Response(ListingUploadSerializer(qs, many=True).data)
 
 
+def _listing_upload_safe_name(upload: ListingUpload) -> str:
+    name = (upload.filename or 'upload').rsplit('.', 1)[0]
+    return ''.join(c if c.isalnum() or c in '-_' else '_' for c in name)[:80] or 'upload'
+
+
+def _listing_upload_row_error_text(row: dict) -> str:
+    errs = row.get('errors') or []
+    if isinstance(errs, list):
+        return '; '.join(str(e).replace('\n', ' ') for e in errs if e)
+    return str(errs).replace('\n', ' ') if errs else ''
+
+
+def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) -> HttpResponse:
+    """Build CSV from ListingUpload.rows_json (per-row import report)."""
+    rows = upload.rows_json if isinstance(upload.rows_json, list) else []
+    if errors_only:
+        rows = [r for r in rows if not r.get('valid', True) or r.get('errors')]
+
+    response = HttpResponse(content_type='text/csv')
+    suffix = '_errors' if errors_only else '_export'
+    safe = _listing_upload_safe_name(upload)
+    response['Content-Disposition'] = f'attachment; filename="{safe}{suffix}.csv"'
+    writer = csv.writer(response)
+    writer.writerow(['Row', 'SKU', 'Status', 'Error Logs'])
+
+    if not rows:
+        # Single-listing / publish activity with no per-row payload.
+        msg = (upload.message or '').replace('\n', ' ')
+        if errors_only and (upload.error_rows or upload.status == ListingUpload.Status.FAILED):
+            writer.writerow(['', '', 'Error', msg or 'Upload failed'])
+        elif not errors_only:
+            status_label = 'Error' if (upload.error_rows or upload.status == ListingUpload.Status.FAILED) else 'Created'
+            writer.writerow(['', upload.filename or '', status_label, msg])
+        return response
+
+    for r in rows:
+        sku = r.get('sku') or r.get('variant_key') or ''
+        err_text = _listing_upload_row_error_text(r)
+        ok = r.get('valid', True) and not err_text
+        writer.writerow([
+            r.get('row_number') or '',
+            sku,
+            'Created' if ok and r.get('imported') else ('Error' if not ok else 'Skipped'),
+            err_text,
+        ])
+    return response
+
+
+class StoreListingUploadErrorFileView(APIView):
+    """Download failed rows from a managed Upload history entry as CSV."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk, upload_id):
+        store = _get_store(request, store_pk)
+        upload = get_object_or_404(ListingUpload, id=upload_id, store=store, user=request.user)
+        return _listing_upload_csv_response(upload, errors_only=True)
+
+
+class StoreListingUploadExportView(APIView):
+    """Export all rows from a managed Upload history entry as CSV."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk, upload_id):
+        store = _get_store(request, store_pk)
+        upload = get_object_or_404(ListingUpload, id=upload_id, store=store, user=request.user)
+        return _listing_upload_csv_response(upload, errors_only=False)
+
+
+class StoreListingUploadDeleteView(APIView):
+    """Delete an Upload history entry; optionally remove listings from system / marketplace."""
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, store_pk, upload_id):
+        store = _get_store(request, store_pk)
+        upload = get_object_or_404(ListingUpload, id=upload_id, store=store, user=request.user)
+        # Accept JSON body or query params.
+        data = request.data if isinstance(request.data, dict) else {}
+        def _flag(name: str) -> bool:
+            raw = data.get(name, request.query_params.get(name, False))
+            if isinstance(raw, bool):
+                return raw
+            return str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
+
+        delete_system = _flag('delete_system')
+        delete_marketplace = _flag('delete_marketplace')
+        try:
+            result = listing_service.delete_upload(
+                request.user,
+                store,
+                upload,
+                delete_system=delete_system,
+                delete_marketplace=delete_marketplace,
+            )
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result, status=status.HTTP_200_OK)
+
+
 class StoreListingPublishView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -310,18 +409,32 @@ class StoreListingPublishView(APIView):
 
 
 class StoreListingScrapeView(APIView):
-    """Scrape vendor URLs on managed listings → update local price/stock."""
+    """Start managed listing scrape in the background (progress survives reload)."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, store_pk):
         store = _get_store(request, store_pk)
         listing_ids = request.data.get('listing_ids') or None
         try:
-            result = listing_service.scrape_listings(request.user, store, listing_ids)
+            result = listing_service.start_scrape_async(request.user, store, listing_ids)
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY
-        return Response(result, status=code)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class StoreListingScrapeProgressView(APIView):
+    """Live scrape progress for managed Inventory management (processed/total).
+
+    Counts come from listing statuses when a scrape is active (catalog-style).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        from . import scrape_progress as scrape_prog
+        data = scrape_prog.enrich_progress_from_listings(store.id)
+        data['store_id'] = str(store.id)
+        return Response(data)
 
 
 class StoreListingPushInventoryView(APIView):

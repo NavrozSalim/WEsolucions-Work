@@ -8,6 +8,7 @@ import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
 import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
 import LasooConnectionFields from './LasooConnectionFields';
+import NoraInventoryUploadField, { isNoraVendor } from './NoraInventoryUploadField';
 
 const LASOO_DEFAULT_STAGING_URL = 'https://stage.api.lasoo.com.au';
 const LASOO_DEFAULT_PRODUCTION_URL = 'https://api.lasoo.com.au';
@@ -110,6 +111,9 @@ function storeToForm(store) {
                 multiplier: r.multiplier ?? 0.5,
                 fixed_value: r.fixed_value ?? null,
             })),
+            nora_inventory_file_name: vi.nora_inventory_file_name || '',
+            has_nora_inventory_file: !!vi.has_nora_inventory_file,
+            nora_inventory_uploaded_at: vi.nora_inventory_uploaded_at || null,
         })),
         schedule_enabled: sched?.enabled ?? sched?.is_active ?? false,
         schedule_frequency: sched ? crontabToFrequency(sched.crontab_hour) : 'daily',
@@ -955,6 +959,26 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                             <Trash2 className="h-4 w-4 mr-1.5 inline" aria-hidden /> Delete vendor
                                         </Button>
                                     </div>
+                                    {isNoraVendor(vendors.find((v) => String(v.id) === String(vi.vendor_id))) && (
+                                        <NoraInventoryUploadField
+                                            storeId={store?.id}
+                                            fileName={vi.nora_inventory_file_name || ''}
+                                            uploadedAt={vi.nora_inventory_uploaded_at}
+                                            onUploaded={(data) => {
+                                                setForm((f) => {
+                                                    const next = [...f.vendor_inventory_settings];
+                                                    next[i] = {
+                                                        ...next[i],
+                                                        nora_inventory_file_name: data?.file_name || next[i].nora_inventory_file_name,
+                                                        has_nora_inventory_file: true,
+                                                        nora_inventory_uploaded_at: data?.uploaded_at || new Date().toISOString(),
+                                                    };
+                                                    return { ...f, vendor_inventory_settings: next };
+                                                });
+                                            }}
+                                            onError={(msg) => setError(msg)}
+                                        />
+                                    )}
                                     <div className="text-sm font-medium text-slate-700 dark:text-slate-300">Inventory ranges</div>
                                     <div className="space-y-3">
                                     {(vi.range_multipliers || []).map((r, ri) => (

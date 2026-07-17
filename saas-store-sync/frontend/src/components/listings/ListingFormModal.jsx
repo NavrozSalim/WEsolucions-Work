@@ -18,6 +18,7 @@ const EMPTY_LASOO = {
     sku: '',
     barcode: '',
     vendor_url: '',
+    vendor_id: '',
     image_urls: '',
     inventory: '0',
     infinite_quantity: false,
@@ -118,6 +119,7 @@ export default function ListingFormModal({
                     sku: listing.sku || '',
                     barcode: listing.barcode || '',
                     vendor_url: listing.vendor_url || '',
+                    vendor_id: listing.vendor_id || '',
                     image_urls: listing.image_urls || '',
                     inventory: String(listing.inventory ?? 0),
                     infinite_quantity: !!listing.infinite_quantity,
@@ -357,11 +359,19 @@ export default function ListingFormModal({
                                 <Input label="Barcode (optional)" value={form.barcode} onChange={set('barcode')} />
                                 <div className="sm:col-span-2">
                                     <Input
-                                        label="Vendor / source URL (optional)"
-                                        placeholder="https://… product page you source this from"
+                                        label="Vendor / source URL (eBay AU for price scrape)"
+                                        placeholder="https://www.ebay.com.au/itm/…"
                                         value={form.vendor_url}
                                         onChange={set('vendor_url')}
                                         type="url"
+                                    />
+                                </div>
+                                <div className="sm:col-span-2">
+                                    <Input
+                                        label="Vendor ID (Nora BarCode after cleaning, e.g. 8FNZ100-DL-G1)"
+                                        placeholder="Matches Nora inventory Excel BarCode"
+                                        value={form.vendor_id}
+                                        onChange={set('vendor_id')}
                                     />
                                 </div>
                                 <div className="sm:col-span-2">

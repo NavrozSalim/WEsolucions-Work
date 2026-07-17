@@ -20,6 +20,15 @@ export const testWalmartConnection = (data) => api.post('/stores/test-walmart-co
 /** Test Sears JSON credentials before creating a store. */
 export const testSearsConnection = (data) => api.post('/stores/test-sears-connection/', data);
 
+/** Upload / overwrite Nora Inventory Excel for a store. */
+export const uploadNoraInventory = (storeId, file) => {
+    const form = new FormData();
+    form.append('file', file);
+    return api.post(`/stores/${storeId}/nora-inventory/`, form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+    });
+};
+
 export const getSyncSchedule = (storeId) => api.get(`/stores/${storeId}/sync/schedule/`);
 export const updateSyncSchedule = (storeId, data) => api.put(`/stores/${storeId}/sync/schedule/`, data);
 export const createSyncSchedule = (storeId, data) => api.post(`/stores/${storeId}/sync/schedule/`, data);

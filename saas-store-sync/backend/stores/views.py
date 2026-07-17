@@ -2,6 +2,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from stores.models import Store
 from stores.serializers import StoreSerializer
 from rest_framework.permissions import IsAuthenticated
@@ -12,6 +13,7 @@ from core.throttles import ProgressReadRateThrottle
 class StoreViewSet(viewsets.ModelViewSet):
     serializer_class = StoreSerializer
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def get_throttles(self):
         if getattr(self, 'action', None) in ('list', 'retrieve'):
@@ -116,6 +118,84 @@ class StoreViewSet(viewsets.ModelViewSet):
             log_action(self.request.user, 'store_deleted', 'store', oid, {'name': name}, self.request)
         except Exception:
             pass  # Don't block delete if audit fails
+
+    @action(detail=True, methods=['post'], url_path='nora-inventory')
+    def upload_nora_inventory(self, request, pk=None):
+        """Upload / overwrite the Nora Inventory Excel for this store.
+
+        Expects multipart field ``file`` (.xlsx). Requires Nora Inventory to
+        already be present in vendor_inventory_settings.
+        """
+        from django.utils import timezone
+        from scrapers.nora_au_ingest import load_nora_stock_map_from_file
+        from stores.models import StoreVendorInventorySettings
+        from stores.nora import get_nora_inventory_settings
+
+        store = self.get_object()
+        upload = request.FILES.get('file')
+        if not upload:
+            return Response({'detail': 'Attach an Excel file as "file".'}, status=status.HTTP_400_BAD_REQUEST)
+        name = (upload.name or '').lower()
+        if not name.endswith(('.xlsx', '.xlsm', '.xls')):
+            return Response(
+                {'detail': 'Nora inventory must be an Excel file (.xlsx).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        inv = get_nora_inventory_settings(store)
+        if inv is None:
+            # Auto-create inventory settings row if Nora vendor exists but wasn't added yet.
+            from vendor.models import Vendor
+            nora = Vendor.objects.filter(code='noraau').first()
+            if not nora:
+                return Response(
+                    {'detail': 'Nora Inventory vendor is not seeded. Run migrations.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            inv = StoreVendorInventorySettings.objects.create(
+                store=store,
+                vendor=nora,
+                rule_type='multiplier',
+            )
+            from stores.models import StoreInventoryRangeMultiplier
+            from decimal import Decimal
+            StoreInventoryRangeMultiplier.objects.create(
+                inventory_settings=inv,
+                from_value=Decimal('0'),
+                to_value=Decimal('999999999'),
+                range_type='multiplier',
+                multiplier=Decimal('1'),
+            )
+
+        # Validate parse before saving
+        try:
+            stock_map = load_nora_stock_map_from_file(upload)
+        except Exception as exc:
+            return Response(
+                {'detail': f'Could not parse Nora Excel: {exc}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if hasattr(upload, 'seek'):
+            upload.seek(0)
+
+        if inv.nora_inventory_file:
+            inv.nora_inventory_file.delete(save=False)
+        inv.nora_inventory_file = upload
+        inv.nora_inventory_original_name = upload.name or ''
+        inv.nora_inventory_uploaded_at = timezone.now()
+        inv.save(update_fields=[
+            'nora_inventory_file',
+            'nora_inventory_original_name',
+            'nora_inventory_uploaded_at',
+            'updated_at',
+        ])
+        return Response({
+            'ok': True,
+            'message': f'Nora inventory uploaded ({len(stock_map)} Vendor ID(s)).',
+            'vendor_ids': len(stock_map),
+            'file_name': inv.nora_inventory_original_name,
+            'uploaded_at': inv.nora_inventory_uploaded_at,
+        })
 
     @action(detail=True, methods=['post'], url_path='duplicate-vendor-settings')
     def duplicate_vendor_settings(self, request, pk=None):

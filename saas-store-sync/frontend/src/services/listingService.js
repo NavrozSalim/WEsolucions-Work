@@ -50,6 +50,10 @@ export const getReverbConditions = (storeId) =>
 export const scrapeListings = (storeId, listingIds = null) =>
     api.post(`/stores/${storeId}/listings/scrape/`, listingIds ? { listing_ids: listingIds } : {});
 
+/** Live managed-listing scrape progress (processed / total). */
+export const getListingScrapeProgress = (storeId) =>
+    api.get(`/stores/${storeId}/listings/scrape/progress/`);
+
 /** Push local price/stock to marketplace for already-uploaded listings. */
 export const pushListingInventory = (storeId, listingIds = null) =>
     api.post(`/stores/${storeId}/listings/push-inventory/`, listingIds ? { listing_ids: listingIds } : {});
@@ -82,6 +86,46 @@ export const exportListingInventory = (storeId, syncStatus = '') =>
 
 export const getListingUploads = (storeId) =>
     api.get(`/stores/${storeId}/listings/uploads/`);
+
+/** Download failed rows from a managed Upload history entry as CSV. */
+export const downloadListingUploadErrors = (storeId, uploadId, filename = '') =>
+    api.get(`/stores/${storeId}/listings/uploads/${uploadId}/errors/`, { responseType: 'blob' }).then((res) => {
+        const base = (filename || 'upload').replace(/\.[^.]+$/, '') || 'upload';
+        const url = window.URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', `${base}_errors.csv`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+    });
+
+/** Export all rows from a managed Upload history entry as CSV. */
+export const exportListingUpload = (storeId, uploadId, filename = '') =>
+    api.get(`/stores/${storeId}/listings/uploads/${uploadId}/export/`, { responseType: 'blob' }).then((res) => {
+        const base = (filename || 'upload').replace(/\.[^.]+$/, '') || 'upload';
+        const url = window.URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', `${base}_export.csv`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+    });
+
+/**
+ * Delete a managed Upload history entry.
+ * @param {{ deleteSystem?: boolean, deleteMarketplace?: boolean }} options
+ */
+export const deleteListingUpload = (storeId, uploadId, { deleteSystem = false, deleteMarketplace = false } = {}) =>
+    api.delete(`/stores/${storeId}/listings/uploads/${uploadId}/`, {
+        data: {
+            delete_system: !!deleteSystem,
+            delete_marketplace: !!deleteMarketplace,
+        },
+    });
 
 // --- Orders ---
 export const getOrders = (storeId, { refresh = false } = {}) =>

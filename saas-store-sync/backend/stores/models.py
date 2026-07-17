@@ -236,6 +236,14 @@ class StoreVendorInventorySettings(models.Model):
     default_multiplier = models.DecimalField(max_digits=8, decimal_places=4, default=Decimal('1'), null=True, blank=True)
     default_value = models.IntegerField(default=1, help_text="For fixed/cap/floor rules")
     zero_if_low = models.BooleanField(default=True, help_text="Treat '1 left' as 0")
+    nora_inventory_file = models.FileField(
+        upload_to='nora_inventory/%Y/%m/',
+        null=True,
+        blank=True,
+        help_text='Nora Inventory Excel (Export inventory sheet). Overwritten on re-upload.',
+    )
+    nora_inventory_uploaded_at = models.DateTimeField(null=True, blank=True)
+    nora_inventory_original_name = models.CharField(max_length=255, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

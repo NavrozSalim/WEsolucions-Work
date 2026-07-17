@@ -67,8 +67,16 @@ class StoreListing(models.Model):
     category = models.CharField(max_length=500, blank=True, default='')
     sku = models.CharField(max_length=255, blank=True, default='', db_index=True)
     barcode = models.CharField(max_length=255, blank=True, default='')
-    # Source URL (vendor / supplier product page) for order fulfillment lookup.
+    # Source URL (vendor / supplier product page) for price scrape / fulfillment.
     vendor_url = models.CharField(max_length=1000, blank=True, default='')
+    # Nora / supplier barcode matched to inventory Excel after cleaning.
+    vendor_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text='Supplier Vendor ID (Nora BarCode after -G1/-V* normalization).',
+    )
     image_urls = models.TextField(blank=True, default='')  # pipe-joined: a|b|c
     inventory = models.IntegerField(default=0)
     infinite_quantity = models.BooleanField(default=False)

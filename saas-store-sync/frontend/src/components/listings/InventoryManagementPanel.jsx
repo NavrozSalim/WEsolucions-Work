@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, FileDown, Pencil, Play, RefreshCw, Send, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
 import {
     criticalZeroListingInventory,
     deleteListing,
     exportListingInventory,
+    getListingScrapeProgress,
     getListings,
     pushListingInventory,
     resetListingInventory,
@@ -46,13 +47,39 @@ function formatListingMargin(listing) {
     return `×${Math.round((s / v) * 100) / 100}`;
 }
 
-function JobProgressStrip({ mode, count }) {
+/**
+ * Progress strip matching catalog Manual sync / scrape UX:
+ * always show processed/total counts while scraping.
+ */
+function JobProgressStrip({ mode, count, progress, marketplaceLabel = 'marketplace' }) {
     if (!mode) return null;
     const isScrape = mode === 'scrape';
-    const title = isScrape ? 'Fetching vendor prices…' : 'Pushing price/stock to marketplace…';
+    const processed = Number(progress?.processed ?? 0);
+    const total = Math.max(
+        Number(progress?.total ?? 0) || 0,
+        Number(count ?? 0) || 0,
+    );
+    const scraped = Number(progress?.scraped ?? 0);
+    const failed = Number(progress?.failed ?? 0);
+    const pct = total > 0
+        ? Math.max(0, Math.min(100, Number(progress?.pct ?? Math.round((100 * processed) / total))))
+        : 0;
+    const hasCounts = isScrape && total > 0;
+    const phase = progress?.phase || '';
+    const title = isScrape
+        ? (phase === 'pushing' ? 'Pushing scraped prices…' : 'Fetching vendor prices…')
+        : `Pushing price/stock to ${marketplaceLabel}…`;
     const detail = isScrape
-        ? `Scraping ${count || 0} listing(s) with vendor links. Keep this page open until it finishes.`
-        : `Updating ${count || 0} listing(s) on Reverb. Keep this page open until it finishes.`;
+        ? (hasCounts
+            ? (
+                `Scraping ${Math.min(Math.max(processed, processed < total ? processed + (phase === 'running' ? 1 : 0) : processed), total).toLocaleString()} of ${total.toLocaleString()}`
+                + ` · ${processed.toLocaleString()}/${total.toLocaleString()} done`
+                + ` · ${scraped.toLocaleString()} ok`
+                + ` · ${failed.toLocaleString()} failed`
+                + `. Progress follows listing status (Pending → Scraped).`
+            )
+            : 'Starting scrape…')
+        : `Updating ${count || 0} listing(s) on ${marketplaceLabel}. Keep this page open until it finishes.`;
     const border = isScrape
         ? 'border-sky-200 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/30'
         : 'border-emerald-200 dark:border-emerald-800 bg-emerald-50/80 dark:bg-emerald-950/30';
@@ -60,6 +87,7 @@ function JobProgressStrip({ mode, count }) {
     const pill = isScrape
         ? 'bg-sky-200 text-sky-900 dark:bg-sky-800 dark:text-sky-200'
         : 'bg-emerald-200 text-emerald-900 dark:bg-emerald-800 dark:text-emerald-200';
+    const sku = (progress?.current_sku || '').trim();
 
     return (
         <div className={`rounded-lg border ${border} p-4 mb-0 shadow-sm`}>
@@ -71,16 +99,36 @@ function JobProgressStrip({ mode, count }) {
                         <span className={`ml-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${pill}`}>
                             running
                         </span>
+                        {hasCounts ? (
+                            <span className="ml-2 text-xs font-semibold tabular-nums text-slate-600 dark:text-slate-300">
+                                {processed}/{total}
+                            </span>
+                        ) : null}
                     </h3>
                     <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-300">{detail}</p>
+                    {sku ? (
+                        <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400 truncate" title={sku}>
+                            Current: {sku}
+                        </p>
+                    ) : null}
                     <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
-                        <div
-                            className={`h-full w-1/3 rounded-full ${bar}`}
-                            style={{
-                                animation: 'managedInvProgress 1.2s ease-in-out infinite',
-                            }}
-                        />
+                        {hasCounts ? (
+                            <div
+                                className={`h-full rounded-full transition-all duration-500 ${bar}`}
+                                style={{ width: `${Math.max(pct, total > 0 ? 2 : 0)}%` }}
+                            />
+                        ) : (
+                            <div
+                                className={`h-full w-1/3 rounded-full ${bar}`}
+                                style={{ animation: 'managedInvProgress 1.2s ease-in-out infinite' }}
+                            />
+                        )}
                     </div>
+                    {hasCounts ? (
+                        <p className="mt-1 text-xs tabular-nums text-slate-500 dark:text-slate-400">
+                            {pct}% complete ({processed} of {total})
+                        </p>
+                    ) : null}
                 </div>
             </div>
             <style>{`
@@ -93,9 +141,12 @@ function JobProgressStrip({ mode, count }) {
     );
 }
 
-/** Managed-store inventory: same scrape/push/reset/export ideas as Product listings. */
+/** Managed-store inventory: scrape then Manual sync / schedule — same as Reverb. */
 export default function InventoryManagementPanel({ storeId, marketplaceCode = '', reloadNonce = 0, onMessage }) {
-    const isReverb = String(marketplaceCode || '').trim().toLowerCase() === 'reverb';
+    const marketplaceLabel = String(marketplaceCode || '').trim() || 'marketplace';
+    const isReverb = marketplaceLabel.toLowerCase() === 'reverb';
+    const isLasoo = marketplaceLabel.toLowerCase() === 'lasoo';
+    const canScrape = isReverb || isLasoo;
     const [listings, setListings] = useState([]);
     const [loading, setLoading] = useState(false);
     const [scraping, setScraping] = useState(false);
@@ -108,6 +159,8 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     const [search, setSearch] = useState('');
     const [syncFilter, setSyncFilter] = useState('all');
     const [jobCount, setJobCount] = useState(0);
+    const [scrapeProgress, setScrapeProgress] = useState(null);
+    const scrapeWasActiveRef = useRef(false);
 
     const load = useCallback(() => {
         if (!storeId) return;
@@ -124,29 +177,103 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
         load();
     }, [load, reloadNonce]);
 
+    // Always poll server scrape progress so the bar survives page reload
+    // (same idea as catalog Inventory management Celery scrape strip).
+    useEffect(() => {
+        if (!storeId) return undefined;
+        let cancelled = false;
+        const tick = () => {
+            getListingScrapeProgress(storeId)
+                .then((res) => {
+                    if (cancelled) return;
+                    const data = res.data || null;
+                    const active = Boolean(data?.active);
+                    const wasActive = scrapeWasActiveRef.current;
+                    if (wasActive && !active) {
+                        const msg = data?.message || 'Scrape finished. Use Manual sync to push to the marketplace.';
+                        const ok = (data?.scraped || 0) > 0 || data?.phase === 'done';
+                        onMessage?.(msg, ok ? 'success' : 'error');
+                        setScraping(false);
+                        setJobCount(0);
+                        load();
+                    }
+                    scrapeWasActiveRef.current = active;
+                    setScrapeProgress(data);
+                    if (active) {
+                        setScraping(true);
+                        setJobCount(Number(data?.total || 0));
+                        getListings(storeId, {
+                            view: 'inventory',
+                            search: search || undefined,
+                            ...(syncFilter !== 'all' ? { sync_status: syncFilter } : {}),
+                        })
+                            .then((r) => {
+                                if (!cancelled) setListings(Array.isArray(r.data) ? r.data : []);
+                            })
+                            .catch(() => {});
+                    }
+                })
+                .catch(() => { /* ignore transient poll errors */ });
+        };
+        tick();
+        const id = setInterval(tick, 1500);
+        return () => {
+            cancelled = true;
+            clearInterval(id);
+        };
+    }, [storeId, search, syncFilter, load, onMessage]);
+
     const withVendor = useMemo(
-        () => listings.filter((l) => (l.vendor_url || '').trim()).length,
+        () => listings.filter((l) => (l.vendor_url || '').trim() || (l.vendor_id || '').trim()).length,
         [listings],
     );
+
+    const serverScraping = Boolean(scrapeProgress?.active);
+    const scrapeBusy = scraping || serverScraping;
 
     const handleScrape = (ids = null) => {
         const targetCount = ids?.length
             ? ids.length
-            : listings.filter((l) => (l.vendor_url || '').trim()).length;
+            : listings.filter((l) => (l.vendor_url || '').trim() || (l.vendor_id || '').trim()).length;
         setJobCount(targetCount);
+        setScrapeProgress({
+            active: true,
+            total: targetCount,
+            processed: 0,
+            scraped: 0,
+            failed: 0,
+            pct: 0,
+            phase: 'queued',
+            message: 'Starting scrape…',
+        });
+        scrapeWasActiveRef.current = true;
         setScraping(true);
         scrapeListings(storeId, ids)
             .then((res) => {
-                onMessage?.(res.data?.message || 'Scrape finished.', res.data?.ok ? 'success' : 'error');
-                load();
+                const serverTotal = Number(res.data?.total || 0);
+                if (serverTotal > 0) {
+                    setJobCount(serverTotal);
+                    setScrapeProgress((prev) => ({
+                        ...(prev || {}),
+                        active: true,
+                        total: serverTotal,
+                        phase: prev?.phase || 'queued',
+                        message: res.data?.message || prev?.message,
+                    }));
+                }
+                if (res.data?.already_running) {
+                    onMessage?.(res.data?.message || 'Scrape already running.', 'success');
+                } else {
+                    onMessage?.(res.data?.message || 'Scrape started. You can reload — progress continues.', 'success');
+                }
+                // Progress + completion are driven by the server poll above.
             })
             .catch((err) => {
+                scrapeWasActiveRef.current = false;
+                setScraping(false);
+                setScrapeProgress(null);
                 onMessage?.(err.response?.data?.detail || 'Scrape failed.', 'error');
                 load();
-            })
-            .finally(() => {
-                setScraping(false);
-                setJobCount(0);
             });
     };
 
@@ -181,7 +308,8 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     };
 
     const handleCriticalZero = () => {
-        if (!window.confirm('Set stock to 0 on all marketplace listings and push to Reverb?')) return;
+        const label = marketplaceLabel.charAt(0).toUpperCase() + marketplaceLabel.slice(1);
+        if (!window.confirm(`Set stock to 0 on all marketplace listings and push to ${label}?`)) return;
         setCriticalLoading(true);
         criticalZeroListingInventory(storeId)
             .then((res) => {
@@ -211,15 +339,17 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
             .catch((err) => onMessage?.(err.response?.data?.detail || 'Delete failed.', 'error'));
     };
 
-    const busy = scraping || pushing || resetting || criticalLoading;
+    const busy = scrapeBusy || pushing || resetting || criticalLoading;
 
     return (
         <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
-            {(scraping || pushing) && (
+            {(scrapeBusy || pushing) && (
                 <div className="border-b border-slate-200 dark:border-slate-700 p-4">
                     <JobProgressStrip
-                        mode={scraping ? 'scrape' : 'push'}
+                        mode={scrapeBusy ? 'scrape' : 'push'}
                         count={jobCount}
+                        progress={scrapeBusy ? scrapeProgress : null}
+                        marketplaceLabel={marketplaceLabel}
                     />
                 </div>
             )}
@@ -231,6 +361,11 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                             {loading && listings.length === 0
                                 ? 'Loading…'
                                 : `${listings.length.toLocaleString()} listing${listings.length === 1 ? '' : 's'} on the marketplace`}
+                            {canScrape ? (
+                                <span className="block mt-0.5">
+                                    Start Scraping updates vendor price/stock locally (Scraped). Manual sync or your store schedule pushes to {marketplaceLabel}.
+                                </span>
+                            ) : null}
                         </p>
                     </div>
                 </div>
@@ -284,16 +419,16 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         {exporting ? 'Exporting…' : 'Export'}
                     </Button>
 
-                    {isReverb && (
+                    {canScrape && (
                         <Button
                             variant="secondary"
                             size="sm"
                             onClick={() => handleScrape()}
                             disabled={busy || withVendor === 0}
-                            title={withVendor === 0 ? 'Add Vendor URL on each listing first' : 'Refresh vendor price and stock'}
+                            title={withVendor === 0 ? 'Add Vendor URL / Vendor ID on each listing first' : 'Refresh vendor price and stock locally (then Manual sync)'}
                         >
                             <Play className={`mr-1.5 h-4 w-4 ${scraping ? 'animate-spin' : ''}`} />
-                            {scraping ? 'Scraping…' : `Start Scraping (${withVendor})`}
+                            {scraping || serverScraping ? 'Scraping…' : `Start Scraping (${withVendor})`}
                         </Button>
                     )}
 
@@ -335,6 +470,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                                 <th className="px-3 py-2.5">SKU</th>
                                 <th className="px-3 py-2.5">Title</th>
                                 <th className="px-3 py-2.5">Vendor URL</th>
+                                <th className="px-3 py-2.5">Vendor ID</th>
                                 <th className="px-3 py-2.5">Vendor price</th>
                                 <th className="px-3 py-2.5">Price</th>
                                 <th className="px-3 py-2.5">Stock</th>
@@ -367,6 +503,9 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                                             <span className="text-amber-600 dark:text-amber-400">Missing</span>
                                         )}
                                     </td>
+                                    <td className="px-3 py-2.5 text-xs text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                                        {l.vendor_id || <span className="text-slate-400">—</span>}
+                                    </td>
                                     <td className="px-3 py-2.5 text-slate-700 dark:text-slate-300 whitespace-nowrap">
                                         {l.vendor_price != null ? `$${Number(l.vendor_price).toFixed(2)}` : '—'}
                                     </td>
@@ -392,13 +531,13 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                                     </td>
                                     <td className="px-3 py-2.5">
                                         <div className="flex items-center justify-end gap-1">
-                                            {isReverb && (
+                                            {canScrape && (
                                                 <button
                                                     type="button"
-                                                    title="Scrape vendor URL"
+                                                    title="Scrape vendor URL / Nora stock"
                                                     className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
                                                     onClick={() => handleScrape([l.id])}
-                                                    disabled={busy || !(l.vendor_url || '').trim()}
+                                                    disabled={busy || (!(l.vendor_url || '').trim() && !(l.vendor_id || '').trim())}
                                                 >
                                                     <Play className="h-4 w-4" />
                                                 </button>

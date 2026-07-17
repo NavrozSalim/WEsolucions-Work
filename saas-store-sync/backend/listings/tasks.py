@@ -1,13 +1,56 @@
-"""Celery tasks for managed-store listings (orders + tickets sync)."""
+"""Celery tasks for managed-store listings (orders + tickets sync + inventory scrape)."""
 import logging
 
 from celery import shared_task
+from django.contrib.auth import get_user_model
 
 from stores.models import Store
 
 from . import order_service, ticket_service
+from .errors import MarketplaceError
 
 logger = logging.getLogger("listings")
+
+
+@shared_task(name="listings.scrape_store_listings", bind=True, ignore_result=True)
+def scrape_store_listings(self, user_id, store_id, listing_ids=None):
+    """Background vendor scrape for managed Inventory management (survives page reload)."""
+    from . import listing_service
+    from . import scrape_progress as scrape_prog
+
+    User = get_user_model()
+    try:
+        user = User.objects.get(pk=user_id)
+        store = Store.objects.select_related("marketplace", "user").get(pk=store_id)
+    except (User.DoesNotExist, Store.DoesNotExist):
+        scrape_prog.finish_scrape_progress(
+            store_id,
+            message="Scrape cancelled: store or user not found.",
+        )
+        return {"ok": False, "error": "not_found"}
+
+    scrape_prog.set_scrape_progress(
+        store.id,
+        active=True,
+        phase="running",
+        task_id=getattr(self.request, "id", None) or "",
+        message="Worker started…",
+    )
+    try:
+        return listing_service.scrape_listings(user, store, listing_ids)
+    except MarketplaceError as exc:
+        scrape_prog.finish_scrape_progress(
+            store.id,
+            message=str(exc)[:200],
+        )
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Managed scrape task failed store=%s", store_id)
+        scrape_prog.finish_scrape_progress(
+            store.id,
+            message=(str(exc) or "Scrape failed.")[:200],
+        )
+        return {"ok": False, "error": str(exc)}
 
 
 @shared_task(name="listings.fetch_all_store_tickets", ignore_result=True)

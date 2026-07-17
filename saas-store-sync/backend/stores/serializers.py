@@ -44,6 +44,8 @@ class StoreVendorInventorySettingsReadSerializer(serializers.ModelSerializer):
     vendor_code = serializers.CharField(source='vendor.code', read_only=True)
     vendor_name = serializers.CharField(source='vendor.name', read_only=True)
     range_multipliers = serializers.SerializerMethodField()
+    nora_inventory_file_name = serializers.SerializerMethodField()
+    has_nora_inventory_file = serializers.SerializerMethodField()
 
     class Meta:
         model = StoreVendorInventorySettings
@@ -51,6 +53,8 @@ class StoreVendorInventorySettingsReadSerializer(serializers.ModelSerializer):
             'id', 'vendor', 'vendor_code', 'vendor_name',
             'rule_type', 'default_multiplier', 'default_value', 'zero_if_low',
             'range_multipliers',
+            'nora_inventory_file_name', 'has_nora_inventory_file',
+            'nora_inventory_uploaded_at',
         ]
 
     def get_range_multipliers(self, obj):
@@ -65,6 +69,14 @@ class StoreVendorInventorySettingsReadSerializer(serializers.ModelSerializer):
             }
             for r in obj.range_multipliers.all()
         ]
+
+    def get_nora_inventory_file_name(self, obj):
+        return (obj.nora_inventory_original_name or '').strip() or (
+            obj.nora_inventory_file.name.rsplit('/', 1)[-1] if obj.nora_inventory_file else ''
+        )
+
+    def get_has_nora_inventory_file(self, obj):
+        return bool(obj.nora_inventory_file)
 
 
 class SyncScheduleInlineSerializer(serializers.Serializer):
@@ -559,6 +571,15 @@ class StoreSerializer(serializers.ModelSerializer):
         valid_items = [i for i in data if (i.get('vendor_id') or i.get('vendor')) and (i.get('range_multipliers') or [])]
         if data and not valid_items:
             raise ValidationError({'vendor_inventory_settings': 'Add at least one vendor with inventory ranges (multiplier or fixed value).'})
+        # Preserve Nora Excel files across delete/recreate of inventory settings.
+        existing_nora = {}
+        for old in StoreVendorInventorySettings.objects.filter(store=store).select_related('vendor'):
+            if old.nora_inventory_file:
+                existing_nora[str(old.vendor_id)] = {
+                    'file': old.nora_inventory_file.name,
+                    'uploaded_at': old.nora_inventory_uploaded_at,
+                    'original_name': old.nora_inventory_original_name or '',
+                }
         StoreVendorInventorySettings.objects.filter(store=store).delete()
         for item in data:
             vendor_id = item.get('vendor_id') or item.get('vendor')
@@ -575,6 +596,16 @@ class StoreSerializer(serializers.ModelSerializer):
                 default_value=max(0, int(item.get('default_value', 1) or 1)),
                 zero_if_low=item.get('zero_if_low', True) if item.get('zero_if_low') is not False else False,
             )
+            preserved = existing_nora.get(str(vendor.id))
+            if preserved and preserved.get('file'):
+                inv.nora_inventory_file.name = preserved['file']
+                inv.nora_inventory_uploaded_at = preserved.get('uploaded_at')
+                inv.nora_inventory_original_name = preserved.get('original_name') or ''
+                inv.save(update_fields=[
+                    'nora_inventory_file',
+                    'nora_inventory_uploaded_at',
+                    'nora_inventory_original_name',
+                ])
             for rm in item.get('range_multipliers', []):
                 to_val = rm.get('to_value')
                 try:

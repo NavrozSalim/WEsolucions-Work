@@ -61,7 +61,7 @@ import PageHeader from '../../components/design/PageHeader';
 import EmptyState from '../../components/design/EmptyState';
 import Badge from '../../components/design/Badge';
 import UpdateWithFileModal from '../../components/catalog/UpdateWithFileModal';
-import { getListingUploads } from '../../services/listingService';
+import { getListingUploads, downloadListingUploadErrors, exportListingUpload, deleteListingUpload } from '../../services/listingService';
 import { useSidebarActivity } from '../../context/SidebarActivityContext';
 
 const syncStatusVariant = {
@@ -87,6 +87,12 @@ const uploadStatusLabel = {
     synced: 'Success', validated: 'Success', pending: 'Pending',
     processing: 'Processing', partial: 'Partial', failed: 'Failed',
     completed: 'Success',
+};
+/** Managed-store Upload history: all OK → Created; any failure → Error. */
+const managedUploadStatusLabel = {
+    completed: 'Created',
+    partial: 'Error',
+    failed: 'Error',
 };
 
 function formatDate(iso) {
@@ -446,6 +452,146 @@ function UploadActionsDropdown({ upload, storeId, syncing, scraping, syncingUplo
             role="menu"
             style={{ position: 'fixed', top: menuPos.top, right: menuPos.right, zIndex: 99999 }}
             className="min-w-[14rem] rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40 overflow-visible"
+        >
+            {items.map((item, i) =>
+                item.divider ? (
+                    <div key={i} className="my-1.5 border-t border-slate-100 dark:border-slate-700/80" role="separator" />
+                ) : (
+                    <button
+                        key={i}
+                        type="button"
+                        role="menuitem"
+                        disabled={item.disabled}
+                        onClick={() => { setOpen(false); item.onClick(); }}
+                        className={`flex w-full items-center gap-3 whitespace-nowrap px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/90 disabled:cursor-not-allowed disabled:opacity-40 ${item.className}`}
+                    >
+                        {item.icon}
+                        <span>{item.label}</span>
+                    </button>
+                )
+            )}
+        </div>,
+        document.body,
+    );
+
+    return (
+        <>
+            <button
+                ref={triggerRef}
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={open}
+                onClick={() => {
+                    setOpen((o) => {
+                        if (!o && triggerRef.current) {
+                            const r = triggerRef.current.getBoundingClientRect();
+                            setMenuPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+                        }
+                        return !o;
+                    });
+                }}
+                className="inline-flex size-8 items-center justify-center rounded-lg text-slate-500 ring-offset-2 ring-offset-white transition hover:bg-slate-100 hover:text-slate-800 focus:outline-none focus:ring-2 focus:ring-accent-500 dark:text-slate-400 dark:ring-offset-slate-900 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                title="Actions"
+            >
+                <MoreVertical className="h-4 w-4" />
+            </button>
+            {menu}
+        </>
+    );
+}
+
+function ManagedUploadActionsDropdown({
+    upload,
+    storeId,
+    deletingId,
+    onExport,
+    onDownloadErrors,
+    onDeleteHistory,
+    onDeleteSystem,
+    onDeleteMarketplace,
+}) {
+    const [open, setOpen] = useState(false);
+    const [menuPos, setMenuPos] = useState({ top: 0, right: 0 });
+    const triggerRef = useRef(null);
+    const menuRef = useRef(null);
+
+    const updatePosition = useCallback(() => {
+        const el = triggerRef.current;
+        if (!el) return;
+        const r = el.getBoundingClientRect();
+        setMenuPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+    }, []);
+
+    useLayoutEffect(() => {
+        if (!open) return;
+        updatePosition();
+        const onScroll = () => updatePosition();
+        window.addEventListener('scroll', onScroll, true);
+        window.addEventListener('resize', onScroll);
+        return () => {
+            window.removeEventListener('scroll', onScroll, true);
+            window.removeEventListener('resize', onScroll);
+        };
+    }, [open, updatePosition]);
+
+    useEffect(() => {
+        if (!open) return;
+        const handler = (e) => {
+            if (triggerRef.current?.contains(e.target) || menuRef.current?.contains(e.target)) return;
+            setOpen(false);
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [open]);
+
+    const u = upload;
+    const hasErrors = (u.error_rows ?? 0) > 0 || u.status === 'failed' || u.status === 'partial';
+    const busy = deletingId === u.id;
+    const items = [
+        {
+            label: 'Export',
+            icon: <FileDown className="h-4 w-4 shrink-0" />,
+            onClick: () => onExport(storeId, u.id, u.filename),
+            className: 'text-slate-700 dark:text-slate-300',
+        },
+    ];
+    if (hasErrors) {
+        items.push({
+            label: u.error_rows ? `Download Errors (${u.error_rows})` : 'Download Errors',
+            icon: <AlertTriangle className="h-4 w-4 shrink-0" />,
+            onClick: () => onDownloadErrors(storeId, u.id, u.filename),
+            className: 'text-amber-600 dark:text-amber-400',
+        });
+    }
+    items.push({ divider: true });
+    items.push({
+        label: 'Delete from history',
+        icon: <Trash2 className="h-4 w-4 shrink-0" />,
+        onClick: () => onDeleteHistory(u),
+        disabled: busy,
+        className: 'text-rose-600 dark:text-rose-400',
+    });
+    items.push({
+        label: 'Delete from system',
+        icon: <Trash2 className="h-4 w-4 shrink-0" />,
+        onClick: () => onDeleteSystem(u),
+        disabled: busy,
+        className: 'text-rose-600 dark:text-rose-400',
+    });
+    items.push({
+        label: 'Delete from marketplace',
+        icon: <Trash2 className="h-4 w-4 shrink-0" />,
+        onClick: () => onDeleteMarketplace(u),
+        disabled: busy,
+        className: 'text-rose-600 dark:text-rose-400',
+    });
+
+    const menu = open && createPortal(
+        <div
+            ref={menuRef}
+            role="menu"
+            style={{ position: 'fixed', top: menuPos.top, right: menuPos.right, zIndex: 99999 }}
+            className="min-w-[15rem] rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40 overflow-visible"
         >
             {items.map((item, i) =>
                 item.divider ? (
@@ -1040,6 +1186,9 @@ export default function Catalog() {
     const [scrapingUploadId, setScrapingUploadId] = useState(null);
     const [deleteUploadConfirm, setDeleteUploadConfirm] = useState(null);
     const [deletingUploadId, setDeletingUploadId] = useState(null);
+    /** Managed Upload history delete: { upload, deleteSystem, deleteMarketplace } */
+    const [deleteListingUploadConfirm, setDeleteListingUploadConfirm] = useState(null);
+    const [deletingListingUploadId, setDeletingListingUploadId] = useState(null);
     const [modalFile, setModalFile] = useState(null);
     const [modalTemplate, setModalTemplate] = useState('standard');
     const [progress, setProgress] = useState(0);
@@ -2374,6 +2523,32 @@ export default function Catalog() {
             .finally(() => setDeletingUploadId(null));
     };
 
+    const handleDeleteListingUpload = () => {
+        const conf = deleteListingUploadConfirm;
+        if (!selectedStore || !conf?.upload) return;
+        const upload = conf.upload;
+        setDeletingListingUploadId(upload.id);
+        deleteListingUpload(selectedStore, upload.id, {
+            deleteSystem: !!conf.deleteSystem,
+            deleteMarketplace: !!conf.deleteMarketplace,
+        })
+            .then((res) => {
+                setDeleteListingUploadConfirm(null);
+                const n = res?.data?.listings_deleted ?? 0;
+                const mp = res?.data?.marketplace_deleted ?? 0;
+                if (conf.deleteMarketplace) {
+                    setMessage(`Upload removed. Deleted ${n} listing(s) from system${mp ? ` and ${mp} from marketplace` : ''}.`);
+                } else if (conf.deleteSystem) {
+                    setMessage(`Upload removed. Deleted ${n} listing(s) from system.`);
+                } else {
+                    setMessage('Upload removed from history.');
+                }
+                getListingUploads(selectedStore).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
+            })
+            .catch((err) => setMessage(formatCatalogError(err) || 'Failed to delete upload'))
+            .finally(() => setDeletingListingUploadId(null));
+    };
+
     // ``products`` already contains exactly one server page filtered by the
     // active search / status — no client-side slicing is needed. We keep
     // ``filteredProducts`` as an alias so the existing JSX below doesn't
@@ -2706,6 +2881,7 @@ export default function Catalog() {
                                         <th className="text-right whitespace-nowrap">OK</th>
                                         <th className="text-right whitespace-nowrap">Errors</th>
                                         <th className="whitespace-nowrap">Status</th>
+                                        <th className="w-[80px] text-right whitespace-nowrap">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -2724,8 +2900,32 @@ export default function Catalog() {
                                             <td className="text-right text-sm tabular-nums align-middle">{u.error_rows ?? '—'}</td>
                                             <td className="align-middle whitespace-nowrap">
                                                 <Badge variant={uploadStatusVariant[u.status] || 'warning'}>
-                                                    {uploadStatusLabel[u.status] || u.status}
+                                                    {managedUploadStatusLabel[u.status] || uploadStatusLabel[u.status] || u.status}
                                                 </Badge>
+                                            </td>
+                                            <td className="text-right align-middle whitespace-nowrap">
+                                                <ManagedUploadActionsDropdown
+                                                    upload={u}
+                                                    storeId={selectedStore}
+                                                    deletingId={deletingListingUploadId}
+                                                    onExport={(sid, uid, fname) => exportListingUpload(sid, uid, fname).catch(() => setMessage('Failed to export upload'))}
+                                                    onDownloadErrors={(sid, uid, fname) => downloadListingUploadErrors(sid, uid, fname).catch(() => setMessage('Failed to download error file'))}
+                                                    onDeleteHistory={(upload) => setDeleteListingUploadConfirm({
+                                                        upload,
+                                                        deleteSystem: false,
+                                                        deleteMarketplace: false,
+                                                    })}
+                                                    onDeleteSystem={(upload) => setDeleteListingUploadConfirm({
+                                                        upload,
+                                                        deleteSystem: true,
+                                                        deleteMarketplace: false,
+                                                    })}
+                                                    onDeleteMarketplace={(upload) => setDeleteListingUploadConfirm({
+                                                        upload,
+                                                        deleteSystem: true,
+                                                        deleteMarketplace: true,
+                                                    })}
+                                                />
                                             </td>
                                         </tr>
                                     ))}
@@ -3433,6 +3633,28 @@ export default function Catalog() {
                 loading={deletingUploadId === deleteUploadConfirm?.id}
                 onConfirm={() => handleDeleteUpload(deleteUploadConfirm)}
                 onCancel={() => setDeleteUploadConfirm(null)}
+            />
+            <ConfirmModal
+                open={!!deleteListingUploadConfirm}
+                title={
+                    deleteListingUploadConfirm?.deleteMarketplace
+                        ? 'Delete from marketplace'
+                        : deleteListingUploadConfirm?.deleteSystem
+                            ? 'Delete from system'
+                            : 'Delete from history'
+                }
+                message={
+                    deleteListingUploadConfirm?.deleteMarketplace
+                        ? `Remove "${deleteListingUploadConfirm?.upload?.filename || 'this upload'}" from history, delete matching listings from this app, and remove them from the marketplace. This cannot be undone.`
+                        : deleteListingUploadConfirm?.deleteSystem
+                            ? `Remove "${deleteListingUploadConfirm?.upload?.filename || 'this upload'}" from history and delete matching listings from this app. Marketplace listings will stay. This cannot be undone.`
+                            : `Remove "${deleteListingUploadConfirm?.upload?.filename || 'this upload'}" from Upload history only. Listings stay in the system and marketplace.`
+                }
+                confirmLabel="Delete"
+                variant="danger"
+                loading={deletingListingUploadId === deleteListingUploadConfirm?.upload?.id}
+                onConfirm={handleDeleteListingUpload}
+                onCancel={() => !deletingListingUploadId && setDeleteListingUploadConfirm(null)}
             />
             <ConfirmModal
                 open={criticalModalOpen}

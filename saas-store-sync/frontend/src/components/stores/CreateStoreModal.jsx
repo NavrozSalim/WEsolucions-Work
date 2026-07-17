@@ -3,11 +3,12 @@ import { X, Plus, Clock, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
-import { createStore, getMarketplaces, getVendors, testSearsConnection, testWalmartConnection } from '../../services/storeService';
+import { createStore, getMarketplaces, getVendors, testSearsConnection, testWalmartConnection, uploadNoraInventory } from '../../services/storeService';
 import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
 import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
 import LasooConnectionFields from './LasooConnectionFields';
+import NoraInventoryUploadField, { isNoraVendor } from './NoraInventoryUploadField';
 
 const emptyPriceRange = () => ({ from_value: 0, to_value: null, margin_type: 'percentage', margin_percentage: 25 });
 const emptyInventoryRange = () => ({ from_value: 0, to_value: 999999999, range_type: 'multiplier', multiplier: 0.5, fixed_value: null });
@@ -69,6 +70,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const [selectedVendorInventory, setSelectedVendorInventory] = useState('');
     const [mydealUploadOpen, setMydealUploadOpen] = useState(false);
     const [createdStoreId, setCreatedStoreId] = useState(null);
+    const [noraPendingByVendorId, setNoraPendingByVendorId] = useState({});
     const [form, setForm] = useState({
         name: '',
         management_mode: 'inventory_only', // 'inventory_only' | 'full_store'
@@ -124,6 +126,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             });
             setSelectedVendorPrice('');
             setSelectedVendorInventory('');
+            setNoraPendingByVendorId({});
             setError('');
             setWalmartTestLoading(false);
             setWalmartTestMessage('');
@@ -579,9 +582,19 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 })).filter((vi) => vi.vendor_id && (vi.range_multipliers?.length || 0) > 0);
             }
             createStore(payload)
-                .then((res) => {
+                .then(async (res) => {
                     onSuccess();
                     const id = res.data?.id;
+                    const pending = Object.entries(noraPendingByVendorId).filter(([, f]) => f);
+                    if (id && pending.length) {
+                        for (const [, file] of pending) {
+                            try {
+                                await uploadNoraInventory(id, file);
+                            } catch {
+                                /* non-fatal; user can re-upload in settings */
+                            }
+                        }
+                    }
                     if (isMydeal && mydealSetup === 'upload' && id) {
                         setCreatedStoreId(id);
                         setMydealUploadOpen(true);
@@ -635,9 +648,19 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             sync_schedule: buildSchedulePayload(),
         };
         createStore(payload)
-            .then((res) => {
+            .then(async (res) => {
                 onSuccess();
                 const id = res.data?.id;
+                const pending = Object.entries(noraPendingByVendorId).filter(([, f]) => f);
+                if (id && pending.length) {
+                    for (const [, file] of pending) {
+                        try {
+                            await uploadNoraInventory(id, file);
+                        } catch {
+                            /* non-fatal */
+                        }
+                    }
+                }
                 if (isMydeal && mydealSetup === 'upload' && id) {
                     setCreatedStoreId(id);
                     setMydealUploadOpen(true);
@@ -1231,6 +1254,22 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                 <Trash2 className="h-4 w-4 mr-1.5 inline" aria-hidden /> Delete vendor
                                             </Button>
                                         </div>
+                                        {(() => {
+                                            const selected = vendors.find((v) => String(v.id) === String(vi.vendor_id));
+                                            const showNora = isNoraVendor(selected) || isNoraVendor(selected?.name);
+                                            if (!showNora) return null;
+                                            return (
+                                            <NoraInventoryUploadField
+                                                pendingFile={noraPendingByVendorId[vi.vendor_id] || null}
+                                                onPendingFile={(file) => {
+                                                    setNoraPendingByVendorId((prev) => ({
+                                                        ...prev,
+                                                        [vi.vendor_id]: file,
+                                                    }));
+                                                }}
+                                            />
+                                            );
+                                        })()}
                                         <div className="text-sm font-medium text-slate-700 dark:text-slate-300">Inventory ranges</div>
                                         <div className="space-y-3">
                                             {(vi.range_multipliers || []).map((r, ri) => (

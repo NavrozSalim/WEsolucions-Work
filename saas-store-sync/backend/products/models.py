@@ -93,6 +93,14 @@ class Product(models.Model):
     vendor_sku = models.CharField(max_length=255, db_index=True)
     variation_id = models.CharField(max_length=255, default='', blank=True, db_index=True)
     vendor_url = models.URLField(max_length=1000, null=True, blank=True)
+    # Nora Inventory / supplier barcode used to match Excel "BarCode" after cleaning.
+    inventory_vendor_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text='Supplier Vendor ID (e.g. Nora BarCode after -G1/-V* normalization).',
+    )
 
     class Meta:
         db_table = 'products_product'
