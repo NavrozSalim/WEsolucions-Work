@@ -203,37 +203,21 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     pagination_class = CatalogProductPagination
 
-    def get_queryset(self):
+    def _base_queryset(self):
+        """Filter + order only (no VendorPrice subqueries) for cheap COUNT/pagination."""
         store_id = self.kwargs.get('store_pk')
         if not store_id:
             return ProductMapping.objects.none()
-        latest_vp = VendorPrice.objects.filter(
-            product=OuterRef('product_id')
-        ).order_by('-scraped_at')
-        qs = ProductMapping.objects.filter(is_active=True).select_related(
+        qs = ProductMapping.objects.filter(
+            is_active=True,
+            store_id=store_id,
+            store__user=self.request.user,
+        ).select_related(
             'product',
             'product__vendor',
             'store',
-        ).annotate(
-            latest_vendor_price=Subquery(latest_vp.values('price')[:1]),
-            latest_vendor_stock=Subquery(latest_vp.values('stock')[:1]),
-            latest_vendor_at=Subquery(latest_vp.values('scraped_at')[:1]),
-        ).prefetch_related(
-            Prefetch(
-                'store__vendor_price_settings',
-                queryset=StoreVendorPriceSettings.objects.prefetch_related(
-                    'range_margins__price_range',
-                ),
-            ),
         )
-        if store_id:
-            qs = qs.filter(store_id=store_id, store__user=self.request.user)
-        else:
-            qs = qs.filter(store__user=self.request.user)
 
-        # Server-side filters so the catalog page doesn't have to load every
-        # row just to search / filter. Used by the frontend when the user
-        # types in the search box or picks a sync-status pill.
         params = getattr(self.request, 'query_params', None) or {}
         status_filter = (params.get('sync_status') or '').strip()
         if status_filter:
@@ -250,9 +234,51 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
                 | Q(product__vendor__code__icontains=search)
             )
 
-        # Deterministic ordering so client-side pagination never shows the
-        # same row twice across pages.
         return qs.order_by('product__vendor_sku', 'id')
+
+    def _annotate_vendor_prices(self, qs):
+        latest_vp = VendorPrice.objects.filter(
+            product=OuterRef('product_id')
+        ).order_by('-scraped_at')
+        return qs.annotate(
+            latest_vendor_price=Subquery(latest_vp.values('price')[:1]),
+            latest_vendor_stock=Subquery(latest_vp.values('stock')[:1]),
+            latest_vendor_at=Subquery(latest_vp.values('scraped_at')[:1]),
+        ).prefetch_related(
+            Prefetch(
+                'store__vendor_price_settings',
+                queryset=StoreVendorPriceSettings.objects.prefetch_related(
+                    'range_margins__price_range',
+                ),
+            ),
+        )
+
+    def get_queryset(self):
+        return self._annotate_vendor_prices(self._base_queryset())
+
+    def list(self, request, *args, **kwargs):
+        """Paginate on a cheap queryset, then annotate only the current page."""
+        base = self.filter_queryset(self._base_queryset())
+        page = self.paginate_queryset(base)
+        if page is not None:
+            page_ids = [obj.pk for obj in page]
+            annotated = {
+                obj.pk: obj
+                for obj in self._annotate_vendor_prices(
+                    ProductMapping.objects.filter(pk__in=page_ids).select_related(
+                        'product',
+                        'product__vendor',
+                        'store',
+                    )
+                )
+            }
+            ordered = [annotated[pk] for pk in page_ids if pk in annotated]
+            serializer = self.get_serializer(ordered, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        qs = self._annotate_vendor_prices(base)
+        serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def reset_sync_status(self, request, store_pk=None, pk=None):

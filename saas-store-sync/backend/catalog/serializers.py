@@ -70,30 +70,32 @@ class ProductMappingSerializer(serializers.ModelSerializer):
 
             vendor = getattr(obj.product, 'vendor', None)
             vcode = (getattr(vendor, 'code', '') or '').strip().lower()
-            upload_url = latest_upload_vendor_url_for_mapping(obj)
-            if is_costco_vendor_code(vcode):
-                url = resolve_costco_product_url(
-                    obj.product,
-                    vendor_url_raw=upload_url,
-                )
-                if url:
-                    return url
-            elif is_heb_vendor_code(vcode):
-                url = resolve_heb_product_url(
-                    obj.product,
-                    vendor_url_raw=upload_url,
-                    store=obj.store,
-                )
-                if url:
-                    return url
-            u = obj.product.vendor_url
-            if u:
-                return u
-            if is_heb_vendor_code(vcode):
-                return resolve_heb_product_url(obj.product, store=obj.store)
-            if is_costco_vendor_code(vcode):
-                return resolve_costco_product_url(obj.product)
-            return None
+            # Fast path: most vendors (Amazon/eBay/Vevor/…) already have URL on Product.
+            product_url = obj.product.vendor_url or None
+            if product_url and not is_costco_vendor_code(vcode) and not is_heb_vendor_code(vcode):
+                return product_url
+
+            # Costco/HEB may need upload-row fallback — only when product URL missing.
+            upload_url = None
+            if is_costco_vendor_code(vcode) or is_heb_vendor_code(vcode):
+                if not product_url:
+                    upload_url = latest_upload_vendor_url_for_mapping(obj)
+                if is_costco_vendor_code(vcode):
+                    url = resolve_costco_product_url(
+                        obj.product,
+                        vendor_url_raw=upload_url or product_url,
+                    )
+                    if url:
+                        return url
+                else:
+                    url = resolve_heb_product_url(
+                        obj.product,
+                        vendor_url_raw=upload_url or product_url,
+                        store=obj.store,
+                    )
+                    if url:
+                        return url
+            return product_url
         except Exception:
             return None
 

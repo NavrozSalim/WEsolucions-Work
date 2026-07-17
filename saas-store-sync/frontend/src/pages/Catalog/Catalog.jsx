@@ -1286,12 +1286,15 @@ export default function Catalog() {
         if (!selectedStore) return;
         const skipStores = Boolean(opts.skipStores);
         const skipProducts = Boolean(opts.skipProducts);
+        const skipUploads = Boolean(opts.skipUploads);
         if (!skipStores) {
             getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
         }
-        getCatalogUploads(selectedStore)
-            .then((r) => setUploads(Array.isArray(r.data) ? r.data : []))
-            .catch(() => {});
+        if (!skipUploads && viewMode === 'history') {
+            getCatalogUploads(selectedStore)
+                .then((r) => setUploads(Array.isArray(r.data) ? r.data : []))
+                .catch(() => {});
+        }
         if (viewMode === 'products' && !skipProducts) {
             refreshProducts();
         } else if (viewMode === 'logs') {
@@ -1554,7 +1557,14 @@ export default function Catalog() {
                     }
                 });
             const manualActive = trackingManualPushRef.current;
-            refreshLiveData({ skipStores: burst % 4 !== 0, skipProducts: manualActive });
+            // During live scrape: poll progress every tick; refresh product rows
+            // less often; never hit upload-history on the Products tab.
+            const skipProducts = manualActive || (burst % 3 !== 0);
+            refreshLiveData({
+                skipStores: burst % 4 !== 0,
+                skipProducts,
+                skipUploads: viewMode !== 'history',
+            });
         };
 
         poll();
@@ -1573,6 +1583,7 @@ export default function Catalog() {
         };
     }, [
         selectedStore,
+        viewMode,
         flowStatus,
         liveRefreshUntil,
         trackingScrape,
@@ -3236,17 +3247,6 @@ export default function Catalog() {
                             />
                         ) : (
                             <div className="relative">
-                                {productsFetching && products.length > 0 ? (
-                                    <div
-                                        className="absolute inset-0 z-10 flex items-start justify-center bg-white/60 dark:bg-slate-900/60 pt-10 pointer-events-none"
-                                        aria-hidden
-                                    >
-                                        <span className="inline-flex items-center gap-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-600 dark:text-slate-300 shadow-sm">
-                                            <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 dark:border-slate-600 border-t-accent-500" />
-                                            Loading page…
-                                        </span>
-                                    </div>
-                                ) : null}
                                 <table className="table-base">
                                 <thead>
                                     <tr>
