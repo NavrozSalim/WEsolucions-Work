@@ -1,9 +1,13 @@
 """Amazon AU OOS error-selector stock rules."""
+import os
+from unittest.mock import patch
+
 from django.test import SimpleTestCase
 from bs4 import BeautifulSoup
 
 from scrapers.amazon_au_scraper import (
     AU_OOS_ERROR_SELECTOR,
+    amazon_au_postcode,
     apply_au_error_stock,
 )
 
@@ -54,3 +58,18 @@ class AmazonAUErrorStockTests(SimpleTestCase):
         soup = BeautifulSoup(html, "html.parser")
         self.assertEqual(apply_au_error_stock(soup, 99), 99)
         self.assertIsNone(apply_au_error_stock(soup, None))
+
+
+class AmazonAUPostcodeTests(SimpleTestCase):
+    def test_default_postcode_is_2762(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AMAZON_AU_POSTCODE", None)
+            self.assertEqual(amazon_au_postcode(), "2762")
+
+    def test_env_override(self):
+        with patch.dict(os.environ, {"AMAZON_AU_POSTCODE": "2000"}):
+            self.assertEqual(amazon_au_postcode(), "2000")
+
+    def test_invalid_falls_back(self):
+        with patch.dict(os.environ, {"AMAZON_AU_POSTCODE": "abc"}):
+            self.assertEqual(amazon_au_postcode(), "2762")

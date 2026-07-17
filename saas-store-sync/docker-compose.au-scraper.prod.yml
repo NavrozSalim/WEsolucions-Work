@@ -65,6 +65,7 @@ services:
       - PROXY_URLS=${PROXY_URLS:-}
       - COSTCO_AU_PROXY_URL=${COSTCO_AU_PROXY_URL:-}
       - COSTCO_AU_PROXY_URLS=${COSTCO_AU_PROXY_URLS:-}
+      - AMAZON_AU_POSTCODE=${AMAZON_AU_POSTCODE:-2762}
       - EBAY_AU_PROXY_URLS=${EBAY_AU_PROXY_URLS:-}
       # Safer eBay defaults (production logs showed eBay 403-cascading every IP):
       #   gap 5s lets a 5-proxy pool sustain ~1 request/sec/proxy without burning IPs

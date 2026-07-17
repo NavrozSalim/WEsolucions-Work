@@ -9,6 +9,8 @@ Public API:
   close_amazon_au_session(session)
 """
 import logging
+import os
+import re
 
 import requests
 from bs4 import BeautifulSoup
@@ -24,6 +26,24 @@ logger = logging.getLogger("scrapers.amazon_au")
 
 RETRY_LIMIT = 3
 FETCH_TIMEOUT = 30
+
+# Default to Tallawong NSW so shipping-coverage errors match typical AU customer locations.
+# Override with AMAZON_AU_POSTCODE in the AU worker .env.prod.
+_DEFAULT_AU_POSTCODE = "2762"
+
+
+def amazon_au_postcode() -> str:
+    """AU delivery postcode for Amazon.com.au pricing / coverage checks."""
+    raw = (os.environ.get("AMAZON_AU_POSTCODE") or _DEFAULT_AU_POSTCODE).strip()
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) == 4:
+        return digits
+    logger.warning(
+        "Invalid AMAZON_AU_POSTCODE=%r — using default %s",
+        raw,
+        _DEFAULT_AU_POSTCODE,
+    )
+    return _DEFAULT_AU_POSTCODE
 
 _AU_COOKIES = {
     "i18n-prefs": "AUD",
@@ -113,7 +133,7 @@ class AmazonAUHTTP:
         zip_key = "amazon_au_http_zip_set"
         if session_dict is not None and session_dict.get(zip_key):
             return
-        zip_code = "3000" if is_au else "10001"
+        zip_code = amazon_au_postcode() if is_au else "10001"
         endpoint = cls._ZIP_CHANGE_URLS.get(is_au, cls._ZIP_CHANGE_URLS[False])
         try:
             s.get(seed_url, timeout=FETCH_TIMEOUT)
@@ -248,8 +268,9 @@ def _ensure_au_location(driver, session: dict = None) -> bool:
                 continue
 
         if postal_input:
+            postcode = amazon_au_postcode()
             postal_input.clear()
-            postal_input.send_keys("3000")
+            postal_input.send_keys(postcode)
             random_delay(0.5, 1.5)
             for sel in [
                 "input#GLUXZipUpdate[type='submit']",
