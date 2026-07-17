@@ -83,6 +83,54 @@ LASOO_TEMPLATE_HEADERS = [
     "Sale Price",
 ]
 
+# Internal field -> template header for export (Lasoo Create/Mapped files).
+LASOO_EXPORT_FIELDS = [
+    ("vendor_name", "Vendor Name"),
+    ("vendor_url", "Vendor URL"),
+    ("vendor_id", "Vendor ID"),
+    ("marketplace_name", "Marketplace Name"),
+    ("store_name", "Store Name"),
+    ("action", "Action"),
+    ("product_key", "Product Key"),
+    ("variant_key", "Variant Key"),
+    ("title", "Title"),
+    ("description", "Description"),
+    ("brand", "Brand"),
+    ("category", "Category"),
+    ("sku", "SKU"),
+    ("barcode", "Barcode"),
+    ("image_urls", "Image URLs"),
+    ("inventory", "Inventory"),
+    ("infinite_quantity", "Infinite Quantity"),
+    ("original_price", "Original Price"),
+    ("sale_price", "Sale Price"),
+]
+
+REVERB_EXPORT_FIELDS = [
+    ("vendor_name", "Vendor Name"),
+    ("vendor_url", "Vendor URL"),
+    ("marketplace_name", "Marketplace Name"),
+    ("store_name", "Store Name"),
+    ("action", "Action"),
+    ("sku", "SKU"),
+    ("title", "Title"),
+    ("make", "Make"),
+    ("model", "Model"),
+    ("description", "Description"),
+    ("finish", "Finish"),
+    ("year", "Year"),
+    ("condition", "Condition"),
+    ("category", "Category"),
+    ("sale_price", "Price"),
+    ("currency", "Currency"),
+    ("inventory", "Inventory"),
+    ("barcode", "UPC"),
+    ("upc_does_not_apply", "UPC Does Not Apply"),
+    ("image_urls", "Photo URLs"),
+    ("publish_status", "status"),
+    ("free_shipping", "free_shipping"),
+]
+
 REVERB_TEMPLATE_HEADERS = [
     "Vendor Name",
     "Vendor URL",
@@ -377,3 +425,29 @@ def build_template_csv(action: str = "create", store=None) -> str:
     writer.writeheader()
     writer.writerow(sample)
     return out.getvalue()
+
+
+def snapshot_row_fields(row: dict) -> dict:
+    """Copy template-relevant fields for later export (JSON-safe scalars)."""
+    out = {}
+    for key, value in (row or {}).items():
+        if key in ("row_number", "errors", "valid", "imported", "fields"):
+            continue
+        if isinstance(value, bool):
+            out[key] = "true" if value else "false"
+        elif value is None:
+            out[key] = ""
+        else:
+            out[key] = str(value).strip() if not isinstance(value, (int, float)) else value
+    # Prefer human Action label in export snapshot
+    action = str(out.get("action") or "").strip().lower()
+    if action in VALID_ACTIONS:
+        out["action"] = action.capitalize()
+    return out
+
+
+def export_field_specs(store=None) -> list[tuple[str, str]]:
+    """Return (internal_key, header) pairs for the store's marketplace template."""
+    if _is_reverb_store(store):
+        return list(REVERB_EXPORT_FIELDS)
+    return list(LASOO_EXPORT_FIELDS)

@@ -559,6 +559,15 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
             "errors": errors,
             "valid": not errors,
             "imported": False,
+            # Full input row for export (template columns + Status).
+            "fields": csv_import.snapshot_row_fields({
+                **row,
+                "store_name": row.get("store_name") or getattr(target_store, "name", "") or "",
+                "marketplace_name": row.get("marketplace_name") or (
+                    getattr(getattr(target_store, "marketplace", None), "name", None) or ""
+                ),
+                "action": file_action,
+            }),
         }
 
         environment = _listing_env(target_store)

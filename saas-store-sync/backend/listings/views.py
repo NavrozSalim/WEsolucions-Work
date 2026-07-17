@@ -299,35 +299,48 @@ def _listing_upload_row_error_text(row: dict) -> str:
     return str(errs).replace('\n', ' ') if errs else ''
 
 
-def _listing_upload_status_label(listing, *, row_ok: bool, imported: bool) -> str:
-    """Human status for upload export: Created / Uploaded / Error / Skipped."""
+def _listing_upload_status_text(listing, *, row_ok: bool, imported: bool, err_text: str = '') -> str:
+    """Status cell for template-style export."""
     if not row_ok:
-        return 'Error'
+        reason = (err_text or 'Import failed.').strip()
+        return f'Error: {reason}' if not reason.lower().startswith('error') else reason
     if listing is not None:
         if listing.status in (
             ListingStatus.UPLOADED_STAGING,
             ListingStatus.UPLOADED_PRODUCTION,
         ) or listing.action == ListingAction.MAPPED:
-            return 'Uploaded'
+            return 'Uploaded on the marketplace'
         if listing.status == ListingStatus.VALIDATION_FAILED:
-            return 'Error'
+            errs = listing.validation_errors_json or []
+            if isinstance(errs, list):
+                reason = '; '.join(str(e) for e in errs if e)
+            else:
+                reason = str(errs or 'Validation failed.')
+            return f'Error: {reason}' if reason else 'Error: Validation failed.'
         if listing.status == ListingStatus.FAILED:
-            return 'Error'
-        # ready / draft — in system but not pushed to marketplace yet
+            return 'Error: Marketplace upload failed.'
         return 'Created'
     if imported:
         return 'Created'
     return 'Skipped'
 
 
-def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) -> HttpResponse:
-    """Build CSV from ListingUpload.rows_json (per-row import report).
+def _listing_upload_has_template_fields(rows: list) -> bool:
+    return any(isinstance(r.get('fields'), dict) and r.get('fields') for r in rows)
 
-    Columns: Row, SKU, Status, Error Logs.
-    Status reflects current listing state when possible:
-      Created  — saved in system, not yet on marketplace
-      Uploaded — on marketplace (or Mapped)
-      Error    — import/validation/publish failure (reason in Error Logs)
+
+def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) -> HttpResponse:
+    """Export upload rows.
+
+    Preferred format (Create/Mapped file uploads that stored full input):
+      <same columns as input template> + Status
+
+    Status values:
+      Created
+      Uploaded on the marketplace
+      Error: <reason>
+
+    Legacy / non-file activities fall back to Row, SKU, Status, Error Logs.
     """
     rows = upload.rows_json if isinstance(upload.rows_json, list) else []
     if errors_only:
@@ -338,16 +351,18 @@ def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) ->
     safe = _listing_upload_safe_name(upload)
     response['Content-Disposition'] = f'attachment; filename="{safe}{suffix}.csv"'
     writer = csv.writer(response)
-    writer.writerow(['Row', 'SKU', 'Status', 'Error Logs'])
 
     if not rows:
-        # Single-listing / publish activity with no per-row payload.
         msg = (upload.message or '').replace('\n', ' ')
+        writer.writerow(['Row', 'SKU', 'Status', 'Error Logs'])
         if errors_only and (upload.error_rows or upload.status == ListingUpload.Status.FAILED):
-            writer.writerow(['', '', 'Error', msg or 'Upload failed'])
+            writer.writerow(['', '', f'Error: {msg or "Upload failed"}', msg or 'Upload failed'])
         elif not errors_only:
-            status_label = 'Error' if (upload.error_rows or upload.status == ListingUpload.Status.FAILED) else 'Created'
-            writer.writerow(['', upload.filename or '', status_label, msg])
+            label = (
+                f'Error: {msg}' if (upload.error_rows or upload.status == ListingUpload.Status.FAILED)
+                else 'Created'
+            )
+            writer.writerow(['', upload.filename or '', label, msg])
         return response
 
     # Batch-load current listings so Status can show Uploaded vs Created.
@@ -355,6 +370,11 @@ def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) ->
     for r in rows:
         for field in ('sku', 'variant_key'):
             val = (r.get(field) or '').strip()
+            if val:
+                keys.add(val)
+        fields = r.get('fields') if isinstance(r.get('fields'), dict) else {}
+        for field in ('sku', 'variant_key'):
+            val = str(fields.get(field) or '').strip()
             if val:
                 keys.add(val)
     listings_by_key = {}
@@ -368,34 +388,69 @@ def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) ->
                 if k:
                     listings_by_key[k] = listing
 
+    use_template = _listing_upload_has_template_fields(rows)
+    store = getattr(upload, 'store', None)
+    if store is None and upload.store_id:
+        store = Store.objects.filter(pk=upload.store_id).select_related('marketplace').first()
+    field_specs = csv_import.export_field_specs(store) if use_template else []
+
+    if use_template:
+        writer.writerow([header for _, header in field_specs] + ['Status'])
+    else:
+        writer.writerow(['Row', 'SKU', 'Status', 'Error Logs'])
+
     for r in rows:
-        sku = (r.get('sku') or r.get('variant_key') or '').strip()
-        variant = (r.get('variant_key') or r.get('sku') or '').strip()
+        fields = r.get('fields') if isinstance(r.get('fields'), dict) else {}
+        sku = (r.get('sku') or fields.get('sku') or r.get('variant_key') or '').strip()
+        variant = (r.get('variant_key') or fields.get('variant_key') or sku).strip()
         err_text = _listing_upload_row_error_text(r)
         row_ok = r.get('valid', True) and not err_text
         listing = listings_by_key.get(sku) or listings_by_key.get(variant)
 
-        # Prefer live listing validation errors when row report has none.
         if listing and listing.status == ListingStatus.VALIDATION_FAILED and not err_text:
             errs = listing.validation_errors_json or []
             if isinstance(errs, list):
                 err_text = '; '.join(str(e).replace('\n', ' ') for e in errs if e)
             row_ok = False
-
-        status_label = _listing_upload_status_label(
-            listing, row_ok=row_ok, imported=bool(r.get('imported')),
-        )
-        # Marketplace publish failure stored on the listing
         if listing and listing.status == ListingStatus.FAILED and not err_text:
             err_text = 'Marketplace upload failed.'
-            status_label = 'Error'
+            row_ok = False
 
-        writer.writerow([
-            r.get('row_number') or '',
-            sku or variant,
-            status_label,
-            err_text,
-        ])
+        status_text = _listing_upload_status_text(
+            listing, row_ok=row_ok, imported=bool(r.get('imported')), err_text=err_text,
+        )
+
+        if use_template:
+            cells = []
+            for key, _header in field_specs:
+                val = fields.get(key, '')
+                if key == 'action' and not val:
+                    val = (upload.action or '').capitalize()
+                if key == 'store_name' and not val and store is not None:
+                    val = store.name or ''
+                if key == 'marketplace_name' and not val and store is not None:
+                    mp = getattr(store, 'marketplace', None)
+                    val = getattr(mp, 'name', None) or ''
+                if isinstance(val, bool):
+                    val = 'true' if val else 'false'
+                cells.append('' if val is None else str(val))
+            cells.append(status_text)
+            writer.writerow(cells)
+        else:
+            # Legacy summary format for older uploads / non-file activities.
+            short = status_text
+            if short.startswith('Error: '):
+                short_status, short_err = 'Error', short[7:]
+            elif short == 'Uploaded on the marketplace':
+                short_status, short_err = 'Uploaded', ''
+            else:
+                short_status, short_err = short, err_text
+            writer.writerow([
+                r.get('row_number') or '',
+                sku or variant,
+                short_status,
+                short_err or err_text,
+            ])
     return response
 
 

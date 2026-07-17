@@ -304,24 +304,101 @@ class ListingServiceTests(TestCase):
             success_rows=2,
             error_rows=1,
             rows_json=[
-                {"row_number": 2, "sku": "UP-1", "valid": True, "imported": True, "errors": []},
-                {"row_number": 3, "sku": "CR-1", "valid": True, "imported": True, "errors": []},
+                {
+                    "row_number": 2,
+                    "sku": "UP-1",
+                    "valid": True,
+                    "imported": True,
+                    "errors": [],
+                    "fields": {
+                        "vendor_name": "Nora Inventory",
+                        "vendor_url": "",
+                        "vendor_id": "VID-1",
+                        "marketplace_name": "Lasoo",
+                        "store_name": "Lasoo Test Store",
+                        "action": "Create",
+                        "product_key": "UP-1",
+                        "variant_key": "UP-1",
+                        "title": "On marketplace",
+                        "description": "d",
+                        "brand": "b",
+                        "category": "",
+                        "sku": "UP-1",
+                        "barcode": "",
+                        "image_urls": "https://img.example.com/a.jpg",
+                        "inventory": "1",
+                        "infinite_quantity": "false",
+                        "original_price": "10",
+                        "sale_price": "9",
+                    },
+                },
+                {
+                    "row_number": 3,
+                    "sku": "CR-1",
+                    "valid": True,
+                    "imported": True,
+                    "errors": [],
+                    "fields": {
+                        "sku": "CR-1",
+                        "title": "Ready only",
+                        "action": "Create",
+                        "product_key": "CR-1",
+                        "variant_key": "CR-1",
+                        "description": "d",
+                        "brand": "b",
+                        "image_urls": "https://img.example.com/b.jpg",
+                        "inventory": "1",
+                        "infinite_quantity": "false",
+                        "original_price": "10",
+                        "sale_price": "9",
+                    },
+                },
                 {
                     "row_number": 4,
                     "sku": "BAD-1",
                     "valid": False,
                     "imported": False,
                     "errors": ['A listing with SKU "NA" already exists. Use the Mapped action to update it.'],
+                    "fields": {
+                        "sku": "BAD-1",
+                        "title": "Bad",
+                        "action": "Create",
+                        "product_key": "BAD-1",
+                        "variant_key": "BAD-1",
+                        "description": "d",
+                        "brand": "b",
+                        "image_urls": "https://img.example.com/c.jpg",
+                        "inventory": "1",
+                        "infinite_quantity": "false",
+                        "original_price": "10",
+                        "sale_price": "9",
+                    },
                 },
             ],
         )
         resp = _listing_upload_csv_response(upload, errors_only=False)
         body = resp.content.decode()
-        self.assertIn("Row,SKU,Status,Error Logs", body)
-        self.assertIn("UP-1,Uploaded", body)
-        self.assertIn("CR-1,Created", body)
-        self.assertIn("BAD-1,Error", body)
-        self.assertIn("already exists", body)
+        self.assertIn("Vendor Name", body)
+        self.assertIn("Sale Price", body)
+        self.assertIn(",Status", body)
+        self.assertIn("Uploaded on the marketplace", body)
+        self.assertIn(",Created", body)
+        self.assertIn("Error: A listing with SKU", body)
+        self.assertIn("Nora Inventory", body)
+
+    def test_bulk_import_stores_fields_for_export(self):
+        content = csv_import.build_template_csv("create", store=self.store).encode()
+        listing_service.bulk_import(self.user, self.store, "full.csv", content, action="create")
+        upload = ListingUpload.objects.get(store=self.store, filename="full.csv")
+        row = upload.rows_json[0]
+        self.assertIn("fields", row)
+        self.assertEqual(row["fields"].get("sku"), "TSHIRT-001-BLACK-M")
+        self.assertTrue(row["fields"].get("title"))
+        resp = _listing_upload_csv_response(upload, errors_only=False)
+        body = resp.content.decode()
+        self.assertIn("Vendor Name", body)
+        self.assertIn("TSHIRT-001-BLACK-M", body)
+        self.assertIn("Created", body)
 
     def test_delete_upload_history_only(self):
         content = csv_import.build_template_csv("create").encode()
