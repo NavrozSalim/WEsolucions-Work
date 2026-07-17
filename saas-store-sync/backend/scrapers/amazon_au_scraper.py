@@ -35,18 +35,48 @@ _USD_COOKIES = {
     "lc-main": "en_US",
 }
 
-# Red error under spacing-base (e.g. temporarily unavailable) → force inventory 0.
+# Red error under spacing-base → force inventory 0.
 AU_OOS_ERROR_SELECTOR = ".a-spacing-base span.a-color-error"
+# Broader buy-box errors (shipping coverage, etc.) may not nest under .a-spacing-base.
+AU_COLOR_ERROR_SELECTOR = "span.a-color-error"
+_AU_UNSELLABLE_ERROR_MARKERS = (
+    "beyond seller's shipping coverage",
+    "beyond sellers shipping coverage",
+    "shipping coverage for this item",
+    "selected delivery location",
+    "choose a different delivery location",
+    "purchase from another seller",
+    "temporarily out of stock",
+    "currently unavailable",
+    "out of stock",
+)
+
+
+def _au_error_span_is_unsellable(text: str) -> bool:
+    t = " ".join((text or "").lower().split())
+    if not t:
+        return False
+    # "Only 5 left in stock" is a-color-error on some PDPs but still sellable.
+    if "left in stock" in t or "only" in t and "left" in t:
+        if not any(m in t for m in _AU_UNSELLABLE_ERROR_MARKERS):
+            return False
+    return any(m in t for m in _AU_UNSELLABLE_ERROR_MARKERS)
 
 
 def apply_au_error_stock(soup: BeautifulSoup, stock):
-    """If Amazon AU shows ``.a-spacing-base span.a-color-error``, force stock to 0.
+    """Force stock to 0 when Amazon AU shows an unsellable red error.
 
-    Price is left unchanged by the caller.
+    Matches ``.a-spacing-base span.a-color-error`` or any ``span.a-color-error``
+    whose text indicates shipping coverage / unavailable. Price is unchanged.
     """
     try:
-        if soup is not None and soup.select_one(AU_OOS_ERROR_SELECTOR) is not None:
+        if soup is None:
+            return stock
+        if soup.select_one(AU_OOS_ERROR_SELECTOR) is not None:
             return 0
+        for el in soup.select(AU_COLOR_ERROR_SELECTOR):
+            if _au_error_span_is_unsellable(el.get_text(" ", strip=True)):
+                return 0
     except Exception:
         pass
     return stock
