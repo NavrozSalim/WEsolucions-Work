@@ -60,9 +60,11 @@ COLUMN_MAP = {
     "free shipping": "free_shipping",
 }
 
-# System routing columns first, then marketplace payload fields.
+# System routing columns first (vendor identity together), then marketplace payload.
 LASOO_TEMPLATE_HEADERS = [
     "Vendor Name",
+    "Vendor URL",
+    "Vendor ID",
     "Marketplace Name",
     "Store Name",
     "Action",
@@ -74,13 +76,11 @@ LASOO_TEMPLATE_HEADERS = [
     "Category",
     "SKU",
     "Barcode",
-    "Vendor URL",
     "Image URLs",
     "Inventory",
     "Infinite Quantity",
     "Original Price",
     "Sale Price",
-    "Vendor ID",
 ]
 
 REVERB_TEMPLATE_HEADERS = [

@@ -96,6 +96,13 @@ class CsvImportTests(TestCase):
         self.assertEqual(rows[0]["vendor_name"], "Nora Inventory")
         self.assertEqual(rows[0]["marketplace_name"], "Lasoo")
 
+    def test_lasoo_template_vendor_columns_follow_vendor_name(self):
+        header = csv_import.build_template_csv("create").splitlines()[0]
+        cols = header.split(",")
+        self.assertEqual(cols[0], "Vendor Name")
+        self.assertEqual(cols[1], "Vendor URL")
+        self.assertEqual(cols[2], "Vendor ID")
+
     def test_parse_action_instructional_text(self):
         content = (
             "Action,SKU,Title,Original Price,Sale Price,Inventory,Image URLs,Brand,Description\n"
