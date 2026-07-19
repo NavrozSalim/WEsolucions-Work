@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import { Download, FileDown, Search } from 'lucide-react';
+import { Download, FileDown, Search, Square } from 'lucide-react';
 import Modal from '../ui/Modal';
 import Input from '../ui/Input';
 import Button from '../ui/Button';
 import Badge from '../design/Badge';
 import {
-    bulkLookupListingsOnMarketplace,
-    downloadMarketplaceLookupCsv,
+    MARKETPLACE_LOOKUP_MAX,
+    cancelMarketplaceLookupJob,
+    downloadMarketplaceLookupJobCsv,
+    getMarketplaceLookupProgress,
     lookupListingOnMarketplace,
+    startMarketplaceLookupJob,
 } from '../../services/listingService';
 
 function formatWhen(value) {
@@ -25,7 +28,16 @@ function formatWhen(value) {
 
 function apiError(err, fallback) {
     const detail = err.response?.data?.detail;
-    return typeof detail === 'string' && detail.trim() ? detail : err.message || fallback;
+    if (typeof detail === 'string' && detail.trim()) return detail;
+    return err.message || fallback;
+}
+
+function statusBadgeVariant(status) {
+    if (status === 'done') return 'success';
+    if (status === 'cancelled') return 'warning';
+    if (status === 'error') return 'error';
+    if (status === 'running' || status === 'queued') return 'accent';
+    return 'default';
 }
 
 export default function MarketplaceLookupModal({ open, onClose, storeId, storeName }) {
@@ -34,9 +46,11 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
     const [bulkText, setBulkText] = useState('');
     const [bulkFile, setBulkFile] = useState(null);
     const [loading, setLoading] = useState(false);
+    const [cancelling, setCancelling] = useState(false);
+    const [downloading, setDownloading] = useState(false);
     const [error, setError] = useState('');
     const [result, setResult] = useState(null);
-    const [bulkResult, setBulkResult] = useState(null);
+    const [job, setJob] = useState(null);
     const fileRef = useRef(null);
 
     useEffect(() => {
@@ -47,9 +61,37 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
         setBulkFile(null);
         setError('');
         setResult(null);
-        setBulkResult(null);
         setLoading(false);
+        setCancelling(false);
+        setDownloading(false);
         if (fileRef.current) fileRef.current.value = '';
+        // Keep last job status when reopening — loaded by the poll effect below.
+    }, [open, storeId]);
+
+    // Poll job progress while modal is open (also restores finished results after leave).
+    useEffect(() => {
+        if (!open || !storeId) return undefined;
+        let cancelled = false;
+        let restoredTab = false;
+        const tick = () => {
+            getMarketplaceLookupProgress(storeId)
+                .then((res) => {
+                    if (cancelled) return;
+                    const data = res.data || null;
+                    setJob(data);
+                    if (!restoredTab && data && (data.active || data.has_results)) {
+                        setMode('bulk');
+                        restoredTab = true;
+                    }
+                })
+                .catch(() => { /* ignore transient poll errors */ });
+        };
+        tick();
+        const id = setInterval(tick, 2000);
+        return () => {
+            cancelled = true;
+            clearInterval(id);
+        };
     }, [open, storeId]);
 
     const handleSingleSearch = (e) => {
@@ -62,16 +104,10 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
         setLoading(true);
         setError('');
         setResult(null);
-        setBulkResult(null);
         lookupListingOnMarketplace(storeId, q)
             .then((res) => setResult(res.data || null))
             .catch((err) => setError(apiError(err, 'Could not check the marketplace.')))
             .finally(() => setLoading(false));
-    };
-
-    const bulkPayload = () => {
-        if (bulkFile) return { file: bulkFile };
-        return { text: bulkText };
     };
 
     const handleBulkSearch = (e) => {
@@ -84,11 +120,24 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
         setLoading(true);
         setError('');
         setResult(null);
-        setBulkResult(null);
-        bulkLookupListingsOnMarketplace(storeId, bulkPayload())
-            .then((res) => setBulkResult(res.data || null))
-            .catch((err) => setError(apiError(err, 'Could not run bulk check.')))
+        const payload = bulkFile ? { file: bulkFile } : { text: bulkText };
+        startMarketplaceLookupJob(storeId, payload)
+            .then((res) => {
+                setJob(res.data || null);
+                setMode('bulk');
+            })
+            .catch((err) => setError(apiError(err, 'Could not start marketplace check.')))
             .finally(() => setLoading(false));
+    };
+
+    const handleCancel = () => {
+        if (!storeId || cancelling) return;
+        setCancelling(true);
+        setError('');
+        cancelMarketplaceLookupJob(storeId)
+            .then((res) => setJob(res.data || null))
+            .catch((err) => setError(apiError(err, 'Could not cancel.')))
+            .finally(() => setCancelling(false));
     };
 
     const handleDownloadTemplate = () => {
@@ -109,53 +158,21 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
         window.URL.revokeObjectURL(url);
     };
 
-    const downloadRowsAsCsv = (rows) => {
-        const headers = [
-            'SKU', 'Found', 'Marketplace Status', 'Created At', 'Published At',
-            'Title', 'Marketplace ID', 'URL', 'Local Status', 'Local Created At', 'Message',
-        ];
-        const keys = [
-            'sku', 'found', 'marketplace_status', 'created_at', 'published_at',
-            'title', 'marketplace_id', 'url', 'local_status', 'local_created_at', 'message',
-        ];
-        const esc = (v) => {
-            const s = String(v ?? '');
-            return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-        };
-        const lines = [headers.join(',')];
-        for (const row of rows) {
-            lines.push(keys.map((k) => esc(row[k])).join(','));
-        }
-        const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
-        const url = window.URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', 'marketplace_sku_check.csv');
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
-    };
-
     const handleDownloadCsv = () => {
         if (!storeId) return;
-        if (bulkResult?.rows?.length) {
-            downloadRowsAsCsv(bulkResult.rows);
-            return;
-        }
-        if (!bulkFile && !bulkText.trim()) {
-            setError('Run a bulk search first, or provide SKUs / a file.');
-            return;
-        }
-        setLoading(true);
+        setDownloading(true);
         setError('');
-        downloadMarketplaceLookupCsv(storeId, bulkPayload())
+        downloadMarketplaceLookupJobCsv(storeId)
             .catch((err) => setError(apiError(err, 'Could not download CSV.')))
-            .finally(() => setLoading(false));
+            .finally(() => setDownloading(false));
     };
 
     const hit = Array.isArray(result?.results) ? result.results[0] : null;
     const local = result?.local_listing || null;
+    const jobActive = Boolean(job?.active);
+    const jobHasResults = Boolean(job?.has_results);
+    const progressPct = Number(job?.pct || 0);
+    const showJobPanel = job && job.status && job.status !== 'idle';
 
     return (
         <Modal open={open} onClose={onClose} title="Check on marketplace">
@@ -218,13 +235,20 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
                         </label>
                         <textarea
                             value={bulkText}
-                            onChange={(e) => { setBulkText(e.target.value); setBulkFile(null); if (fileRef.current) fileRef.current.value = ''; }}
+                            onChange={(e) => {
+                                setBulkText(e.target.value);
+                                setBulkFile(null);
+                                if (fileRef.current) fileRef.current.value = '';
+                            }}
                             rows={5}
                             placeholder={"SKU-001\nSKU-002\nSKU-003"}
                             className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-none"
+                            disabled={loading || jobActive}
                         />
                         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                            Max 200 SKUs per run. Or download the template, fill the SKU column, and upload.
+                            Max {MARKETPLACE_LOOKUP_MAX.toLocaleString()} SKUs per run.
+                            You can leave this page — the check continues in the background.
+                            Starting a new check replaces the previous results.
                         </p>
                     </div>
                     <div>
@@ -232,7 +256,13 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
                             Upload file (optional)
                         </label>
                         <div className="flex flex-wrap items-center gap-2 mb-2">
-                            <Button type="button" variant="secondary" size="sm" onClick={handleDownloadTemplate}>
+                            <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                onClick={handleDownloadTemplate}
+                                disabled={loading || jobActive}
+                            >
                                 <Download className="h-4 w-4 mr-1.5" />
                                 Download template
                             </Button>
@@ -244,6 +274,7 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
                             ref={fileRef}
                             type="file"
                             accept=".txt,.csv,.xlsx,.xlsm"
+                            disabled={loading || jobActive}
                             onChange={(e) => {
                                 const f = e.target.files?.[0] || null;
                                 setBulkFile(f);
@@ -262,23 +293,77 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
                         <Button type="button" variant="secondary" size="sm" onClick={onClose}>
                             Close
                         </Button>
+                        {jobActive ? (
+                            <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                disabled={cancelling}
+                                onClick={handleCancel}
+                            >
+                                <Square className="h-3.5 w-3.5 mr-1.5" />
+                                {cancelling ? 'Cancelling…' : 'Cancel'}
+                            </Button>
+                        ) : null}
                         <Button
                             type="button"
                             variant="secondary"
                             size="sm"
-                            disabled={loading || (!bulkResult && !bulkText.trim() && !bulkFile)}
+                            disabled={downloading || !jobHasResults}
                             onClick={handleDownloadCsv}
                         >
                             <FileDown className="h-4 w-4 mr-1.5" />
-                            Download CSV
+                            {downloading ? 'Downloading…' : 'Download CSV'}
                         </Button>
-                        <Button type="submit" variant="primary" size="sm" disabled={loading}>
+                        <Button type="submit" variant="primary" size="sm" disabled={loading || jobActive}>
                             <Search className="h-4 w-4 mr-1.5" />
-                            {loading ? 'Checking…' : 'Run bulk check'}
+                            {loading ? 'Starting…' : jobActive ? 'Running…' : 'Run bulk check'}
                         </Button>
                     </div>
                 </form>
             )}
+
+            {mode === 'bulk' && showJobPanel ? (
+                <div className="mt-5 space-y-3 border-t border-slate-200 dark:border-slate-700 pt-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant={statusBadgeVariant(job.status)}>
+                            {job.status}
+                        </Badge>
+                        {jobActive ? (
+                            <Badge variant="accent">
+                                {(job.processed || 0).toLocaleString()} / {(job.total || 0).toLocaleString()}
+                            </Badge>
+                        ) : null}
+                        <Badge variant="success">{job.found ?? 0} found</Badge>
+                        <Badge variant="warning">{job.not_found ?? 0} not found</Badge>
+                        {(job.errors ?? 0) > 0 ? (
+                            <Badge variant="error">{job.errors} errors</Badge>
+                        ) : null}
+                    </div>
+                    <p className="text-sm text-slate-700 dark:text-slate-300">{job.message}</p>
+                    {jobActive ? (
+                        <div>
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                                <div
+                                    className="h-full rounded-full bg-sky-500 transition-all duration-300"
+                                    style={{ width: `${Math.max(progressPct, job.total ? 2 : 0)}%` }}
+                                />
+                            </div>
+                            {job.current_sku ? (
+                                <p className="mt-1 text-xs text-slate-500 truncate" title={job.current_sku}>
+                                    Current: {job.current_sku}
+                                </p>
+                            ) : null}
+                        </div>
+                    ) : null}
+                    {jobHasResults ? (
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                            Results stay available here until you start a new bulk check.
+                            Use <span className="font-medium">Download CSV</span> anytime.
+                        </p>
+                    ) : null}
+                </div>
+            ) : null}
 
             {mode === 'single' && result ? (
                 <div className="mt-5 space-y-4 border-t border-slate-200 dark:border-slate-700 pt-4">
@@ -346,23 +431,6 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
                             This SKU is not in Created products for this store.
                         </p>
                     )}
-                </div>
-            ) : null}
-
-            {mode === 'bulk' && bulkResult ? (
-                <div className="mt-5 space-y-3 border-t border-slate-200 dark:border-slate-700 pt-4">
-                    <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant="success">{bulkResult.found ?? 0} found</Badge>
-                        <Badge variant="warning">{bulkResult.not_found ?? 0} not found</Badge>
-                        {(bulkResult.errors ?? 0) > 0 ? (
-                            <Badge variant="error">{bulkResult.errors} errors</Badge>
-                        ) : null}
-                    </div>
-                    <p className="text-sm text-slate-700 dark:text-slate-300">{bulkResult.message}</p>
-                    <p className="text-xs text-slate-500 dark:text-slate-400">
-                        Use <span className="font-medium">Download CSV</span> for the full status file
-                        (Found, Marketplace Status, Created At, etc.).
-                    </p>
                 </div>
             ) : null}
         </Modal>

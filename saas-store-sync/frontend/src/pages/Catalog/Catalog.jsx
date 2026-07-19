@@ -1325,6 +1325,11 @@ export default function Catalog() {
         });
     }, [selectedStore, storeList]);
 
+    const handleInventoryMessage = useCallback((msg, variant) => {
+        setMessage(msg);
+        setFlowStatus(variant === 'error' ? 'failed' : 'success');
+    }, []);
+
     const refreshLiveData = useCallback((opts = {}) => {
         if (!selectedStore) return;
         const skipStores = Boolean(opts.skipStores);
@@ -2837,10 +2842,7 @@ export default function Catalog() {
                     storeId={selectedStore}
                     marketplaceCode={selectedStoreData?.marketplace_code}
                     reloadNonce={createdReloadNonce}
-                    onMessage={(msg, variant) => {
-                        setMessage(msg);
-                        setFlowStatus(variant === 'error' ? 'failed' : 'success');
-                    }}
+                    onMessage={handleInventoryMessage}
                 />
             )}
 

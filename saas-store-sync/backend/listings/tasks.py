@@ -129,6 +129,30 @@ def scrape_store_listings(self, user_id, store_id, listing_ids=None):
         return {"ok": False, "error": str(exc)}
 
 
+@shared_task(name="listings.lookup_marketplace_skus", bind=True, ignore_result=True)
+def lookup_marketplace_skus(self, store_id, skus):
+    """Background bulk marketplace SKU check (survives leaving the Catalog page)."""
+    from . import marketplace_lookup
+    from . import marketplace_lookup_progress as prog
+
+    prog.set_lookup_progress(
+        store_id,
+        active=True,
+        status="running",
+        task_id=getattr(self.request, "id", None) or "",
+        message="Worker started…",
+    )
+    try:
+        return marketplace_lookup.run_marketplace_lookup_job(store_id, skus or [])
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Marketplace lookup task failed store=%s", store_id)
+        return prog.finish_lookup_progress(
+            store_id,
+            status="error",
+            message=(str(exc) or "Marketplace check failed.")[:200],
+        )
+
+
 @shared_task(name="listings.fetch_us_store_tickets", ignore_result=True)
 def fetch_us_store_tickets():
     """Hourly on US orders VPS (queue orders-us): USA-region Lasoo + Reverb tickets."""

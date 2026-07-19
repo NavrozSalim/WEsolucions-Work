@@ -94,14 +94,23 @@ export const lookupListingOnMarketplace = (storeId, sku) =>
         params: { sku },
     });
 
-/** Bulk marketplace SKU check — returns JSON summary + rows. */
-export const bulkLookupListingsOnMarketplace = (storeId, { skus, text, file } = {}) => {
+/** Max SKUs for one bulk check run. */
+export const MARKETPLACE_LOOKUP_MAX = 2000;
+
+function marketplaceLookupFormData(file) {
+    const fd = new FormData();
+    fd.append('file', file);
+    // Do not set Content-Type manually — browser must add the multipart boundary.
+    return fd;
+}
+
+/** Start background bulk marketplace SKU check (survives leaving the page). */
+export const startMarketplaceLookupJob = (storeId, { skus, text, file } = {}) => {
     if (file) {
-        const fd = new FormData();
-        fd.append('file', file);
-        return api.post(`/stores/${storeId}/listings/marketplace-lookup/`, fd, {
-            headers: { 'Content-Type': 'multipart/form-data' },
-        });
+        return api.post(
+            `/stores/${storeId}/listings/marketplace-lookup/`,
+            marketplaceLookupFormData(file),
+        );
     }
     return api.post(`/stores/${storeId}/listings/marketplace-lookup/`, {
         skus: skus || undefined,
@@ -109,27 +118,19 @@ export const bulkLookupListingsOnMarketplace = (storeId, { skus, text, file } = 
     });
 };
 
-/** Bulk marketplace SKU check — download CSV results. */
-export const downloadMarketplaceLookupCsv = (storeId, { skus, text, file } = {}) => {
-    const request = file
-        ? (() => {
-            const fd = new FormData();
-            fd.append('file', file);
-            return api.post(
-                `/stores/${storeId}/listings/marketplace-lookup/?download=1`,
-                fd,
-                {
-                    headers: { 'Content-Type': 'multipart/form-data' },
-                    responseType: 'blob',
-                },
-            );
-        })()
-        : api.post(
-            `/stores/${storeId}/listings/marketplace-lookup/?download=1`,
-            { skus: skus || undefined, text: text || undefined },
-            { responseType: 'blob' },
-        );
-    return request.then((res) => {
+/** Poll background marketplace check status. */
+export const getMarketplaceLookupProgress = (storeId) =>
+    api.get(`/stores/${storeId}/listings/marketplace-lookup/progress/`);
+
+/** Cancel an in-flight marketplace check (partial results remain downloadable). */
+export const cancelMarketplaceLookupJob = (storeId) =>
+    api.post(`/stores/${storeId}/listings/marketplace-lookup/cancel/`);
+
+/** Download CSV for the latest marketplace check results. */
+export const downloadMarketplaceLookupJobCsv = (storeId) =>
+    api.get(`/stores/${storeId}/listings/marketplace-lookup/download/`, {
+        responseType: 'blob',
+    }).then((res) => {
         const url = window.URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
         const link = document.createElement('a');
         link.href = url;
@@ -139,7 +140,11 @@ export const downloadMarketplaceLookupCsv = (storeId, { skus, text, file } = {})
         link.remove();
         window.URL.revokeObjectURL(url);
     });
-};
+
+/** @deprecated Prefer startMarketplaceLookupJob — kept for compatibility. */
+export async function bulkLookupListingsOnMarketplace(storeId, payload = {}) {
+    return startMarketplaceLookupJob(storeId, payload);
+}
 
 /** Download failed rows from a managed Upload history entry as CSV. */
 export const downloadListingUploadErrors = (storeId, uploadId, filename = '') =>

@@ -11,6 +11,9 @@ from .views import (
     StoreListingCriticalInventoryView,
     StoreListingInventoryExportView,
     StoreListingMarketplaceLookupView,
+    StoreListingMarketplaceLookupProgressView,
+    StoreListingMarketplaceLookupCancelView,
+    StoreListingMarketplaceLookupDownloadView,
     StoreListingScrapeView,
     StoreListingScrapeProgressView,
     StoreListingTemplateView,
@@ -61,6 +64,21 @@ urlpatterns = [
         'stores/<uuid:store_pk>/listings/marketplace-lookup/',
         StoreListingMarketplaceLookupView.as_view(),
         name='store-listings-marketplace-lookup',
+    ),
+    path(
+        'stores/<uuid:store_pk>/listings/marketplace-lookup/progress/',
+        StoreListingMarketplaceLookupProgressView.as_view(),
+        name='store-listings-marketplace-lookup-progress',
+    ),
+    path(
+        'stores/<uuid:store_pk>/listings/marketplace-lookup/cancel/',
+        StoreListingMarketplaceLookupCancelView.as_view(),
+        name='store-listings-marketplace-lookup-cancel',
+    ),
+    path(
+        'stores/<uuid:store_pk>/listings/marketplace-lookup/download/',
+        StoreListingMarketplaceLookupDownloadView.as_view(),
+        name='store-listings-marketplace-lookup-download',
     ),
     path('stores/<uuid:store_pk>/listings/scrape/', StoreListingScrapeView.as_view(), name='store-listings-scrape'),
     path(

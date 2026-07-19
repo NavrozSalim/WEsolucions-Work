@@ -540,8 +540,9 @@ class StoreListingMarketplaceLookupView(APIView):
     """Live SKU check on the store marketplace (Lasoo Variants_Search / Reverb my/listings).
 
     GET  ?sku=… → single lookup JSON
-    POST JSON {skus:[…]} or {text:"…"} or multipart file → bulk JSON
-    POST …?download=1 → CSV file download
+    POST JSON {skus:[…]} / {text:"…"} / multipart file → start background bulk job
+    POST …?parse_only=1 → parse SKUs only
+    POST …?sync=1 → legacy synchronous bulk (small batches only)
     """
     permission_classes = [IsAuthenticated]
 
@@ -577,22 +578,122 @@ class StoreListingMarketplaceLookupView(APIView):
                 skus = marketplace_lookup.parse_sku_list(
                     data.get('text') or data.get('sku') or ''
                 )
+
+        parse_only = str(request.query_params.get('parse_only') or '').lower() in (
+            '1', 'true', 'yes',
+        )
+        if parse_only:
+            cleaned = marketplace_lookup.parse_sku_list(skus)
+            if not cleaned:
+                return Response(
+                    {'detail': 'Provide at least one SKU.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if len(cleaned) > marketplace_lookup.BULK_TOTAL_MAX_SKUS:
+                return Response(
+                    {
+                        'detail': (
+                            f'Too many SKUs ({len(cleaned)}). '
+                            f'Maximum is {marketplace_lookup.BULK_TOTAL_MAX_SKUS} per run.'
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            return Response({
+                'ok': True,
+                'total': len(cleaned),
+                'skus': cleaned,
+                'batch_size': marketplace_lookup.BULK_MAX_SKUS,
+                'max_skus': marketplace_lookup.BULK_TOTAL_MAX_SKUS,
+            })
+
+        sync = str(request.query_params.get('sync') or '').lower() in (
+            '1', 'true', 'yes',
+        )
+        if sync:
+            try:
+                result = marketplace_lookup.lookup_skus_bulk(store, skus)
+            except MarketplaceError as exc:
+                return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            download = str(request.query_params.get('download') or '').lower() in (
+                '1', 'true', 'yes', 'csv',
+            )
+            if download:
+                content = marketplace_lookup.build_lookup_csv(result)
+                response = HttpResponse(content, content_type='text/csv')
+                response['Content-Disposition'] = (
+                    'attachment; filename="marketplace_sku_check.csv"'
+                )
+                return response
+            return Response(result)
+
         try:
-            result = marketplace_lookup.lookup_skus_bulk(store, skus)
+            result = marketplace_lookup.start_marketplace_lookup_async(store, skus)
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-        download = str(request.query_params.get('download') or '').lower() in (
-            '1', 'true', 'yes', 'csv',
-        )
-        if download:
-            content = marketplace_lookup.build_lookup_csv(result)
-            response = HttpResponse(content, content_type='text/csv')
-            response['Content-Disposition'] = (
-                'attachment; filename="marketplace_sku_check.csv"'
-            )
-            return response
         return Response(result)
+
+
+class StoreListingMarketplaceLookupProgressView(APIView):
+    """Poll background marketplace SKU check status (survives page leave)."""
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ProgressReadRateThrottle]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        from . import marketplace_lookup_progress as prog
+        return Response(prog.public_lookup_progress(store.id))
+
+
+class StoreListingMarketplaceLookupCancelView(APIView):
+    """Request cancel of an in-flight marketplace SKU check."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        from . import marketplace_lookup_progress as prog
+        cur = prog.get_lookup_progress(store.id)
+        if not cur.get('active'):
+            return Response({
+                'ok': True,
+                'cancelled': False,
+                'message': 'No marketplace check is running.',
+                **prog.public_lookup_progress(store.id),
+            })
+        prog.request_lookup_cancel(store.id)
+        return Response({
+            'ok': True,
+            'cancelled': True,
+            'message': 'Cancel requested. Partial results will be available shortly.',
+            **prog.public_lookup_progress(store.id),
+        })
+
+
+class StoreListingMarketplaceLookupDownloadView(APIView):
+    """Download CSV for the latest marketplace SKU check results (including cancelled partial)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        from . import marketplace_lookup_progress as prog
+        cur = prog.get_lookup_progress(store.id)
+        rows = cur.get('rows') or []
+        if not rows:
+            return Response(
+                {'detail': 'No marketplace check results to download yet.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        content = marketplace_lookup.build_lookup_csv({
+            'rows': rows,
+            'found': cur.get('found'),
+            'not_found': cur.get('not_found'),
+            'errors': cur.get('errors'),
+        })
+        response = HttpResponse(content, content_type='text/csv')
+        response['Content-Disposition'] = (
+            'attachment; filename="marketplace_sku_check.csv"'
+        )
+        return response
 
 
 class StoreListingPublishView(APIView):

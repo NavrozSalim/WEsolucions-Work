@@ -279,7 +279,8 @@ def lookup_sku(store, sku: str) -> dict:
     )
 
 
-BULK_MAX_SKUS = 200
+BULK_MAX_SKUS = 20  # per HTTP request — keeps lookups under gunicorn timeout
+BULK_TOTAL_MAX_SKUS = 2000  # max SKUs accepted for parse / overall client-driven run
 
 
 def parse_sku_list(raw) -> list[str]:
@@ -390,7 +391,8 @@ def lookup_skus_bulk(store, skus: list[str]) -> dict:
         raise MarketplaceError("Provide at least one SKU.")
     if len(cleaned) > BULK_MAX_SKUS:
         raise MarketplaceError(
-            f"Too many SKUs ({len(cleaned)}). Maximum is {BULK_MAX_SKUS} per run."
+            f'Too many SKUs in one batch ({len(cleaned)}). '
+            f'Maximum is {BULK_MAX_SKUS} per request — the UI sends batches automatically.'
         )
 
     kind = marketplace_kind(store.marketplace)
@@ -467,3 +469,134 @@ def build_lookup_csv(bulk_result: dict) -> bytes:
     for row in bulk_result.get("rows") or []:
         writer.writerow([row.get(key, "") for key, _ in CSV_COLUMNS])
     return buf.getvalue().encode("utf-8-sig")
+
+
+def run_marketplace_lookup_job(store_id, skus: list[str]) -> dict:
+    """Process a queued bulk lookup (Celery / background thread). Checks cancel between SKUs."""
+    from stores.models import Store
+
+    from . import marketplace_lookup_progress as prog
+
+    try:
+        store = Store.objects.select_related("marketplace", "user").get(pk=store_id)
+    except Store.DoesNotExist:
+        prog.finish_lookup_progress(
+            store_id,
+            status="error",
+            message="Store not found.",
+        )
+        return {"ok": False, "error": "not_found"}
+
+    cleaned = parse_sku_list(skus)
+    prog.set_lookup_progress(
+        store.id,
+        active=True,
+        status="running",
+        message=f"Checking 0 of {len(cleaned)}…",
+    )
+
+    for sku in cleaned:
+        if prog.is_lookup_cancel_requested(store.id):
+            return prog.finish_lookup_progress(store.id, status="cancelled")
+        try:
+            result = lookup_sku(store, sku)
+            row = _row_from_lookup(sku, result)
+            prog.append_lookup_row(
+                store.id,
+                row,
+                marketplace=result.get("marketplace") or "",
+                environment=result.get("environment") or "",
+            )
+        except MarketplaceError as exc:
+            row = _row_from_lookup(sku, None, error=str(exc))
+            row["found"] = "Error"
+            prog.append_lookup_row(store.id, row)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Marketplace lookup job failed for sku=%s store=%s", sku, store_id)
+            row = _row_from_lookup(sku, None, error=str(exc)[:300])
+            row["found"] = "Error"
+            prog.append_lookup_row(store.id, row)
+
+    if prog.is_lookup_cancel_requested(store.id):
+        return prog.finish_lookup_progress(store.id, status="cancelled")
+    return prog.finish_lookup_progress(store.id, status="done")
+
+
+def start_marketplace_lookup_async(store, skus) -> dict:
+    """Start a background marketplace SKU check (survives leaving the page).
+
+    Uses a daemon thread (same pattern as managed listing scrape). Progress and
+    result rows live in cache until the user starts a new check.
+    """
+    import threading
+
+    from . import marketplace_lookup_progress as prog
+
+    if getattr(store, "management_mode", None) != "full_store":
+        raise MarketplaceError("Marketplace SKU check is only available for managed stores.")
+
+    cleaned = parse_sku_list(skus)
+    if not cleaned:
+        raise MarketplaceError("Provide at least one SKU.")
+    if len(cleaned) > BULK_TOTAL_MAX_SKUS:
+        raise MarketplaceError(
+            f"Too many SKUs ({len(cleaned)}). Maximum is {BULK_TOTAL_MAX_SKUS} per run."
+        )
+
+    kind = marketplace_kind(store.marketplace)
+    if kind not in ("lasoo", "reverb"):
+        raise MarketplaceError(
+            f'Marketplace SKU check is not supported for "{kind or "this marketplace"}" yet.'
+        )
+
+    existing = prog.get_lookup_progress(store.id)
+    if existing.get("active"):
+        return {
+            "started": False,
+            "already_running": True,
+            "ok": True,
+            "message": "A marketplace check is already running. You can leave this page — progress continues.",
+            **prog.public_lookup_progress(store.id),
+        }
+
+    prog.begin_lookup_progress(
+        store.id,
+        skus=cleaned,
+        message=f"Starting check for {len(cleaned)} SKU(s)…",
+    )
+
+    store_id = str(store.id)
+    sku_list = list(cleaned)
+
+    def _run():
+        try:
+            run_marketplace_lookup_job(store_id, sku_list)
+        except Exception:  # noqa: BLE001
+            logger.exception("Marketplace lookup thread failed store=%s", store_id)
+            prog.finish_lookup_progress(
+                store_id,
+                status="error",
+                message="Marketplace check failed unexpectedly.",
+            )
+
+    threading.Thread(
+        target=_run,
+        daemon=True,
+        name=f"marketplace-lookup-{store_id}",
+    ).start()
+
+    # Progress and CSV results live in cache until the next run.
+
+    return {
+        "started": True,
+        "async": True,
+        "via": "thread",
+        "ok": True,
+        "total": len(sku_list),
+        "processed": 0,
+        "message": (
+            f"Started check for {len(sku_list)} SKU(s). "
+            "You can leave this page — results stay available until you start a new check."
+        ),
+        **prog.public_lookup_progress(store.id),
+    }

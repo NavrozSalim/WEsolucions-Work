@@ -141,6 +141,21 @@ function JobProgressStrip({ mode, count, progress, marketplaceLabel = 'marketpla
     );
 }
 
+function inventoryLoadError(err) {
+    if (!err) return 'Failed to load inventory.';
+    if (err.code === 'ERR_CANCELED' || err.name === 'CanceledError' || err.name === 'AbortError') {
+        return null;
+    }
+    if (err.response?.status === 429) {
+        return 'Too many requests — wait a moment, then refresh. Your inventory list is unchanged.';
+    }
+    const detail = err.response?.data?.detail;
+    if (typeof detail === 'string' && detail.trim()) return detail;
+    if (err.code === 'ECONNABORTED') return 'Inventory request timed out. Try again.';
+    if (!err.response) return 'Could not reach the server. Check your connection and try again.';
+    return err.message || 'Failed to load inventory.';
+}
+
 /** Managed-store inventory: scrape then Manual sync / schedule — same as Reverb. */
 export default function InventoryManagementPanel({ storeId, marketplaceCode = '', reloadNonce = 0, onMessage }) {
     const marketplaceLabel = String(marketplaceCode || '').trim() || 'marketplace';
@@ -157,21 +172,47 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     const [editListing, setEditListing] = useState(null);
     const [editOpen, setEditOpen] = useState(false);
     const [search, setSearch] = useState('');
+    const [debouncedSearch, setDebouncedSearch] = useState('');
     const [syncFilter, setSyncFilter] = useState('all');
     const [jobCount, setJobCount] = useState(0);
     const [scrapeProgress, setScrapeProgress] = useState(null);
     const scrapeWasActiveRef = useRef(false);
+    const onMessageRef = useRef(onMessage);
+    const loadGenRef = useRef(0);
+    const scrapeListRefreshTickRef = useRef(0);
+
+    useEffect(() => {
+        onMessageRef.current = onMessage;
+    }, [onMessage]);
+
+    // Debounce search so typing does not fire a request per keystroke.
+    useEffect(() => {
+        const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+        return () => clearTimeout(t);
+    }, [search]);
 
     const load = useCallback(() => {
         if (!storeId) return;
+        const gen = ++loadGenRef.current;
         setLoading(true);
-        const params = { view: 'inventory', search: search || undefined };
+        const params = { view: 'inventory', search: debouncedSearch || undefined };
         if (syncFilter !== 'all') params.sync_status = syncFilter;
         getListings(storeId, params)
-            .then((res) => setListings(Array.isArray(res.data) ? res.data : []))
-            .catch(() => onMessage?.('Failed to load inventory.', 'error'))
-            .finally(() => setLoading(false));
-    }, [storeId, search, syncFilter, onMessage]);
+            .then((res) => {
+                if (gen !== loadGenRef.current) return;
+                setListings(Array.isArray(res.data) ? res.data : []);
+            })
+            .catch((err) => {
+                if (gen !== loadGenRef.current) return;
+                // Keep existing rows — clearing looks like inventory disappeared.
+                const msg = inventoryLoadError(err);
+                if (msg) onMessageRef.current?.(msg, 'error');
+            })
+            .finally(() => {
+                if (gen !== loadGenRef.current) return;
+                setLoading(false);
+            });
+    }, [storeId, debouncedSearch, syncFilter]);
 
     useEffect(() => {
         load();
@@ -182,6 +223,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     useEffect(() => {
         if (!storeId) return undefined;
         let cancelled = false;
+        scrapeListRefreshTickRef.current = 0;
         const tick = () => {
             getListingScrapeProgress(storeId)
                 .then((res) => {
@@ -192,7 +234,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                     if (wasActive && !active) {
                         const msg = data?.message || 'Scrape finished. Use Manual sync to push to the marketplace.';
                         const ok = (data?.scraped || 0) > 0 || data?.phase === 'done';
-                        onMessage?.(msg, ok ? 'success' : 'error');
+                        onMessageRef.current?.(msg, ok ? 'success' : 'error');
                         setScraping(false);
                         setJobCount(0);
                         load();
@@ -202,15 +244,20 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                     if (active) {
                         setScraping(true);
                         setJobCount(Number(data?.total || 0));
+                        // Refresh rows less often than progress (~every 4.5s) to avoid throttle spam.
+                        scrapeListRefreshTickRef.current += 1;
+                        if (scrapeListRefreshTickRef.current % 3 !== 0) return;
                         getListings(storeId, {
                             view: 'inventory',
-                            search: search || undefined,
+                            search: debouncedSearch || undefined,
                             ...(syncFilter !== 'all' ? { sync_status: syncFilter } : {}),
                         })
                             .then((r) => {
                                 if (!cancelled) setListings(Array.isArray(r.data) ? r.data : []);
                             })
                             .catch(() => {});
+                    } else {
+                        scrapeListRefreshTickRef.current = 0;
                     }
                 })
                 .catch(() => { /* ignore transient poll errors */ });
@@ -221,7 +268,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
             cancelled = true;
             clearInterval(id);
         };
-    }, [storeId, search, syncFilter, load, onMessage]);
+    }, [storeId, debouncedSearch, syncFilter, load]);
 
     const withVendor = useMemo(
         () => listings.filter((l) => (l.vendor_url || '').trim() || (l.vendor_id || '').trim()).length,

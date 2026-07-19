@@ -205,7 +205,76 @@ class MarketplaceLookupTests(TestCase):
         self.assertIn("MISS,No,", text)
         self.assertIn("ERR,Error,", text)
 
+    def test_bulk_rejects_over_batch_limit(self):
+        store = self._lasoo_store()
+        too_many = [f"SKU-{i}" for i in range(marketplace_lookup.BULK_MAX_SKUS + 1)]
+        with self.assertRaises(MarketplaceError):
+            marketplace_lookup.lookup_skus_bulk(store, too_many)
+
     def test_bulk_rejects_empty(self):
         store = self._lasoo_store()
         with self.assertRaises(MarketplaceError):
             marketplace_lookup.lookup_skus_bulk(store, [])
+
+    @patch("listings.marketplace_lookup.lookup_sku")
+    def test_async_job_writes_progress_and_csv(self, mock_lookup):
+        from . import marketplace_lookup_progress as prog
+
+        store = self._lasoo_store()
+
+        def _side_effect(_store, sku):
+            return {
+                "ok": True,
+                "found": sku == "A",
+                "marketplace": "lasoo",
+                "environment": "staging",
+                "message": "ok",
+                "results": (
+                    [{"sku": "A", "status": "Active", "created_at": "2026-01-01T00:00:00Z", "title": "A"}]
+                    if sku == "A"
+                    else []
+                ),
+                "local_listing": None,
+            }
+
+        mock_lookup.side_effect = _side_effect
+        prog.begin_lookup_progress(store.id, skus=["A", "B"])
+        marketplace_lookup.run_marketplace_lookup_job(str(store.id), ["A", "B"])
+        data = prog.get_lookup_progress(store.id)
+        self.assertFalse(data["active"])
+        self.assertEqual(data["status"], "done")
+        self.assertEqual(data["found"], 1)
+        self.assertEqual(data["not_found"], 1)
+        self.assertTrue(prog.public_lookup_progress(store.id)["has_results"])
+        csv_bytes = marketplace_lookup.build_lookup_csv({"rows": data["rows"]})
+        self.assertIn(b"A,Yes,Active", csv_bytes)
+
+    @patch("listings.marketplace_lookup.lookup_sku")
+    def test_async_job_respects_cancel(self, mock_lookup):
+        from . import marketplace_lookup_progress as prog
+
+        store = self._lasoo_store()
+        calls = {"n": 0}
+
+        def _side_effect(_store, sku):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                prog.request_lookup_cancel(store.id)
+            return {
+                "ok": True,
+                "found": False,
+                "marketplace": "lasoo",
+                "environment": "staging",
+                "message": "nf",
+                "results": [],
+                "local_listing": None,
+            }
+
+        mock_lookup.side_effect = _side_effect
+        prog.begin_lookup_progress(store.id, skus=["X", "Y", "Z"])
+        marketplace_lookup.run_marketplace_lookup_job(str(store.id), ["X", "Y", "Z"])
+        data = prog.get_lookup_progress(store.id)
+        self.assertEqual(data["status"], "cancelled")
+        self.assertFalse(data["active"])
+        self.assertGreaterEqual(len(data["rows"]), 1)
+        self.assertLess(len(data["rows"]), 3)
