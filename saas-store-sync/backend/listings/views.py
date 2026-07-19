@@ -17,7 +17,16 @@ from store_adapters import get_adapter
 from store_adapters.reverb_adapter import ReverbAPIError
 from stores.credentials import marketplace_kind
 
-from . import csv_import, export_xlsx, listing_service, order_service, photo_upload, shipping_service, ticket_service
+from . import (
+    csv_import,
+    export_xlsx,
+    listing_service,
+    marketplace_lookup,
+    order_service,
+    photo_upload,
+    shipping_service,
+    ticket_service,
+)
 from .errors import MarketplaceError
 from .models import ListingAction, ListingStatus, ListingUpload, MarketplaceOrder, StoreListing, SupportTicket
 from .photo_upload import PhotoUploadError
@@ -525,6 +534,65 @@ class StoreListingUploadDeleteView(APIView):
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result, status=status.HTTP_200_OK)
+
+
+class StoreListingMarketplaceLookupView(APIView):
+    """Live SKU check on the store marketplace (Lasoo Variants_Search / Reverb my/listings).
+
+    GET  ?sku=… → single lookup JSON
+    POST JSON {skus:[…]} or {text:"…"} or multipart file → bulk JSON
+    POST …?download=1 → CSV file download
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        sku = (request.query_params.get('sku') or '').strip()
+        try:
+            result = marketplace_lookup.lookup_sku(store, sku)
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result)
+
+    def post(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        skus = []
+        upload = request.FILES.get('file') or request.FILES.get('skus')
+        if upload is not None:
+            try:
+                skus = marketplace_lookup.parse_skus_from_file(
+                    upload.read(),
+                    filename=getattr(upload, 'name', '') or '',
+                )
+            except Exception as exc:  # noqa: BLE001
+                return Response(
+                    {'detail': f'Could not read SKU file: {exc}'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            data = request.data if isinstance(request.data, dict) else {}
+            if data.get('skus') is not None:
+                skus = marketplace_lookup.parse_sku_list(data.get('skus'))
+            else:
+                skus = marketplace_lookup.parse_sku_list(
+                    data.get('text') or data.get('sku') or ''
+                )
+        try:
+            result = marketplace_lookup.lookup_skus_bulk(store, skus)
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        download = str(request.query_params.get('download') or '').lower() in (
+            '1', 'true', 'yes', 'csv',
+        )
+        if download:
+            content = marketplace_lookup.build_lookup_csv(result)
+            response = HttpResponse(content, content_type='text/csv')
+            response['Content-Disposition'] = (
+                'attachment; filename="marketplace_sku_check.csv"'
+            )
+            return response
+        return Response(result)
 
 
 class StoreListingPublishView(APIView):

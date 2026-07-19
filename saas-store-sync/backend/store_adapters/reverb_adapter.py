@@ -92,19 +92,32 @@ class ReverbAdapter(BaseStoreAdapter):
     def lookup_listing_by_sku(self, sku: str) -> str | None:
         """Find listing ID by SKU. Returns listing ID (UUID) or None."""
         try:
-            data = self._request("GET", f"/api/my/listings?sku={quote(sku)}&state=all")
+            listings = self.find_listings_by_sku(sku)
         except ReverbAPIError:
             return None
-        if not data:
+        if not listings:
             return None
+        first = listings[0]
+        lid = first.get("id") or first.get("uuid") if isinstance(first, dict) else None
+        return str(lid) if lid else None
+
+    def find_listings_by_sku(self, sku: str) -> list[dict]:
+        """GET /api/my/listings?sku=…&state=all — live + draft matches."""
+        text = (sku or "").strip()
+        if not text:
+            return []
+        data = self._request(
+            "GET",
+            f"/api/my/listings?sku={quote(text)}&state=all",
+        )
+        if not data:
+            return []
         listings = data.get("listings")
         if not listings and isinstance(data.get("_embedded"), dict):
             listings = data["_embedded"].get("listings")
-        if isinstance(listings, list) and listings:
-            first = listings[0]
-            lid = first.get("id") or first.get("uuid") if isinstance(first, dict) else None
-            return str(lid) if lid else None
-        return None
+        if not isinstance(listings, list):
+            return []
+        return [row for row in listings if isinstance(row, dict)]
 
     def get_orders_selling(
         self,

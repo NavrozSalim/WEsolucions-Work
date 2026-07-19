@@ -21,6 +21,7 @@ import {
     ScrollText,
     Plus,
     Layers,
+    SearchCheck,
 } from 'lucide-react';
 import { getMarketplaces, deleteStore } from '../../services/storeService';
 import {
@@ -52,6 +53,7 @@ import {
 import MydealUploadModal from '../../components/catalog/MydealUploadModal';
 import ListingFormModal from '../../components/listings/ListingFormModal';
 import BulkListingModal from '../../components/listings/BulkListingModal';
+import MarketplaceLookupModal from '../../components/listings/MarketplaceLookupModal';
 import CreatedProductsPanel from '../../components/listings/CreatedProductsPanel';
 import InventoryManagementPanel from '../../components/listings/InventoryManagementPanel';
 import Button from '../../components/ui/Button';
@@ -1196,6 +1198,7 @@ export default function Catalog() {
     const [uploadModalOpen, setUploadModalOpen] = useState(false);
     const [createListingOpen, setCreateListingOpen] = useState(false);
     const [bulkListingOpen, setBulkListingOpen] = useState(false);
+    const [marketplaceLookupOpen, setMarketplaceLookupOpen] = useState(false);
     const [createdReloadNonce, setCreatedReloadNonce] = useState(0);
     const [mydealUploadOpen, setMydealUploadOpen] = useState(false);
     const [mydealDownloadOpen, setMydealDownloadOpen] = useState(false);
@@ -2750,6 +2753,14 @@ export default function Catalog() {
                                         <Layers className="h-4 w-4 mr-1.5" />
                                         Bulk Listing
                                     </Button>
+                                    <Button
+                                        variant="secondary"
+                                        size="sm"
+                                        onClick={() => setMarketplaceLookupOpen(true)}
+                                    >
+                                        <SearchCheck className="h-4 w-4 mr-1.5" />
+                                        Check marketplace
+                                    </Button>
                                 </>
                             )}
                             {isMydealStore ? (
@@ -3653,6 +3664,13 @@ export default function Catalog() {
                     setUploadsReloadNonce((n) => n + 1);
                     setViewMode('created');
                 }}
+            />
+
+            <MarketplaceLookupModal
+                open={marketplaceLookupOpen && !!selectedStore}
+                storeId={selectedStore}
+                storeName={selectedStoreData?.name}
+                onClose={() => setMarketplaceLookupOpen(false)}
             />
 
             <UpdateWithFileModal

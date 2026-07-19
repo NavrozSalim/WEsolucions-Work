@@ -88,6 +88,59 @@ export const exportListingInventory = (storeId, syncStatus = '') =>
 export const getListingUploads = (storeId, { scope = 'history' } = {}) =>
     api.get(`/stores/${storeId}/listings/uploads/`, { params: { scope } });
 
+/** Live marketplace SKU check (Lasoo / Reverb managed stores). */
+export const lookupListingOnMarketplace = (storeId, sku) =>
+    api.get(`/stores/${storeId}/listings/marketplace-lookup/`, {
+        params: { sku },
+    });
+
+/** Bulk marketplace SKU check — returns JSON summary + rows. */
+export const bulkLookupListingsOnMarketplace = (storeId, { skus, text, file } = {}) => {
+    if (file) {
+        const fd = new FormData();
+        fd.append('file', file);
+        return api.post(`/stores/${storeId}/listings/marketplace-lookup/`, fd, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+        });
+    }
+    return api.post(`/stores/${storeId}/listings/marketplace-lookup/`, {
+        skus: skus || undefined,
+        text: text || undefined,
+    });
+};
+
+/** Bulk marketplace SKU check — download CSV results. */
+export const downloadMarketplaceLookupCsv = (storeId, { skus, text, file } = {}) => {
+    const request = file
+        ? (() => {
+            const fd = new FormData();
+            fd.append('file', file);
+            return api.post(
+                `/stores/${storeId}/listings/marketplace-lookup/?download=1`,
+                fd,
+                {
+                    headers: { 'Content-Type': 'multipart/form-data' },
+                    responseType: 'blob',
+                },
+            );
+        })()
+        : api.post(
+            `/stores/${storeId}/listings/marketplace-lookup/?download=1`,
+            { skus: skus || undefined, text: text || undefined },
+            { responseType: 'blob' },
+        );
+    return request.then((res) => {
+        const url = window.URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', 'marketplace_sku_check.csv');
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+    });
+};
+
 /** Download failed rows from a managed Upload history entry as CSV. */
 export const downloadListingUploadErrors = (storeId, uploadId, filename = '') =>
     api.get(`/stores/${storeId}/listings/uploads/${uploadId}/errors/`, { responseType: 'blob' }).then((res) => {
