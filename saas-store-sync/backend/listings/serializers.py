@@ -83,7 +83,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
 
     @staticmethod
     def _format_price_multiplier(sale, vendor):
-        """Sale ÷ vendor as ×N (e.g. 2× cost → ×2)."""
+        """Sale ÷ vendor as ×N (e.g. 2× cost → ×2). Fallback when no tier is configured."""
         try:
             sale_f = float(sale or 0)
             vendor_f = float(vendor) if vendor is not None else None
@@ -93,22 +93,8 @@ class StoreListingSerializer(serializers.ModelSerializer):
             return None
         return f'×{round(sale_f / vendor_f, 2):g}'
 
-    @staticmethod
-    def _format_percentage_tier_as_multiplier(margin_val, fee_pct=0.0):
-        """
-        Percentage tiers price as cost × 100 / (100 − margin − fee).
-        Show that factor so 50% margin reads as ×2, matching direct multipliers.
-        """
-        try:
-            denom = 100.0 - float(margin_val) - float(fee_pct or 0)
-        except (TypeError, ValueError):
-            return None
-        if denom <= 0:
-            return None
-        return f'×{round(100.0 / denom, 2):g}'
-
     def get_margin_pct(self, obj):
-        """Legacy: (sale − vendor) / sale × 100. Prefer margin_display (×N)."""
+        """Legacy: (sale − vendor) / sale × 100. Prefer margin_display."""
         try:
             sale = float(obj.sale_price or 0)
             vendor = float(obj.vendor_price) if obj.vendor_price is not None else None
@@ -119,7 +105,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
         return round(((sale - vendor) / sale) * 100, 1)
 
     def get_margin_display(self, obj):
-        """Configured tier as ×N / +$ (same as catalog), else sale÷vendor ×N."""
+        """Configured tier: direct → ×N, fixed → +$N, percentage → N%."""
         try:
             if obj.vendor_price is None:
                 return None
@@ -150,11 +136,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
                 return f'×{val:g}'
             if m_type == 'fixed':
                 return f'+${val:.2f}'
-            fee_pct = float(getattr(ps, 'marketplace_fees_percentage', 0) or 0)
-            return (
-                self._format_percentage_tier_as_multiplier(val, fee_pct)
-                or self._format_price_multiplier(obj.sale_price, obj.vendor_price)
-            )
+            return f'{val:g}%'
         except Exception:  # noqa: BLE001
             return self._format_price_multiplier(
                 getattr(obj, 'sale_price', None),

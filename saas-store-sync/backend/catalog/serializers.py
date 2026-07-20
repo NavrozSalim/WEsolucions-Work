@@ -126,22 +126,10 @@ class ProductMappingSerializer(serializers.ModelSerializer):
         except Exception:
             return None
 
-    @staticmethod
-    def _format_percentage_tier_as_multiplier(margin_val, fee_pct=0.0):
-        """Percentage tier → ×N (50% margin with no fee → ×2)."""
-        try:
-            denom = 100.0 - float(margin_val) - float(fee_pct or 0)
-        except (TypeError, ValueError):
-            return None
-        if denom <= 0:
-            return None
-        return f'×{round(100.0 / denom, 2):g}'
-
     def get_margin_display(self, obj):
         """
-        Show the tier's configured pricing as Inventory management does:
-        ``direct`` → ×N, ``fixed`` → +$N, ``percentage`` → ×N equivalent
-        (price = cost × 100 / (100 − margin − fee)), so 50% reads as ×2.
+        Show the tier's configured pricing:
+        ``direct`` → ×N, ``fixed`` → +$N, ``percentage`` → N%.
         """
         try:
             price = getattr(obj, 'latest_vendor_price', None)
@@ -165,8 +153,7 @@ class ProductMappingSerializer(serializers.ModelSerializer):
                 return f'×{val:g}'
             if m_type == 'fixed':
                 return f'+${val:.2f}'
-            fee_pct = float(getattr(ps, 'marketplace_fees_percentage', 0) or 0)
-            return self._format_percentage_tier_as_multiplier(val, fee_pct) or f'+{val:g}%'
+            return f'{val:g}%'
         except Exception:
             return None
 
