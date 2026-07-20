@@ -30,15 +30,30 @@ def validate_listing(data: dict) -> list[str]:
     key = _variant_label(data)
 
     for field, label in REQUIRED_TEXT_FIELDS:
+        # SKU may be filled from Variant Key — check after resolve below for SKU.
+        if field == "sku":
+            continue
         if not str(data.get(field, "") or "").strip():
             errors.append(f"{label} is required for variant {key}.")
 
     # Product/variant keys fall back to SKU, so they only fail when SKU is empty too.
     product_key, variant_key = resolve_keys(data)
+    sku = (data.get("sku") or "").strip() or variant_key
+    if not sku:
+        errors.append(f"SKU is required for variant {key}.")
     if not product_key:
         errors.append(f"Product Key is required for variant {key}.")
     if not variant_key:
         errors.append(f"Variant Key is required for variant {key}.")
+
+    options = str(data.get("options") or "").strip()
+    # Multi-variant rows (shared parent, unique variant) must declare Options
+    # so Lasoo receives colour/size instead of splitting into separate products.
+    if product_key and variant_key and product_key != variant_key and not options:
+        errors.append(
+            f"Options are required for variant {key} when Product Key differs from "
+            "Variant Key (e.g. Colour=Black)."
+        )
 
     if not normalize_image_urls(data.get("image_urls")):
         errors.append(f"Image URLs are required for variant {key}.")

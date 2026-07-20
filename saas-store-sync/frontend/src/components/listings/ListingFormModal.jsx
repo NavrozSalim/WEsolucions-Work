@@ -18,6 +18,7 @@ const EMPTY_LASOO = {
     category: '',
     sku: '',
     barcode: '',
+    options: '',
     source_vendor_code: '',
     vendor_url: '',
     vendor_id: '',
@@ -179,6 +180,7 @@ export default function ListingFormModal({
                     category: listing.category || '',
                     sku: listing.sku || '',
                     barcode: listing.barcode || '',
+                    options: listing.options || '',
                     source_vendor_code: listing.source_vendor_code || '',
                     vendor_url: listing.vendor_url || '',
                     vendor_id: listing.vendor_id || '',
@@ -501,18 +503,34 @@ export default function ListingFormModal({
                                         required
                                     />
                                 </div>
+                                <div className="sm:col-span-2 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 px-3 py-2 text-xs text-slate-600 dark:text-slate-300">
+                                    Multi-variant products: use the <span className="font-medium">same Product Key</span> on every colour/size,
+                                    a <span className="font-medium">unique Variant Key</span> (usually same as SKU), and fill{' '}
+                                    <span className="font-medium">Options</span> on each row (e.g. Colour=Black).
+                                </div>
                                 <Input
-                                    label="Product Key (defaults to SKU)"
-                                    placeholder="Groups variants of the same product"
+                                    label="Product Key"
+                                    placeholder="Shared parent key (defaults to SKU)"
                                     value={form.product_key}
                                     onChange={set('product_key')}
                                 />
                                 <Input
-                                    label="Variant Key (defaults to SKU)"
-                                    placeholder="Unique per variant"
+                                    label="Variant Key"
+                                    placeholder="Unique per variant (defaults to SKU)"
                                     value={form.variant_key}
                                     onChange={set('variant_key')}
                                 />
+                                <div className="sm:col-span-2">
+                                    <Input
+                                        label="Options"
+                                        placeholder="e.g. Colour=Black"
+                                        value={form.options}
+                                        onChange={set('options')}
+                                    />
+                                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                        Required when Product Key differs from Variant Key. Example: Colour=Gold
+                                    </p>
+                                </div>
                                 <Input
                                     label="Original Price"
                                     type="number"

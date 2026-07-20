@@ -4,6 +4,7 @@ Covers the Lasoo mapper/validator port, CSV/XLSX bulk import parsing, and the
 listing service validation flow (no network calls).
 """
 import io
+import json
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
@@ -28,6 +29,7 @@ VALID_DATA = {
     "category": "Apparel",
     "sku": "TSHIRT-001-BLACK-M",
     "barcode": "",
+    "options": "Colour=Black",
     "image_urls": "https://img.example.com/a.jpg|https://img.example.com/b.jpg",
     "inventory": 10,
     "infinite_quantity": False,
@@ -72,6 +74,24 @@ class MapperTests(TestCase):
         self.assertEqual(variant["variantSalePriceCents"], 2499)
         self.assertEqual(variant["externalVariantKey"], "TSHIRT-001-BLACK-M")
         self.assertEqual(variant["externalDataFormat"], "JSON")
+        payload = json.loads(variant["externalDataObject"])
+        self.assertEqual(payload.get("Options"), "Colour=Black")
+        self.assertEqual(payload.get("SKU"), "TSHIRT-001-BLACK-M")
+
+    def test_options_required_when_product_and_variant_differ(self):
+        data = {**VALID_DATA, "options": ""}
+        errors = validator.validate_listing(data)
+        self.assertTrue(any("Options are required" in e for e in errors))
+
+    def test_options_optional_for_single_sku_product(self):
+        data = {
+            **VALID_DATA,
+            "product_key": "SOLO-1",
+            "variant_key": "SOLO-1",
+            "sku": "SOLO-1",
+            "options": "",
+        }
+        self.assertEqual(validator.validate_listing(data), [])
 
     def test_bulk_upsert_payload_shape(self):
         payload = mapper.build_bulk_upsert_payload([VALID_DATA], auth_key="secret")
@@ -100,13 +120,26 @@ class CsvImportTests(TestCase):
     def test_parse_csv_template(self):
         content = csv_import.build_template_csv("create").encode()
         rows = csv_import.parse_upload("listings.csv", content)
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["sku"], "TSHIRT-001-BLACK-M")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["sku"], "JJ-XZ216-BK")
+        self.assertEqual(rows[0]["product_key"], "JJ-XZ216")
+        self.assertEqual(rows[0]["variant_key"], "JJ-XZ216-BK")
+        self.assertEqual(rows[0]["options"], "Colour=Black")
+        self.assertEqual(rows[1]["sku"], "JJ-XZ216-GD")
+        self.assertEqual(rows[1]["options"], "Colour=Gold")
         self.assertEqual(rows[0]["action"], "create")
         self.assertEqual(rows[0]["row_number"], 2)
         self.assertFalse(rows[0]["infinite_quantity"])
         self.assertEqual(rows[0]["vendor_name"], "Nora Inventory")
         self.assertEqual(rows[0]["marketplace_name"], "Lasoo")
+
+    def test_lasoo_template_includes_options_column(self):
+        header = csv_import.build_template_csv("create").splitlines()[0]
+        cols = header.split(",")
+        self.assertIn("Options", cols)
+        self.assertIn("Product Key", cols)
+        self.assertIn("Variant Key", cols)
+        self.assertIn("SKU", cols)
 
     def test_lasoo_template_vendor_columns_follow_vendor_name(self):
         header = csv_import.build_template_csv("create").splitlines()[0]

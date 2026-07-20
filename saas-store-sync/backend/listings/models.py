@@ -67,6 +67,13 @@ class StoreListing(models.Model):
     category = models.CharField(max_length=500, blank=True, default='')
     sku = models.CharField(max_length=255, blank=True, default='', db_index=True)
     barcode = models.CharField(max_length=255, blank=True, default='')
+    # Lasoo variant Options (e.g. Colour=Black) — one value per variant row.
+    options = models.CharField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text='Variant options for Lasoo (e.g. Colour=Black). Required when Product Key differs from Variant Key.',
+    )
     # Source URL (vendor / supplier product page) for price scrape / fulfillment.
     vendor_url = models.CharField(max_length=1000, blank=True, default='')
     # Nora / supplier barcode matched to inventory Excel after cleaning.

@@ -188,8 +188,10 @@ def _apply_fields(listing: StoreListing, data: dict):
     listing.brand = make
     category = (data.get("category_uuid") or data.get("category") or "").strip()
     listing.category = category
-    listing.sku = (data.get("sku") or "").strip()
+    listing.sku = (data.get("sku") or "").strip() or variant_key
     listing.barcode = (data.get("barcode") or data.get("upc") or "").strip()
+    if _store_kind(store) != "reverb":
+        listing.options = (data.get("options") or "").strip()[:500]
     listing.vendor_url = (data.get("vendor_url") or "").strip()[:1000]
     listing.vendor_id = (data.get("vendor_id") or "").strip()[:255]
     source_code = (data.get("source_vendor_code") or data.get("vendor_code") or "").strip()
@@ -444,6 +446,7 @@ def _listing_to_data(listing: StoreListing) -> dict:
         "category": listing.category,
         "sku": listing.sku,
         "barcode": listing.barcode,
+        "options": listing.options,
         "vendor_url": listing.vendor_url,
         "vendor_id": listing.vendor_id,
         "source_vendor_code": listing.source_vendor_code,

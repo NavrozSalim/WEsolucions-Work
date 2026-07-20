@@ -26,6 +26,9 @@ COLUMN_MAP = {
     "barcode": "barcode",
     "upc": "barcode",
     "upc does not apply": "upc_does_not_apply",
+    "options": "options",
+    "option": "options",
+    "variant options": "options",
     "currency": "currency",
     "price": "sale_price",
     "vendor url": "vendor_url",
@@ -70,11 +73,12 @@ LASOO_TEMPLATE_HEADERS = [
     "Action",
     "Product Key",
     "Variant Key",
+    "SKU",
+    "Options",
     "Title",
     "Description",
     "Brand",
     "Category",
-    "SKU",
     "Barcode",
     "Image URLs",
     "Inventory",
@@ -93,11 +97,12 @@ LASOO_EXPORT_FIELDS = [
     ("action", "Action"),
     ("product_key", "Product Key"),
     ("variant_key", "Variant Key"),
+    ("sku", "SKU"),
+    ("options", "Options"),
     ("title", "Title"),
     ("description", "Description"),
     ("brand", "Brand"),
     ("category", "Category"),
-    ("sku", "SKU"),
     ("barcode", "Barcode"),
     ("image_urls", "Image URLs"),
     ("inventory", "Inventory"),
@@ -399,20 +404,21 @@ def build_template_csv(action: str = "create", store=None) -> str:
         writer.writerow(sample)
         return out.getvalue()
 
-    sample = {
+    sample_black = {
         "Vendor Name": "Nora Inventory",
         "Marketplace Name": marketplace_name or "Lasoo",
         "Store Name": store_name,
         "Action": "Mapped" if action == "mapped" else "Create",
-        "Product Key": "TSHIRT-001",
-        "Variant Key": "TSHIRT-001-BLACK-M",
-        "Title": "Black T-Shirt (M)",
-        "Description": "Soft 100% cotton tee.",
+        "Product Key": "JJ-XZ216",
+        "Variant Key": "JJ-XZ216-BK",
+        "SKU": "JJ-XZ216-BK",
+        "Options": "Colour=Black",
+        "Title": "Example Product — Black",
+        "Description": "Soft 100% cotton tee. Same Product Key groups colour variants on Lasoo.",
         "Brand": "MyBrand",
         "Category": "Apparel > T-Shirts",
-        "SKU": "TSHIRT-001-BLACK-M",
         "Barcode": "123456789012",
-        "Vendor URL": "https://www.example-vendor.com/product/tshirt-001",
+        "Vendor URL": "https://www.example-vendor.com/product/jj-xz216-bk",
         "Image URLs": "https://img.example.com/a.jpg|https://img.example.com/b.jpg",
         "Inventory": "10",
         "Infinite Quantity": "false",
@@ -420,10 +426,21 @@ def build_template_csv(action: str = "create", store=None) -> str:
         "Sale Price": "24.99",
         "Vendor ID": "8FNZ100-DL-G1",
     }
+    sample_gold = {
+        **sample_black,
+        "Variant Key": "JJ-XZ216-GD",
+        "SKU": "JJ-XZ216-GD",
+        "Options": "Colour=Gold",
+        "Title": "Example Product — Gold",
+        "Vendor URL": "https://www.example-vendor.com/product/jj-xz216-gd",
+        "Vendor ID": "8FNZ100-DL-G2",
+        "Barcode": "123456789013",
+    }
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=LASOO_TEMPLATE_HEADERS, lineterminator="\n")
     writer.writeheader()
-    writer.writerow(sample)
+    writer.writerow(sample_black)
+    writer.writerow(sample_gold)
     return out.getvalue()
 
 

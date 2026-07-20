@@ -95,6 +95,13 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                         Rows with errors appear under the <strong>Errors</strong> filter on Created products.
                         Optional columns <strong>Vendor Name</strong>, <strong>Marketplace Name</strong>, and{' '}
                         <strong>Store Name</strong> must match a source vendor and your store (or route to another of your stores).
+                        {!isReverb && (
+                            <>
+                                {' '}For colour/size variants use the same <strong>Product Key</strong>, unique{' '}
+                                <strong>Variant Key</strong> and <strong>SKU</strong> (usually the same), and fill{' '}
+                                <strong>Options</strong> on every variant row (e.g. Colour=Black).
+                            </>
+                        )}
                         {isReverb && (
                             <> Reverb columns include Make, Model, Condition, Category, Vendor URL, Price, Photo URLs, status, and free_shipping.</>
                         )}

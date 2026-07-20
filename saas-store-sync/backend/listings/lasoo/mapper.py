@@ -37,7 +37,7 @@ def normalize_image_urls(raw) -> str:
 def build_external_data_object(data: dict) -> str:
     """Build the externalDataObject JSON string.
 
-    ``data`` keys: title, description, image_urls, brand, category, sku, barcode.
+    ``data`` keys: title, description, image_urls, brand, category, sku, barcode, options.
     Returns a JSON string; json.dumps escapes exactly once. The surrounding
     payload serialization (requests json=) handles the second-level escaping,
     so we must NOT pre-escape here.
@@ -53,6 +53,10 @@ def build_external_data_object(data: dict) -> str:
     barcode = (data.get("barcode") or "").strip()
     if barcode:
         obj["Barcode"] = barcode
+    options = (data.get("options") or "").strip()
+    if options:
+        # Lasoo maps this as the Options column (colour / size / etc. per variant).
+        obj["Options"] = options
     # externalRegionKey intentionally omitted (Lasoo: reserved for future use).
     return json.dumps(obj, ensure_ascii=False)
 
@@ -83,17 +87,33 @@ def clean_key(value) -> str:
 def resolve_keys(data: dict) -> tuple[str, str]:
     """Resolve (externalProductKey, externalVariantKey).
 
-    Falls back to SKU for single-variant products where the user left the
-    product/variant key blank (or put N/A / NA / none).
+    Multi-variant products: same Product Key on every row, unique Variant Key
+    (usually equal to SKU). Single-variant: blank keys fall back to SKU.
     """
     sku = clean_key(data.get("sku"))
-    product_key = clean_key(data.get("product_key")) or sku
     variant_key = clean_key(data.get("variant_key")) or sku
+    # If Variant Key is set but SKU is blank, treat SKU as the variant key.
+    if not sku and variant_key:
+        sku = variant_key
+    product_key = clean_key(data.get("product_key")) or sku or variant_key
     return product_key, variant_key
+
+
+def resolve_sku(data: dict) -> str:
+    """SKU used for Lasoo / local storage — prefer explicit SKU, else Variant Key."""
+    sku = clean_key(data.get("sku"))
+    if sku:
+        return sku
+    _, variant_key = resolve_keys(data)
+    return variant_key
 
 
 def build_variant(data: dict) -> dict:
     product_key, variant_key = resolve_keys(data)
+    sku = resolve_sku(data)
+    # Keep SKU aligned with variant key in the payload when user left SKU blank.
+    payload_data = dict(data)
+    payload_data["sku"] = sku
     infinite = bool(data.get("infinite_quantity"))
     try:
         inventory = 0 if infinite else int(data.get("inventory") or 0)
@@ -106,7 +126,7 @@ def build_variant(data: dict) -> dict:
         "variantInfiniteQuantity": infinite,
         "variantOriginalPriceCents": dollars_to_cents(data.get("original_price")),
         "variantSalePriceCents": dollars_to_cents(data.get("sale_price")),
-        "externalDataObject": build_external_data_object(data),
+        "externalDataObject": build_external_data_object(payload_data),
         "externalDataFormat": "JSON",
     }
 
