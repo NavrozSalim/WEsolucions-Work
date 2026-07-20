@@ -67,13 +67,23 @@ class StoreListing(models.Model):
     category = models.CharField(max_length=500, blank=True, default='')
     sku = models.CharField(max_length=255, blank=True, default='', db_index=True)
     barcode = models.CharField(max_length=255, blank=True, default='')
-    # Lasoo variant Options (e.g. Colour=Black) — one value per variant row.
+    # Legacy combined options string (also auto-filled from option_N name/value pairs).
     options = models.CharField(
         max_length=500,
         blank=True,
         default='',
-        help_text='Variant options for Lasoo (e.g. Colour=Black). Required when Product Key differs from Variant Key.',
+        help_text='Combined Options summary (e.g. Size=XL; Color=Blue). Prefer option_1..4 fields.',
     )
+    option_1_name = models.CharField(max_length=100, blank=True, default='')
+    option_1_value = models.CharField(max_length=255, blank=True, default='')
+    option_2_name = models.CharField(max_length=100, blank=True, default='')
+    option_2_value = models.CharField(max_length=255, blank=True, default='')
+    option_3_name = models.CharField(max_length=100, blank=True, default='')
+    option_3_value = models.CharField(max_length=255, blank=True, default='')
+    option_4_name = models.CharField(max_length=100, blank=True, default='')
+    option_4_value = models.CharField(max_length=255, blank=True, default='')
+    # Variant-specific image (required when Product Key differs from Variant Key).
+    variation_image_url = models.CharField(max_length=1000, blank=True, default='')
     # Source URL (vendor / supplier product page) for price scrape / fulfillment.
     vendor_url = models.CharField(max_length=1000, blank=True, default='')
     # Nora / supplier barcode matched to inventory Excel after cleaning.

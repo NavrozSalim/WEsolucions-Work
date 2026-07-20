@@ -34,13 +34,41 @@ def normalize_image_urls(raw) -> str:
     return "|".join(p for p in parts if p)
 
 
+OPTION_SLOTS = (1, 2, 3, 4)
+
+
+def collect_option_pairs(data: dict) -> list[tuple[str, str]]:
+    """Return filled (name, value) pairs from option_1..4 fields."""
+    pairs: list[tuple[str, str]] = []
+    for i in OPTION_SLOTS:
+        name = str(data.get(f"option_{i}_name") or "").strip()
+        value = str(data.get(f"option_{i}_value") or "").strip()
+        if name or value:
+            pairs.append((name, value))
+    return pairs
+
+
+def format_options_summary(data: dict) -> str:
+    """Combined Options string for Lasoo / display (Size=XL; Color=Blue)."""
+    pairs = collect_option_pairs(data)
+    if pairs:
+        parts = []
+        for name, value in pairs:
+            if name and value:
+                parts.append(f"{name}={value}")
+            elif value:
+                parts.append(value)
+            elif name:
+                parts.append(name)
+        return "; ".join(parts)
+    return str(data.get("options") or "").strip()
+
+
 def build_external_data_object(data: dict) -> str:
     """Build the externalDataObject JSON string.
 
-    ``data`` keys: title, description, image_urls, brand, category, sku, barcode, options.
-    Returns a JSON string; json.dumps escapes exactly once. The surrounding
-    payload serialization (requests json=) handles the second-level escaping,
-    so we must NOT pre-escape here.
+    Includes structured Option N Name/Value (up to 4), Variation Img URL,
+    and a combined Options summary for Lasoo mapping.
     """
     obj = {
         "productName": (data.get("title") or "").strip(),
@@ -53,10 +81,23 @@ def build_external_data_object(data: dict) -> str:
     barcode = (data.get("barcode") or "").strip()
     if barcode:
         obj["Barcode"] = barcode
-    options = (data.get("options") or "").strip()
-    if options:
-        # Lasoo maps this as the Options column (colour / size / etc. per variant).
-        obj["Options"] = options
+
+    pairs = collect_option_pairs(data)
+    for i, (name, value) in enumerate(pairs, start=1):
+        if name:
+            obj[f"Option {i} Name"] = name
+        if value:
+            obj[f"Option {i} Value"] = value
+
+    options_summary = format_options_summary(data)
+    if options_summary:
+        obj["Options"] = options_summary
+
+    variation_img = str(data.get("variation_image_url") or "").strip()
+    if variation_img:
+        obj["Variation Img URL"] = variation_img
+        obj["Variation Image URL"] = variation_img
+
     # externalRegionKey intentionally omitted (Lasoo: reserved for future use).
     return json.dumps(obj, ensure_ascii=False)
 

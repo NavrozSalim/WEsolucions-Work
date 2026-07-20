@@ -29,7 +29,15 @@ VALID_DATA = {
     "category": "Apparel",
     "sku": "TSHIRT-001-BLACK-M",
     "barcode": "",
-    "options": "Colour=Black",
+    "option_1_name": "Colour",
+    "option_1_value": "Black",
+    "option_2_name": "Size",
+    "option_2_value": "M",
+    "option_3_name": "",
+    "option_3_value": "",
+    "option_4_name": "",
+    "option_4_value": "",
+    "variation_image_url": "https://img.example.com/tshirt-black-m.jpg",
     "image_urls": "https://img.example.com/a.jpg|https://img.example.com/b.jpg",
     "inventory": 10,
     "infinite_quantity": False,
@@ -75,13 +83,27 @@ class MapperTests(TestCase):
         self.assertEqual(variant["externalVariantKey"], "TSHIRT-001-BLACK-M")
         self.assertEqual(variant["externalDataFormat"], "JSON")
         payload = json.loads(variant["externalDataObject"])
-        self.assertEqual(payload.get("Options"), "Colour=Black")
+        self.assertEqual(payload.get("Option 1 Name"), "Colour")
+        self.assertEqual(payload.get("Option 1 Value"), "Black")
+        self.assertEqual(payload.get("Option 2 Name"), "Size")
+        self.assertEqual(payload.get("Option 2 Value"), "M")
+        self.assertEqual(payload.get("Options"), "Colour=Black; Size=M")
+        self.assertEqual(payload.get("Variation Img URL"), "https://img.example.com/tshirt-black-m.jpg")
         self.assertEqual(payload.get("SKU"), "TSHIRT-001-BLACK-M")
 
     def test_options_required_when_product_and_variant_differ(self):
-        data = {**VALID_DATA, "options": ""}
+        data = {
+            **VALID_DATA,
+            "option_1_name": "",
+            "option_1_value": "",
+            "option_2_name": "",
+            "option_2_value": "",
+            "variation_image_url": "",
+        }
         errors = validator.validate_listing(data)
-        self.assertTrue(any("Options are required" in e for e in errors))
+        joined = " ".join(errors)
+        self.assertIn("Option 1 Name and Option 1 Value are required", joined)
+        self.assertIn("Variation Img URL is required", joined)
 
     def test_options_optional_for_single_sku_product(self):
         data = {
@@ -89,7 +111,11 @@ class MapperTests(TestCase):
             "product_key": "SOLO-1",
             "variant_key": "SOLO-1",
             "sku": "SOLO-1",
-            "options": "",
+            "option_1_name": "",
+            "option_1_value": "",
+            "option_2_name": "",
+            "option_2_value": "",
+            "variation_image_url": "",
         }
         self.assertEqual(validator.validate_listing(data), [])
 
@@ -121,12 +147,17 @@ class CsvImportTests(TestCase):
         content = csv_import.build_template_csv("create").encode()
         rows = csv_import.parse_upload("listings.csv", content)
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0]["sku"], "JJ-XZ216-BK")
-        self.assertEqual(rows[0]["product_key"], "JJ-XZ216")
-        self.assertEqual(rows[0]["variant_key"], "JJ-XZ216-BK")
-        self.assertEqual(rows[0]["options"], "Colour=Black")
-        self.assertEqual(rows[1]["sku"], "JJ-XZ216-GD")
-        self.assertEqual(rows[1]["options"], "Colour=Gold")
+        self.assertEqual(rows[0]["sku"], "JDXTY-XL-B")
+        self.assertEqual(rows[0]["product_key"], "JDXTY")
+        self.assertEqual(rows[0]["variant_key"], "JDXTY-XL-B")
+        self.assertEqual(rows[0]["option_1_name"], "Size")
+        self.assertEqual(rows[0]["option_1_value"], "XL")
+        self.assertEqual(rows[0]["option_2_name"], "Color")
+        self.assertEqual(rows[0]["option_2_value"], "Blue")
+        self.assertEqual(rows[0]["variation_image_url"], "https://img.example.com/jdxty-xl-blue.jpg")
+        self.assertEqual(rows[1]["sku"], "JDXTY-S-R")
+        self.assertEqual(rows[1]["option_1_value"], "S")
+        self.assertEqual(rows[1]["option_2_value"], "Red")
         self.assertEqual(rows[0]["action"], "create")
         self.assertEqual(rows[0]["row_number"], 2)
         self.assertFalse(rows[0]["infinite_quantity"])
@@ -136,7 +167,9 @@ class CsvImportTests(TestCase):
     def test_lasoo_template_includes_options_column(self):
         header = csv_import.build_template_csv("create").splitlines()[0]
         cols = header.split(",")
-        self.assertIn("Options", cols)
+        self.assertIn("Option 1 Name", cols)
+        self.assertIn("Option 1 Value", cols)
+        self.assertIn("Variation Img URL", cols)
         self.assertIn("Product Key", cols)
         self.assertIn("Variant Key", cols)
         self.assertIn("SKU", cols)
@@ -261,18 +294,23 @@ class ListingServiceTests(TestCase):
     def test_bulk_import_create_action(self):
         content = csv_import.build_template_csv("create").encode()
         result = listing_service.bulk_import(self.user, self.store, "l.csv", content, action="create")
-        self.assertEqual(result["imported"], 1)
+        self.assertEqual(result["imported"], 2)
         self.assertEqual(result["action"], "create")
-        listing = StoreListing.objects.get(store=self.store)
+        self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 2)
+        listing = StoreListing.objects.get(store=self.store, sku="JDXTY-XL-B")
         self.assertEqual(listing.status, ListingStatus.READY)
         self.assertEqual(listing.action, "create")
+        self.assertEqual(listing.option_1_name, "Size")
+        self.assertEqual(listing.option_1_value, "XL")
+        self.assertEqual(listing.option_2_value, "Blue")
+        self.assertTrue(listing.variation_image_url)
 
     def test_bulk_import_rejects_duplicate_on_create(self):
         content = csv_import.build_template_csv("create").encode()
         listing_service.bulk_import(self.user, self.store, "l.csv", content, action="create")
         result2 = listing_service.bulk_import(self.user, self.store, "l.csv", content, action="create")
         self.assertEqual(result2["imported"], 0)
-        self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 1)
+        self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 2)
         upload = ListingUpload.objects.filter(store=self.store).order_by("-created_at").first()
         self.assertEqual(upload.status, ListingUpload.Status.FAILED)
         self.assertGreater(upload.error_rows, 0)
@@ -494,12 +532,16 @@ class ListingServiceTests(TestCase):
         upload = ListingUpload.objects.get(store=self.store, filename="full.csv")
         row = upload.rows_json[0]
         self.assertIn("fields", row)
-        self.assertEqual(row["fields"].get("sku"), "TSHIRT-001-BLACK-M")
+        self.assertEqual(row["fields"].get("sku"), "JDXTY-XL-B")
+        self.assertEqual(row["fields"].get("option_1_name"), "Size")
+        self.assertEqual(row["fields"].get("option_1_value"), "XL")
+        self.assertTrue(row["fields"].get("variation_image_url"))
         self.assertTrue(row["fields"].get("title"))
         resp = _listing_upload_csv_response(upload, errors_only=False)
         body = resp.content.decode()
         self.assertIn("Vendor Name", body)
-        self.assertIn("TSHIRT-001-BLACK-M", body)
+        self.assertIn("JDXTY-XL-B", body)
+        self.assertIn("Option 1 Name", body)
         self.assertIn("Created", body)
 
     def test_delete_upload_history_only(self):
@@ -510,7 +552,7 @@ class ListingServiceTests(TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["listings_deleted"], 0)
         self.assertFalse(ListingUpload.objects.filter(pk=upload.id).exists())
-        self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 1)
+        self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 2)
 
     def test_delete_upload_with_system(self):
         content = csv_import.build_template_csv("create").encode()
@@ -519,7 +561,7 @@ class ListingServiceTests(TestCase):
         result = listing_service.delete_upload(
             self.user, self.store, upload, delete_system=True,
         )
-        self.assertEqual(result["listings_deleted"], 1)
+        self.assertEqual(result["listings_deleted"], 2)
         self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 0)
         self.assertFalse(ListingUpload.objects.filter(pk=upload.id).exists())
 
@@ -527,9 +569,11 @@ class ListingServiceTests(TestCase):
     def test_delete_upload_with_marketplace(self, mock_client_cls):
         content = csv_import.build_template_csv("create").encode()
         listing_service.bulk_import(self.user, self.store, "mp.csv", content, action="create")
-        listing = StoreListing.objects.get(store=self.store)
-        listing.status = ListingStatus.UPLOADED_STAGING
-        listing.save(update_fields=["status"])
+        listings = list(StoreListing.objects.filter(store=self.store))
+        self.assertEqual(len(listings), 2)
+        for listing in listings:
+            listing.status = ListingStatus.UPLOADED_STAGING
+            listing.save(update_fields=["status"])
         upload = ListingUpload.objects.get(store=self.store, filename="mp.csv")
 
         mock_client = mock_client_cls.return_value
@@ -540,8 +584,8 @@ class ListingServiceTests(TestCase):
             self.user, self.store, upload,
             delete_system=True, delete_marketplace=True,
         )
-        self.assertEqual(result["listings_deleted"], 1)
-        self.assertEqual(result["marketplace_deleted"], 1)
+        self.assertEqual(result["listings_deleted"], 2)
+        self.assertEqual(result["marketplace_deleted"], 2)
         mock_client.send.assert_called_once()
         self.assertEqual(mock_client.send.call_args[0][0], "bulk_delete")
         self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 0)
@@ -549,8 +593,8 @@ class ListingServiceTests(TestCase):
     def test_bulk_import_mapped_sets_uploaded_status(self):
         content = csv_import.build_template_csv("mapped").encode()
         result = listing_service.bulk_import(self.user, self.store, "m.csv", content, action="mapped")
-        self.assertEqual(result["imported"], 1)
-        listing = StoreListing.objects.get(store=self.store)
+        self.assertEqual(result["imported"], 2)
+        listing = StoreListing.objects.get(store=self.store, sku="JDXTY-XL-B")
         self.assertEqual(listing.action, "mapped")
         self.assertEqual(listing.status, ListingStatus.UPLOADED_STAGING)
         self.assertEqual(listing.source_vendor_code, "noraau")

@@ -6,7 +6,12 @@ Returns clear, per-variant error messages, e.g.:
 """
 from decimal import Decimal, InvalidOperation
 
-from .mapper import normalize_image_urls, resolve_keys
+from .mapper import (
+    collect_option_pairs,
+    format_options_summary,
+    normalize_image_urls,
+    resolve_keys,
+)
 
 REQUIRED_TEXT_FIELDS = [
     ("title", "Title"),
@@ -22,6 +27,10 @@ def _variant_label(data: dict) -> str:
         or (data.get("sku") or "").strip()
         or "unknown"
     )
+
+
+def _is_multi_variant(product_key: str, variant_key: str) -> bool:
+    return bool(product_key and variant_key and product_key != variant_key)
 
 
 def validate_listing(data: dict) -> list[str]:
@@ -46,14 +55,41 @@ def validate_listing(data: dict) -> list[str]:
     if not variant_key:
         errors.append(f"Variant Key is required for variant {key}.")
 
-    options = str(data.get("options") or "").strip()
-    # Multi-variant rows (shared parent, unique variant) must declare Options
-    # so Lasoo receives colour/size instead of splitting into separate products.
-    if product_key and variant_key and product_key != variant_key and not options:
-        errors.append(
-            f"Options are required for variant {key} when Product Key differs from "
-            "Variant Key (e.g. Colour=Black)."
-        )
+    # Validate option name/value pairs (incomplete pairs are errors).
+    for i in (1, 2, 3, 4):
+        name = str(data.get(f"option_{i}_name") or "").strip()
+        value = str(data.get(f"option_{i}_value") or "").strip()
+        if name and not value:
+            errors.append(
+                f"Option {i} Value is required for variant {key} when Option {i} Name is set."
+            )
+        if value and not name:
+            errors.append(
+                f"Option {i} Name is required for variant {key} when Option {i} Value is set."
+            )
+
+    pairs = collect_option_pairs(data)
+    legacy_options = format_options_summary(data)
+    variation_img = str(data.get("variation_image_url") or "").strip()
+
+    # Multi-variant rows need at least Option 1 + variation image.
+    if _is_multi_variant(product_key, variant_key):
+        if not pairs and not legacy_options:
+            errors.append(
+                f"At least Option 1 Name and Option 1 Value are required for variant {key} "
+                "(e.g. Size / XL)."
+            )
+        elif pairs:
+            name0, value0 = pairs[0]
+            if not name0 or not value0:
+                errors.append(
+                    f"Option 1 Name and Option 1 Value are required for variant {key}."
+                )
+        if not variation_img:
+            errors.append(
+                f"Variation Img URL is required for variant {key} when Product Key "
+                "differs from Variant Key."
+            )
 
     if not normalize_image_urls(data.get("image_urls")):
         errors.append(f"Image URLs are required for variant {key}.")

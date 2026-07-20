@@ -98,8 +98,9 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                         {!isReverb && (
                             <>
                                 {' '}For colour/size variants use the same <strong>Product Key</strong>, unique{' '}
-                                <strong>Variant Key</strong> and <strong>SKU</strong> (usually the same), and fill{' '}
-                                <strong>Options</strong> on every variant row (e.g. Colour=Black).
+                                <strong>Variant Key</strong> / <strong>SKU</strong>, fill{' '}
+                                <strong>Option 1–4 Name/Value</strong> (e.g. Size / XL, Color / Blue), and a{' '}
+                                <strong>Variation Img URL</strong> on every variant row.
                             </>
                         )}
                         {isReverb && (

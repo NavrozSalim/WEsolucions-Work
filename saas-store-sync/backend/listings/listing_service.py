@@ -191,7 +191,19 @@ def _apply_fields(listing: StoreListing, data: dict):
     listing.sku = (data.get("sku") or "").strip() or variant_key
     listing.barcode = (data.get("barcode") or data.get("upc") or "").strip()
     if _store_kind(store) != "reverb":
-        listing.options = (data.get("options") or "").strip()[:500]
+        for i in (1, 2, 3, 4):
+            setattr(
+                listing,
+                f"option_{i}_name",
+                str(data.get(f"option_{i}_name") or "").strip()[:100],
+            )
+            setattr(
+                listing,
+                f"option_{i}_value",
+                str(data.get(f"option_{i}_value") or "").strip()[:255],
+            )
+        listing.variation_image_url = str(data.get("variation_image_url") or "").strip()[:1000]
+        listing.options = mapper.format_options_summary(data)[:500]
     listing.vendor_url = (data.get("vendor_url") or "").strip()[:1000]
     listing.vendor_id = (data.get("vendor_id") or "").strip()[:255]
     source_code = (data.get("source_vendor_code") or data.get("vendor_code") or "").strip()
@@ -447,6 +459,15 @@ def _listing_to_data(listing: StoreListing) -> dict:
         "sku": listing.sku,
         "barcode": listing.barcode,
         "options": listing.options,
+        "option_1_name": listing.option_1_name,
+        "option_1_value": listing.option_1_value,
+        "option_2_name": listing.option_2_name,
+        "option_2_value": listing.option_2_value,
+        "option_3_name": listing.option_3_name,
+        "option_3_value": listing.option_3_value,
+        "option_4_name": listing.option_4_name,
+        "option_4_value": listing.option_4_value,
+        "variation_image_url": listing.variation_image_url,
         "vendor_url": listing.vendor_url,
         "vendor_id": listing.vendor_id,
         "source_vendor_code": listing.source_vendor_code,

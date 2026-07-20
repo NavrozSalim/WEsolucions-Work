@@ -23,6 +23,9 @@ class StoreListingSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'store', 'external_product_key', 'external_variant_key',
             'title', 'description', 'brand', 'category', 'sku', 'barcode', 'options',
+            'option_1_name', 'option_1_value', 'option_2_name', 'option_2_value',
+            'option_3_name', 'option_3_value', 'option_4_name', 'option_4_value',
+            'variation_image_url',
             'vendor_url', 'vendor_id', 'source_vendor_code', 'image_urls', 'inventory', 'infinite_quantity',
             'original_price', 'sale_price', 'vendor_price',
             'make', 'model', 'finish', 'year',
@@ -174,6 +177,15 @@ class ListingInputSerializer(serializers.Serializer):
     sku = serializers.CharField(required=False, allow_blank=True, default='')
     barcode = serializers.CharField(required=False, allow_blank=True, default='')
     options = serializers.CharField(required=False, allow_blank=True, default='', max_length=500)
+    option_1_name = serializers.CharField(required=False, allow_blank=True, default='', max_length=100)
+    option_1_value = serializers.CharField(required=False, allow_blank=True, default='', max_length=255)
+    option_2_name = serializers.CharField(required=False, allow_blank=True, default='', max_length=100)
+    option_2_value = serializers.CharField(required=False, allow_blank=True, default='', max_length=255)
+    option_3_name = serializers.CharField(required=False, allow_blank=True, default='', max_length=100)
+    option_3_value = serializers.CharField(required=False, allow_blank=True, default='', max_length=255)
+    option_4_name = serializers.CharField(required=False, allow_blank=True, default='', max_length=100)
+    option_4_value = serializers.CharField(required=False, allow_blank=True, default='', max_length=255)
+    variation_image_url = serializers.CharField(required=False, allow_blank=True, default='', max_length=1000)
     vendor_url = serializers.CharField(required=False, allow_blank=True, default='', max_length=1000)
     vendor_id = serializers.CharField(required=False, allow_blank=True, default='', max_length=255)
     source_vendor_code = serializers.CharField(required=False, allow_blank=True, default='', max_length=50)
