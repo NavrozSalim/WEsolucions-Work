@@ -31,6 +31,17 @@ def _clean_sku(val) -> str:
     return s
 
 
+def _header_index(headers: list[str], name: str) -> int | None:
+    """Case-insensitive header lookup; returns 0-based index or None."""
+    want = (name or "").strip().lower()
+    if not want:
+        return None
+    for i, h in enumerate(headers):
+        if str(h).strip().lower() == want:
+            return i
+    return None
+
+
 def _loads_service_account_json(raw: str) -> dict:
     try:
         obj = json.loads(raw)
@@ -200,12 +211,10 @@ class KoganAdapter(BaseStoreAdapter):
         sku_idx = headers.index(cfg.sku_col_name)
         stock_idx = headers.index(cfg.stock_col_name)
         first_price_idx = headers.index(cfg.first_price_col_name)
-        list_price_idx = (
-            headers.index(cfg.list_price_col_name)
-            if cfg.list_price_col_name in headers
-            else None
-        )
-        rrp_idx = headers.index(cfg.rrp_col_name) if cfg.rrp_col_name in headers else None
+        # PRICE / rrp are optional but matched case-insensitively so recovered
+        # price pushes still update all three columns when headers differ by case.
+        list_price_idx = _header_index(headers, cfg.list_price_col_name)
+        rrp_idx = _header_index(headers, cfg.rrp_col_name)
 
         # Read all SKU values in the sheet once to build SKU -> row mapping
         sku_col_letter = _col_index_to_letter(sku_idx)

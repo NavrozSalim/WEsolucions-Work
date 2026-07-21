@@ -91,3 +91,92 @@ class KoganAdapterRrpTests(SimpleTestCase):
         self.assertEqual(ranges['Sheet1!D2'], 74.0)
         self.assertEqual(ranges['Sheet1!E2'], 100.0)
         self.assertNotIn('Sheet1!E3', ranges)
+
+    @patch.object(KoganAdapter, '_get_service')
+    def test_bulk_update_matches_price_rrp_headers_case_insensitive(self, mock_get_service):
+        store = _kogan_store(kogan_price_column='PRICE', kogan_rrp_column='rrp')
+        adapter = KoganAdapter(store)
+        adapter._header_cache = [
+            'PRODUCT_SKU',
+            'STOCK',
+            'Price',
+            'kogan_first_price',
+            'RRP',
+        ]
+
+        batch_updates = []
+
+        def _batch_update(**kwargs):
+            batch_updates.extend(kwargs['body']['data'])
+            return MagicMock(execute=MagicMock(return_value={}))
+
+        values_api = MagicMock()
+        values_api.get.return_value.execute.side_effect = [
+            {'values': [['SKU-1']]},
+        ]
+        values_api.batchUpdate.side_effect = _batch_update
+
+        spreadsheets_api = MagicMock()
+        spreadsheets_api.values.return_value = values_api
+        mock_get_service.return_value.spreadsheets.return_value = spreadsheets_api
+
+        result = adapter.update_products_bulk([
+            ('SKU-1', 74.0, 2, 100.0, 92.5),
+        ])
+
+        self.assertEqual(result['ok'], {'SKU-1'})
+        ranges = {u['range']: u['values'][0][0] for u in batch_updates}
+        self.assertEqual(ranges['Sheet1!C2'], 92.5)
+        self.assertEqual(ranges['Sheet1!D2'], 74.0)
+        self.assertEqual(ranges['Sheet1!E2'], 100.0)
+
+
+class KoganPostScrapePushTests(SimpleTestCase):
+    def test_apply_post_scrape_pushes_kogan_with_list_price_and_rrp(self):
+        from catalog.marketplace_push import apply_post_scrape_marketplace_push
+
+        store = _kogan_store()
+        pm = MagicMock()
+        pm.store_price = Decimal('74.00')
+        pm.store_stock = 4
+        pm.sync_status = 'scraped'
+        pm.scrape_error = 'scrape_failed: old'
+        ps = MagicMock()
+        ps.mydeal_rrp_margin_percentage = Decimal('26')
+        ps.kogan_price_margin_percentage = Decimal('20')
+
+        with patch(
+            'catalog.marketplace_push.push_product_mapping_to_marketplace',
+            return_value=(True, None),
+        ) as mock_push:
+            apply_post_scrape_marketplace_push(
+                pm,
+                store,
+                price_by_vendor_id={'vid-1': ps},
+                price_fallback=ps,
+            )
+
+        mock_push.assert_called_once()
+        self.assertEqual(mock_push.call_args[0][0], pm)
+        self.assertEqual(mock_push.call_args[0][1], store)
+        self.assertEqual(pm.sync_status, 'synced')
+        pm.save.assert_called()
+        self.assertIsNone(pm.scrape_error)
+
+    def test_apply_post_scrape_skips_non_kogan_non_walmart(self):
+        from catalog.marketplace_push import apply_post_scrape_marketplace_push
+
+        store = MagicMock()
+        store.marketplace = MagicMock()
+        store.marketplace.code = 'reverb'
+        store.marketplace.name = 'Reverb'
+        pm = MagicMock()
+        pm.sync_status = 'scraped'
+
+        with patch(
+            'catalog.marketplace_push.push_product_mapping_to_marketplace',
+        ) as mock_push:
+            apply_post_scrape_marketplace_push(pm, store)
+
+        mock_push.assert_not_called()
+        pm.save.assert_not_called()

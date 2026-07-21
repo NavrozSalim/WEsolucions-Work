@@ -5,7 +5,7 @@ import logging
 from decimal import Decimal, ROUND_HALF_UP
 
 from catalog.marketplace_rrp import adapter_push_kwargs
-from catalog.reverb_catalog import store_is_sears, store_is_walmart
+from catalog.reverb_catalog import store_is_kogan, store_is_sears, store_is_walmart
 
 logger = logging.getLogger(__name__)
 
@@ -390,7 +390,11 @@ def apply_post_scrape_marketplace_push(
     price_fallback=None,
 ) -> None:
     """
-    After a successful vendor scrape, push to Walmart immediately.
+    After a successful vendor scrape, push to Walmart / Kogan immediately.
+
+    Kogan: writes ``kogan_first_price``, ``PRICE`` (list_price), and ``rrp`` together
+    via ``adapter_push_kwargs`` so recovered failed listings do not leave stale
+    PRICE/RRP columns when first price changes.
 
     Sears pushes are deferred and flushed in bulk when the scrape batch finishes
     (see ``bulk_push_sears_scraped_listings``) or during ``run_store_update``.
@@ -400,7 +404,7 @@ def apply_post_scrape_marketplace_push(
     if store_is_sears(store):
         return
 
-    if not store_is_walmart(store):
+    if not (store_is_walmart(store) or store_is_kogan(store)):
         return
 
     ok, err = push_product_mapping_to_marketplace(
