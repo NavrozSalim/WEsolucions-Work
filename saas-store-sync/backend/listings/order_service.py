@@ -209,10 +209,58 @@ def _sibling_address(obj: dict | None) -> dict | None:
     return built
 
 
+def _looks_like_person(obj) -> bool:
+    """True when a dict has buyer identity fields (not a wrapper like order.customer)."""
+    if not isinstance(obj, dict):
+        return False
+    for key in (
+        "firstName", "first_name", "givenName",
+        "surname", "lastName", "last_name", "familyName",
+        "email", "emailAddress", "email_address",
+        "phone", "phoneNumber", "mobile", "mobileNumber",
+        "name", "fullName",
+    ):
+        val = obj.get(key)
+        if val not in (None, ""):
+            return True
+    return False
+
+
+def _lasoo_buyer_blob(raw: dict) -> dict | None:
+    """Buyer person dict from Lasoo Connect invoice shapes.
+
+    Production payloads use either:
+    - ``order`` flat person+address fields, or
+    - ``order.customer`` / ``order.billingCustomer`` nested person blobs.
+    """
+    order = raw.get("order") if isinstance(raw.get("order"), dict) else None
+    if not order:
+        return None
+    nested = order.get("customer")
+    if isinstance(nested, dict) and (_looks_like_person(nested) or _sibling_address(nested)):
+        return nested
+    if _looks_like_person(order):
+        return order
+    return None
+
+
+def _lasoo_billing_blob(raw: dict) -> dict | None:
+    order = raw.get("order") if isinstance(raw.get("order"), dict) else None
+    if not order:
+        return None
+    nested = order.get("billingCustomer")
+    if isinstance(nested, dict) and (_looks_like_person(nested) or _sibling_address(nested)):
+        return nested
+    return None
+
+
 def _address_candidates(raw: dict, cust: dict) -> list:
     """Collect possible address blobs from Lasoo invoice / customer shapes."""
-    # Lasoo Connect Invoices_Search nests buyer + flat address under ``order``.
+    # Lasoo Connect Invoices_Search nests buyer + flat address under ``order``
+    # or ``order.customer`` / ``order.billingCustomer``.
     order_blob = raw.get("order") if isinstance(raw.get("order"), dict) else {}
+    order_customer = order_blob.get("customer") if isinstance(order_blob.get("customer"), dict) else {}
+    order_billing = order_blob.get("billingCustomer") if isinstance(order_blob.get("billingCustomer"), dict) else {}
     return [
         cust.get("shippingAddress"),
         cust.get("shipping_address"),
@@ -238,7 +286,10 @@ def _address_candidates(raw: dict, cust: dict) -> list:
         _dig(raw, "invoice.customer.shippingAddress"),
         _dig(raw, "invoice.customer.address"),
         order_blob.get("shippingAddress"),
+        order_customer.get("shippingAddress"),
         _sibling_address(cust),
+        _sibling_address(order_customer),
+        _sibling_address(order_billing),
         _sibling_address(order_blob),
         _sibling_address(raw),
         _flatten_prefixed_address(raw, "shipping"),
@@ -248,6 +299,7 @@ def _address_candidates(raw: dict, cust: dict) -> list:
         _flatten_prefixed_address(cust, "delivery"),
         # Last: raw string street-only on customer (legacy).
         cust.get("address") if isinstance(cust.get("address"), str) else None,
+        order_customer.get("address") if isinstance(order_customer.get("address"), str) else None,
         order_blob.get("address") if isinstance(order_blob.get("address"), str) else None,
     ]
 
@@ -284,8 +336,6 @@ def _flatten_prefixed_address(obj: dict | None, prefix: str) -> dict | None:
 
 def _normalize_customer(raw: dict) -> dict | None:
     """Flatten customer + contact fields from Lasoo / Marketplacer invoice shapes."""
-    # Lasoo Connect nests buyer + flat shipping fields under ``order`` (not ``customer``).
-    order_blob = raw.get("order") if isinstance(raw.get("order"), dict) else None
     cust = _first(
         raw.get("customer"),
         raw.get("customerInfo"),
@@ -295,7 +345,8 @@ def _normalize_customer(raw: dict) -> dict | None:
         _dig(raw, "invoice.customer"),
         _dig(raw, "invoice.buyer"),
         _dig(raw, "shipping.customer"),
-        order_blob,
+        # Prefer order.customer (current Lasoo Connect) over wrapper ``order``.
+        _lasoo_buyer_blob(raw),
     )
     if not isinstance(cust, dict):
         cust = {}
@@ -305,6 +356,7 @@ def _normalize_customer(raw: dict) -> dict | None:
         # Marketplacer Invoice top-level buyer fields
         raw.get("buyerFirstName"), raw.get("buyer_first_name"),
         raw.get("customerFirstName"), raw.get("shippingFirstName"),
+        _dig(raw, "order.customer.firstName"),
         _dig(raw, "order.firstName"),
         _dig(raw, "shipping.firstName"),
         _dig(raw, "invoice.buyerFirstName"),
@@ -315,6 +367,8 @@ def _normalize_customer(raw: dict) -> dict | None:
         # Marketplacer Invoice top-level buyer fields
         raw.get("buyerSurname"), raw.get("buyer_surname"), raw.get("buyerLastName"),
         raw.get("customerLastName"), raw.get("shippingLastName"),
+        _dig(raw, "order.customer.surname"),
+        _dig(raw, "order.customer.lastName"),
         _dig(raw, "order.surname"),
         _dig(raw, "order.lastName"),
         _dig(raw, "shipping.lastName"),
@@ -332,6 +386,8 @@ def _normalize_customer(raw: dict) -> dict | None:
         cust.get("email"), cust.get("emailAddress"), cust.get("email_address"),
         raw.get("buyerEmailAddress"), raw.get("buyer_email_address"), raw.get("buyerEmail"),
         raw.get("customerEmail"), raw.get("email"),
+        _dig(raw, "order.customer.emailAddress"),
+        _dig(raw, "order.customer.email"),
         _dig(raw, "order.emailAddress"),
         _dig(raw, "order.email"),
         _dig(raw, "shipping.email"),
@@ -342,6 +398,7 @@ def _normalize_customer(raw: dict) -> dict | None:
         cust.get("mobileNumber"),
         raw.get("buyerPhone"), raw.get("buyer_phone"),
         raw.get("customerPhone"), raw.get("phone"),
+        _dig(raw, "order.customer.phone"),
         _dig(raw, "order.phone"),
         _dig(raw, "shipping.phone"),
         _dig(raw, "invoice.buyerPhone"),
@@ -353,6 +410,7 @@ def _normalize_customer(raw: dict) -> dict | None:
         if shipping:
             break
 
+    billing_person = _lasoo_billing_blob(raw)
     billing = _normalize_address(
         _first(
             cust.get("billingAddress"),
@@ -361,6 +419,7 @@ def _normalize_customer(raw: dict) -> dict | None:
             raw.get("billingAddress"),
             _dig(raw, "invoice.billingAddress"),
             _dig(raw, "invoice.buyerBillingAddress"),
+            _sibling_address(billing_person),
             _flatten_prefixed_address(raw, "billing"),
         )
     )
