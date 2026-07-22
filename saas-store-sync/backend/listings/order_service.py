@@ -211,6 +211,8 @@ def _sibling_address(obj: dict | None) -> dict | None:
 
 def _address_candidates(raw: dict, cust: dict) -> list:
     """Collect possible address blobs from Lasoo invoice / customer shapes."""
+    # Lasoo Connect Invoices_Search nests buyer + flat address under ``order``.
+    order_blob = raw.get("order") if isinstance(raw.get("order"), dict) else {}
     return [
         cust.get("shippingAddress"),
         cust.get("shipping_address"),
@@ -235,7 +237,9 @@ def _address_candidates(raw: dict, cust: dict) -> list:
         _dig(raw, "invoice.shipTo"),
         _dig(raw, "invoice.customer.shippingAddress"),
         _dig(raw, "invoice.customer.address"),
+        order_blob.get("shippingAddress"),
         _sibling_address(cust),
+        _sibling_address(order_blob),
         _sibling_address(raw),
         _flatten_prefixed_address(raw, "shipping"),
         _flatten_prefixed_address(raw, "delivery"),
@@ -244,6 +248,7 @@ def _address_candidates(raw: dict, cust: dict) -> list:
         _flatten_prefixed_address(cust, "delivery"),
         # Last: raw string street-only on customer (legacy).
         cust.get("address") if isinstance(cust.get("address"), str) else None,
+        order_blob.get("address") if isinstance(order_blob.get("address"), str) else None,
     ]
 
 
@@ -279,6 +284,8 @@ def _flatten_prefixed_address(obj: dict | None, prefix: str) -> dict | None:
 
 def _normalize_customer(raw: dict) -> dict | None:
     """Flatten customer + contact fields from Lasoo / Marketplacer invoice shapes."""
+    # Lasoo Connect nests buyer + flat shipping fields under ``order`` (not ``customer``).
+    order_blob = raw.get("order") if isinstance(raw.get("order"), dict) else None
     cust = _first(
         raw.get("customer"),
         raw.get("customerInfo"),
@@ -288,6 +295,7 @@ def _normalize_customer(raw: dict) -> dict | None:
         _dig(raw, "invoice.customer"),
         _dig(raw, "invoice.buyer"),
         _dig(raw, "shipping.customer"),
+        order_blob,
     )
     if not isinstance(cust, dict):
         cust = {}
@@ -297,6 +305,7 @@ def _normalize_customer(raw: dict) -> dict | None:
         # Marketplacer Invoice top-level buyer fields
         raw.get("buyerFirstName"), raw.get("buyer_first_name"),
         raw.get("customerFirstName"), raw.get("shippingFirstName"),
+        _dig(raw, "order.firstName"),
         _dig(raw, "shipping.firstName"),
         _dig(raw, "invoice.buyerFirstName"),
     )
@@ -306,6 +315,8 @@ def _normalize_customer(raw: dict) -> dict | None:
         # Marketplacer Invoice top-level buyer fields
         raw.get("buyerSurname"), raw.get("buyer_surname"), raw.get("buyerLastName"),
         raw.get("customerLastName"), raw.get("shippingLastName"),
+        _dig(raw, "order.surname"),
+        _dig(raw, "order.lastName"),
         _dig(raw, "shipping.lastName"),
         _dig(raw, "invoice.buyerSurname"),
     )
@@ -321,6 +332,8 @@ def _normalize_customer(raw: dict) -> dict | None:
         cust.get("email"), cust.get("emailAddress"), cust.get("email_address"),
         raw.get("buyerEmailAddress"), raw.get("buyer_email_address"), raw.get("buyerEmail"),
         raw.get("customerEmail"), raw.get("email"),
+        _dig(raw, "order.emailAddress"),
+        _dig(raw, "order.email"),
         _dig(raw, "shipping.email"),
         _dig(raw, "invoice.buyerEmailAddress"),
     )
@@ -329,6 +342,7 @@ def _normalize_customer(raw: dict) -> dict | None:
         cust.get("mobileNumber"),
         raw.get("buyerPhone"), raw.get("buyer_phone"),
         raw.get("customerPhone"), raw.get("phone"),
+        _dig(raw, "order.phone"),
         _dig(raw, "shipping.phone"),
         _dig(raw, "invoice.buyerPhone"),
     )

@@ -894,6 +894,47 @@ class OrderNormalizeTests(TestCase):
         self.assertEqual(details["shippingAddress"]["city"], "Melbourne")
         self.assertEqual(details["shippingAddress"]["postcode"], "3000")
 
+    def test_build_order_details_from_lasoo_connect_order_blob(self):
+        """Lasoo Connect Invoices_Search nests buyer + address under ``order``."""
+        raw = {
+            "id": 1024157,
+            "status": "PAID",
+            "totalCents": 2699,
+            "lineItems": [
+                {
+                    "title": "Plush Dog Crate Bed with Non Slip Base and Removable Cover",
+                    "sku": "P-XD1836-M-BG",
+                    "quantity": 1,
+                    "priceCents": 2699,
+                }
+            ],
+            "shipment": [],
+            "order": {
+                "city": "Kellyville",
+                "phone": "0435713191",
+                "state": "NSW",
+                "address": "46 stringer road",
+                "country": "AU",
+                "orderId": None,
+                "surname": "Goplani",
+                "postcode": "2155",
+                "firstName": "Piyush",
+                "emailAddress": "ca.goplanipiyush@gmail.com",
+                "billingOrderId": 5020885,
+            },
+        }
+        details = order_service.build_order_details(raw)
+        self.assertEqual(details["customer"]["firstName"], "Piyush")
+        self.assertEqual(details["customer"]["lastName"], "Goplani")
+        self.assertEqual(details["customer"]["name"], "Piyush Goplani")
+        self.assertEqual(details["customer"]["email"], "ca.goplanipiyush@gmail.com")
+        self.assertEqual(details["customer"]["phone"], "0435713191")
+        self.assertEqual(details["shippingAddress"]["line1"], "46 stringer road")
+        self.assertEqual(details["shippingAddress"]["city"], "Kellyville")
+        self.assertEqual(details["shippingAddress"]["state"], "NSW")
+        self.assertEqual(details["shippingAddress"]["postcode"], "2155")
+        self.assertEqual(details["shippingAddress"]["country"], "AU")
+
     def test_enrich_order_line_items_from_store_listing(self):
         User = get_user_model()
         user = User.objects.create_user(username="enr", email="enr@example.com", password="pw")
