@@ -159,6 +159,56 @@ def _dig(obj, *paths):
     return None
 
 
+def _place_text(value) -> str | None:
+    """Turn Marketplacer place objects (state/country) or plain strings into text."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, dict):
+        for key in ("name", "short", "code", "label", "title", "value"):
+            text = value.get(key)
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _sibling_address(obj: dict | None) -> dict | None:
+    """Build an address from flat sibling fields (legacy customer include shape)."""
+    if not isinstance(obj, dict):
+        return None
+    # Only treat as a flat address when street/city/postcode live on the same object
+    # and ``address`` is not itself a nested dict (Marketplacer Address wrapper).
+    if isinstance(obj.get("address"), dict):
+        return None
+    built = {
+        "line1": _first(
+            obj.get("line1"), obj.get("address1"), obj.get("street"),
+            obj.get("addressLine1"), obj.get("address"),
+        ),
+        "line2": _first(
+            obj.get("line2"), obj.get("address2"), obj.get("subaddress"),
+            obj.get("addressLine2"),
+        ),
+        "city": _first(obj.get("city"), obj.get("suburb"), obj.get("town")),
+        "state": obj.get("state") or obj.get("region") or obj.get("province"),
+        "postcode": _first(
+            obj.get("postcode"), obj.get("postalCode"), obj.get("zip"), obj.get("zipCode"),
+        ),
+        "country": obj.get("country") or obj.get("countryCode") or obj.get("countryName"),
+        "company": _first(obj.get("company"), obj.get("companyName"), obj.get("businessName")),
+    }
+    if not any(v not in (None, "") for v in built.values()):
+        return None
+    # Require at least a street or city/postcode so we don't treat a person blob as an address.
+    if not any(built.get(k) not in (None, "") for k in ("line1", "city", "postcode")):
+        return None
+    return built
+
+
 def _address_candidates(raw: dict, cust: dict) -> list:
     """Collect possible address blobs from Lasoo invoice / customer shapes."""
     return [
@@ -167,7 +217,6 @@ def _address_candidates(raw: dict, cust: dict) -> list:
         cust.get("deliveryAddress"),
         cust.get("shipToAddress"),
         cust.get("shipTo"),
-        cust.get("address"),
         raw.get("shippingAddress"),
         raw.get("shipping_address"),
         raw.get("deliveryAddress"),
@@ -186,11 +235,15 @@ def _address_candidates(raw: dict, cust: dict) -> list:
         _dig(raw, "invoice.shipTo"),
         _dig(raw, "invoice.customer.shippingAddress"),
         _dig(raw, "invoice.customer.address"),
+        _sibling_address(cust),
+        _sibling_address(raw),
         _flatten_prefixed_address(raw, "shipping"),
         _flatten_prefixed_address(raw, "delivery"),
         _flatten_prefixed_address(raw, "shipTo"),
         _flatten_prefixed_address(cust, "shipping"),
         _flatten_prefixed_address(cust, "delivery"),
+        # Last: raw string street-only on customer (legacy).
+        cust.get("address") if isinstance(cust.get("address"), str) else None,
     ]
 
 
@@ -201,7 +254,7 @@ def _flatten_prefixed_address(obj: dict | None, prefix: str) -> dict | None:
     prefixes = (prefix, prefix.lower(), prefix[:1].upper() + prefix[1:] if prefix else prefix)
     keys = {
         "line1": ("Line1", "Address1", "Street", "Street1", "AddressLine1", "Address"),
-        "line2": ("Line2", "Address2", "Street2", "AddressLine2"),
+        "line2": ("Line2", "Address2", "Street2", "AddressLine2", "Subaddress"),
         "city": ("City", "Suburb", "Town"),
         "state": ("State", "Region", "Province"),
         "postcode": ("Postcode", "PostalCode", "Zip", "ZipCode"),
@@ -225,7 +278,7 @@ def _flatten_prefixed_address(obj: dict | None, prefix: str) -> dict | None:
 
 
 def _normalize_customer(raw: dict) -> dict | None:
-    """Flatten customer + contact fields from Lasoo's varied shapes."""
+    """Flatten customer + contact fields from Lasoo / Marketplacer invoice shapes."""
     cust = _first(
         raw.get("customer"),
         raw.get("customerInfo"),
@@ -241,30 +294,43 @@ def _normalize_customer(raw: dict) -> dict | None:
 
     first = _first(
         cust.get("firstName"), cust.get("first_name"), cust.get("givenName"),
+        # Marketplacer Invoice top-level buyer fields
+        raw.get("buyerFirstName"), raw.get("buyer_first_name"),
         raw.get("customerFirstName"), raw.get("shippingFirstName"),
         _dig(raw, "shipping.firstName"),
+        _dig(raw, "invoice.buyerFirstName"),
     )
     last = _first(
         cust.get("lastName"), cust.get("last_name"), cust.get("familyName"),
+        cust.get("surname"), cust.get("Surname"),
+        # Marketplacer Invoice top-level buyer fields
+        raw.get("buyerSurname"), raw.get("buyer_surname"), raw.get("buyerLastName"),
         raw.get("customerLastName"), raw.get("shippingLastName"),
         _dig(raw, "shipping.lastName"),
+        _dig(raw, "invoice.buyerSurname"),
     )
     name = _first(
         cust.get("name"),
         cust.get("fullName"),
         raw.get("customerName"),
         raw.get("shippingName"),
+        raw.get("buyerName"),
         " ".join(p for p in (first, last) if p).strip() or None,
     )
     email = _first(
-        cust.get("email"), cust.get("emailAddress"),
+        cust.get("email"), cust.get("emailAddress"), cust.get("email_address"),
+        raw.get("buyerEmailAddress"), raw.get("buyer_email_address"), raw.get("buyerEmail"),
         raw.get("customerEmail"), raw.get("email"),
         _dig(raw, "shipping.email"),
+        _dig(raw, "invoice.buyerEmailAddress"),
     )
     phone = _first(
         cust.get("phone"), cust.get("phoneNumber"), cust.get("mobile"),
-        cust.get("mobileNumber"), raw.get("customerPhone"), raw.get("phone"),
+        cust.get("mobileNumber"),
+        raw.get("buyerPhone"), raw.get("buyer_phone"),
+        raw.get("customerPhone"), raw.get("phone"),
         _dig(raw, "shipping.phone"),
+        _dig(raw, "invoice.buyerPhone"),
     )
 
     shipping = None
@@ -277,8 +343,10 @@ def _normalize_customer(raw: dict) -> dict | None:
         _first(
             cust.get("billingAddress"),
             cust.get("billing_address"),
+            raw.get("buyerBillingAddress"),
             raw.get("billingAddress"),
             _dig(raw, "invoice.billingAddress"),
+            _dig(raw, "invoice.buyerBillingAddress"),
             _flatten_prefixed_address(raw, "billing"),
         )
     )
@@ -290,6 +358,12 @@ def _normalize_customer(raw: dict) -> dict | None:
         "email": email or "",
         "phone": phone or "",
     }
+    company = _first(
+        cust.get("company"), cust.get("companyName"),
+        raw.get("companyName"), raw.get("billingCompanyName"),
+    )
+    if company:
+        out["company"] = str(company).strip()
     if shipping:
         out["shippingAddress"] = shipping
     if billing:
@@ -314,28 +388,35 @@ def _normalize_address(addr) -> dict | None:
         }
     if not isinstance(addr, dict):
         return None
-    # Nested { address: {...} } wrappers
-    nested = _first(addr.get("address"), addr.get("shippingAddress"), addr.get("deliveryAddress"))
+    # Nested { address: {...} } wrappers (not Marketplacer's string ``address`` field)
+    nested = addr.get("address")
+    if not isinstance(nested, dict):
+        nested = _first(addr.get("shippingAddress"), addr.get("deliveryAddress"))
     if isinstance(nested, dict) and not any(
         addr.get(k) for k in ("line1", "address1", "street", "city", "suburb", "postcode", "postalCode")
     ):
         addr = nested
     line1 = _first(
         addr.get("line1"), addr.get("address1"), addr.get("street"), addr.get("street1"),
-        addr.get("addressLine1"), addr.get("address"), addr.get("addressLine"),
+        addr.get("addressLine1"),
+        addr.get("address") if not isinstance(addr.get("address"), dict) else None,
+        addr.get("addressLine"),
+        addr.get("fullAddress"),
     )
     line2 = _first(
         addr.get("line2"), addr.get("address2"), addr.get("street2"),
-        addr.get("addressLine2"), addr.get("unit"),
+        addr.get("addressLine2"), addr.get("subaddress"), addr.get("unit"),
     )
     city = _first(addr.get("city"), addr.get("suburb"), addr.get("town"), addr.get("locality"))
-    state = _first(addr.get("state"), addr.get("region"), addr.get("province"), addr.get("stateCode"))
+    state = _place_text(
+        _first(addr.get("state"), addr.get("region"), addr.get("province"), addr.get("stateCode"))
+    )
     postcode = _first(
         addr.get("postcode"), addr.get("postalCode"), addr.get("zip"),
         addr.get("zipCode"), addr.get("postCode"),
     )
-    country = _first(
-        addr.get("country"), addr.get("countryCode"), addr.get("countryName"), addr.get("nation"),
+    country = _place_text(
+        _first(addr.get("country"), addr.get("countryCode"), addr.get("countryName"), addr.get("nation"))
     )
     company = _first(addr.get("company"), addr.get("companyName"), addr.get("businessName"), addr.get("organisation"))
     out = {

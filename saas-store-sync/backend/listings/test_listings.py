@@ -819,6 +819,81 @@ class OrderNormalizeTests(TestCase):
         self.assertEqual(details["shippingAddress"]["postcode"], "4000")
         self.assertEqual(details["customer"]["name"], "Alex Buyer")
 
+    def test_build_order_details_from_marketplacer_buyer_fields(self):
+        """Lasoo/Marketplacer invoices expose buyer* + nested state/country objects."""
+        raw = {
+            "id": 1024157,
+            "invoiceNumber": "1024157",
+            "status": "PAID",
+            "createdAt": "2026-07-22T03:33:00Z",
+            "totalCents": 2699,
+            "buyerFirstName": "Taylor",
+            "buyerSurname": "Nguyen",
+            "buyerEmailAddress": "taylor@example.com",
+            "buyerPhone": "0412345678",
+            "companyName": "Nguyen Co",
+            "shippingAddress": {
+                "address": "42 Harbour Rd",
+                "subaddress": "Unit 3",
+                "city": "Sydney",
+                "postcode": "2000",
+                "state": {"name": "New South Wales", "short": "NSW"},
+                "country": {"code": "AU", "name": "Australia"},
+            },
+            "buyerBillingAddress": {
+                "address": "42 Harbour Rd",
+                "city": "Sydney",
+                "postcode": "2000",
+                "state": {"short": "NSW"},
+                "country": {"code": "AU"},
+            },
+            "lineItems": [
+                {
+                    "title": "Plush Dog Crate Bed",
+                    "sku": "P-XD1836-M-BG",
+                    "quantity": 1,
+                    "priceCents": 2699,
+                }
+            ],
+        }
+        details = order_service.build_order_details(raw)
+        self.assertEqual(details["customer"]["firstName"], "Taylor")
+        self.assertEqual(details["customer"]["lastName"], "Nguyen")
+        self.assertEqual(details["customer"]["name"], "Taylor Nguyen")
+        self.assertEqual(details["customer"]["email"], "taylor@example.com")
+        self.assertEqual(details["customer"]["phone"], "0412345678")
+        self.assertEqual(details["shippingAddress"]["line1"], "42 Harbour Rd")
+        self.assertEqual(details["shippingAddress"]["line2"], "Unit 3")
+        self.assertEqual(details["shippingAddress"]["city"], "Sydney")
+        self.assertEqual(details["shippingAddress"]["state"], "New South Wales")
+        self.assertEqual(details["shippingAddress"]["postcode"], "2000")
+        self.assertEqual(details["shippingAddress"]["country"], "Australia")
+        self.assertEqual(details["billingAddress"]["state"], "NSW")
+        self.assertEqual(details["billingAddress"]["country"], "AU")
+
+    def test_build_order_details_from_legacy_customer_include(self):
+        """Legacy REST include=customer puts address fields flat on the customer blob."""
+        details = order_service.build_order_details({
+            "invoiceNumber": "INV-LEGACY",
+            "customer": {
+                "first_name": "Test",
+                "surname": "User",
+                "email_address": "test@example.com",
+                "phone": "0491570156",
+                "address": "1 Example Road",
+                "city": "Melbourne",
+                "state": "Victoria",
+                "postcode": "3000",
+                "country": "Australia",
+            },
+            "lineItems": [{"title": "Item", "quantity": 1, "priceCents": 1000}],
+        })
+        self.assertEqual(details["customer"]["name"], "Test User")
+        self.assertEqual(details["customer"]["email"], "test@example.com")
+        self.assertEqual(details["shippingAddress"]["line1"], "1 Example Road")
+        self.assertEqual(details["shippingAddress"]["city"], "Melbourne")
+        self.assertEqual(details["shippingAddress"]["postcode"], "3000")
+
     def test_enrich_order_line_items_from_store_listing(self):
         User = get_user_model()
         user = User.objects.create_user(username="enr", email="enr@example.com", password="pw")
