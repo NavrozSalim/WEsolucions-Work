@@ -643,6 +643,7 @@ export default function Orders() {
     const [searchParams, setSearchParams] = useSearchParams();
     const initialStore = searchParams.get('store') || '';
     const initialOrderKey = searchParams.get('order') || '';
+    const initialStatus = searchParams.get('status') || 'all';
 
     const [stores, setStores] = useState([]);
     const [storesLoading, setStoresLoading] = useState(true);
@@ -659,7 +660,11 @@ export default function Orders() {
     const [cancelOrderRow, setCancelOrderRow] = useState(null);
     const [cancelLoading, setCancelLoading] = useState(false);
     const [exporting, setExporting] = useState(false);
-    const [statusFilter, setStatusFilter] = useState('all');
+    const [statusFilter, setStatusFilter] = useState(() => {
+        if (initialStatus === 'open' || initialStatus === 'all') return initialStatus === 'open' ? 'open' : 'all';
+        if (Object.prototype.hasOwnProperty.call(STATUS_LABELS, initialStatus)) return initialStatus;
+        return 'all';
+    });
 
     useEffect(() => {
         getCatalogStores()
@@ -814,12 +819,18 @@ export default function Orders() {
 
     const filteredOrders = useMemo(() => {
         if (!statusFilter || statusFilter === 'all') return orders;
+        if (statusFilter === 'open') {
+            return orders.filter((o) => o.status === 'new' || o.status === 'paid');
+        }
         return orders.filter((o) => o.status === statusFilter);
     }, [orders, statusFilter]);
 
     const statusFilterOptions = useMemo(() => {
         const present = new Set(orders.map((o) => o.status).filter(Boolean));
-        const opts = [{ value: 'all', label: 'All statuses' }];
+        const opts = [
+            { value: 'all', label: 'All statuses' },
+            { value: 'open', label: 'Open (new + paid)' },
+        ];
         Object.keys(STATUS_LABELS).forEach((key) => {
             if (present.has(key) || key === statusFilter) {
                 opts.push({ value: key, label: STATUS_LABELS[key] });

@@ -1,14 +1,20 @@
 from django.utils import timezone
 from django.db.models import Sum, Q, Count, Max
+from django.db.models.functions import TruncDate
 from django.core.cache import cache
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from datetime import timedelta, datetime, date as date_cls
+from datetime import timedelta, datetime, date as date_cls, time as time_cls
 
 from stores.models import Store
 from catalog.models import ProductMapping
+from listings.models import MarketplaceOrder, OrderStatus
 from .serializers import DashboardSummarySerializer
+
+OPEN_ORDER_STATUSES = (OrderStatus.NEW, OrderStatus.PAID)
+IN_SHIPPING_STATUSES = (OrderStatus.SENT, OrderStatus.SHIPPING_SUBMITTED)
+COMPLETE_ORDER_STATUSES = (OrderStatus.SHIPPING_COMPLETE,)
 
 
 def _live_sync_snapshot(store_ids):
@@ -37,6 +43,38 @@ def _live_sync_snapshot(store_ids):
     )}
 
 
+def _orders_by_day(store_ids, start_date, end_date):
+    """Live order counts keyed by local date from MarketplaceOrder.created_at."""
+    if not store_ids:
+        return {}
+    start_dt = timezone.make_aware(datetime.combine(start_date, time_cls.min))
+    end_dt = timezone.make_aware(datetime.combine(end_date + timedelta(days=1), time_cls.min))
+    rows = (
+        MarketplaceOrder.objects.filter(
+            store_id__in=store_ids,
+            created_at__gte=start_dt,
+            created_at__lt=end_dt,
+        )
+        .annotate(day=TruncDate('created_at'))
+        .values('day')
+        .annotate(
+            orders_count=Count('id'),
+            revenue_cents=Sum('total_amount_cents'),
+        )
+        .order_by('day')
+    )
+    out = {}
+    for row in rows:
+        day = row['day']
+        if day is None:
+            continue
+        out[day] = {
+            'orders_count': row.get('orders_count') or 0,
+            'revenue': float((row.get('revenue_cents') or 0) / 100.0),
+        }
+    return out
+
+
 def _chart_date_range(request):
     range_type = request.query_params.get('range', '30')
     end_date = timezone.now().date()
@@ -62,13 +100,13 @@ def _chart_date_range(request):
 
 
 class DashboardSummaryView(APIView):
-    """Ops KPIs: listings, sync status buckets, out-of-stock. Optional: ?store_id=<uuid>"""
+    """Ops KPIs: listings, sync buckets, orders. Optional: ?store_id=<uuid>"""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         user = request.user
         store_id = request.query_params.get('store_id')
-        cache_key = f'analytics:dashboard:v3:user={user.id}:store={store_id or "all"}'
+        cache_key = f'analytics:dashboard:v4:user={user.id}:store={store_id or "all"}'
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached)
@@ -82,10 +120,18 @@ class DashboardSummaryView(APIView):
 
         mappings = ProductMapping.objects.filter(store_id__in=store_ids)
         total_products = mappings.count()
-        total_orders = 0
         out_of_stock_count = mappings.filter(
             Q(store_stock=0) | Q(store_stock__isnull=True)
         ).count()
+
+        recent_since = timezone.now() - timedelta(days=30)
+        order_totals = MarketplaceOrder.objects.filter(store_id__in=store_ids).aggregate(
+            total_orders=Count('id'),
+            orders_open_count=Count('id', filter=Q(status__in=OPEN_ORDER_STATUSES)),
+            orders_in_shipping_count=Count('id', filter=Q(status__in=IN_SHIPPING_STATUSES)),
+            orders_complete_count=Count('id', filter=Q(status__in=COMPLETE_ORDER_STATUSES)),
+            orders_recent_count=Count('id', filter=Q(created_at__gte=recent_since)),
+        )
 
         bd_rows = (
             mappings
@@ -106,6 +152,19 @@ class DashboardSummaryView(APIView):
         )
         bd_map = {row['store_id']: row for row in bd_rows}
 
+        order_rows = (
+            MarketplaceOrder.objects.filter(store_id__in=store_ids)
+            .values('store_id')
+            .annotate(
+                order_count=Count('id'),
+                orders_open_count=Count('id', filter=Q(status__in=OPEN_ORDER_STATUSES)),
+                orders_in_shipping_count=Count('id', filter=Q(status__in=IN_SHIPPING_STATUSES)),
+                orders_complete_count=Count('id', filter=Q(status__in=COMPLETE_ORDER_STATUSES)),
+                orders_recent_count=Count('id', filter=Q(created_at__gte=recent_since)),
+            )
+        )
+        order_map = {row['store_id']: row for row in order_rows}
+
         store_breakdown = []
         needs_attention_total = 0
         pending_total = 0
@@ -114,6 +173,7 @@ class DashboardSummaryView(APIView):
         synced_total = 0
         for store in stores:
             row = bd_map.get(store.id, {})
+            o_row = order_map.get(store.id, {})
             needs_attention = row.get('needs_attention_count', 0) or 0
             pending = row.get('pending_count', 0) or 0
             failed = row.get('failed_count', 0) or 0
@@ -144,12 +204,21 @@ class DashboardSummaryView(APIView):
                 'scraped_count': scraped,
                 'out_of_stock_count': row.get('out_of_stock_count', 0) or 0,
                 'last_sync_at': latest.isoformat() if latest else None,
+                'order_count': o_row.get('order_count', 0) or 0,
+                'orders_open_count': o_row.get('orders_open_count', 0) or 0,
+                'orders_in_shipping_count': o_row.get('orders_in_shipping_count', 0) or 0,
+                'orders_complete_count': o_row.get('orders_complete_count', 0) or 0,
+                'orders_recent_count': o_row.get('orders_recent_count', 0) or 0,
             })
 
         data = {
             'total_products': total_products,
             'catalog_count': total_products,
-            'total_orders': total_orders,
+            'total_orders': order_totals.get('total_orders') or 0,
+            'orders_open_count': order_totals.get('orders_open_count') or 0,
+            'orders_in_shipping_count': order_totals.get('orders_in_shipping_count') or 0,
+            'orders_complete_count': order_totals.get('orders_complete_count') or 0,
+            'orders_recent_count': order_totals.get('orders_recent_count') or 0,
             'out_of_stock_count': out_of_stock_count,
             'needs_attention_count': needs_attention_total,
             'pending_count': pending_total,
@@ -188,6 +257,7 @@ class AnalyticsChartView(APIView):
         store_ids = list(stores.values_list('id', flat=True))
         start_date, end_date = _chart_date_range(request)
         live = _live_sync_snapshot(store_ids)
+        live_orders = _orders_by_day(store_ids, start_date, end_date)
         today = timezone.now().date()
 
         metrics = DailyStoreMetrics.objects.filter(
@@ -209,16 +279,27 @@ class AnalyticsChartView(APIView):
         )
         by_date = {row['date']: row for row in daily}
 
-        # Build a continuous series; always overlay today's live snapshot.
         cursor = start_date
         series = []
         while cursor <= end_date:
             row = by_date.get(cursor)
+            order_live = live_orders.get(cursor) or {}
+            # Prefer live MarketplaceOrder counts for the orders series.
+            orders_count = order_live.get('orders_count')
+            revenue = order_live.get('revenue')
+            if orders_count is None and row:
+                orders_count = row.get('orders_count') or 0
+                revenue = float(row.get('revenue') or 0)
+            if orders_count is None:
+                orders_count = 0
+            if revenue is None:
+                revenue = 0.0
+
             if cursor == today or (row is None and cursor == end_date and end_date == today):
                 point = {
                     'date': cursor,
-                    'orders_count': (row or {}).get('orders_count') or 0,
-                    'revenue': float((row or {}).get('revenue') or 0),
+                    'orders_count': orders_count,
+                    'revenue': revenue,
                     'out_of_stock_count': live['out_of_stock'],
                     'pending_count': live['pending'],
                     'failed_count': live['failed'],
@@ -226,32 +307,29 @@ class AnalyticsChartView(APIView):
                     'synced_count': live['synced'],
                     'scraped_count': live['scraped'],
                 }
-            elif row:
+            elif row or order_live:
                 point = {
                     'date': cursor,
-                    'orders_count': row.get('orders_count') or 0,
-                    'revenue': float(row.get('revenue') or 0),
-                    'out_of_stock_count': row.get('out_of_stock_count') or 0,
-                    'pending_count': row.get('pending_count') or 0,
-                    'failed_count': row.get('failed_count') or 0,
-                    'needs_attention_count': row.get('needs_attention_count') or 0,
-                    'synced_count': row.get('synced_count') or 0,
-                    'scraped_count': row.get('scraped_count') or 0,
+                    'orders_count': orders_count,
+                    'revenue': revenue,
+                    'out_of_stock_count': (row or {}).get('out_of_stock_count') or 0,
+                    'pending_count': (row or {}).get('pending_count') or 0,
+                    'failed_count': (row or {}).get('failed_count') or 0,
+                    'needs_attention_count': (row or {}).get('needs_attention_count') or 0,
+                    'synced_count': (row or {}).get('synced_count') or 0,
+                    'scraped_count': (row or {}).get('scraped_count') or 0,
                 }
             else:
-                # No history for this day — omit zeros that flatten the chart; skip empty days
-                # unless we have no history at all (handled below).
                 point = None
             if point is not None:
                 series.append(point)
             cursor += timedelta(days=1)
 
-        # If history is empty except today, still show at least today's live point.
         if not series:
             series = [{
                 'date': today,
-                'orders_count': 0,
-                'revenue': 0,
+                'orders_count': (live_orders.get(today) or {}).get('orders_count') or 0,
+                'revenue': (live_orders.get(today) or {}).get('revenue') or 0,
                 'out_of_stock_count': live['out_of_stock'],
                 'pending_count': live['pending'],
                 'failed_count': live['failed'],
@@ -260,8 +338,6 @@ class AnalyticsChartView(APIView):
                 'scraped_count': live['scraped'],
             }]
 
-        # If we only have today's point but user asked for a range, keep that single
-        # honest snapshot rather than inventing a flat fake history.
         def _fmt(d):
             if isinstance(d, date_cls):
                 return d.isoformat()

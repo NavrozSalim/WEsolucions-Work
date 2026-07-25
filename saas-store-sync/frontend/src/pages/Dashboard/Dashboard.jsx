@@ -11,6 +11,7 @@ import {
     ShoppingCart,
     Store,
     MessageSquare,
+    Truck,
 } from 'lucide-react';
 import {
     LineChart,
@@ -36,6 +37,14 @@ function catalogLink({ storeId, status } = {}) {
     if (status) params.set('status', status);
     const qs = params.toString();
     return qs ? `/catalog?${qs}` : '/catalog';
+}
+
+function ordersLink({ storeId, status } = {}) {
+    const params = new URLSearchParams();
+    if (storeId) params.set('store', storeId);
+    if (status) params.set('status', status);
+    const qs = params.toString();
+    return qs ? `/orders?${qs}` : '/orders';
 }
 
 function storeHealth(store) {
@@ -122,12 +131,18 @@ export default function Dashboard() {
         failed_count: 0,
         scraped_count: 0,
         synced_count: 0,
+        total_orders: 0,
+        orders_open_count: 0,
+        orders_in_shipping_count: 0,
+        orders_complete_count: 0,
+        orders_recent_count: 0,
         store_breakdown: [],
     });
     const [chartData, setChartData] = useState({
         out_of_stock: [],
         sync_health: [],
         sync_mix: null,
+        orders: [],
     });
     const [loading, setLoading] = useState(true);
     const [chartsLoading, setChartsLoading] = useState(true);
@@ -173,9 +188,10 @@ export default function Dashboard() {
                     out_of_stock: d.out_of_stock || [],
                     sync_health: d.sync_health || [],
                     sync_mix: d.sync_mix || null,
+                    orders: d.orders || [],
                 });
             })
-            .catch(() => setChartData({ out_of_stock: [], sync_health: [], sync_mix: null }))
+            .catch(() => setChartData({ out_of_stock: [], sync_health: [], sync_mix: null, orders: [] }))
             .finally(() => setChartsLoading(false));
     }, [range, selectedStore]);
 
@@ -186,6 +202,10 @@ export default function Dashboard() {
     const failed = summary.failed_count ?? 0;
     const synced = summary.synced_count ?? 0;
     const scraped = summary.scraped_count ?? 0;
+    const ordersOpen = summary.orders_open_count ?? 0;
+    const ordersInShipping = summary.orders_in_shipping_count ?? 0;
+    const ordersRecent = summary.orders_recent_count ?? 0;
+    const totalOrders = summary.total_orders ?? 0;
     const storeBreakdown = summary.store_breakdown || [];
 
     const attentionItems = useMemo(() => {
@@ -224,6 +244,12 @@ export default function Dashboard() {
             })
             .filter((s) => s.issues.length > 0)
             .sort((a, b) => b.weight - a.weight);
+    }, [storeBreakdown]);
+
+    const openOrderStores = useMemo(() => {
+        return [...storeBreakdown]
+            .filter((s) => (s.orders_open_count || 0) > 0)
+            .sort((a, b) => (b.orders_open_count || 0) - (a.orders_open_count || 0));
     }, [storeBreakdown]);
 
     const liveJobs = useMemo(
@@ -286,11 +312,46 @@ export default function Dashboard() {
         },
     ];
 
+    const orderKpis = [
+        {
+            label: 'Open orders',
+            value: dash(ordersOpen),
+            sub: 'New or paid — need fulfillment',
+            icon: ShoppingCart,
+            tone: ordersOpen > 0 ? 'warning' : 'default',
+            to: ordersLink({ storeId: storeParam, status: 'open' }),
+        },
+        {
+            label: 'In shipping',
+            value: dash(ordersInShipping),
+            sub: 'Sent or shipping submitted',
+            icon: Truck,
+            tone: ordersInShipping > 0 ? 'accent' : 'default',
+            to: ordersLink({ storeId: storeParam, status: 'sent' }),
+        },
+        {
+            label: 'Orders (30d)',
+            value: dash(ordersRecent),
+            sub: 'Created in the last 30 days',
+            icon: ShoppingCart,
+            tone: 'accent',
+            to: ordersLink({ storeId: storeParam }),
+        },
+        {
+            label: 'All orders',
+            value: dash(totalOrders),
+            sub: 'Stored marketplace orders',
+            icon: Package,
+            tone: 'default',
+            to: ordersLink({ storeId: storeParam }),
+        },
+    ];
+
     return (
         <div className="space-y-6">
             <PageHeader
                 title="Dashboard"
-                description="Counts, trends, and store detail in one place."
+                description="Inventory and orders — counts, trends, and store detail in one place."
                 actions={
                     <div className="flex flex-wrap items-center gap-2">
                         <select
@@ -325,13 +386,29 @@ export default function Dashboard() {
                 }
             />
 
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                {kpis.map((item) => (
-                    <KPICard key={item.label} {...item} />
-                ))}
+            <div>
+                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    Inventory
+                </p>
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    {kpis.map((item) => (
+                        <KPICard key={item.label} {...item} />
+                    ))}
+                </div>
             </div>
 
-            <div className="grid gap-6 lg:grid-cols-3">
+            <div>
+                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    Orders
+                </p>
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    {orderKpis.map((item) => (
+                        <KPICard key={item.label} {...item} />
+                    ))}
+                </div>
+            </div>
+
+            <div className="grid gap-6 lg:grid-cols-2">
                 <ChartCard
                     title="Sync health trend"
                     description={`Pending, attention, and failed over the last ${range} days.`}
@@ -420,6 +497,45 @@ export default function Dashboard() {
                 </ChartCard>
 
                 <ChartCard
+                    title="Orders trend"
+                    description={`New marketplace orders over the last ${range} days.`}
+                    empty={!chartsLoading && !(chartData.orders?.length > 0)}
+                >
+                    {chartsLoading ? (
+                        <div className="flex h-full items-center justify-center gap-2 text-sm text-slate-500">
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            Loading…
+                        </div>
+                    ) : (
+                        <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={chartData.orders}>
+                                <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                                <XAxis
+                                    dataKey="date"
+                                    tick={{ fontSize: 11, fill: axisColor }}
+                                    stroke={axisColor}
+                                    tickFormatter={shortDate}
+                                />
+                                <YAxis
+                                    tick={{ fontSize: 11, fill: axisColor }}
+                                    stroke={axisColor}
+                                    allowDecimals={false}
+                                />
+                                <Tooltip contentStyle={tooltipStyle} labelFormatter={shortDate} />
+                                <Line
+                                    type="monotone"
+                                    dataKey="count"
+                                    name="Orders"
+                                    stroke="#0ea5e9"
+                                    strokeWidth={2}
+                                    dot={{ r: 2, fill: '#0ea5e9' }}
+                                />
+                            </LineChart>
+                        </ResponsiveContainer>
+                    )}
+                </ChartCard>
+
+                <ChartCard
                     title="Listing mix"
                     description="Current status breakdown across this view."
                     empty={!chartsLoading && syncMixBars.length === 0}
@@ -454,21 +570,21 @@ export default function Dashboard() {
             </div>
 
             <div className="grid gap-6 lg:grid-cols-3">
-                <div className="rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900 lg:col-span-2">
+                <div className="rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
                     <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800">
                         <div>
                             <h2 className="text-base font-medium text-slate-900 dark:text-slate-100">
-                                Needs attention now
+                                Catalog attention
                             </h2>
                             <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
-                                Stores with failed, blocked, or pending listings.
+                                Failed, blocked, or pending listings.
                             </p>
                         </div>
                         <Link
                             to={catalogLink({ storeId: storeParam })}
                             className="inline-flex items-center gap-1 text-sm font-medium text-accent-600 hover:text-accent-500 dark:text-accent-400"
                         >
-                            Open catalog
+                            Catalog
                             <ArrowRight className="h-3.5 w-3.5" />
                         </Link>
                     </div>
@@ -530,6 +646,74 @@ export default function Dashboard() {
                                     </li>
                                 );
                             })}
+                        </ul>
+                    )}
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
+                    <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800">
+                        <div>
+                            <h2 className="text-base font-medium text-slate-900 dark:text-slate-100">
+                                Open orders
+                            </h2>
+                            <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
+                                New or paid orders waiting to ship.
+                            </p>
+                        </div>
+                        <Link
+                            to={ordersLink({ storeId: storeParam })}
+                            className="inline-flex items-center gap-1 text-sm font-medium text-accent-600 hover:text-accent-500 dark:text-accent-400"
+                        >
+                            Orders
+                            <ArrowRight className="h-3.5 w-3.5" />
+                        </Link>
+                    </div>
+
+                    {loading ? (
+                        <div className="flex items-center justify-center gap-2 px-5 py-16 text-sm text-slate-500 dark:text-slate-400">
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            Loading…
+                        </div>
+                    ) : openOrderStores.length === 0 ? (
+                        <EmptyState
+                            icon={CheckCircle2}
+                            title="No open orders"
+                            description="Nothing in new/paid status for this view."
+                        />
+                    ) : (
+                        <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                            {openOrderStores.map((s) => (
+                                <li key={s.store_id}>
+                                    <Link
+                                        to={ordersLink({ storeId: s.store_id, status: 'open' })}
+                                        className="flex items-center gap-4 px-5 py-3.5 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/40"
+                                    >
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
+                                                    {s.store_name}
+                                                </p>
+                                                {s.marketplace_name && (
+                                                    <span className="text-xs text-slate-400 dark:text-slate-500">
+                                                        {s.marketplace_name}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                                {formatCount(s.orders_open_count)} open
+                                                {' · '}
+                                                {formatCount(s.orders_in_shipping_count)} in shipping
+                                                {' · '}
+                                                {formatCount(s.orders_recent_count)} in 30d
+                                            </p>
+                                        </div>
+                                        <Badge variant="warning">
+                                            {formatCount(s.orders_open_count)} open
+                                        </Badge>
+                                        <ArrowRight className="h-4 w-4 shrink-0 text-slate-400" />
+                                    </Link>
+                                </li>
+                            ))}
                         </ul>
                     )}
                 </div>
@@ -596,7 +780,11 @@ export default function Dashboard() {
                                     icon: Package,
                                     label: 'Open catalog',
                                 },
-                                { to: '/orders', icon: ShoppingCart, label: 'View orders' },
+                                {
+                                    to: ordersLink({ storeId: storeParam }),
+                                    icon: ShoppingCart,
+                                    label: 'View orders',
+                                },
                                 { to: '/tickets', icon: MessageSquare, label: 'Open tickets' },
                                 { to: '/store-settings', icon: Store, label: 'Manage stores' },
                             ].map((a) => (
@@ -621,7 +809,7 @@ export default function Dashboard() {
                         Store scoreboard
                     </h2>
                     <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
-                        Every count you need per store — open a row for full catalog detail.
+                        Inventory and order counts per store — open Catalog or Orders for detail.
                     </p>
                 </div>
                 {loading ? (
@@ -657,6 +845,8 @@ export default function Dashboard() {
                                     <th className="text-right">Attention</th>
                                     <th className="text-right">Failed</th>
                                     <th className="text-right">OOS</th>
+                                    <th className="text-right">Open orders</th>
+                                    <th className="text-right">Orders 30d</th>
                                     <th>Last sync</th>
                                     <th />
                                 </tr>
@@ -700,11 +890,28 @@ export default function Dashboard() {
                                             <td className="text-right tabular-nums text-slate-700 dark:text-slate-300">
                                                 {formatCount(s.out_of_stock_count)}
                                             </td>
+                                            <td className="text-right tabular-nums text-amber-600 dark:text-amber-400">
+                                                {formatCount(s.orders_open_count)}
+                                            </td>
+                                            <td className="text-right tabular-nums">
+                                                {formatCount(s.orders_recent_count)}
+                                            </td>
                                             <td className="whitespace-nowrap text-sm text-slate-500 dark:text-slate-400">
                                                 {formatRelativeTime(s.last_sync_at)}
                                             </td>
                                             <td className="text-right">
                                                 <div className="flex items-center justify-end gap-3">
+                                                    {(s.orders_open_count || 0) > 0 ? (
+                                                        <Link
+                                                            to={ordersLink({
+                                                                storeId: s.store_id,
+                                                                status: 'open',
+                                                            })}
+                                                            className="text-sm font-medium text-amber-600 hover:text-amber-500 dark:text-amber-400"
+                                                        >
+                                                            Orders
+                                                        </Link>
+                                                    ) : null}
                                                     {(s.needs_attention_count || 0) + (s.failed_count || 0) > 0 ? (
                                                         <Link
                                                             to={catalogLink({
@@ -724,7 +931,7 @@ export default function Dashboard() {
                                                         to={catalogLink({ storeId: s.store_id })}
                                                         className="inline-flex items-center gap-1 text-sm font-medium text-accent-600 hover:text-accent-500 dark:text-accent-400"
                                                     >
-                                                        Open
+                                                        Catalog
                                                         <ArrowRight className="h-3.5 w-3.5" />
                                                     </Link>
                                                 </div>
