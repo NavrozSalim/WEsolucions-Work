@@ -541,6 +541,7 @@ def _collect_vendor_urls(
     *,
     restrict_to_user_id: int | None = None,
     backfill_missing: bool = True,
+    pending_only: bool = False,
 ) -> list[str]:
     """Return distinct vendor_url values for ``vendor``.
 
@@ -548,8 +549,14 @@ def _collect_vendor_urls(
 
     For HEB, resolves URLs from ``Product.vendor_url``, catalog Vendor URL / Vendor ID,
     or composite SKU (e.g. ``AHJH-150275-...``) and optionally backfills ``Product.vendor_url``.
+
+    When ``pending_only`` is True (desktop ``next-job``), only mappings still
+    waiting for scrape data (``sync_status='pending'``) are included — so the
+    poller does not re-scrape already populated products.
     """
     qs = _ingest_mapping_qs(vendor, store_id, restrict_to_user_id)
+    if pending_only:
+        qs = qs.filter(sync_status='pending')
     if not qs.exists():
         return []
 
@@ -637,6 +644,7 @@ class VendorIngestNextJobView(APIView):
                     str(job.store_id) if job.store_id else None,
                     vendor=vendor,
                     restrict_to_user_id=token.created_by_id,
+                    pending_only=True,
                 )
                 job.status = HebScrapeJob.Status.CLAIMED
                 job.claimed_at = timezone.now()

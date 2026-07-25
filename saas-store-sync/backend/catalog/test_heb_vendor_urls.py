@@ -71,6 +71,34 @@ class HebIngestUrlCollectionTests(TestCase):
         self.product.refresh_from_db()
         self.assertIn('heb.com', self.product.vendor_url)
 
+    def test_collect_urls_pending_only_skips_scraped(self):
+        scraped = Product.objects.create(
+            vendor=self.vendor,
+            owner=self.user,
+            vendor_sku='AHJH-999001-0311-PK3',
+            vendor_url='https://www.heb.com/product-detail/999001',
+        )
+        ProductMapping.objects.create(
+            store=self.store,
+            product=scraped,
+            marketplace_id='AHJ-scraped',
+            is_active=True,
+            sync_status='scraped',
+        )
+        all_urls = _collect_vendor_urls(
+            str(self.store.id), vendor='heb', restrict_to_user_id=self.user.id,
+        )
+        pending_urls = _collect_vendor_urls(
+            str(self.store.id),
+            vendor='heb',
+            restrict_to_user_id=self.user.id,
+            pending_only=True,
+        )
+        self.assertEqual(len(all_urls), 2)
+        self.assertEqual(len(pending_urls), 1)
+        self.assertIn('150275', pending_urls[0])
+        self.assertTrue(all('999001' not in u for u in pending_urls))
+
 
 @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
 class HebPickPendingJobTests(TestCase):
