@@ -21,6 +21,10 @@ class Store(models.Model):
         ('staging', 'Staging'),
         ('production', 'Production'),
     ]
+    MYDEAL_ENVIRONMENT_CHOICES = [
+        ('sandbox', 'Sandbox'),
+        ('production', 'Production (Live)'),
+    ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='stores')
@@ -75,8 +79,23 @@ class Store(models.Model):
         choices=MYDEAL_SETUP_CHOICES,
         default='upload',
         blank=True,
-        help_text='Mydeal: upload Price/Inventory CSV templates or API (future).',
+        help_text='MyDeal (Woolworths/WMP): upload Price/Inventory CSV templates or Universal API.',
     )
+    # --- MyDeal / Woolworths Marketplace Platform (WMP) Universal API ---
+    mydeal_environment = models.CharField(
+        max_length=20, choices=MYDEAL_ENVIRONMENT_CHOICES, default='sandbox', blank=True,
+        help_text='Which MyDeal environment listing pushes / order pulls use by default.',
+    )
+    mydeal_sandbox_base_url = models.URLField(max_length=500, blank=True, default='')
+    mydeal_production_base_url = models.URLField(max_length=500, blank=True, default='')
+    mydeal_sandbox_client_id = EncryptedTextField(null=True, blank=True)
+    mydeal_sandbox_client_secret = EncryptedTextField(null=True, blank=True)
+    mydeal_sandbox_seller_id = EncryptedTextField(null=True, blank=True)
+    mydeal_sandbox_seller_token = EncryptedTextField(null=True, blank=True)
+    mydeal_production_client_id = EncryptedTextField(null=True, blank=True)
+    mydeal_production_client_secret = EncryptedTextField(null=True, blank=True)
+    mydeal_production_seller_id = EncryptedTextField(null=True, blank=True)
+    mydeal_production_seller_token = EncryptedTextField(null=True, blank=True)
     marketplace = models.ForeignKey(
         'marketplace.Marketplace',
         on_delete=models.SET_NULL,

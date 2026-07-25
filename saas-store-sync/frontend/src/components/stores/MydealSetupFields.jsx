@@ -1,9 +1,10 @@
 import { UploadCloud } from 'lucide-react';
 import Button from '../ui/Button';
 import Select from '../ui/Select';
+import MydealConnectionFields from './MydealConnectionFields';
 
 /**
- * Kogan-style Mydeal setup: connection method + template upload when "upload" is selected.
+ * MyDeal setup: connection method + template upload or API credentials.
  * storeId: set when editing an existing store; omit during create until store is saved.
  */
 export default function MydealSetupFields({
@@ -11,25 +12,37 @@ export default function MydealSetupFields({
     onSetupMethodChange,
     storeId,
     onOpenUpload,
+    form,
+    setForm,
+    mode = 'edit',
+    /** Managed (full_store) MyDeal requires API — hide upload option. */
+    forceApi = false,
 }) {
-    const isUpload = (setupMethod || 'upload') === 'upload';
+    const effectiveMethod = forceApi ? 'api' : ((setupMethod || 'upload') === 'api' ? 'api' : 'upload');
+    const isUpload = effectiveMethod === 'upload';
+    const isApi = effectiveMethod === 'api';
 
     return (
         <div className="space-y-3">
-            <Select
-                label="Mydeal connection method"
-                value={setupMethod || 'upload'}
-                onChange={(e) => onSetupMethodChange(e.target.value)}
-                options={[
-                    { value: 'upload', label: 'Upload Option (Price & Inventory templates)' },
-                    { value: 'api', label: 'API connection (coming soon)' },
-                ]}
-                required
-            />
-            {setupMethod === 'api' && (
-                <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
-                    API integration is not active yet. Use Upload Option and upload your Mydeal Price and Inventory CSV templates.
-                </div>
+            {!forceApi && (
+                <Select
+                    label="MyDeal connection method"
+                    value={setupMethod || 'upload'}
+                    onChange={(e) => onSetupMethodChange(e.target.value)}
+                    options={[
+                        { value: 'upload', label: 'Upload Option (Price & Inventory templates)' },
+                        { value: 'api', label: 'API connection (Managed store / WMP Universal API)' },
+                    ]}
+                    required
+                />
+            )}
+            {forceApi && (
+                <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                    MyDeal managed store uses the WMP Universal API
+                </p>
+            )}
+            {isApi && form && setForm && (
+                <MydealConnectionFields form={form} setForm={setForm} mode={mode} />
             )}
             {isUpload && (
                 <div className="space-y-2">
@@ -55,7 +68,8 @@ export default function MydealSetupFields({
                 </div>
             )}
             <p className="text-xs text-slate-500 dark:text-slate-400">
-                Use <strong>Store name</strong> for your Mydeal store (e.g. TFS, P&amp;P). Credentials are encrypted at rest.
+                Use <strong>Store name</strong> for your MyDeal store (e.g. TFS, P&amp;P). Credentials are encrypted at rest.
+                MyDeal is also known as Woolworths Marketplace (WMP).
             </p>
         </div>
     );

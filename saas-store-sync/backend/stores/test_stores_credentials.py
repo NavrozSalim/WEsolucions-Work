@@ -340,3 +340,103 @@ class LasooConnectionTests(SimpleTestCase):
         ok, msg = verify_store_connection(store)
         self.assertFalse(ok)
         self.assertIn('AuthKey', msg or '')
+
+
+class MyDealConnectionTests(SimpleTestCase):
+    def _store(self, **overrides):
+        base = dict(
+            name='TFS MyDeal',
+            marketplace=_mkt('mydeal'),
+            mydeal_setup_method='api',
+            mydeal_environment='sandbox',
+            mydeal_sandbox_base_url='https://sandbox.example.mydeal',
+            mydeal_sandbox_client_id='cid',
+            mydeal_sandbox_client_secret='csecret',
+            mydeal_sandbox_seller_id='sid',
+            mydeal_sandbox_seller_token='stoken',
+            mydeal_production_base_url='',
+            mydeal_production_client_id='',
+            mydeal_production_client_secret='',
+            mydeal_production_seller_id='',
+            mydeal_production_seller_token='',
+        )
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def test_marketplace_kind_mydeal(self):
+        from stores.credentials import marketplace_kind
+        self.assertEqual(marketplace_kind(_mkt('mydeal')), 'mydeal')
+        self.assertEqual(marketplace_kind(SimpleNamespace(code='', name='MyDeal')), 'mydeal')
+
+    def test_verify_upload_mode_skips_api(self):
+        store = self._store(mydeal_setup_method='upload')
+        ok, msg = verify_store_connection(store)
+        self.assertTrue(ok)
+        self.assertIn('upload', (msg or '').lower())
+
+    def test_verify_missing_credentials(self):
+        store = self._store(mydeal_sandbox_client_id='')
+        ok, msg = verify_store_connection(store)
+        self.assertFalse(ok)
+        self.assertIn('ClientID', msg or '')
+
+    @patch('listings.mydeal.client.MyDealClient.verify_connection')
+    def test_verify_store_connection_mydeal_ok(self, mock_verify):
+        mock_verify.return_value = SimpleNamespace(ok=True, message='MyDeal response: Success.')
+        store = self._store()
+        ok, msg = verify_store_connection(store)
+        self.assertTrue(ok)
+        self.assertIn('sandbox', msg or '')
+        mock_verify.assert_called_once()
+
+    @patch('listings.mydeal.client.requests.post')
+    @patch('listings.mydeal.client.requests.request')
+    def test_mydeal_client_token_and_products(self, mock_request, mock_post):
+        from listings.mydeal.client import MyDealClient
+
+        token_resp = MagicMock()
+        token_resp.ok = True
+        token_resp.status_code = 200
+        token_resp.json.return_value = {'access_token': 'tok-1', 'expires_in': 3600}
+        mock_post.return_value = token_resp
+
+        prod_resp = MagicMock()
+        prod_resp.ok = True
+        prod_resp.status_code = 200
+        prod_resp.json.return_value = {'ResponseStatus': 'Success', 'Products': []}
+        mock_request.return_value = prod_resp
+
+        client = MyDealClient(self._store())
+        result = client.verify_connection()
+        self.assertTrue(result.ok)
+        mock_post.assert_called()
+        self.assertIn('/mydealaccesstoken', mock_post.call_args[0][0])
+        token_body = mock_post.call_args.kwargs.get('data') or mock_post.call_args[1].get('data')
+        self.assertEqual(token_body.get('grant_type'), 'client_credentials')
+        self.assertEqual(token_body.get('client_id'), 'cid')
+        self.assertEqual(token_body.get('client_Id'), 'cid')
+        self.assertEqual(token_body.get('client_secret'), 'csecret')
+        mock_request.assert_called()
+        args, kwargs = mock_request.call_args
+        self.assertEqual(args[0], 'GET')
+        self.assertIn('/products', args[1])
+        self.assertEqual(kwargs['headers']['Authorization'], 'Bearer tok-1')
+        self.assertEqual(kwargs['headers']['SellerID'], 'sid')
+        self.assertEqual(kwargs['headers']['SellerToken'], 'stoken')
+
+    @patch('listings.mydeal.client.requests.post')
+    def test_mydeal_token_gateway_forbidden_message(self, mock_post):
+        from listings.errors import MarketplaceError
+        from listings.mydeal.client import MyDealClient
+
+        resp = MagicMock()
+        resp.ok = False
+        resp.status_code = 403
+        resp.headers = {'x-amzn-ErrorType': 'ForbiddenException'}
+        resp.json.return_value = {'message': 'Forbidden'}
+        mock_post.return_value = resp
+
+        client = MyDealClient(self._store())
+        with self.assertRaises(MarketplaceError) as ctx:
+            client.get_access_token(force=True)
+        self.assertIn('allowlist', str(ctx.exception).lower())

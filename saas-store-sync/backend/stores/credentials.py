@@ -107,6 +107,26 @@ def verify_lasoo_connection(store) -> tuple[bool, str | None]:
     return False, result.message or 'Lasoo rejected these credentials.'
 
 
+def verify_mydeal_connection(store) -> tuple[bool, str | None]:
+    """Verify MyDeal (WMP) client + seller credentials via token + products list."""
+    from listings.errors import MarketplaceError
+    from listings.mydeal.client import MyDealClient
+
+    method = (getattr(store, 'mydeal_setup_method', None) or 'upload').strip().lower()
+    if method != 'api':
+        return True, 'MyDeal upload mode — API credentials not required.'
+
+    try:
+        client = MyDealClient(store)
+    except MarketplaceError as exc:
+        return False, str(exc)
+
+    result = client.verify_connection()
+    if result.ok:
+        return True, f'MyDeal {client.environment} connection successful.'
+    return False, result.message or 'MyDeal rejected these credentials.'
+
+
 def verify_store_connection(store) -> tuple[bool, str | None]:
     """Call the marketplace adapter to verify credentials. Returns (ok, error_message)."""
     from store_adapters import get_adapter
@@ -115,6 +135,8 @@ def verify_store_connection(store) -> tuple[bool, str | None]:
     kind = marketplace_kind(marketplace)
     if kind == 'lasoo':
         return verify_lasoo_connection(store)
+    if kind == 'mydeal':
+        return verify_mydeal_connection(store)
 
     if requires_structured_credentials(marketplace):
         try:

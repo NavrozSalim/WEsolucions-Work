@@ -38,9 +38,22 @@ const FREQUENCY_OPTIONS = [
 const DEFAULT_TZ = { USA: 'America/New_York', AU: 'Australia/Sydney' };
 
 // Marketplaces where we can create listings + manage orders (managed store mode).
-const FULL_STORE_MARKETPLACES = ['reverb', 'lasoo'];
+const FULL_STORE_MARKETPLACES = ['reverb', 'lasoo', 'mydeal'];
 const LASOO_DEFAULT_STAGING_URL = 'https://stage.api.lasoo.com.au';
 const LASOO_DEFAULT_PRODUCTION_URL = 'https://api.lasoo.com.au';
+const emptyMydealApiFields = () => ({
+    mydeal_environment: 'sandbox',
+    mydeal_sandbox_base_url: '',
+    mydeal_sandbox_client_id: '',
+    mydeal_sandbox_client_secret: '',
+    mydeal_sandbox_seller_id: '',
+    mydeal_sandbox_seller_token: '',
+    mydeal_production_base_url: '',
+    mydeal_production_client_id: '',
+    mydeal_production_client_secret: '',
+    mydeal_production_seller_id: '',
+    mydeal_production_seller_token: '',
+});
 
 function frequencyToCrontab(freq, hour, minute) {
     const h = parseInt(hour, 10) || 0;
@@ -81,6 +94,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         kogan_tab_name: '',
         kogan_service_account_json: '',
         mydeal_setup_method: 'upload',
+        ...emptyMydealApiFields(),
         lasoo_environment: 'staging',
         lasoo_staging_base_url: LASOO_DEFAULT_STAGING_URL,
         lasoo_staging_auth_key: '',
@@ -111,6 +125,8 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 kogan_sheet_id: '',
                 kogan_tab_name: '',
                 kogan_service_account_json: '',
+                mydeal_setup_method: 'upload',
+                ...emptyMydealApiFields(),
                 lasoo_environment: 'staging',
                 lasoo_staging_base_url: LASOO_DEFAULT_STAGING_URL,
                 lasoo_staging_auth_key: '',
@@ -365,7 +381,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         if (!form.name?.trim()) errs.push('Store name is required');
         if (!form.marketplace_id) errs.push('Marketplace is required');
         if (isFullStore && selectedMarketplace && !FULL_STORE_MARKETPLACES.includes(marketplaceCode(selectedMarketplace))) {
-            errs.push('Managed stores are only available for Reverb and Lasoo right now');
+            errs.push('Managed stores are only available for Reverb, Lasoo, and MyDeal right now');
         }
         if (isLasoo) {
             const env = form.lasoo_environment || 'staging';
@@ -387,7 +403,17 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 if (!form.api_token?.trim()) errs.push('API token is required');
             }
         } else if (isMydeal) {
-            if (mydealSetup === 'api') errs.push('Mydeal API connection is not available yet. Use Upload Option.');
+            const method = isFullStore ? 'api' : mydealSetup;
+            if (method === 'api') {
+                const env = form.mydeal_environment || 'sandbox';
+                const prefix = env === 'production' ? 'mydeal_production' : 'mydeal_sandbox';
+                const envLabel = env === 'production' ? 'production' : 'sandbox';
+                if (!form[`${prefix}_base_url`]?.trim()) errs.push(`MyDeal ${envLabel} API base URL is required`);
+                if (!form[`${prefix}_client_id`]?.trim()) errs.push(`MyDeal ${envLabel} Client ID is required`);
+                if (!form[`${prefix}_client_secret`]?.trim()) errs.push(`MyDeal ${envLabel} Client Secret is required`);
+                if (!form[`${prefix}_seller_id`]?.trim()) errs.push(`MyDeal ${envLabel} Seller ID is required`);
+                if (!form[`${prefix}_seller_token`]?.trim()) errs.push(`MyDeal ${envLabel} Seller Token is required`);
+            }
         } else {
             if (!form.api_token?.trim()) errs.push('API key is required');
             else if (isSears || isWalmart) {
@@ -448,6 +474,21 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         lasoo_production_base_url: form.lasoo_production_base_url?.trim() || '',
         lasoo_production_auth_key: form.lasoo_production_auth_key?.trim() || '',
     });
+
+    const buildMydealPayload = () => {
+        const method = isFullStore ? 'api' : mydealSetup;
+        const payload = { mydeal_setup_method: method };
+        if (method !== 'api') return payload;
+        const env = form.mydeal_environment || 'sandbox';
+        const prefix = env === 'production' ? 'mydeal_production' : 'mydeal_sandbox';
+        payload.mydeal_environment = env;
+        payload[`${prefix}_base_url`] = form[`${prefix}_base_url`]?.trim() || '';
+        for (const key of ['client_id', 'client_secret', 'seller_id', 'seller_token']) {
+            const field = `${prefix}_${key}`;
+            if (form[field]?.trim()) payload[field] = form[field].trim();
+        }
+        return payload;
+    };
 
     const buildSettingsPayload = () => ({
         vendor_price_settings: (form.vendor_price_settings || []).map((vp) => {
@@ -543,7 +584,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     : isKogan && koganAuth === 'token'
                         ? { api_token: form.api_token }
                     : isMydeal
-                        ? { mydeal_setup_method: mydealSetup }
+                        ? buildMydealPayload()
                     : isLasoo
                         ? buildLasooPayload()
                     : { api_token: form.api_token }),
@@ -595,7 +636,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                             }
                         }
                     }
-                    if (isMydeal && mydealSetup === 'upload' && id) {
+                    if (isMydeal && !isFullStore && mydealSetup === 'upload' && id) {
                         setCreatedStoreId(id);
                         setMydealUploadOpen(true);
                     } else {
@@ -639,7 +680,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 : isKogan && koganAuth === 'token'
                     ? { api_token: form.api_token }
                 : isMydeal
-                    ? { mydeal_setup_method: mydealSetup }
+                    ? buildMydealPayload()
                 : isLasoo
                     ? buildLasooPayload()
                 : { api_token: form.api_token }),
@@ -661,7 +702,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                         }
                     }
                 }
-                if (isMydeal && mydealSetup === 'upload' && id) {
+                if (isMydeal && !isFullStore && mydealSetup === 'upload' && id) {
                     setCreatedStoreId(id);
                     setMydealUploadOpen(true);
                 } else {
@@ -767,7 +808,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                     {
                                                         value: 'full_store',
                                                         title: 'Managed store',
-                                                        desc: 'Create listings from here, push them to the marketplace, and manage orders & shipping. (Reverb, Lasoo)',
+                                                        desc: 'Create listings from here, push them to the marketplace, and manage orders & shipping. (Reverb, Lasoo, MyDeal)',
                                                     },
                                                     {
                                                         value: 'inventory_only',
@@ -785,6 +826,9 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                                     const sel = marketplaces.find((m) => String(m.id) === String(f.marketplace_id));
                                                                     if (sel && !FULL_STORE_MARKETPLACES.includes(marketplaceCode(sel))) {
                                                                         next.marketplace_id = '';
+                                                                    }
+                                                                    if (sel && marketplaceCode(sel) === 'mydeal') {
+                                                                        next.mydeal_setup_method = 'api';
                                                                     }
                                                                 }
                                                                 return next;
@@ -812,10 +856,14 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                             value={form.marketplace_id}
                                             onChange={(e) => {
                                                 const nextId = e.target.value;
-                                                setForm((f) => ({
-                                                    ...f,
-                                                    marketplace_id: nextId,
-                                                }));
+                                                setForm((f) => {
+                                                    const next = { ...f, marketplace_id: nextId };
+                                                    const sel = marketplaces.find((m) => String(m.id) === String(nextId));
+                                                    if (f.management_mode === 'full_store' && sel && marketplaceCode(sel) === 'mydeal') {
+                                                        next.mydeal_setup_method = 'api';
+                                                    }
+                                                    return next;
+                                                });
                                             }}
                                             options={[
                                                 { value: '', label: 'Select marketplace' },
@@ -825,7 +873,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                         />
                                         {isFullStore && (
                                             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                                                Managed store mode currently supports Reverb and Lasoo.
+                                                Managed store mode currently supports Reverb, Lasoo, and MyDeal.
                                             </p>
                                         )}
                                     </div>
@@ -834,10 +882,14 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                             <LasooConnectionFields form={form} setForm={setForm} mode="create" />
                                         ) : isMydeal ? (
                                             <MydealSetupFields
-                                                setupMethod={mydealSetup}
+                                                setupMethod={isFullStore ? 'api' : mydealSetup}
                                                 onSetupMethodChange={(v) => setForm((f) => ({ ...f, mydeal_setup_method: v }))}
                                                 storeId={createdStoreId}
                                                 onOpenUpload={() => setMydealUploadOpen(true)}
+                                                form={form}
+                                                setForm={setForm}
+                                                mode="create"
+                                                forceApi={isFullStore}
                                             />
                                         ) : !isKogan ? (
                                             <div className="space-y-2">

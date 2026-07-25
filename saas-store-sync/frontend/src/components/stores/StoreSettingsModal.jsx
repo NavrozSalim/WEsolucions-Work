@@ -60,6 +60,18 @@ function storeToForm(store) {
     if (!store) return {
         name: '',
         api_token: '',
+        mydeal_setup_method: 'upload',
+        mydeal_environment: 'sandbox',
+        mydeal_sandbox_base_url: '',
+        mydeal_sandbox_client_id: '',
+        mydeal_sandbox_client_secret: '',
+        mydeal_sandbox_seller_id: '',
+        mydeal_sandbox_seller_token: '',
+        mydeal_production_base_url: '',
+        mydeal_production_client_id: '',
+        mydeal_production_client_secret: '',
+        mydeal_production_seller_id: '',
+        mydeal_production_seller_token: '',
         lasoo_environment: 'staging',
         lasoo_staging_base_url: LASOO_DEFAULT_STAGING_URL,
         lasoo_staging_auth_key: '',
@@ -82,6 +94,17 @@ function storeToForm(store) {
         kogan_tab_name: store.kogan_tab_name || '',
         kogan_service_account_json: '',
         mydeal_setup_method: store.mydeal_setup_method || 'upload',
+        mydeal_environment: store.mydeal_environment || 'sandbox',
+        mydeal_sandbox_base_url: store.mydeal_sandbox_base_url || '',
+        mydeal_sandbox_client_id: '',
+        mydeal_sandbox_client_secret: '',
+        mydeal_sandbox_seller_id: '',
+        mydeal_sandbox_seller_token: '',
+        mydeal_production_base_url: store.mydeal_production_base_url || '',
+        mydeal_production_client_id: '',
+        mydeal_production_client_secret: '',
+        mydeal_production_seller_id: '',
+        mydeal_production_seller_token: '',
         lasoo_environment: store.lasoo_environment || 'staging',
         lasoo_staging_base_url: store.lasoo_staging_base_url || LASOO_DEFAULT_STAGING_URL,
         lasoo_staging_auth_key: '',
@@ -355,6 +378,23 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
             }
         }
 
+        if (isMydeal) {
+            const method = isManaged ? 'api' : mydealSetup;
+            payload.mydeal_setup_method = method;
+            if (method === 'api') {
+                const env = form.mydeal_environment || 'sandbox';
+                const prefix = env === 'production' ? 'mydeal_production' : 'mydeal_sandbox';
+                payload.mydeal_environment = env;
+                if (form[`${prefix}_base_url`]?.trim()) {
+                    payload[`${prefix}_base_url`] = form[`${prefix}_base_url`].trim();
+                }
+                for (const key of ['client_id', 'client_secret', 'seller_id', 'seller_token']) {
+                    const field = `${prefix}_${key}`;
+                    if (form[field]?.trim()) payload[field] = form[field].trim();
+                }
+            }
+        }
+
         payload.vendor_price_settings = form.vendor_price_settings.map((vp) => {
             const ranges = vp.range_margins || [];
             const allDirect = ranges.length > 0 && ranges.every((r) => r.margin_type === 'direct');
@@ -398,9 +438,6 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
             payload.kogan_tab_name = form.kogan_tab_name?.trim();
             if (form.kogan_service_account_json?.trim()) payload.kogan_service_account_json = form.kogan_service_account_json;
         }
-        if (isMydeal) {
-            payload.mydeal_setup_method = mydealSetup;
-        }
         return payload;
     };
 
@@ -415,6 +452,14 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                 }
             } else if (!form.lasoo_staging_base_url?.trim()) {
                 errs.push('Lasoo staging base URL is required');
+            }
+        }
+        if (isMydeal && (isManaged || mydealSetup === 'api')) {
+            const env = form.mydeal_environment || 'sandbox';
+            const prefix = env === 'production' ? 'mydeal_production' : 'mydeal_sandbox';
+            const existingUrl = store?.[`${prefix}_base_url`] || '';
+            if (!form[`${prefix}_base_url`]?.trim() && !existingUrl.trim()) {
+                errs.push(`MyDeal ${env} API base URL is required`);
             }
         }
         return errs;
@@ -570,10 +615,14 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                         <LasooConnectionFields form={form} setForm={setForm} mode="edit" />
                                     ) : isMydeal ? (
                                         <MydealSetupFields
-                                            setupMethod={mydealSetup}
+                                            setupMethod={isManaged ? 'api' : mydealSetup}
                                             onSetupMethodChange={(v) => setForm((f) => ({ ...f, mydeal_setup_method: v }))}
                                             storeId={store?.id}
                                             onOpenUpload={() => setMydealUploadOpen(true)}
+                                            form={form}
+                                            setForm={setForm}
+                                            mode="edit"
+                                            forceApi={isManaged}
                                         />
                                     ) : !isKogan ? (
                                         <>

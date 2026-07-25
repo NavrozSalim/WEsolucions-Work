@@ -104,6 +104,12 @@ class StoreSerializer(serializers.ModelSerializer):
             'kogan_service_account_json', 'kogan_sheet_id', 'kogan_tab_name',
             'kogan_sku_column', 'kogan_stock_column', 'kogan_price_column', 'kogan_rrp_column', 'kogan_first_price_column',
             'mydeal_setup_method',
+            'mydeal_environment',
+            'mydeal_sandbox_base_url', 'mydeal_production_base_url',
+            'mydeal_sandbox_client_id', 'mydeal_sandbox_client_secret',
+            'mydeal_sandbox_seller_id', 'mydeal_sandbox_seller_token',
+            'mydeal_production_client_id', 'mydeal_production_client_secret',
+            'mydeal_production_seller_id', 'mydeal_production_seller_token',
             'lasoo_environment', 'lasoo_staging_base_url', 'lasoo_production_base_url',
             'lasoo_staging_auth_key', 'lasoo_production_auth_key',
             'connection_status', 'last_validated_at',
@@ -118,6 +124,14 @@ class StoreSerializer(serializers.ModelSerializer):
             'kogan_service_account_json': {'write_only': True},
             'lasoo_staging_auth_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'lasoo_production_auth_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'mydeal_sandbox_client_id': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'mydeal_sandbox_client_secret': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'mydeal_sandbox_seller_id': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'mydeal_sandbox_seller_token': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'mydeal_production_client_id': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'mydeal_production_client_secret': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'mydeal_production_seller_id': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'mydeal_production_seller_token': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'marketplace': {'allow_null': True},
             'connection_status': {'read_only': True},
             'last_validated_at': {'read_only': True},
@@ -171,10 +185,16 @@ class StoreSerializer(serializers.ModelSerializer):
         if management_mode == 'full_store':
             from stores.credentials import marketplace_kind
             kind = marketplace_kind(mkt)
-            if kind not in ('reverb', 'lasoo'):
+            if kind not in ('reverb', 'lasoo', 'mydeal'):
                 raise ValidationError({
-                    'marketplace': 'Managed stores are only available for Reverb and Lasoo right now.',
+                    'marketplace': 'Managed stores are only available for Reverb, Lasoo, and MyDeal right now.',
                 })
+            if kind == 'mydeal':
+                method = (req.get('mydeal_setup_method') or validated_data.get('mydeal_setup_method') or 'upload').strip()
+                if method != 'api':
+                    raise ValidationError({
+                        'mydeal_setup_method': 'MyDeal managed store requires API connection (not upload templates).',
+                    })
         if is_lasoo:
             # Lasoo uses per-environment AuthKeys, not Store.api_token.
             staging_key = (req.get('lasoo_staging_auth_key') or '').strip()
@@ -187,7 +207,23 @@ class StoreSerializer(serializers.ModelSerializer):
                 raise ValidationError({'mydeal_setup_method': 'Mydeal setup must be upload or api.'})
             validated_data['mydeal_setup_method'] = method
             if method == 'api':
-                raise ValidationError({'mydeal_setup_method': 'Mydeal API connection is not available yet. Use Upload templates.'})
+                env = (req.get('mydeal_environment') or validated_data.get('mydeal_environment') or 'sandbox').strip()
+                if env not in ('sandbox', 'production'):
+                    env = 'sandbox'
+                validated_data['mydeal_environment'] = env
+                prefix = 'mydeal_sandbox' if env == 'sandbox' else 'mydeal_production'
+                required = {
+                    f'{prefix}_base_url': 'base URL',
+                    f'{prefix}_client_id': 'ClientID',
+                    f'{prefix}_client_secret': 'ClientSecret',
+                    f'{prefix}_seller_id': 'SellerID',
+                    f'{prefix}_seller_token': 'SellerToken',
+                }
+                for field, label in required.items():
+                    val = (req.get(field) or validated_data.get(field) or '').strip()
+                    if not val:
+                        raise ValidationError({field: f'MyDeal {env} {label} is required for API connection.'})
+                    validated_data[field] = val
             validated_data.setdefault('api_token', '')
         if is_kogan:
             # Kogan uses Google Sheets service account JSON + spreadsheet details, not Store.api_token.
@@ -233,6 +269,17 @@ class StoreSerializer(serializers.ModelSerializer):
                 'kogan_rrp_column',
                 'kogan_first_price_column',
                 'mydeal_setup_method',
+                'mydeal_environment',
+                'mydeal_sandbox_base_url',
+                'mydeal_production_base_url',
+                'mydeal_sandbox_client_id',
+                'mydeal_sandbox_client_secret',
+                'mydeal_sandbox_seller_id',
+                'mydeal_sandbox_seller_token',
+                'mydeal_production_client_id',
+                'mydeal_production_client_secret',
+                'mydeal_production_seller_id',
+                'mydeal_production_seller_token',
                 # Lasoo (managed stores)
                 'lasoo_environment',
                 'lasoo_staging_base_url',
@@ -260,12 +307,13 @@ class StoreSerializer(serializers.ModelSerializer):
         self._save_vendor_inventory_settings(store, inventory_settings_data, Vendor)
         self._save_sync_schedule(store, req.get('sync_schedule'), SyncSchedule)
 
-        if is_structured:
+        if is_structured or (is_mydeal and store.mydeal_setup_method == 'api'):
             ok, err_msg = verify_store_connection(store)
             if not ok:
                 store.delete()
+                field = 'mydeal_setup_method' if is_mydeal else 'api_token'
                 raise ValidationError({
-                    'api_token': err_msg or 'Marketplace rejected these credentials.',
+                    field: err_msg or 'Marketplace rejected these credentials.',
                 })
 
         return store
@@ -275,6 +323,16 @@ class StoreSerializer(serializers.ModelSerializer):
         from marketplace.models import Marketplace
         from sync.models import SyncSchedule
         req = self.context['request'].data
+        MYDEAL_SECRET_FIELDS = (
+            'mydeal_sandbox_client_id',
+            'mydeal_sandbox_client_secret',
+            'mydeal_sandbox_seller_id',
+            'mydeal_sandbox_seller_token',
+            'mydeal_production_client_id',
+            'mydeal_production_client_secret',
+            'mydeal_production_seller_id',
+            'mydeal_production_seller_token',
+        )
         for attr, value in validated_data.items():
             if attr in (
                 'name',
@@ -293,6 +351,10 @@ class StoreSerializer(serializers.ModelSerializer):
                 'kogan_rrp_column',
                 'kogan_first_price_column',
                 'mydeal_setup_method',
+                'mydeal_environment',
+                'mydeal_sandbox_base_url',
+                'mydeal_production_base_url',
+                *MYDEAL_SECRET_FIELDS,
                 # Lasoo (managed stores)
                 'lasoo_environment',
                 'lasoo_staging_base_url',
@@ -300,8 +362,12 @@ class StoreSerializer(serializers.ModelSerializer):
                 'lasoo_staging_auth_key',
                 'lasoo_production_auth_key',
             ):
-                if attr in ('lasoo_staging_auth_key', 'lasoo_production_auth_key') and not (value or '').strip():
-                    # Blank key in a PATCH means "keep the existing key".
+                if attr in (
+                    'lasoo_staging_auth_key',
+                    'lasoo_production_auth_key',
+                    *MYDEAL_SECRET_FIELDS,
+                ) and not (value or '').strip():
+                    # Blank secret in a PATCH means "keep the existing value".
                     continue
                 setattr(instance, attr, value)
         marketplace_id = req.get('marketplace_id') or req.get('marketplace')
@@ -323,9 +389,33 @@ class StoreSerializer(serializers.ModelSerializer):
             if method and method not in ('upload', 'api'):
                 raise ValidationError({'mydeal_setup_method': 'Mydeal setup must be upload or api.'})
             if method == 'api':
-                raise ValidationError({'mydeal_setup_method': 'Mydeal API connection is not available yet. Use Upload templates.'})
+                env = (req.get('mydeal_environment') or instance.mydeal_environment or 'sandbox').strip()
+                if env not in ('sandbox', 'production'):
+                    env = 'sandbox'
+                instance.mydeal_environment = env
+                prefix = 'mydeal_sandbox' if env == 'sandbox' else 'mydeal_production'
+                base_url = (req.get(f'{prefix}_base_url') or getattr(instance, f'{prefix}_base_url', '') or '').strip()
+                if not base_url:
+                    raise ValidationError({f'{prefix}_base_url': f'MyDeal {env} base URL is required for API connection.'})
+                for suffix, label in (
+                    ('client_id', 'ClientID'),
+                    ('client_secret', 'ClientSecret'),
+                    ('seller_id', 'SellerID'),
+                    ('seller_token', 'SellerToken'),
+                ):
+                    field = f'{prefix}_{suffix}'
+                    incoming = (req.get(field) or '').strip()
+                    existing = (getattr(instance, field, None) or '').strip()
+                    if not incoming and not existing:
+                        raise ValidationError({field: f'MyDeal {env} {label} is required for API connection.'})
             if method:
                 instance.mydeal_setup_method = method
+            if method == 'api' and (instance.management_mode or '') == 'full_store':
+                pass  # allowed
+            if method == 'upload' and (req.get('management_mode') or instance.management_mode) == 'full_store':
+                raise ValidationError({
+                    'mydeal_setup_method': 'MyDeal managed store requires API connection (not upload templates).',
+                })
         if is_kogan:
             if 'kogan_sheet_id' in req and not (req.get('kogan_sheet_id') or '').strip():
                 raise ValidationError({'kogan_sheet_id': 'Spreadsheet ID is required for Kogan.'})
