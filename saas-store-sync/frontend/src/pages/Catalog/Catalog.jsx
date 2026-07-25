@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
     Search,
     UploadCloud,
@@ -1175,6 +1175,8 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId, onSt
 }
 
 export default function Catalog() {
+    const [searchParams] = useSearchParams();
+    const deepLinkAppliedRef = useRef(false);
     const [storeList, setStoreList] = useState([]);
     const [marketplaces, setMarketplaces] = useState([]);
     const [selectedStore, setSelectedStore] = useState('');
@@ -1405,6 +1407,20 @@ export default function Catalog() {
             })
             .finally(() => setLoading(false));
     }, [selectedMarketplace]);
+
+    // Deep link from Dashboard: /catalog?store=<id>&status=needs_attention|pending|failed
+    useEffect(() => {
+        if (deepLinkAppliedRef.current || loading || !storeList.length) return;
+        const storeId = searchParams.get('store');
+        if (!storeId) return;
+        const match = storeList.find((s) => String(s.id) === String(storeId));
+        if (!match) return;
+        deepLinkAppliedRef.current = true;
+        setSelectedStore(match.id);
+        setViewMode('products');
+        const status = searchParams.get('status') || '';
+        if (status) setStatusFilter(status);
+    }, [loading, storeList, searchParams]);
 
     useEffect(() => {
         if (!selectedStore || viewMode !== 'history') return undefined;
