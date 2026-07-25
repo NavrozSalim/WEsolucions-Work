@@ -2657,7 +2657,7 @@ export default function Catalog() {
         <div className="space-y-6">
             <PageHeader
                 title="Catalog"
-                description="Pick a store, upload a catalog file, use Ready to Upload (upload history) to create products, then Start Scraping or use your schedule for vendor prices."
+                description="Upload catalogs, scrape vendor prices, and sync listings to your marketplace stores."
             />
 
             {(flowStatus || message) && flowStatus !== 'syncing' && flowStatus !== 'scraping' && (
@@ -2707,12 +2707,12 @@ export default function Catalog() {
                                 </div>
                             </div>
                         </div>
-                        <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-                            <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 p-0.5">
+                        <div className="flex w-full flex-wrap items-center gap-2 lg:w-auto lg:justify-end">
+                            <div className="inline-flex w-full rounded-lg border border-slate-200 bg-white p-0.5 dark:border-slate-600 dark:bg-slate-900 sm:w-auto">
                                 <button
                                     type="button"
                                     onClick={() => setViewMode('history')}
-                                    className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                                    className={`min-h-10 flex-1 rounded-md px-3 py-1.5 text-xs font-semibold transition sm:min-h-0 sm:flex-none ${
                                         viewMode === 'history'
                                             ? 'bg-accent-500 text-white shadow-sm'
                                             : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
@@ -2723,31 +2723,32 @@ export default function Catalog() {
                                 <button
                                     type="button"
                                     onClick={handleViewProducts}
-                                    className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                                    className={`min-h-10 flex-1 rounded-md px-3 py-1.5 text-xs font-semibold transition sm:min-h-0 sm:flex-none ${
                                         viewMode === 'products'
                                             ? 'bg-accent-500 text-white shadow-sm'
                                             : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                                     }`}
                                 >
-                                    {isManagedStore ? 'Inventory management' : 'Products'}
+                                    {isManagedStore ? 'Inventory' : 'Products'}
                                 </button>
                                 {isManagedStore && (
                                     <button
                                         type="button"
                                         onClick={() => setViewMode('created')}
-                                        className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                                        className={`min-h-10 flex-1 rounded-md px-2 py-1.5 text-xs font-semibold transition sm:min-h-0 sm:flex-none sm:px-3 ${
                                             viewMode === 'created'
                                                 ? 'bg-accent-500 text-white shadow-sm'
                                                 : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                                         }`}
                                     >
-                                        Created products
+                                        <span className="sm:hidden">Created</span>
+                                        <span className="hidden sm:inline">Created products</span>
                                     </button>
                                 )}
                                 <button
                                     type="button"
                                     onClick={() => setViewMode('logs')}
-                                    className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                                    className={`min-h-10 flex-1 rounded-md px-3 py-1.5 text-xs font-semibold transition sm:min-h-0 sm:flex-none ${
                                         viewMode === 'logs'
                                             ? 'bg-accent-500 text-white shadow-sm'
                                             : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'

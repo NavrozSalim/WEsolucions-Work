@@ -870,7 +870,7 @@ export default function Orders() {
         <div className="space-y-4">
             <PageHeader
                 title="Orders"
-                description="Orders from your managed marketplace stores. Expand a row for customer, address, line items, and shipping details."
+                description="Managed marketplace orders — expand for customer, address, and shipping details."
             />
 
             {message && (
@@ -887,8 +887,8 @@ export default function Orders() {
                 </div>
             )}
 
-            <div className="flex flex-wrap items-end gap-3">
-                <div className="w-full max-w-xs">
+            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+                <div className="w-full sm:max-w-xs">
                     <Select
                         label="Managed store"
                         value={selectedStore}
@@ -906,7 +906,7 @@ export default function Orders() {
                     />
                 </div>
                 {selectedStore && (
-                    <div className="w-full max-w-[11rem]">
+                    <div className="w-full sm:max-w-[11rem]">
                         <Select
                             label="Status"
                             value={statusFilter}
@@ -916,14 +916,21 @@ export default function Orders() {
                     </div>
                 )}
                 {selectedStore && (
-                    <div className="flex items-center gap-2 pb-0.5">
-                        <Button variant="primary" size="sm" onClick={() => loadOrders(true)} disabled={refreshing}>
+                    <div className="grid w-full grid-cols-1 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:pb-0.5">
+                        <Button
+                            variant="primary"
+                            size="sm"
+                            className="w-full justify-center sm:w-auto"
+                            onClick={() => loadOrders(true)}
+                            disabled={refreshing}
+                        >
                             <RefreshCw className={`mr-1.5 h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
                             {refreshing ? 'Fetching…' : 'Fetch from marketplace'}
                         </Button>
                         <Button
                             variant="secondary"
                             size="sm"
+                            className="w-full justify-center sm:w-auto"
                             onClick={handleExportExcel}
                             disabled={exporting || loading || filteredOrders.length === 0}
                         >
@@ -931,7 +938,13 @@ export default function Orders() {
                             {exporting ? 'Exporting…' : 'Export Excel'}
                         </Button>
                         {(selectedStoreData?.marketplace_code || '').toLowerCase() === 'lasoo' && (
-                            <Button variant="secondary" size="sm" onClick={handleCreateTestOrder} disabled={creatingTest}>
+                            <Button
+                                variant="secondary"
+                                size="sm"
+                                className="w-full justify-center sm:w-auto"
+                                onClick={handleCreateTestOrder}
+                                disabled={creatingTest}
+                            >
                                 <FlaskConical className="mr-1.5 h-4 w-4" />
                                 {creatingTest ? 'Creating…' : 'Create test order'}
                             </Button>
@@ -949,139 +962,230 @@ export default function Orders() {
             )}
 
             {selectedStore && (
-                <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
-                    <div className="overflow-x-auto">
-                        {loading ? (
-                            <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">Loading orders…</p>
-                        ) : filteredOrders.length === 0 ? (
-                            <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">
-                                {orders.length === 0
-                                    ? 'No orders yet. Use “Fetch from marketplace” to pull the latest orders.'
-                                    : 'No orders match this status filter.'}
-                            </p>
-                        ) : (
-                            <table className="w-full text-left text-sm">
-                                <thead className="bg-slate-50 dark:bg-slate-800 text-xs uppercase text-slate-500 dark:text-slate-400">
-                                    <tr>
-                                        <th className="px-4 py-2.5">{orderIdLabel}</th>
-                                        <th className="px-4 py-2.5">Customer</th>
-                                        <th className="px-4 py-2.5">Items</th>
-                                        <th className="px-4 py-2.5">Source</th>
-                                        <th className="px-4 py-2.5">Total</th>
-                                        <th className="px-4 py-2.5">Status</th>
-                                        <th className="px-4 py-2.5">Ticket</th>
-                                        <th className="px-4 py-2.5">Ordered</th>
-                                        <th className="px-4 py-2.5 text-right">Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {filteredOrders.map((o) => {
-                                        const currency = o.details?.totals?.currency || 'AUD';
-                                        const orderedAt = o.details?.dates?.orderedAt || o.created_at;
-                                        const tickets = Array.isArray(o.related_tickets) ? o.related_tickets : [];
-                                        const primaryTicket = tickets[0] || null;
-                                        return (
-                                            <Fragment key={o.id}>
-                                                <tr className="border-t border-slate-100 dark:border-slate-800">
-                                                    <td className="px-4 py-2.5 font-medium text-slate-900 dark:text-slate-100">
+                <div className="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
+                    {loading ? (
+                        <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">Loading orders…</p>
+                    ) : filteredOrders.length === 0 ? (
+                        <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">
+                            {orders.length === 0
+                                ? 'No orders yet. Use “Fetch from marketplace” to pull the latest orders.'
+                                : 'No orders match this status filter.'}
+                        </p>
+                    ) : (
+                        <>
+                            {/* Mobile cards */}
+                            <ul className="divide-y divide-slate-100 md:hidden dark:divide-slate-800">
+                                {filteredOrders.map((o) => {
+                                    const currency = o.details?.totals?.currency || 'AUD';
+                                    const orderedAt = o.details?.dates?.orderedAt || o.created_at;
+                                    const tickets = Array.isArray(o.related_tickets) ? o.related_tickets : [];
+                                    const primaryTicket = tickets[0] || null;
+                                    const terminal = ['cancelled', 'refunded', 'shipping_complete'].includes(o.status);
+                                    return (
+                                        <li key={o.id} className="px-4 py-4">
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div className="min-w-0">
+                                                    <p className="font-medium text-slate-900 dark:text-slate-100">
                                                         {o.invoice_number || o.external_order_key || '—'}
-                                                        <p className="text-[11px] font-normal capitalize text-slate-400">{o.environment}</p>
-                                                    </td>
-                                                    <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">
-                                                        <p>{customerName(o)}</p>
-                                                        {o.details?.customer?.email && (
-                                                            <p className="text-xs text-slate-500 dark:text-slate-400">{o.details.customer.email}</p>
-                                                        )}
-                                                    </td>
-                                                    <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">{itemsSummary(o)}</td>
-                                                    <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">
-                                                        <SourceLinkCell order={o} />
-                                                    </td>
-                                                    <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">
+                                                    </p>
+                                                    <p className="mt-0.5 truncate text-sm text-slate-600 dark:text-slate-300">
+                                                        {customerName(o)}
+                                                    </p>
+                                                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                                        {itemsSummary(o)} · {formatDate(orderedAt)}
+                                                    </p>
+                                                </div>
+                                                <div className="shrink-0 text-right">
+                                                    <p className="text-sm font-semibold tabular-nums text-slate-900 dark:text-slate-100">
                                                         {money(o.details?.totals?.totalCents ?? o.total_amount_cents, currency)}
-                                                    </td>
-                                                    <td className="px-4 py-2.5">
-                                                        <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[o.status] || STATUS_STYLES.new}`}>
-                                                            {STATUS_LABELS[o.status] || o.status}
-                                                        </span>
-                                                    </td>
-                                                    <td className="px-4 py-2.5">
-                                                        {primaryTicket ? (
-                                                            <button
-                                                                type="button"
-                                                                title={primaryTicket.subject || 'Open ticket'}
-                                                                onClick={() => openTicket(primaryTicket.id)}
-                                                                className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700 hover:bg-sky-100 dark:bg-sky-900/30 dark:text-sky-300 dark:hover:bg-sky-900/50"
-                                                            >
-                                                                <MessageSquare className="h-3.5 w-3.5" />
-                                                                {tickets.length > 1 ? `${tickets.length} tickets` : 'Open'}
-                                                                {primaryTicket.unread_count > 0 && (
-                                                                    <span className="rounded-full bg-sky-600 px-1 text-[10px] text-white">
-                                                                        {primaryTicket.unread_count}
-                                                                    </span>
-                                                                )}
-                                                            </button>
-                                                        ) : (
-                                                            <span className="text-xs text-slate-400">—</span>
-                                                        )}
-                                                    </td>
-                                                    <td className="px-4 py-2.5 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">
-                                                        {formatDate(orderedAt)}
-                                                    </td>
-                                                    <td className="px-4 py-2.5">
-                                                        <div className="flex items-center justify-end gap-1">
-                                                            <button
-                                                                type="button"
-                                                                title="Submit shipping / tracking"
-                                                                className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
-                                                                onClick={() => setShippingOrder(o)}
-                                                                disabled={['cancelled', 'refunded', 'shipping_complete'].includes(o.status)}
-                                                            >
-                                                                <Truck className="h-4 w-4" />
-                                                            </button>
-                                                            <button
-                                                                type="button"
-                                                                title="Mark shipping complete (delivered)"
-                                                                className="rounded-md p-1.5 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 disabled:opacity-40"
-                                                                onClick={() => handleComplete(o)}
-                                                                disabled={completingId === o.id || o.shipping_status !== 'submitted'}
-                                                            >
-                                                                <CheckCircle2 className="h-4 w-4" />
-                                                            </button>
-                                                            <button
-                                                                type="button"
-                                                                title="Cancel order"
-                                                                className="rounded-md p-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20 disabled:opacity-40"
-                                                                onClick={() => setCancelOrderRow(o)}
-                                                                disabled={['cancelled', 'refunded', 'shipping_complete'].includes(o.status)}
-                                                            >
-                                                                <Ban className="h-4 w-4" />
-                                                            </button>
-                                                            <button
-                                                                type="button"
-                                                                title="Show full order details"
-                                                                className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
-                                                                onClick={() => setExpandedId(expandedId === o.id ? null : o.id)}
-                                                            >
-                                                                {expandedId === o.id ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                                                            </button>
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                                {expandedId === o.id && (
-                                                    <tr className="border-t border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40">
-                                                        <td colSpan={9} className="px-4 py-4">
-                                                            <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} onOpenTicket={openTicket} />
+                                                    </p>
+                                                    <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[o.status] || STATUS_STYLES.new}`}>
+                                                        {STATUS_LABELS[o.status] || o.status}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                                                {primaryTicket ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openTicket(primaryTicket.id)}
+                                                        className="inline-flex min-h-10 items-center gap-1 rounded-md bg-sky-50 px-3 text-xs font-medium text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
+                                                    >
+                                                        <MessageSquare className="h-3.5 w-3.5" />
+                                                        Ticket
+                                                    </button>
+                                                ) : null}
+                                                <button
+                                                    type="button"
+                                                    className="inline-flex min-h-10 items-center gap-1 rounded-md border border-slate-200 px-3 text-xs font-medium text-slate-600 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300"
+                                                    onClick={() => setShippingOrder(o)}
+                                                    disabled={terminal}
+                                                >
+                                                    <Truck className="h-3.5 w-3.5" />
+                                                    Ship
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="inline-flex min-h-10 items-center gap-1 rounded-md border border-slate-200 px-3 text-xs font-medium text-emerald-700 disabled:opacity-40 dark:border-slate-700 dark:text-emerald-400"
+                                                    onClick={() => handleComplete(o)}
+                                                    disabled={completingId === o.id || o.shipping_status !== 'submitted'}
+                                                >
+                                                    <CheckCircle2 className="h-3.5 w-3.5" />
+                                                    Done
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="inline-flex min-h-10 items-center gap-1 rounded-md border border-slate-200 px-3 text-xs font-medium text-rose-600 disabled:opacity-40 dark:border-slate-700"
+                                                    onClick={() => setCancelOrderRow(o)}
+                                                    disabled={terminal}
+                                                >
+                                                    <Ban className="h-3.5 w-3.5" />
+                                                    Cancel
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="inline-flex min-h-10 flex-1 items-center justify-center gap-1 rounded-md bg-slate-100 px-3 text-xs font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                                                    onClick={() => setExpandedId(expandedId === o.id ? null : o.id)}
+                                                >
+                                                    {expandedId === o.id ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                                                    {expandedId === o.id ? 'Hide details' : 'Details'}
+                                                </button>
+                                            </div>
+                                            {expandedId === o.id && (
+                                                <div className="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800">
+                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} onOpenTicket={openTicket} />
+                                                </div>
+                                            )}
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+
+                            {/* Desktop table */}
+                            <div className="hidden overflow-x-auto md:block">
+                                <table className="w-full text-left text-sm">
+                                    <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                                        <tr>
+                                            <th className="px-4 py-2.5">{orderIdLabel}</th>
+                                            <th className="px-4 py-2.5">Customer</th>
+                                            <th className="px-4 py-2.5">Items</th>
+                                            <th className="px-4 py-2.5">Source</th>
+                                            <th className="px-4 py-2.5">Total</th>
+                                            <th className="px-4 py-2.5">Status</th>
+                                            <th className="px-4 py-2.5">Ticket</th>
+                                            <th className="px-4 py-2.5">Ordered</th>
+                                            <th className="px-4 py-2.5 text-right">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {filteredOrders.map((o) => {
+                                            const currency = o.details?.totals?.currency || 'AUD';
+                                            const orderedAt = o.details?.dates?.orderedAt || o.created_at;
+                                            const tickets = Array.isArray(o.related_tickets) ? o.related_tickets : [];
+                                            const primaryTicket = tickets[0] || null;
+                                            return (
+                                                <Fragment key={o.id}>
+                                                    <tr className="border-t border-slate-100 dark:border-slate-800">
+                                                        <td className="px-4 py-2.5 font-medium text-slate-900 dark:text-slate-100">
+                                                            {o.invoice_number || o.external_order_key || '—'}
+                                                            <p className="text-[11px] font-normal capitalize text-slate-400">{o.environment}</p>
+                                                        </td>
+                                                        <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">
+                                                            <p>{customerName(o)}</p>
+                                                            {o.details?.customer?.email && (
+                                                                <p className="text-xs text-slate-500 dark:text-slate-400">{o.details.customer.email}</p>
+                                                            )}
+                                                        </td>
+                                                        <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">{itemsSummary(o)}</td>
+                                                        <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">
+                                                            <SourceLinkCell order={o} />
+                                                        </td>
+                                                        <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">
+                                                            {money(o.details?.totals?.totalCents ?? o.total_amount_cents, currency)}
+                                                        </td>
+                                                        <td className="px-4 py-2.5">
+                                                            <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[o.status] || STATUS_STYLES.new}`}>
+                                                                {STATUS_LABELS[o.status] || o.status}
+                                                            </span>
+                                                        </td>
+                                                        <td className="px-4 py-2.5">
+                                                            {primaryTicket ? (
+                                                                <button
+                                                                    type="button"
+                                                                    title={primaryTicket.subject || 'Open ticket'}
+                                                                    onClick={() => openTicket(primaryTicket.id)}
+                                                                    className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700 hover:bg-sky-100 dark:bg-sky-900/30 dark:text-sky-300 dark:hover:bg-sky-900/50"
+                                                                >
+                                                                    <MessageSquare className="h-3.5 w-3.5" />
+                                                                    {tickets.length > 1 ? `${tickets.length} tickets` : 'Open'}
+                                                                    {primaryTicket.unread_count > 0 && (
+                                                                        <span className="rounded-full bg-sky-600 px-1 text-[10px] text-white">
+                                                                            {primaryTicket.unread_count}
+                                                                        </span>
+                                                                    )}
+                                                                </button>
+                                                            ) : (
+                                                                <span className="text-xs text-slate-400">—</span>
+                                                            )}
+                                                        </td>
+                                                        <td className="whitespace-nowrap px-4 py-2.5 text-xs text-slate-500 dark:text-slate-400">
+                                                            {formatDate(orderedAt)}
+                                                        </td>
+                                                        <td className="px-4 py-2.5">
+                                                            <div className="flex items-center justify-end gap-1">
+                                                                <button
+                                                                    type="button"
+                                                                    title="Submit shipping / tracking"
+                                                                    className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
+                                                                    onClick={() => setShippingOrder(o)}
+                                                                    disabled={['cancelled', 'refunded', 'shipping_complete'].includes(o.status)}
+                                                                >
+                                                                    <Truck className="h-4 w-4" />
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    title="Mark shipping complete (delivered)"
+                                                                    className="rounded-md p-1.5 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 disabled:opacity-40"
+                                                                    onClick={() => handleComplete(o)}
+                                                                    disabled={completingId === o.id || o.shipping_status !== 'submitted'}
+                                                                >
+                                                                    <CheckCircle2 className="h-4 w-4" />
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    title="Cancel order"
+                                                                    className="rounded-md p-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20 disabled:opacity-40"
+                                                                    onClick={() => setCancelOrderRow(o)}
+                                                                    disabled={['cancelled', 'refunded', 'shipping_complete'].includes(o.status)}
+                                                                >
+                                                                    <Ban className="h-4 w-4" />
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    title="Show full order details"
+                                                                    className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                                                                    onClick={() => setExpandedId(expandedId === o.id ? null : o.id)}
+                                                                >
+                                                                    {expandedId === o.id ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                                                                </button>
+                                                            </div>
                                                         </td>
                                                     </tr>
-                                                )}
-                                            </Fragment>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
-                        )}
-                    </div>
+                                                    {expandedId === o.id && (
+                                                        <tr className="border-t border-slate-100 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/40">
+                                                            <td colSpan={9} className="px-4 py-4">
+                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} onOpenTicket={openTicket} />
+                                                            </td>
+                                                        </tr>
+                                                    )}
+                                                </Fragment>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </>
+                    )}
                 </div>
             )}
 

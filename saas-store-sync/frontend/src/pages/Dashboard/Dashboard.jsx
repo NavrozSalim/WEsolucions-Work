@@ -104,14 +104,14 @@ function shortDate(d) {
     return String(d);
 }
 
-function ChartCard({ title, description, children, empty }) {
+function ChartCard({ title, description, children, empty, className = '' }) {
     return (
-        <div className="rounded-lg border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-900">
-            <h3 className="text-base font-medium text-slate-900 dark:text-slate-100">{title}</h3>
+        <div className={`rounded-lg border border-slate-200 bg-white p-3 sm:p-5 dark:border-slate-700 dark:bg-slate-900 ${className}`}>
+            <h3 className="text-sm font-medium text-slate-900 dark:text-slate-100 sm:text-base">{title}</h3>
             {description ? (
-                <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">{description}</p>
+                <p className="mt-0.5 hidden text-sm text-slate-500 dark:text-slate-400 sm:block">{description}</p>
             ) : null}
-            <div className="mt-4 h-56">
+            <div className="mt-3 h-44 sm:mt-4 sm:h-56">
                 {empty ? (
                     <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">
                         No chart data yet.
@@ -396,16 +396,16 @@ export default function Dashboard() {
     ];
 
     return (
-        <div className="space-y-6">
+        <div className="space-y-4 sm:space-y-6">
             <PageHeader
                 title="Dashboard"
                 description="Inventory and orders — counts, trends, and store detail in one place."
                 actions={
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center">
                         <select
                             value={selectedStore}
                             onChange={(e) => setSelectedStore(e.target.value)}
-                            className="min-w-[160px] rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 outline-none focus:border-accent-500 focus:ring-1 focus:ring-accent-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                            className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 outline-none focus:border-accent-500 focus:ring-1 focus:ring-accent-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 sm:w-auto sm:min-w-[160px] sm:py-1.5"
                         >
                             <option value="">All stores</option>
                             {stores.map((s) => (
@@ -414,13 +414,13 @@ export default function Dashboard() {
                                 </option>
                             ))}
                         </select>
-                        <div className="flex gap-1">
+                        <div className="flex w-full gap-1 sm:w-auto">
                             {['7', '30'].map((r) => (
                                 <button
                                     key={r}
                                     type="button"
                                     onClick={() => setRange(r)}
-                                    className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                                    className={`min-h-10 flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors sm:min-h-0 sm:flex-none sm:py-1.5 ${
                                         range === r
                                             ? 'bg-accent-600 text-white dark:bg-accent-500'
                                             : 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800'
@@ -438,7 +438,7 @@ export default function Dashboard() {
                 <p className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
                     Inventory
                 </p>
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="grid grid-cols-2 gap-2 sm:gap-4 lg:grid-cols-4">
                     {kpis.map((item) => (
                         <KPICard key={item.label} {...item} />
                     ))}
@@ -449,14 +449,14 @@ export default function Dashboard() {
                 <p className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
                     Orders
                 </p>
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="grid grid-cols-2 gap-2 sm:gap-4 lg:grid-cols-4">
                     {orderKpis.map((item) => (
                         <KPICard key={item.label} {...item} />
                     ))}
                 </div>
             </div>
 
-            <div className="grid gap-6 lg:grid-cols-2">
+            <div className="grid gap-4 sm:gap-6 lg:grid-cols-2">
                 <ChartCard
                     title="Sync health trend"
                     description={`Pending, attention, and failed over the last ${range} days.`}
@@ -587,6 +587,7 @@ export default function Dashboard() {
                     title="Listing mix"
                     description="Current status breakdown across this view."
                     empty={!chartsLoading && syncMixBars.length === 0}
+                    className="hidden sm:block"
                 >
                     {chartsLoading ? (
                         <div className="flex h-full items-center justify-center gap-2 text-sm text-slate-500">
@@ -617,9 +618,9 @@ export default function Dashboard() {
                 </ChartCard>
             </div>
 
-            <div className="grid gap-6 lg:grid-cols-3">
+            <div className="grid gap-4 sm:gap-6 lg:grid-cols-3">
                 <div className="rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
-                    <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800">
+                    <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-4 py-3 sm:px-5 sm:py-4 dark:border-slate-800">
                         <div>
                             <h2 className="text-base font-medium text-slate-900 dark:text-slate-100">
                                 Catalog attention
@@ -910,116 +911,214 @@ export default function Dashboard() {
                         }
                     />
                 ) : (
-                    <div className="overflow-x-auto">
-                        <table className="table-base">
-                            <thead>
-                                <tr>
-                                    <th>Store</th>
-                                    <th>Status</th>
-                                    <th className="text-right">Listings</th>
-                                    <th className="text-right">Synced</th>
-                                    <th className="text-right">Pending</th>
-                                    <th className="text-right">Scraped</th>
-                                    <th className="text-right">Attention</th>
-                                    <th className="text-right">Failed</th>
-                                    <th className="text-right">OOS</th>
-                                    <th className="text-right">Open orders</th>
-                                    <th className="text-right">Orders 30d</th>
-                                    <th>Last sync</th>
-                                    <th />
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {storeBreakdown.map((s) => {
-                                    const health = storeHealth(s);
-                                    return (
-                                        <tr key={s.store_id}>
-                                            <td>
-                                                <div className="font-medium text-slate-900 dark:text-slate-100">
+                    <>
+                        {/* Mobile store cards */}
+                        <ul className="divide-y divide-slate-100 md:hidden dark:divide-slate-800">
+                            {storeBreakdown.map((s) => {
+                                const health = storeHealth(s);
+                                return (
+                                    <li key={s.store_id} className="space-y-3 px-4 py-4">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div className="min-w-0">
+                                                <p className="truncate font-medium text-slate-900 dark:text-slate-100">
                                                     {s.store_name}
-                                                </div>
+                                                </p>
                                                 {s.marketplace_name ? (
-                                                    <div className="text-xs text-slate-500 dark:text-slate-400">
+                                                    <p className="text-xs text-slate-500 dark:text-slate-400">
                                                         {s.marketplace_name}
-                                                    </div>
+                                                    </p>
                                                 ) : null}
-                                            </td>
-                                            <td>
-                                                <Badge variant={health.variant}>{health.label}</Badge>
-                                            </td>
-                                            <td className="text-right tabular-nums">
-                                                {formatCount(s.product_count)}
-                                            </td>
-                                            <td className="text-right tabular-nums text-emerald-600 dark:text-emerald-400">
-                                                {formatCount(s.synced_count)}
-                                            </td>
-                                            <td className="text-right tabular-nums text-amber-600 dark:text-amber-400">
-                                                {formatCount(s.pending_count)}
-                                            </td>
-                                            <td className="text-right tabular-nums text-sky-600 dark:text-sky-400">
-                                                {formatCount(s.scraped_count)}
-                                            </td>
-                                            <td className="text-right tabular-nums text-rose-600 dark:text-rose-400">
-                                                {formatCount(s.needs_attention_count)}
-                                            </td>
-                                            <td className="text-right tabular-nums text-rose-600 dark:text-rose-400">
-                                                {formatCount(s.failed_count)}
-                                            </td>
-                                            <td className="text-right tabular-nums text-slate-700 dark:text-slate-300">
-                                                {formatCount(s.out_of_stock_count)}
-                                            </td>
-                                            <td className="text-right tabular-nums text-amber-600 dark:text-amber-400">
-                                                {formatCount(s.orders_open_count)}
-                                            </td>
-                                            <td className="text-right tabular-nums">
-                                                {formatCount(s.orders_recent_count)}
-                                            </td>
-                                            <td className="whitespace-nowrap text-sm text-slate-500 dark:text-slate-400">
-                                                {formatRelativeTime(s.last_sync_at)}
-                                            </td>
-                                            <td className="text-right">
-                                                <div className="flex items-center justify-end gap-3">
-                                                    {(s.orders_open_count || 0) > 0 ? (
-                                                        <Link
-                                                            to={ordersLink({
-                                                                storeId: s.store_id,
-                                                                status: 'open',
-                                                            })}
-                                                            className="text-sm font-medium text-amber-600 hover:text-amber-500 dark:text-amber-400"
-                                                        >
-                                                            Orders
-                                                        </Link>
+                                            </div>
+                                            <Badge variant={health.variant}>{health.label}</Badge>
+                                        </div>
+                                        <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                                            <div className="rounded-md bg-slate-50 px-2 py-2 dark:bg-slate-800/60">
+                                                <p className="tabular-nums font-semibold text-slate-900 dark:text-slate-100">
+                                                    {formatCount(s.product_count)}
+                                                </p>
+                                                <p className="text-slate-500">Listings</p>
+                                            </div>
+                                            <div className="rounded-md bg-slate-50 px-2 py-2 dark:bg-slate-800/60">
+                                                <p className="tabular-nums font-semibold text-amber-600 dark:text-amber-400">
+                                                    {formatCount(s.pending_count)}
+                                                </p>
+                                                <p className="text-slate-500">Pending</p>
+                                            </div>
+                                            <div className="rounded-md bg-slate-50 px-2 py-2 dark:bg-slate-800/60">
+                                                <p className="tabular-nums font-semibold text-rose-600 dark:text-rose-400">
+                                                    {formatCount((s.needs_attention_count || 0) + (s.failed_count || 0))}
+                                                </p>
+                                                <p className="text-slate-500">Issues</p>
+                                            </div>
+                                            <div className="rounded-md bg-slate-50 px-2 py-2 dark:bg-slate-800/60">
+                                                <p className="tabular-nums font-semibold text-slate-900 dark:text-slate-100">
+                                                    {formatCount(s.out_of_stock_count)}
+                                                </p>
+                                                <p className="text-slate-500">OOS</p>
+                                            </div>
+                                            <div className="rounded-md bg-slate-50 px-2 py-2 dark:bg-slate-800/60">
+                                                <p className="tabular-nums font-semibold text-amber-600 dark:text-amber-400">
+                                                    {formatCount(s.orders_open_count)}
+                                                </p>
+                                                <p className="text-slate-500">Open</p>
+                                            </div>
+                                            <div className="rounded-md bg-slate-50 px-2 py-2 dark:bg-slate-800/60">
+                                                <p className="tabular-nums font-semibold text-slate-900 dark:text-slate-100">
+                                                    {formatCount(s.orders_recent_count)}
+                                                </p>
+                                                <p className="text-slate-500">30d</p>
+                                            </div>
+                                        </div>
+                                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                                            Last sync {formatRelativeTime(s.last_sync_at)}
+                                        </p>
+                                        <div className="flex flex-wrap gap-2">
+                                            {(s.orders_open_count || 0) > 0 ? (
+                                                <Link
+                                                    to={ordersLink({ storeId: s.store_id, status: 'open' })}
+                                                    className="inline-flex min-h-10 flex-1 items-center justify-center rounded-md border border-amber-200 px-3 text-sm font-medium text-amber-700 dark:border-amber-800 dark:text-amber-300"
+                                                >
+                                                    Orders
+                                                </Link>
+                                            ) : null}
+                                            {(s.needs_attention_count || 0) + (s.failed_count || 0) > 0 ? (
+                                                <Link
+                                                    to={catalogLink({
+                                                        storeId: s.store_id,
+                                                        status:
+                                                            (s.failed_count || 0) > (s.needs_attention_count || 0)
+                                                                ? 'failed'
+                                                                : 'needs_attention',
+                                                    })}
+                                                    className="inline-flex min-h-10 flex-1 items-center justify-center rounded-md border border-rose-200 px-3 text-sm font-medium text-rose-700 dark:border-rose-800 dark:text-rose-300"
+                                                >
+                                                    Issues
+                                                </Link>
+                                            ) : null}
+                                            <Link
+                                                to={catalogLink({ storeId: s.store_id })}
+                                                className="inline-flex min-h-10 flex-1 items-center justify-center rounded-md bg-accent-600 px-3 text-sm font-medium text-white"
+                                            >
+                                                Catalog
+                                            </Link>
+                                        </div>
+                                    </li>
+                                );
+                            })}
+                        </ul>
+
+                        {/* Desktop table */}
+                        <div className="hidden overflow-x-auto md:block">
+                            <table className="table-base">
+                                <thead>
+                                    <tr>
+                                        <th>Store</th>
+                                        <th>Status</th>
+                                        <th className="text-right">Listings</th>
+                                        <th className="text-right">Synced</th>
+                                        <th className="text-right">Pending</th>
+                                        <th className="text-right">Scraped</th>
+                                        <th className="text-right">Attention</th>
+                                        <th className="text-right">Failed</th>
+                                        <th className="text-right">OOS</th>
+                                        <th className="text-right">Open orders</th>
+                                        <th className="text-right">Orders 30d</th>
+                                        <th>Last sync</th>
+                                        <th />
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {storeBreakdown.map((s) => {
+                                        const health = storeHealth(s);
+                                        return (
+                                            <tr key={s.store_id}>
+                                                <td>
+                                                    <div className="font-medium text-slate-900 dark:text-slate-100">
+                                                        {s.store_name}
+                                                    </div>
+                                                    {s.marketplace_name ? (
+                                                        <div className="text-xs text-slate-500 dark:text-slate-400">
+                                                            {s.marketplace_name}
+                                                        </div>
                                                     ) : null}
-                                                    {(s.needs_attention_count || 0) + (s.failed_count || 0) > 0 ? (
+                                                </td>
+                                                <td>
+                                                    <Badge variant={health.variant}>{health.label}</Badge>
+                                                </td>
+                                                <td className="text-right tabular-nums">
+                                                    {formatCount(s.product_count)}
+                                                </td>
+                                                <td className="text-right tabular-nums text-emerald-600 dark:text-emerald-400">
+                                                    {formatCount(s.synced_count)}
+                                                </td>
+                                                <td className="text-right tabular-nums text-amber-600 dark:text-amber-400">
+                                                    {formatCount(s.pending_count)}
+                                                </td>
+                                                <td className="text-right tabular-nums text-sky-600 dark:text-sky-400">
+                                                    {formatCount(s.scraped_count)}
+                                                </td>
+                                                <td className="text-right tabular-nums text-rose-600 dark:text-rose-400">
+                                                    {formatCount(s.needs_attention_count)}
+                                                </td>
+                                                <td className="text-right tabular-nums text-rose-600 dark:text-rose-400">
+                                                    {formatCount(s.failed_count)}
+                                                </td>
+                                                <td className="text-right tabular-nums text-slate-700 dark:text-slate-300">
+                                                    {formatCount(s.out_of_stock_count)}
+                                                </td>
+                                                <td className="text-right tabular-nums text-amber-600 dark:text-amber-400">
+                                                    {formatCount(s.orders_open_count)}
+                                                </td>
+                                                <td className="text-right tabular-nums">
+                                                    {formatCount(s.orders_recent_count)}
+                                                </td>
+                                                <td className="whitespace-nowrap text-sm text-slate-500 dark:text-slate-400">
+                                                    {formatRelativeTime(s.last_sync_at)}
+                                                </td>
+                                                <td className="text-right">
+                                                    <div className="flex items-center justify-end gap-3">
+                                                        {(s.orders_open_count || 0) > 0 ? (
+                                                            <Link
+                                                                to={ordersLink({
+                                                                    storeId: s.store_id,
+                                                                    status: 'open',
+                                                                })}
+                                                                className="text-sm font-medium text-amber-600 hover:text-amber-500 dark:text-amber-400"
+                                                            >
+                                                                Orders
+                                                            </Link>
+                                                        ) : null}
+                                                        {(s.needs_attention_count || 0) + (s.failed_count || 0) > 0 ? (
+                                                            <Link
+                                                                to={catalogLink({
+                                                                    storeId: s.store_id,
+                                                                    status:
+                                                                        (s.failed_count || 0) >
+                                                                        (s.needs_attention_count || 0)
+                                                                            ? 'failed'
+                                                                            : 'needs_attention',
+                                                                })}
+                                                                className="text-sm font-medium text-rose-600 hover:text-rose-500 dark:text-rose-400"
+                                                            >
+                                                                Issues
+                                                            </Link>
+                                                        ) : null}
                                                         <Link
-                                                            to={catalogLink({
-                                                                storeId: s.store_id,
-                                                                status:
-                                                                    (s.failed_count || 0) >
-                                                                    (s.needs_attention_count || 0)
-                                                                        ? 'failed'
-                                                                        : 'needs_attention',
-                                                            })}
-                                                            className="text-sm font-medium text-rose-600 hover:text-rose-500 dark:text-rose-400"
+                                                            to={catalogLink({ storeId: s.store_id })}
+                                                            className="inline-flex items-center gap-1 text-sm font-medium text-accent-600 hover:text-accent-500 dark:text-accent-400"
                                                         >
-                                                            Issues
+                                                            Catalog
+                                                            <ArrowRight className="h-3.5 w-3.5" />
                                                         </Link>
-                                                    ) : null}
-                                                    <Link
-                                                        to={catalogLink({ storeId: s.store_id })}
-                                                        className="inline-flex items-center gap-1 text-sm font-medium text-accent-600 hover:text-accent-500 dark:text-accent-400"
-                                                    >
-                                                        Catalog
-                                                        <ArrowRight className="h-3.5 w-3.5" />
-                                                    </Link>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    );
-                                })}
-                            </tbody>
-                        </table>
-                    </div>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    </>
                 )}
             </div>
         </div>

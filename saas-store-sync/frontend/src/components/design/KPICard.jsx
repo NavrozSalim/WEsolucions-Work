@@ -13,7 +13,7 @@ export default function KPICard({ label, value, sub, icon: Icon, to, tone = 'def
     }[tone] || 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400';
 
     const className = [
-        'block rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-5',
+        'block rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 sm:p-5',
         'transition-colors',
         to
             ? 'hover:border-accent-400 dark:hover:border-accent-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500'
@@ -23,18 +23,18 @@ export default function KPICard({ label, value, sub, icon: Icon, to, tone = 'def
         .join(' ');
 
     const content = (
-        <div className="flex items-start justify-between">
-            <div>
-                <p className="text-sm font-medium text-slate-500 dark:text-slate-400">{label}</p>
-                <p className="mt-1 text-2xl font-semibold tracking-tight tabular-nums text-slate-900 dark:text-slate-100">
+        <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+                <p className="text-xs font-medium text-slate-500 dark:text-slate-400 sm:text-sm">{label}</p>
+                <p className="mt-0.5 text-xl font-semibold tracking-tight tabular-nums text-slate-900 dark:text-slate-100 sm:mt-1 sm:text-2xl">
                     {value}
                 </p>
                 {sub && (
-                    <p className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">{sub}</p>
+                    <p className="mt-0.5 hidden text-xs text-slate-400 dark:text-slate-500 sm:block">{sub}</p>
                 )}
             </div>
             {Icon && (
-                <div className={`rounded-md p-2 ${toneIcon}`}>
+                <div className={`hidden rounded-md p-2 sm:block ${toneIcon}`}>
                     <Icon className="h-5 w-5" />
                 </div>
             )}
