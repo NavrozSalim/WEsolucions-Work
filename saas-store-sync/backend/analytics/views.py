@@ -11,6 +11,7 @@ from stores.models import Store
 from catalog.models import ProductMapping
 from listings.models import MarketplaceOrder, OrderStatus
 from .serializers import DashboardSummarySerializer
+from .live_jobs import collect_live_jobs
 
 OPEN_ORDER_STATUSES = (OrderStatus.NEW, OrderStatus.PAID)
 IN_SHIPPING_STATUSES = (OrderStatus.SENT, OrderStatus.SHIPPING_SUBMITTED)
@@ -231,6 +232,18 @@ class DashboardSummaryView(APIView):
         serializer.is_valid(raise_exception=True)
         cache.set(cache_key, serializer.data, 45)
         return Response(serializer.data)
+
+
+class LiveJobsView(APIView):
+    """Active scrapes / pushes across the user's stores (server + desktop runners)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        jobs = collect_live_jobs(request.user)
+        return Response({
+            'jobs': jobs,
+            'checked_at': timezone.now().isoformat(),
+        })
 
 
 class AnalyticsChartView(APIView):

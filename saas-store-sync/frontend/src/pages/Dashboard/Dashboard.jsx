@@ -26,7 +26,12 @@ import {
     Cell,
     Legend,
 } from 'recharts';
-import { getDashboardSummary, getAnalyticsCharts, getStores } from '../../services/storeService';
+import {
+    getDashboardSummary,
+    getAnalyticsCharts,
+    getLiveJobs,
+    getStores,
+} from '../../services/storeService';
 import { Badge, EmptyState, KPICard, PageHeader } from '../../components/design';
 import { useSidebarActivity } from '../../context/SidebarActivityContext';
 import { ThemeContext } from '../../context/ThemeContext';
@@ -149,6 +154,8 @@ export default function Dashboard() {
     const [stores, setStores] = useState([]);
     const [selectedStore, setSelectedStore] = useState('');
     const [range, setRange] = useState('30');
+    const [serverJobs, setServerJobs] = useState([]);
+    const [serverJobsLoading, setServerJobsLoading] = useState(true);
     const { activities } = useSidebarActivity();
 
     const tooltipStyle = useMemo(
@@ -166,6 +173,29 @@ export default function Dashboard() {
         getStores()
             .then((res) => setStores(Array.isArray(res.data) ? res.data : res.data?.results || []))
             .catch(() => {});
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+        const poll = () => {
+            getLiveJobs()
+                .then((res) => {
+                    if (cancelled) return;
+                    setServerJobs(Array.isArray(res.data?.jobs) ? res.data.jobs : []);
+                })
+                .catch(() => {
+                    if (!cancelled) setServerJobs([]);
+                })
+                .finally(() => {
+                    if (!cancelled) setServerJobsLoading(false);
+                });
+        };
+        poll();
+        const t = setInterval(poll, 8000);
+        return () => {
+            cancelled = true;
+            clearInterval(t);
+        };
     }, []);
 
     useEffect(() => {
@@ -252,10 +282,28 @@ export default function Dashboard() {
             .sort((a, b) => (b.orders_open_count || 0) - (a.orders_open_count || 0));
     }, [storeBreakdown]);
 
-    const liveJobs = useMemo(
-        () => Object.values(activities || {}).sort((a, b) => a.id.localeCompare(b.id)),
-        [activities],
-    );
+    const liveJobs = useMemo(() => {
+        const session = Object.values(activities || {}).map((a) => ({
+            id: `session-${a.id}`,
+            title: a.title,
+            description: a.description || 'This browser session',
+            progress: a.progress,
+            href: null,
+            source: 'session',
+        }));
+        const server = (serverJobs || [])
+            .filter((j) => !selectedStore || !j.store_id || j.store_id === selectedStore)
+            .map((j) => ({
+                id: j.id,
+                title: j.title,
+                description: j.description || '',
+                progress: j.progress,
+                href: j.href || null,
+                source: 'server',
+                kind: j.kind,
+            }));
+        return [...server, ...session];
+    }, [activities, serverJobs, selectedStore]);
 
     const syncMixBars = useMemo(() => {
         const mix = chartData.sync_mix;
@@ -724,44 +772,74 @@ export default function Dashboard() {
                             Live jobs
                         </h3>
                         <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
-                            Scrapes and syncs running in this session.
+                            Server scrapes, desktop runners, and marketplace pushes.
                         </p>
                         <div className="mt-4 space-y-3">
-                            {liveJobs.length === 0 ? (
+                            {serverJobsLoading && liveJobs.length === 0 ? (
+                                <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                    Checking jobs…
+                                </div>
+                            ) : liveJobs.length === 0 ? (
                                 <p className="text-sm text-slate-500 dark:text-slate-400">
                                     No background jobs running.
                                 </p>
                             ) : (
-                                liveJobs.map((job) => (
-                                    <div
-                                        key={job.id}
-                                        className="rounded-md border border-slate-100 bg-slate-50 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-800/50"
-                                    >
+                                liveJobs.map((job) => {
+                                    const body = (
                                         <div className="flex items-start gap-2">
                                             <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-accent-500" />
                                             <div className="min-w-0 flex-1">
-                                                <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
-                                                    {job.title}
-                                                </p>
+                                                <div className="flex items-start justify-between gap-2">
+                                                    <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                                                        {job.title}
+                                                    </p>
+                                                    {job.href ? (
+                                                        <ArrowRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
+                                                    ) : null}
+                                                </div>
                                                 {job.description ? (
                                                     <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
                                                         {job.description}
                                                     </p>
                                                 ) : null}
                                                 {job.progress != null && job.progress > 0 ? (
-                                                    <div className="mt-2 h-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
-                                                        <div
-                                                            className="h-full rounded-full bg-accent-500 transition-all"
-                                                            style={{
-                                                                width: `${Math.min(100, job.progress)}%`,
-                                                            }}
-                                                        />
+                                                    <div className="mt-2">
+                                                        <div className="h-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                                                            <div
+                                                                className="h-full rounded-full bg-accent-500 transition-all"
+                                                                style={{
+                                                                    width: `${Math.min(100, job.progress)}%`,
+                                                                }}
+                                                            />
+                                                        </div>
+                                                        <p className="mt-1 text-[10px] tabular-nums text-slate-500">
+                                                            {Math.round(job.progress)}%
+                                                        </p>
                                                     </div>
                                                 ) : null}
                                             </div>
                                         </div>
-                                    </div>
-                                ))
+                                    );
+                                    const className =
+                                        'block rounded-md border border-slate-100 bg-slate-50 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-800/50';
+                                    if (job.href) {
+                                        return (
+                                            <Link
+                                                key={job.id}
+                                                to={job.href}
+                                                className={`${className} transition-colors hover:border-accent-400/60 dark:hover:border-accent-500/40`}
+                                            >
+                                                {body}
+                                            </Link>
+                                        );
+                                    }
+                                    return (
+                                        <div key={job.id} className={className}>
+                                            {body}
+                                        </div>
+                                    );
+                                })
                             )}
                         </div>
                     </div>

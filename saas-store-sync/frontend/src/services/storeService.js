@@ -122,3 +122,4 @@ export function formatStoreUpdateResult(r) {
 
 export const getDashboardSummary = (params) => api.get('/analytics/dashboard/', { params });
 export const getAnalyticsCharts = (params) => api.get('/analytics/charts/', { params });
+export const getLiveJobs = () => api.get('/analytics/live-jobs/', { timeout: 60_000 });
