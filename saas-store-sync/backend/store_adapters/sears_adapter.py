@@ -831,22 +831,30 @@ class SearsAdapter(BaseStoreAdapter):
         return last_body
 
     def _put_feed_xml(self, path: str, xml: str) -> str:
-        """PUT XML feed; retry once after a pause when pricing PUT returns 403 (rate limit)."""
+        """PUT XML feed; retry pricing 403s with backoff (Sears rate limits)."""
         params = {"sellerId": self._seller_id}
         retry_sec = get_sears_rate_limit_retry_sec() if '/pricing/' in path else 0.0
-        try:
-            return self._request("PUT", path, params=params, data=xml)
-        except SearsAPIError as exc:
-            if exc.status_code == 403 and retry_sec > 0:
+        max_attempts = 3 if retry_sec > 0 else 1
+        last_exc: SearsAPIError | None = None
+        for attempt in range(max_attempts):
+            try:
+                return self._request("PUT", path, params=params, data=xml)
+            except SearsAPIError as exc:
+                last_exc = exc
+                if exc.status_code != 403 or retry_sec <= 0 or attempt >= max_attempts - 1:
+                    raise
+                wait = retry_sec * (attempt + 1)
                 logger.warning(
-                    "Sears PUT %s returned 403 for seller %s; retrying after %ss",
+                    "Sears PUT %s returned 403 for seller %s; retrying after %ss (attempt %s/%s)",
                     path,
                     self._seller_id,
-                    retry_sec,
+                    wait,
+                    attempt + 1,
+                    max_attempts,
                 )
-                time.sleep(retry_sec)
-                return self._request("PUT", path, params=params, data=xml)
-            raise
+                time.sleep(wait)
+        assert last_exc is not None
+        raise last_exc
 
     def _put_feed_and_verify(
         self,

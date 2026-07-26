@@ -612,8 +612,11 @@ class AmazonDriver:
 
     @staticmethod
     def create():
+        import os
+
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
 
         opts = Options()
         opts.add_argument("--headless=new")
@@ -629,13 +632,24 @@ class AmazonDriver:
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option("useAutomationExtension", False)
 
-        try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            from selenium.webdriver.chrome.service import Service
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=opts)
-        except ImportError:
-            driver = webdriver.Chrome(options=opts)
+        # Prefer image-bundled Chromium + chromedriver (CHROME_BIN / CHROMEDRIVER_PATH).
+        # ChromeDriverManager() pulls the latest driver and often mismatches apt Chromium.
+        chrome_bin = os.environ.get("CHROME_BIN")
+        if chrome_bin:
+            opts.binary_location = chrome_bin
+
+        chromedriver_path = os.environ.get("CHROMEDRIVER_PATH")
+        if chromedriver_path and os.path.isfile(chromedriver_path):
+            service = Service(executable_path=chromedriver_path)
+        else:
+            try:
+                from webdriver_manager.chrome import ChromeDriverManager
+
+                service = Service(ChromeDriverManager().install())
+            except Exception:
+                service = Service()
+
+        driver = webdriver.Chrome(service=service, options=opts)
 
         driver.execute_cdp_cmd(
             "Page.addScriptToEvaluateOnNewDocument",
@@ -647,7 +661,11 @@ class AmazonDriver:
             """},
         )
 
-        logger.info("Chrome driver created (stealth mode, fallback)")
+        logger.info(
+            "Chrome driver created (stealth mode, fallback) bin=%s driver=%s",
+            chrome_bin or "default",
+            chromedriver_path if chromedriver_path and os.path.isfile(chromedriver_path) else "auto",
+        )
         return driver
 
     @staticmethod

@@ -574,6 +574,10 @@ def _get_selenium_driver(session: dict, assignment: ProxyAssignment):
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
 
+    chrome_bin = os.environ.get("CHROME_BIN")
+    if chrome_bin:
+        opts.binary_location = chrome_bin
+
     # Chrome only accepts scheme://host:port — strip credentials, rely on IP allowlist.
     from urllib.parse import urlparse
     p = urlparse(assignment.url)
@@ -584,11 +588,8 @@ def _get_selenium_driver(session: dict, assignment: ProxyAssignment):
     if chromedriver_path and os.path.isfile(chromedriver_path):
         service = Service(executable_path=chromedriver_path)
     else:
-        try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            service = Service(ChromeDriverManager().install())
-        except Exception:
-            service = Service()
+        # Avoid ChromeDriverManager here — it often mismatches apt Chromium in Docker.
+        service = Service()
 
     driver = webdriver.Chrome(service=service, options=opts)
     try:

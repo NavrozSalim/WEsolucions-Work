@@ -54,6 +54,7 @@ class FailProductMappingTests(SimpleTestCase):
                 'sync.tasks._build_store_vendor_pricing_inventory_caches',
                 return_value=({}, None, {}, None),
             ),
+            patch('catalog.reverb_catalog.store_is_sears', return_value=False),
         ):
             from catalog.scrape_failure import _push_zero_stock_for_failed
 
@@ -62,6 +63,22 @@ class FailProductMappingTests(SimpleTestCase):
         mock_push.assert_called_once()
         self.assertEqual(mock_push.call_args[0][0], pm)
         self.assertEqual(mock_push.call_args[0][1], store)
+
+    def test_push_zero_defers_sears_to_bulk(self):
+        pm = MagicMock()
+        pm.store_price = Decimal('12.50')
+        store = MagicMock()
+        store.connection_status = 'connected'
+
+        with (
+            patch('catalog.marketplace_push.push_product_mapping_to_marketplace') as mock_push,
+            patch('catalog.reverb_catalog.store_is_sears', return_value=True),
+        ):
+            from catalog.scrape_failure import _push_zero_stock_for_failed
+
+            _push_zero_stock_for_failed(pm, store)
+
+        mock_push.assert_not_called()
 
 
 class ApplyNoVendorPriceFallbackTests(SimpleTestCase):
@@ -82,3 +99,20 @@ class ApplyNoVendorPriceFallbackTests(SimpleTestCase):
         self.assertIn('489.99', pm.scrape_error)
         pm.save.assert_called_once()
         mock_push.assert_called_once_with(pm, store, None, None)
+
+    def test_fallback_listing_defers_sears_to_bulk(self):
+        pm = MagicMock()
+        store = MagicMock()
+        store.connection_status = 'connected'
+
+        with (
+            patch('catalog.marketplace_push.push_product_mapping_to_marketplace') as mock_push,
+            patch('catalog.marketplace_push.apply_post_scrape_marketplace_push') as mock_post,
+            patch('catalog.reverb_catalog.store_is_sears', return_value=True),
+        ):
+            from catalog.scrape_failure import _push_fallback_listing
+
+            _push_fallback_listing(pm, store)
+
+        mock_push.assert_not_called()
+        mock_post.assert_not_called()

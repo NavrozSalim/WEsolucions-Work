@@ -316,16 +316,25 @@ def bulk_push_sears_scraped_listings(
     store,
     *,
     mappings=None,
-    sync_statuses=('scraped',),
+    sync_statuses=('scraped', 'failed', 'needs_attention'),
     price_by_vendor_id=None,
     price_fallback=None,
     require_connected: bool = True,
+    recently_scraped_minutes: int = 360,
 ) -> dict:
     """
-    After a scrape batch, push all scraped Sears rows to the marketplace in bulk.
+    After a scrape batch, push Sears rows to the marketplace in bulk.
 
-    Skips when the store is not Sears, not connected, or has no scraped rows.
+    Includes successful ``scraped`` rows and recent ``failed`` / ``needs_attention``
+    rows (no-price fallback / zero-stock) that were deferred during parallel scrape
+    to avoid Sears pricing 403 rate limits.
+
+    Skips when the store is not Sears, not connected, or has no eligible rows.
     """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
     from store_adapters import get_adapter
     from sync.tasks import _build_store_vendor_pricing_inventory_caches, _resolve_listing_id_for_pm
 
@@ -341,12 +350,20 @@ def bulk_push_sears_scraped_listings(
     if mappings is None:
         from catalog.models import ProductMapping
 
-        mappings = ProductMapping.objects.filter(
+        qs = ProductMapping.objects.filter(
             store=store,
             is_active=True,
             sync_status__in=list(sync_statuses),
             store_price__isnull=False,
         ).select_related('product', 'product__vendor')
+        # Limit failed/needs_attention to this scrape window so old failures are not re-pushed.
+        minutes = max(0, int(recently_scraped_minutes or 0))
+        if minutes > 0 and any(s != 'scraped' for s in sync_statuses):
+            cutoff = timezone.now() - timedelta(minutes=minutes)
+            from django.db.models import Q
+
+            qs = qs.filter(Q(sync_status='scraped') | Q(last_scrape_time__gte=cutoff))
+        mappings = qs
 
     adapter = get_adapter(store)
     bulk_queue: list[tuple] = []

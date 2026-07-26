@@ -2258,7 +2258,13 @@ def scrape_ebay_for_market(
                 else:
                     parsed = _parse_html_to_result(html, candidate)
                 if parsed is not None:
-                    logger.info("eBay HTTP success for %s", candidate)
+                    if parsed.get("price") is not None:
+                        logger.info("eBay HTTP success for %s", candidate)
+                    else:
+                        logger.info(
+                            "eBay HTTP fetched (no price / ended) for %s",
+                            candidate,
+                        )
                     _ebay_debug_write_html(session, html, "http_cold", candidate)
                     return parsed
 

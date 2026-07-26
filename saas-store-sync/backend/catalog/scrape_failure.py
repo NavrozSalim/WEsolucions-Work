@@ -105,6 +105,17 @@ def _push_fallback_listing(pm, store, price_by_vendor_id=None, price_fallback=No
             apply_post_scrape_marketplace_push,
             push_product_mapping_to_marketplace,
         )
+        from catalog.reverb_catalog import store_is_sears
+
+        # Sears pricing PUTs are rate-limited; per-row pushes during parallel scrape
+        # chunks cause cascading 403s. Defer to the end-of-scrape bulk feed instead.
+        if store_is_sears(store):
+            logger.info(
+                'Deferring Sears fallback push to bulk flush pm=%s sku=%s',
+                getattr(pm, 'id', None),
+                getattr(pm, 'marketplace_child_sku', None),
+            )
+            return
 
         if price_by_vendor_id is None or price_fallback is None:
             from sync.tasks import _build_store_vendor_pricing_inventory_caches
@@ -142,7 +153,16 @@ def _push_zero_stock_for_failed(pm, store) -> None:
 
     try:
         from catalog.marketplace_push import push_product_mapping_to_marketplace
+        from catalog.reverb_catalog import store_is_sears
         from sync.tasks import _build_store_vendor_pricing_inventory_caches
+
+        if store_is_sears(store):
+            logger.info(
+                'Deferring Sears zero-stock push to bulk flush pm=%s sku=%s',
+                getattr(pm, 'id', None),
+                getattr(pm, 'marketplace_child_sku', None),
+            )
+            return
 
         price_by_vid, price_fb, _, _ = _build_store_vendor_pricing_inventory_caches(store)
         ok, err = push_product_mapping_to_marketplace(
