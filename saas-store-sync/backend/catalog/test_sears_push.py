@@ -529,3 +529,22 @@ class SearsMarketplacePushDeferTests(SimpleTestCase):
         pm.sync_status = 'scraped'
         apply_post_scrape_marketplace_push(pm, store)
         pm.save.assert_not_called()
+
+    def test_apply_post_scrape_is_noop_for_all_marketplaces(self):
+        from catalog.marketplace_push import apply_post_scrape_marketplace_push
+
+        for code in ('walmart', 'kogan', 'sears', 'reverb'):
+            store = _store(code) if code == 'sears' else MagicMock(
+                marketplace=MagicMock(code=code, name=code.title()),
+            )
+            if code != 'sears':
+                store.marketplace = MagicMock(code=code, name=code.title())
+            pm = MagicMock()
+            pm.sync_status = 'scraped'
+            with patch(
+                'catalog.marketplace_push.push_product_mapping_to_marketplace',
+            ) as mock_push:
+                apply_post_scrape_marketplace_push(pm, store)
+            mock_push.assert_not_called()
+            self.assertEqual(pm.sync_status, 'scraped')
+            pm.save.assert_not_called()

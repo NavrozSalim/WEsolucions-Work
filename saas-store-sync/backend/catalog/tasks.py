@@ -60,12 +60,11 @@ def _costco_au_runs_on_server() -> bool:
 
 
 def _bulk_push_sears_after_scrape_if_needed(store):
-    """Flush scraped Sears listings to the marketplace in batched XML feeds."""
-    if not store_is_sears(store):
-        return None
-    from catalog.marketplace_push import bulk_push_sears_scraped_listings
+    """Sears marketplace push is not run after scrape.
 
-    return bulk_push_sears_scraped_listings(store)
+    Pushes happen only on Manual sync or scheduled ``run_store_update``.
+    """
+    return {'push_ok': 0, 'push_fail': 0, 'skipped': True, 'reason': 'post_scrape_push_disabled'}
 
 
 def _is_ingest_only_product(product) -> bool:

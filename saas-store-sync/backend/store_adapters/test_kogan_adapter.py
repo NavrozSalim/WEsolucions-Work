@@ -132,7 +132,8 @@ class KoganAdapterRrpTests(SimpleTestCase):
 
 
 class KoganPostScrapePushTests(SimpleTestCase):
-    def test_apply_post_scrape_pushes_kogan_with_list_price_and_rrp(self):
+    def test_apply_post_scrape_does_not_push_kogan(self):
+        """Scrapes must not auto-push; Manual sync / schedule own marketplace push."""
         from catalog.marketplace_push import apply_post_scrape_marketplace_push
 
         store = _kogan_store()
@@ -156,12 +157,9 @@ class KoganPostScrapePushTests(SimpleTestCase):
                 price_fallback=ps,
             )
 
-        mock_push.assert_called_once()
-        self.assertEqual(mock_push.call_args[0][0], pm)
-        self.assertEqual(mock_push.call_args[0][1], store)
-        self.assertEqual(pm.sync_status, 'synced')
-        pm.save.assert_called()
-        self.assertIsNone(pm.scrape_error)
+        mock_push.assert_not_called()
+        self.assertEqual(pm.sync_status, 'scraped')
+        pm.save.assert_not_called()
 
     def test_apply_post_scrape_skips_non_kogan_non_walmart(self):
         from catalog.marketplace_push import apply_post_scrape_marketplace_push

@@ -407,34 +407,11 @@ def apply_post_scrape_marketplace_push(
     price_fallback=None,
 ) -> None:
     """
-    After a successful vendor scrape, push to Walmart / Kogan immediately.
+    Intentionally a no-op.
 
-    Kogan: writes ``kogan_first_price``, ``PRICE`` (list_price), and ``rrp`` together
-    via ``adapter_push_kwargs`` so recovered failed listings do not leave stale
-    PRICE/RRP columns when first price changes.
-
-    Sears pushes are deferred and flushed in bulk when the scrape batch finishes
-    (see ``bulk_push_sears_scraped_listings``) or during ``run_store_update``.
+    Marketplace pushes (Walmart, Kogan, Sears, etc.) run only when the user clicks
+    Manual sync or when the store's schedule fires ``run_store_update``. Scraping
+    updates local ``store_price`` / ``store_stock`` and leaves ``sync_status`` as
+    ``scraped`` until an explicit push succeeds.
     """
-    from django.utils import timezone
-
-    if store_is_sears(store):
-        return
-
-    if not (store_is_walmart(store) or store_is_kogan(store)):
-        return
-
-    ok, err = push_product_mapping_to_marketplace(
-        pm,
-        store,
-        price_by_vendor_id=price_by_vendor_id,
-        price_fallback=price_fallback,
-    )
-    if ok:
-        pm.sync_status = 'synced'
-        pm.last_sync_time = timezone.now()
-        pm.scrape_error = (err or '')[:500] if err else None
-        pm.save(update_fields=['sync_status', 'last_sync_time', 'scrape_error'])
-    else:
-        pm.scrape_error = (err or 'marketplace_push_failed')[:500]
-        pm.save(update_fields=['scrape_error'])
+    return
