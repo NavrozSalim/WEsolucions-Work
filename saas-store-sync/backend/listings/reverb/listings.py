@@ -358,7 +358,7 @@ def build_create_payload(
     """Body for POST /api/listings.
 
     ``publish`` defaults from the row's status column (live → true, draft → false).
-    ``free_shipping`` (default true) adds $0 rates for US + everywhere else.
+    ``free_shipping`` (default true) adds a $0 rate for Continental U.S. only.
     Local pickup is left off (``local: false``) so only shipping is offered.
     """
     price = _to_decimal(data.get("sale_price"))
@@ -409,10 +409,10 @@ def build_create_payload(
 
     if free_shipping_enabled(data.get("free_shipping")):
         zero = {"amount": "0.00", "currency": currency}
+        # Continental U.S. only — do not add XX ("Everywhere else").
         body["shipping"] = {
             "rates": [
                 {"rate": zero, "region_code": "US_CON"},
-                {"rate": zero, "region_code": "XX"},
             ],
             "local": False,
         }
