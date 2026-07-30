@@ -1,8 +1,10 @@
 """Reverb managed-store listing helpers: validate, map payload, publish."""
 from __future__ import annotations
 
+import html
 import json
 import logging
+import re
 from decimal import Decimal, InvalidOperation
 
 logger = logging.getLogger("listings.reverb")
@@ -21,6 +23,13 @@ CONDITION_NAME_HINTS = {
     "non-functioning": "non functioning",
     "b-stock": "b-stock",
 }
+
+_HTML_BLOCK_RE = re.compile(
+    r"<(?:p|br|ul|ol|li|b|strong|em|i|h[1-6]|div|a)\b",
+    re.IGNORECASE,
+)
+_BULLET_LINE_RE = re.compile(r"^[-*•]\s+(.+)$")
+_FEATURE_LINE_RE = re.compile(r"^(.+?)\s*-{2,}\s*(.+)$")
 
 
 def parse_extras(listing_or_json) -> dict:
@@ -352,6 +361,68 @@ def normalize_categories_for_ui(raw: list, *, q: str = "") -> list[dict]:
     return out
 
 
+def _line_is_list_item(line: str) -> bool:
+    return bool(_BULLET_LINE_RE.match(line) or _FEATURE_LINE_RE.match(line))
+
+
+def _format_list_item(line: str) -> str:
+    m = _BULLET_LINE_RE.match(line)
+    if m:
+        return f"<li>{html.escape(m.group(1).strip())}</li>"
+    m = _FEATURE_LINE_RE.match(line)
+    if m:
+        title = html.escape(m.group(1).strip())
+        rest = html.escape(m.group(2).strip())
+        return f"<li><b>{title}</b> — {rest}</li>"
+    return f"<li>{html.escape(line)}</li>"
+
+
+def format_reverb_description(text) -> str:
+    """Turn plain-text descriptions into Reverb-friendly HTML.
+
+    Reverb renders descriptions as HTML, so raw newlines collapse into one
+    paragraph. We convert:
+    - blank-line separated blocks → ``<p>``
+    - single newlines inside a block → ``<br>``
+    - bullet / ``Title----detail`` feature lines → ``<ul><li>``
+    Existing HTML (``<p>``, ``<br>``, ``<ul>``, …) is left unchanged.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    if _HTML_BLOCK_RE.search(raw):
+        return raw
+
+    normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
+    blocks = re.split(r"\n\s*\n+", normalized)
+    parts: list[str] = []
+
+    for block in blocks:
+        lines = [ln.strip() for ln in block.split("\n") if ln.strip()]
+        if not lines:
+            continue
+
+        listish = len(lines) >= 2 and sum(1 for ln in lines if _line_is_list_item(ln)) >= max(
+            2, (len(lines) + 1) // 2
+        )
+        if listish:
+            parts.append("<ul>" + "".join(_format_list_item(ln) for ln in lines) + "</ul>")
+            continue
+
+        # One feature-style line alone still reads better as a short paragraph.
+        if len(lines) == 1 and _FEATURE_LINE_RE.match(lines[0]):
+            m = _FEATURE_LINE_RE.match(lines[0])
+            title = html.escape(m.group(1).strip())
+            rest = html.escape(m.group(2).strip())
+            parts.append(f"<p><b>{title}</b> — {rest}</p>")
+            continue
+
+        body = "<br>".join(html.escape(ln) for ln in lines)
+        parts.append(f"<p>{body}</p>")
+
+    return "".join(parts) if parts else f"<p>{html.escape(raw)}</p>"
+
+
 def build_create_payload(
     data: dict, *, condition_uuid: str, category_uuid: str | None = None, publish: bool | None = None,
 ) -> dict:
@@ -360,6 +431,7 @@ def build_create_payload(
     ``publish`` defaults from the row's status column (live → true, draft → false).
     ``free_shipping`` (default true) adds a $0 rate for Continental U.S. only.
     Local pickup is left off (``local: false``) so only shipping is offered.
+    Description is formatted to HTML so Reverb does not collapse it to one paragraph.
     """
     price = _to_decimal(data.get("sale_price"))
     if price is None:
@@ -387,7 +459,7 @@ def build_create_payload(
         "make": make,
         "model": model,
         "title": str(data.get("title") or "").strip(),
-        "description": str(data.get("description") or "").strip(),
+        "description": format_reverb_description(data.get("description")),
         "sku": str(data.get("sku") or "").strip(),
         "price": {"amount": f"{price.quantize(Decimal('0.01'))}", "currency": currency},
         "condition": {"uuid": condition_uuid},

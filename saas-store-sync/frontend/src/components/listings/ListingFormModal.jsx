@@ -467,7 +467,19 @@ export default function ListingFormModal({
                                 <Input label="Make" value={form.make} onChange={set('make')} required />
                                 <Input label="Model" value={form.model} onChange={set('model')} required />
                                 <div className="sm:col-span-2">
-                                    <Textarea label="Description" rows={4} value={form.description} onChange={set('description')} required />
+                                    <Textarea
+                                        label="Description"
+                                        rows={10}
+                                        value={form.description}
+                                        onChange={set('description')}
+                                        required
+                                        placeholder={'Write like a Reverb listing.\n\nUse a blank line between paragraphs.\n\nFeature Title----Detail on each line for a bullet list.\nOr start lines with - for bullets.'}
+                                    />
+                                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                        Tip: blank line = new paragraph. Lines like{' '}
+                                        <span className="font-medium">Feature----detail</span> or starting with{' '}
+                                        <span className="font-medium">-</span> become a bullet list on Reverb.
+                                    </p>
                                 </div>
                                 <Input label="Finish" value={form.finish} onChange={set('finish')} />
                                 <Input label="Year" value={form.year} onChange={set('year')} />
