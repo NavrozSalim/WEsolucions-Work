@@ -52,7 +52,7 @@ const EMPTY_REVERB = {
     currency: 'USD',
     inventory: '1',
     barcode: '',
-    upc_does_not_apply: true,
+    upc_does_not_apply: false,
     source_vendor_code: '',
     vendor_url: '',
     vendor_id: '',
@@ -170,7 +170,9 @@ export default function ListingFormModal({
                     currency: listing.currency || 'USD',
                     inventory: String(listing.inventory ?? 1),
                     barcode: listing.barcode || '',
-                    upc_does_not_apply: listing.upc_does_not_apply !== false,
+                    upc_does_not_apply: listing.barcode
+                        ? false
+                        : !!listing.upc_does_not_apply,
                     source_vendor_code: listing.source_vendor_code || '',
                     vendor_url: listing.vendor_url || '',
                     vendor_id: listing.vendor_id || '',
@@ -291,7 +293,9 @@ export default function ListingFormModal({
                 currency: form.currency || 'USD',
                 inventory: parseInt(form.inventory, 10) || 0,
                 barcode: form.barcode,
-                upc_does_not_apply: !!form.upc_does_not_apply,
+                upc_does_not_apply: String(form.barcode || '').trim()
+                    ? false
+                    : !!form.upc_does_not_apply,
                 source_vendor_code: form.source_vendor_code || '',
                 vendor_url: form.vendor_url,
                 vendor_id: form.vendor_id || '',
@@ -460,13 +464,27 @@ export default function ListingFormModal({
                                     onChange={set('inventory')}
                                     required
                                 />
-                                <Input label="UPC (optional)" value={form.barcode} onChange={set('barcode')} />
+                                <Input
+                                    label="UPC (optional)"
+                                    value={form.barcode}
+                                    onChange={(e) => {
+                                        const barcode = e.target.value;
+                                        setForm((f) => ({
+                                            ...f,
+                                            barcode,
+                                            upc_does_not_apply: barcode.trim()
+                                                ? false
+                                                : f.upc_does_not_apply,
+                                        }));
+                                    }}
+                                />
                                 {vendorFields}
                                 <label className="mt-6 flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 sm:col-span-2">
                                     <input
                                         type="checkbox"
                                         className="h-4 w-4 rounded border-slate-300"
-                                        checked={!!form.upc_does_not_apply}
+                                        checked={!!form.upc_does_not_apply && !String(form.barcode || '').trim()}
+                                        disabled={!!String(form.barcode || '').trim()}
                                         onChange={set('upc_does_not_apply')}
                                     />
                                     UPC does not apply

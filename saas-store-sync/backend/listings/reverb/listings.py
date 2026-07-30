@@ -73,6 +73,9 @@ def build_extras(data: dict) -> str:
     """Serialize Reverb-specific fields into external_data_object_json."""
     make = str(data.get("make") or data.get("brand") or "").strip()
     model = str(data.get("model") or "").strip()
+    upc = str(data.get("barcode") or data.get("upc") or "").strip()
+    # A provided UPC always wins over "does not apply".
+    upc_dna = False if upc else _truthy(data.get("upc_does_not_apply"))
     payload = {
         "marketplace": "reverb",
         "make": make,
@@ -82,7 +85,7 @@ def build_extras(data: dict) -> str:
         "condition_uuid": str(data.get("condition_uuid") or data.get("condition") or "").strip(),
         "category_uuid": str(data.get("category_uuid") or data.get("category") or "").strip(),
         "currency": (str(data.get("currency") or "USD").strip().upper() or "USD"),
-        "upc_does_not_apply": _truthy(data.get("upc_does_not_apply")),
+        "upc_does_not_apply": upc_dna,
         "publish_status": normalize_publish_status(
             data.get("publish_status") or data.get("status")
         ),
@@ -356,6 +359,7 @@ def build_create_payload(
 
     ``publish`` defaults from the row's status column (live → true, draft → false).
     ``free_shipping`` (default true) adds $0 rates for US + everywhere else.
+    Local pickup is left off (``local: false``) so only shipping is offered.
     """
     price = _to_decimal(data.get("sale_price"))
     if price is None:
@@ -375,7 +379,8 @@ def build_create_payload(
         inventory = 0
 
     upc = str(data.get("barcode") or data.get("upc") or "").strip()
-    upc_dna = _truthy(data.get("upc_does_not_apply")) or not upc
+    # Send UPC whenever present; only mark "does not apply" when empty.
+    upc_dna = not bool(upc)
     do_publish = bool(publish) if publish is not None else should_publish(data)
 
     body = {
@@ -393,7 +398,7 @@ def build_create_payload(
         "upc_does_not_apply": "true" if upc_dna else "false",
         "publish": do_publish,
     }
-    if upc and not upc_dna:
+    if upc:
         body["upc"] = upc
     finish = str(data.get("finish") or "").strip()
     year = str(data.get("year") or "").strip()
@@ -409,6 +414,6 @@ def build_create_payload(
                 {"rate": zero, "region_code": "US_CON"},
                 {"rate": zero, "region_code": "XX"},
             ],
-            "local": True,
+            "local": False,
         }
     return body
