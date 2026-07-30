@@ -58,8 +58,17 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
         setResult(null);
         bulkUploadListings(storeId, file, action)
             .then((res) => {
-                setResult(res.data);
-                onImported?.(res.data);
+                const data = res.data || {};
+                const failed = (data.rows || []).filter((r) => !r.valid);
+                const imported = Number(data.imported) || 0;
+                onImported?.(data);
+                // Full success: leave the choose-file modal; keep it open when any row failed.
+                if (imported > 0 && failed.length === 0) {
+                    reset();
+                    onClose();
+                    return;
+                }
+                setResult(data);
             })
             .catch((err) => {
                 setError(err.response?.data?.detail || 'Upload failed.');

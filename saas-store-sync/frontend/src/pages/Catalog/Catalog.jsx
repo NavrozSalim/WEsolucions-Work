@@ -3650,10 +3650,18 @@ export default function Catalog() {
                 storeId={selectedStore}
                 marketplaceCode={selectedStoreData?.marketplace_code}
                 onClose={() => setBulkListingOpen(false)}
-                onImported={() => {
+                onImported={(data) => {
                     setCreatedReloadNonce((n) => n + 1);
                     setUploadsReloadNonce((n) => n + 1);
                     setViewMode('created');
+                    const imported = Number(data?.imported) || 0;
+                    const failed = (data?.rows || []).filter((r) => !r.valid).length;
+                    if (imported > 0 && failed === 0) {
+                        setFlowStatus('success');
+                        setMessage(
+                            `Imported ${imported} of ${data?.total_rows ?? imported} row(s) (${data?.action || 'create'}).`,
+                        );
+                    }
                 }}
             />
 
