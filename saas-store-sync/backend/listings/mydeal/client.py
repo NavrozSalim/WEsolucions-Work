@@ -287,6 +287,68 @@ class MyDealClient:
             },
         )
 
+    def end_listings(self, items: list[dict]) -> MyDealResult:
+        """Discontinue products on MyDeal via POST /products/listingstatus (NotLive).
+
+        Each item: ``sku`` (required), optional ``external_product_id``,
+        ``buyable_sku``, ``external_buyable_id``. For standalone products
+        External* ids default to the same value as the SKU when omitted.
+        """
+        groups = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            product_sku = str(item.get("sku") or item.get("product_sku") or "").strip()
+            if not product_sku:
+                continue
+            ext_pid = str(
+                item.get("external_product_id")
+                or item.get("ExternalProductID")
+                or product_sku
+            ).strip()
+            buyable_sku = str(item.get("buyable_sku") or item.get("SKU") or product_sku).strip()
+            ext_bid = str(
+                item.get("external_buyable_id")
+                or item.get("ExternalBuyableProductID")
+                or ext_pid
+            ).strip()
+            groups.append(
+                {
+                    "ExternalProductID": ext_pid,
+                    "ProductSKU": product_sku,
+                    "BuyableProducts": [
+                        {
+                            "ExternalBuyableProductID": ext_bid,
+                            "SKU": buyable_sku,
+                            "ListingStatus": "NotLive",
+                        }
+                    ],
+                }
+            )
+        if not groups:
+            return MyDealResult(ok=False, message="SKU is required to end a MyDeal listing.")
+        return self.request("POST", "/products/listingstatus", json_body=groups)
+
+    def end_listing(
+        self,
+        *,
+        sku: str,
+        external_product_id: str | None = None,
+        buyable_sku: str | None = None,
+        external_buyable_id: str | None = None,
+    ) -> MyDealResult:
+        """End a single MyDeal product (set ListingStatus=NotLive)."""
+        return self.end_listings(
+            [
+                {
+                    "sku": sku,
+                    "external_product_id": external_product_id,
+                    "buyable_sku": buyable_sku,
+                    "external_buyable_id": external_buyable_id,
+                }
+            ]
+        )
+
 
 def _safe_json(resp):
     try:

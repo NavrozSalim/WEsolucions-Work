@@ -531,9 +531,7 @@ function ManagedUploadActionsDropdown({
     deletingId,
     onExport,
     onDownloadErrors,
-    onDeleteHistory,
-    onDeleteSystem,
-    onDeleteMarketplace,
+    onDelete,
 }) {
     const [open, setOpen] = useState(false);
     const [menuPos, setMenuPos] = useState({ top: 0, right: 0 });
@@ -590,23 +588,9 @@ function ManagedUploadActionsDropdown({
     }
     items.push({ divider: true });
     items.push({
-        label: 'Delete from history',
+        label: 'Delete (app + marketplace)',
         icon: <Trash2 className="h-4 w-4 shrink-0" />,
-        onClick: () => onDeleteHistory(u),
-        disabled: busy,
-        className: 'text-rose-600 dark:text-rose-400',
-    });
-    items.push({
-        label: 'Delete from system',
-        icon: <Trash2 className="h-4 w-4 shrink-0" />,
-        onClick: () => onDeleteSystem(u),
-        disabled: busy,
-        className: 'text-rose-600 dark:text-rose-400',
-    });
-    items.push({
-        label: 'Delete from marketplace',
-        icon: <Trash2 className="h-4 w-4 shrink-0" />,
-        onClick: () => onDeleteMarketplace(u),
+        onClick: () => onDelete(u),
         disabled: busy,
         className: 'text-rose-600 dark:text-rose-400',
     });
@@ -1214,7 +1198,7 @@ export default function Catalog() {
     const [scrapingUploadId, setScrapingUploadId] = useState(null);
     const [deleteUploadConfirm, setDeleteUploadConfirm] = useState(null);
     const [deletingUploadId, setDeletingUploadId] = useState(null);
-    /** Managed Upload history delete: { upload, deleteSystem, deleteMarketplace } */
+    /** Managed Upload history delete: always app + marketplace for matching SKUs. */
     const [deleteListingUploadConfirm, setDeleteListingUploadConfirm] = useState(null);
     const [deletingListingUploadId, setDeletingListingUploadId] = useState(null);
     const [modalFile, setModalFile] = useState(null);
@@ -2625,13 +2609,11 @@ export default function Catalog() {
                 setDeleteListingUploadConfirm(null);
                 const n = res?.data?.listings_deleted ?? 0;
                 const mp = res?.data?.marketplace_deleted ?? 0;
-                if (conf.deleteMarketplace) {
-                    setMessage(`Upload removed. Deleted ${n} listing(s) from system${mp ? ` and ${mp} from marketplace` : ''}.`);
-                } else if (conf.deleteSystem) {
-                    setMessage(`Upload removed. Deleted ${n} listing(s) from system.`);
-                } else {
-                    setMessage('Upload removed from history.');
-                }
+                setMessage(
+                    `Upload removed. Deleted ${n} listing(s) from the app`
+                    + (mp ? ` and ended ${mp} on the marketplace` : '')
+                    + '.',
+                );
                 getListingUploads(selectedStore, { scope: 'history' }).then((r) => setUploads(Array.isArray(r.data) ? r.data : []));
             })
             .catch((err) => setMessage(formatCatalogError(err) || 'Failed to delete upload'))
@@ -3005,17 +2987,7 @@ export default function Catalog() {
                                                     deletingId={deletingListingUploadId}
                                                     onExport={(sid, uid, fname) => exportListingUpload(sid, uid, fname).catch(() => setMessage('Failed to export upload'))}
                                                     onDownloadErrors={(sid, uid, fname) => downloadListingUploadErrors(sid, uid, fname).catch(() => setMessage('Failed to download error file'))}
-                                                    onDeleteHistory={(upload) => setDeleteListingUploadConfirm({
-                                                        upload,
-                                                        deleteSystem: false,
-                                                        deleteMarketplace: false,
-                                                    })}
-                                                    onDeleteSystem={(upload) => setDeleteListingUploadConfirm({
-                                                        upload,
-                                                        deleteSystem: true,
-                                                        deleteMarketplace: false,
-                                                    })}
-                                                    onDeleteMarketplace={(upload) => setDeleteListingUploadConfirm({
+                                                    onDelete={(upload) => setDeleteListingUploadConfirm({
                                                         upload,
                                                         deleteSystem: true,
                                                         deleteMarketplace: true,
@@ -3733,20 +3705,8 @@ export default function Catalog() {
             />
             <ConfirmModal
                 open={!!deleteListingUploadConfirm}
-                title={
-                    deleteListingUploadConfirm?.deleteMarketplace
-                        ? 'Delete from marketplace'
-                        : deleteListingUploadConfirm?.deleteSystem
-                            ? 'Delete from system'
-                            : 'Delete from history'
-                }
-                message={
-                    deleteListingUploadConfirm?.deleteMarketplace
-                        ? `Remove "${deleteListingUploadConfirm?.upload?.filename || 'this upload'}" from history, delete matching listings from this app, and remove them from the marketplace. This cannot be undone.`
-                        : deleteListingUploadConfirm?.deleteSystem
-                            ? `Remove "${deleteListingUploadConfirm?.upload?.filename || 'this upload'}" from history and delete matching listings from this app. Marketplace listings will stay. This cannot be undone.`
-                            : `Remove "${deleteListingUploadConfirm?.upload?.filename || 'this upload'}" from Upload history only. Listings stay in the system and marketplace.`
-                }
+                title="Delete upload"
+                message={`Remove "${deleteListingUploadConfirm?.upload?.filename || 'this upload'}" from history, delete matching listings from this app, and end them on the marketplace if present. This cannot be undone.`}
                 confirmLabel="Delete"
                 variant="danger"
                 loading={deletingListingUploadId === deleteListingUploadConfirm?.upload?.id}

@@ -300,6 +300,11 @@ def create(user, store, data: dict, action: str = ListingAction.CREATE) -> Store
             + (' Use the Mapped action to update it.' if action == ListingAction.CREATE else '')
         )
     _finalize_validation(listing, data)
+    link_errors = _attach_reverb_mapped_listing(listing)
+    if link_errors:
+        merged = list(listing.validation_errors_json or []) + link_errors
+        listing.validation_errors_json = merged
+        listing.status = ListingStatus.VALIDATION_FAILED
     listing.save()
     return listing
 
@@ -307,46 +312,157 @@ def create(user, store, data: dict, action: str = ListingAction.CREATE) -> Store
 def update(listing: StoreListing, data: dict) -> StoreListing:
     _apply_fields(listing, data)
     _finalize_validation(listing, data)
+    link_errors = _attach_reverb_mapped_listing(listing)
+    if link_errors:
+        merged = list(listing.validation_errors_json or []) + link_errors
+        listing.validation_errors_json = merged
+        listing.status = ListingStatus.VALIDATION_FAILED
     listing.save()
     return listing
 
 
-def delete(user, store, listing: StoreListing) -> dict:
-    """Delete a listing locally; remove it from the marketplace first when it
-    exists there (uploaded or mapped)."""
-    on_marketplace = (
-        listing.status in ON_MARKETPLACE_STATUSES
-        or listing.action == ListingAction.MAPPED
-    )
+def _looks_like_reverb_listing_id(value: str) -> bool:
+    text = (value or "").strip()
+    return len(text) >= 32 and "-" in text
+
+
+def _resolve_reverb_listing_id(adapter, listing: StoreListing) -> str:
+    """Prefer stored Reverb listing UUID; otherwise look up by SKU (live + draft)."""
+    lid = (listing.external_product_key or "").strip()
+    sku = (listing.sku or listing.external_variant_key or "").strip()
+    if lid and _looks_like_reverb_listing_id(lid) and lid != sku:
+        return lid
+    if sku:
+        found = adapter.lookup_listing_by_sku(sku)
+        if found:
+            return str(found).strip()
+    if lid and lid != sku:
+        return lid
+    return ""
+
+
+def _attach_reverb_mapped_listing(listing: StoreListing) -> list[str]:
+    """For Mapped Reverb rows, resolve and store the live/draft listing id.
+
+    Returns human-readable errors (empty == linked or not applicable).
+    """
+    store = listing.store
+    if listing.action != ListingAction.MAPPED or _store_kind(store) != "reverb":
+        return []
+    sku = (listing.sku or listing.external_variant_key or "").strip()
+    if not sku:
+        return ["SKU is required to map a Reverb listing."]
+    try:
+        adapter = get_adapter(store)
+        lid = adapter.lookup_listing_by_sku(sku)
+    except ReverbAPIError as exc:
+        return [f"Could not look up SKU on Reverb: {exc}"]
+    if not lid:
+        return [
+            f'No listing with SKU "{sku}" was found on Reverb (live or draft). '
+            "Mapped is for products already on the marketplace — use Create for new ones."
+        ]
+    listing.external_product_key = str(lid).strip()
+    return []
+
+
+def _end_listing_on_marketplace(store, listing: StoreListing) -> bool:
+    """End/delete the listing on the marketplace if present. Returns True if removed.
+
+    Always attempts a marketplace lookup by id/SKU so leftover drafts from failed
+    publishes are cleaned up. Missing marketplace rows are treated as success.
+    """
     kind = marketplace_kind(store.marketplace)
-    if on_marketplace and kind == "lasoo":
+    if kind == "lasoo":
         environment = listing.environment or store.lasoo_environment or Environment.STAGING
         client = LasooClient(store, environment)
-        payload = mapper.build_bulk_delete_payload([listing.external_variant_key], client.auth_key)
+        key = listing.external_variant_key or listing.sku
+        if not key:
+            return False
+        payload = mapper.build_bulk_delete_payload([key], client.auth_key)
         result = client.send("bulk_delete", payload)
         if not result.ok:
+            msg = (result.message or "").lower()
+            if "not found" in msg or "no variant" in msg:
+                return False
             raise MarketplaceError(
                 result.message or "Could not delete the listing on the marketplace."
             )
-    elif on_marketplace and kind == "reverb":
+        return True
+    if kind == "reverb":
         adapter = get_adapter(store)
-        listing_id = (listing.external_product_key or "").strip()
-        # Prefer Reverb listing id stored after publish; fall back to SKU lookup.
-        if not listing_id or listing_id == listing.sku:
-            try:
-                listing_id = adapter.lookup_listing_by_sku(listing.sku or listing.external_variant_key) or listing_id
-            except ReverbAPIError as exc:
-                raise MarketplaceError(str(exc) or "Could not look up Reverb listing.") from exc
-        if listing_id:
-            try:
-                adapter.delete_product(listing_id)
-            except ReverbAPIError as exc:
-                raise MarketplaceError(
-                    str(exc) or "Could not end the listing on Reverb."
-                ) from exc
+        try:
+            lid = _resolve_reverb_listing_id(adapter, listing)
+        except ReverbAPIError as exc:
+            raise MarketplaceError(str(exc) or "Could not look up Reverb listing.") from exc
+        if not lid:
+            return False
+        try:
+            adapter.delete_product(lid)
+            return True
+        except ReverbAPIError as exc:
+            code = getattr(exc, "status_code", None)
+            msg = str(exc or "").lower()
+            if code == 404 or "not found" in msg or "no longer" in msg:
+                return False
+            raise MarketplaceError(
+                str(exc) or "Could not end the listing on Reverb."
+            ) from exc
+    if kind == "mydeal":
+        return _end_mydeal_listing(store, listing)
+    # Unsupported marketplace — local-only delete.
+    return False
+
+
+def _end_mydeal_listing(store, listing: StoreListing) -> bool:
+    """Set MyDeal ListingStatus=NotLive via Universal API (API-mode stores only)."""
+    method = (getattr(store, "mydeal_setup_method", None) or "upload").strip().lower()
+    if method != "api":
+        # Upload-template stores have no live product API to call.
+        return False
+    sku = (listing.sku or listing.external_variant_key or "").strip()
+    if not sku:
+        return False
+    ext = (listing.external_product_key or "").strip()
+    # Prefer stored product key; fall back to SKU (standalone ProductSKU key mode).
+    if not ext or ext == listing.external_variant_key:
+        ext = sku
+    try:
+        from .mydeal.client import MyDealClient
+
+        client = MyDealClient(store)
+        result = client.end_listing(sku=sku, external_product_id=ext)
+    except MarketplaceError as exc:
+        msg = str(exc or "").lower()
+        if "not configured" in msg or "no sandbox" in msg or "no production" in msg:
+            return False
+        raise
+    if result.ok:
+        return True
+    msg = (result.message or "").lower()
+    status = getattr(result, "status", 0) or 0
+    if status == 404 or "not found" in msg or "does not exist" in msg or "no product" in msg:
+        return False
+    raise MarketplaceError(result.message or "Could not end the MyDeal listing.")
+
+
+def delete(user, store, listing: StoreListing) -> dict:
+    """Delete a listing from the marketplace (if present) and then from this app.
+
+    Live behavior: one delete removes both sides. If the SKU is not on the
+    marketplace, local delete still proceeds.
+    """
+    marketplace_deleted = False
+    kind = marketplace_kind(store.marketplace)
+    if kind in ("lasoo", "reverb", "mydeal"):
+        marketplace_deleted = _end_listing_on_marketplace(store, listing)
     variant_key = listing.external_variant_key
     listing.delete()
-    return {"ok": True, "variant_key": variant_key, "marketplace_deleted": on_marketplace}
+    return {
+        "ok": True,
+        "variant_key": variant_key,
+        "marketplace_deleted": marketplace_deleted,
+    }
 
 
 def _keys_from_upload_rows(upload: ListingUpload) -> list[str]:
@@ -363,40 +479,72 @@ def _keys_from_upload_rows(upload: ListingUpload) -> list[str]:
     return keys
 
 
-def _delete_listings_marketplace(store, listings: list) -> None:
-    """Remove listings from Lasoo/Reverb when they exist on the marketplace."""
-    marketplace_keys = [
-        listing.external_variant_key
-        for listing in listings
-        if listing.status in ON_MARKETPLACE_STATUSES or listing.action == ListingAction.MAPPED
-    ]
-    if not marketplace_keys:
-        return
+def _delete_listings_marketplace(store, listings: list) -> int:
+    """Remove listings from Lasoo/Reverb/MyDeal. Returns marketplace removals count."""
+    if not listings:
+        return 0
     kind = marketplace_kind(store.marketplace)
     if kind == "lasoo":
-        environment = store.lasoo_environment or Environment.STAGING
+        keys = [
+            (listing.external_variant_key or listing.sku or "").strip()
+            for listing in listings
+        ]
+        keys = [k for k in keys if k]
+        if not keys:
+            return 0
+        environment = (
+            listings[0].environment
+            or store.lasoo_environment
+            or Environment.STAGING
+        )
         client = LasooClient(store, environment)
-        payload = mapper.build_bulk_delete_payload(marketplace_keys, client.auth_key)
+        payload = mapper.build_bulk_delete_payload(keys, client.auth_key)
         result = client.send("bulk_delete", payload)
         if not result.ok:
+            msg = (result.message or "").lower()
+            if "not found" in msg or "no variant" in msg:
+                return 0
             raise MarketplaceError(
                 result.message or "Could not delete the listings on the marketplace."
             )
-    elif kind == "reverb":
-        adapter = get_adapter(store)
-        for key in marketplace_keys:
-            try:
-                lid = adapter.lookup_listing_by_sku(key) or key
-                if lid:
-                    adapter.delete_product(lid)
-            except ReverbAPIError as exc:
-                raise MarketplaceError(
-                    str(exc) or f"Could not end Reverb listing for SKU {key}."
-                ) from exc
-    else:
-        raise MarketplaceError(
-            "Deleting marketplace listings is currently only supported for Lasoo and Reverb stores."
-        )
+        return len(keys)
+    if kind == "mydeal":
+        method = (getattr(store, "mydeal_setup_method", None) or "upload").strip().lower()
+        if method != "api":
+            return 0
+        items = []
+        for listing in listings:
+            sku = (listing.sku or listing.external_variant_key or "").strip()
+            if not sku:
+                continue
+            ext = (listing.external_product_key or "").strip()
+            if not ext or ext == listing.external_variant_key:
+                ext = sku
+            items.append({"sku": sku, "external_product_id": ext})
+        if not items:
+            return 0
+        try:
+            from .mydeal.client import MyDealClient
+
+            client = MyDealClient(store)
+            result = client.end_listings(items)
+        except MarketplaceError as exc:
+            msg = str(exc or "").lower()
+            if "not configured" in msg:
+                return 0
+            raise
+        if result.ok:
+            return len(items)
+        msg = (result.message or "").lower()
+        status = getattr(result, "status", 0) or 0
+        if status == 404 or "not found" in msg or "does not exist" in msg:
+            return 0
+        raise MarketplaceError(result.message or "Could not end MyDeal listings.")
+    removed = 0
+    for listing in listings:
+        if _end_listing_on_marketplace(store, listing):
+            removed += 1
+    return removed
 
 
 def delete_upload(
@@ -407,19 +555,18 @@ def delete_upload(
     delete_system: bool = False,
     delete_marketplace: bool = False,
 ) -> dict:
-    """Delete an Upload history entry, optionally its listings from system and marketplace.
+    """Delete an Upload history entry and its listings from app + marketplace.
 
-    - Always removes the history row (Upload history).
-    - ``delete_system`` removes matching StoreListing rows for SKUs in the upload.
-    - ``delete_marketplace`` also removes those listings from the store marketplace
-      (implies ``delete_system``).
+    Live behavior: deleting an upload always removes matching listings from this
+    app and ends them on the marketplace when present. ``delete_system`` /
+    ``delete_marketplace`` are accepted for API compatibility but both mean
+    full live delete when either is true; history-only when both are false.
     """
-    if delete_marketplace:
-        delete_system = True
+    live_delete = bool(delete_system or delete_marketplace)
 
     listings_deleted = 0
     marketplace_deleted = 0
-    if delete_system:
+    if live_delete:
         keys = _keys_from_upload_rows(upload)
         listings = []
         if keys:
@@ -428,14 +575,8 @@ def delete_upload(
                     Q(sku__in=keys) | Q(external_variant_key__in=keys)
                 )
             )
-        if delete_marketplace and listings:
-            on_mp = [
-                L
-                for L in listings
-                if L.status in ON_MARKETPLACE_STATUSES or L.action == ListingAction.MAPPED
-            ]
-            _delete_listings_marketplace(store, listings)
-            marketplace_deleted = len(on_mp)
+        if listings:
+            marketplace_deleted = _delete_listings_marketplace(store, listings)
         listings_deleted = len(listings)
         for listing in listings:
             listing.delete()
@@ -447,8 +588,8 @@ def delete_upload(
         "upload_id": upload_id,
         "listings_deleted": listings_deleted,
         "marketplace_deleted": marketplace_deleted,
-        "delete_system": delete_system,
-        "delete_marketplace": delete_marketplace,
+        "delete_system": live_delete,
+        "delete_marketplace": live_delete,
     }
 
 
@@ -507,9 +648,9 @@ def _resolve_file_action(rows: list[dict], requested: str) -> str:
 
 
 def _bulk_delete(user, store, filename: str, rows: list[dict]) -> dict:
-    """Delete listings by SKU: remove from the marketplace (when there), then locally."""
+    """Delete listings by SKU: end on marketplace when present, then locally."""
     preview, deleted = [], 0
-    to_delete, marketplace_keys = [], []
+    to_delete = []
     for row in rows:
         sku = (row.get("sku") or "").strip()
         row_result = {
@@ -536,43 +677,15 @@ def _bulk_delete(user, store, filename: str, rows: list[dict]) -> dict:
             preview.append(row_result)
             continue
         to_delete.append((listing, row_result))
-        if (
-            listing.status in ON_MARKETPLACE_STATUSES
-            or listing.action == ListingAction.MAPPED
-        ):
-            marketplace_keys.append(listing.external_variant_key)
         preview.append(row_result)
 
-    # One marketplace call for every listing that actually exists there.
-    if marketplace_keys:
-        kind = marketplace_kind(store.marketplace)
-        if kind == "lasoo":
-            environment = store.lasoo_environment or Environment.STAGING
-            client = LasooClient(store, environment)
-            payload = mapper.build_bulk_delete_payload(marketplace_keys, client.auth_key)
-            result = client.send("bulk_delete", payload)
-            if not result.ok:
-                raise MarketplaceError(
-                    result.message or "Could not delete the listings on the marketplace."
-                )
-        elif kind == "reverb":
-            adapter = get_adapter(store)
-            for key in marketplace_keys:
-                try:
-                    lid = adapter.lookup_listing_by_sku(key) or key
-                    if lid:
-                        adapter.delete_product(lid)
-                except ReverbAPIError as exc:
-                    raise MarketplaceError(
-                        str(exc) or f"Could not end Reverb listing for SKU {key}."
-                    ) from exc
-        else:
-            raise MarketplaceError(
-                "Deleting marketplace listings is currently only supported for Lasoo and Reverb stores."
-            )
-
     for listing, row_result in to_delete:
-        listing.delete()
+        try:
+            delete(user, store, listing)
+        except MarketplaceError as exc:
+            row_result["errors"] = [str(exc)]
+            row_result["valid"] = False
+            continue
         row_result["imported"] = True
         deleted += 1
 
@@ -663,6 +776,14 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
         listing.action = file_action
         _apply_fields(listing, row)
         _finalize_validation(listing, row)
+        link_errors = _attach_reverb_mapped_listing(listing)
+        if link_errors:
+            merged = list(listing.validation_errors_json or []) + link_errors
+            listing.validation_errors_json = merged
+            listing.status = ListingStatus.VALIDATION_FAILED
+            errors = list(errors) + link_errors
+            row_result["errors"] = errors
+            row_result["valid"] = False
         if route_errors:
             merged = list(route_errors) + list(listing.validation_errors_json or [])
             listing.validation_errors_json = merged

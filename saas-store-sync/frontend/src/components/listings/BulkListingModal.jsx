@@ -69,9 +69,9 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
 
     const invalidRows = (result?.rows || []).filter((r) => !r.valid);
     const actionHelp = {
-        create: 'Each row creates a new listing. Duplicate SKUs are rejected.',
-        mapped: 'Each row maps an existing marketplace listing into the system.',
-        delete: 'Each row only needs SKU — removes the listing from the marketplace.',
+        create: 'Each row creates a new listing. Duplicate SKUs already in this app are rejected — use Mapped to update them.',
+        mapped: 'For products already live on the marketplace. Links them into this app by SKU (looks up Reverb). Also updates existing app rows.',
+        delete: 'Each row needs SKU — ends the listing on the marketplace and removes it from this app.',
     };
 
     return (

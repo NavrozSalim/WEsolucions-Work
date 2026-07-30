@@ -69,7 +69,7 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
     };
 
     const handleDelete = (listing) => {
-        if (!window.confirm(`Delete "${listing.external_variant_key}"?`)) return;
+        if (!window.confirm(`Delete "${listing.external_variant_key}" from this app and the marketplace?`)) return;
         deleteListing(storeId, listing.id)
             .then(() => {
                 onMessage?.(`Deleted "${listing.external_variant_key}".`, 'success');
