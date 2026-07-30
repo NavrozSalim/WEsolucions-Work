@@ -12,14 +12,22 @@ function splitUrls(text) {
 /**
  * Multi-image upload for Create/Edit listing. Stores public URLs in parent via onChange(urlsText).
  * First URL is the primary photo (order used when publishing to Reverb).
+ * Supports file upload and pasting Photo URLs / Image URLs (pipe/comma/newline separated).
  */
-export default function ListingPhotoUploader({ storeId, value = '', onChange, required = false }) {
+export default function ListingPhotoUploader({
+    storeId,
+    value = '',
+    onChange,
+    required = false,
+    label = 'Photo URLs',
+}) {
     const inputRef = useRef(null);
     const dragFromRef = useRef(null);
     const [uploading, setUploading] = useState(false);
     const [error, setError] = useState('');
     const [dragFrom, setDragFrom] = useState(null);
     const [dragOver, setDragOver] = useState(null);
+    const [pasteText, setPasteText] = useState('');
     const urls = splitUrls(value);
 
     const setUrls = (next) => {
@@ -54,6 +62,21 @@ export default function ListingPhotoUploader({ storeId, value = '', onChange, re
         }
     };
 
+    const applyPastedUrls = () => {
+        const pasted = splitUrls(pasteText);
+        if (!pasted.length) {
+            setError('Paste one or more image URLs (separate with | , or new lines).');
+            return;
+        }
+        const merged = [...urls];
+        pasted.forEach((u) => {
+            if (!merged.includes(u)) merged.push(u);
+        });
+        setUrls(merged);
+        setPasteText('');
+        setError('');
+    };
+
     const removeAt = (idx) => {
         setUrls(urls.filter((_, i) => i !== idx));
     };
@@ -76,11 +99,10 @@ export default function ListingPhotoUploader({ storeId, value = '', onChange, re
     return (
         <div className="sm:col-span-2">
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
-                Photos {required ? <span className="text-rose-500">*</span> : null}
+                {label} {required ? <span className="text-rose-500">*</span> : null}
             </label>
             <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
-                Upload product photos from your computer. They are hosted for Reverb to fetch when you publish.
-                Drag to reorder — photo 1 is the main image.
+                Upload from your computer or paste URLs (same as the bulk template). Drag to reorder — photo 1 is the main image.
             </p>
 
             <div className="flex flex-wrap gap-3">
@@ -162,6 +184,28 @@ export default function ListingPhotoUploader({ storeId, value = '', onChange, re
                         <ImagePlus className="h-6 w-6" />
                     )}
                     <span className="text-[11px] font-medium">{uploading ? 'Uploading…' : 'Add photos'}</span>
+                </button>
+            </div>
+
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+                <div className="min-w-0 flex-1">
+                    <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">
+                        Paste {label}
+                    </label>
+                    <textarea
+                        rows={2}
+                        value={pasteText}
+                        onChange={(e) => setPasteText(e.target.value)}
+                        placeholder="https://…/a.jpg | https://…/b.jpg"
+                        className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-sm focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-none"
+                    />
+                </div>
+                <button
+                    type="button"
+                    onClick={applyPastedUrls}
+                    className="shrink-0 rounded-md border border-slate-200 dark:border-slate-600 px-3 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                >
+                    Add URLs
                 </button>
             </div>
 

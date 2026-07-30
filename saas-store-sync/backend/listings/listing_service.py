@@ -282,6 +282,12 @@ def _finalize_validation(listing: StoreListing, data: dict) -> list[str]:
 def create(user, store, data: dict, action: str = ListingAction.CREATE) -> StoreListing:
     if action not in (ListingAction.CREATE, ListingAction.MAPPED):
         action = ListingAction.CREATE
+    # Same optional routing as bulk: Marketplace Name / Store Name may target
+    # another of the user's stores.
+    target_store, route_errors = template_routing.resolve_row_store(user, store, data or {})
+    if route_errors:
+        raise MarketplaceError(" ".join(route_errors))
+    store = target_store
     environment = _listing_env(store)
     listing = StoreListing(user=user, store=store, environment=environment, action=action)
     _apply_fields(listing, data)
