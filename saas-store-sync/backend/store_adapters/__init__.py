@@ -15,7 +15,7 @@ _REGISTRY = {
     'Etsy': EtsyAdapter,
     'Walmart': WalmartAdapter,
     'Kogan': KoganAdapter,
-    'MyDeal': ReverbAdapter,
+    # MyDeal uses listings.mydeal.client (WMP Universal API), not ReverbAdapter.
     'Sears': SearsAdapter,
 }
 
@@ -40,6 +40,12 @@ def get_adapter(store):
     if getattr(store, 'marketplace', None):
         platform = store.marketplace.name or store.marketplace.code
     platform = platform or getattr(store, 'platform', None) or 'Reverb'
+    # MyDeal / WMP uses listings.mydeal.client — never the Reverb HTTP adapter.
+    if str(platform).strip().lower() in ('mydeal', 'woolworths', 'wmp'):
+        raise ValueError(
+            'MyDeal stores use the WMP Universal API client '
+            '(listings.mydeal), not a store_adapters listing adapter.'
+        )
     adapter_class = _resolve_adapter_class(platform)
     if not adapter_class:
         adapter_class = ReverbAdapter  # fallback for unknown marketplaces

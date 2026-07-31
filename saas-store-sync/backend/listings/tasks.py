@@ -32,7 +32,7 @@ def _managed_stores_qs(*, region: str | None = None, marketplace_codes=None):
 
 def sync_store_tickets(*, region: str | None = None) -> dict:
     """Pull tickets for Lasoo + Reverb managed stores (optional region filter)."""
-    stores = _managed_stores_qs(region=region, marketplace_codes=["lasoo", "reverb"])
+    stores = _managed_stores_qs(region=region, marketplace_codes=["lasoo", "reverb", "mydeal"])
     total_fetched = 0
     store_count = 0
     for store in stores:
@@ -61,7 +61,7 @@ def sync_store_tickets(*, region: str | None = None) -> dict:
 
 def sync_store_orders(*, region: str | None = None, marketplace_codes=None) -> dict:
     """Pull orders for managed stores (default Lasoo + Reverb; optional region)."""
-    codes = marketplace_codes if marketplace_codes is not None else ["lasoo", "reverb"]
+    codes = marketplace_codes if marketplace_codes is not None else ["lasoo", "reverb", "mydeal"]
     stores = _managed_stores_qs(region=region, marketplace_codes=codes)
     total_fetched = 0
     store_count = 0

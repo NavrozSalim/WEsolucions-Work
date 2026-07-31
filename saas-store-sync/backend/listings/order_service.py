@@ -26,10 +26,13 @@ def fetch(user, store, page: int = 1, take: int = 50) -> dict:
     if kind == "reverb":
         from .reverb import orders as reverb_orders
         return reverb_orders.fetch(user, store)
+    if kind == "mydeal":
+        from .mydeal import orders as mydeal_orders
+        return mydeal_orders.fetch(user, store, page=page, take=take)
     if kind != "lasoo":
         raise MarketplaceError(
             f'Order management is not supported yet for "{kind or "this marketplace"}". '
-            'Currently Lasoo and Reverb managed stores can fetch orders.'
+            'Currently Lasoo, Reverb, and MyDeal managed stores can fetch orders.'
         )
     return _fetch_lasoo(user, store, page=page, take=take)
 
@@ -83,6 +86,11 @@ def create_test_order(user, store) -> dict:
         raise MarketplaceError(
             "Reverb has no test-order API. Use Fetch orders to pull real selling orders "
             "from api.reverb.com."
+        )
+    if kind == "mydeal":
+        raise MarketplaceError(
+            "MyDeal has no test-order API. Use Fetch orders to pull ReadytoFulfill orders "
+            "from the WMP Universal API (sandbox or production)."
         )
     _require_lasoo(store)
     environment = store.lasoo_environment or 'staging'
@@ -1022,6 +1030,9 @@ def cancel_reasons(store) -> dict:
     if kind == "reverb":
         from .reverb import orders as reverb_orders
         return reverb_orders.cancel_reasons()
+    if kind == "mydeal":
+        from .mydeal import orders as mydeal_orders
+        return mydeal_orders.cancel_reasons()
     if kind != "lasoo":
         raise MarketplaceError(
             f'Cancel reasons are not available for "{kind or "this marketplace"}" yet.'
@@ -1061,6 +1072,7 @@ def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
     """Cancel an order on the marketplace and mark it cancelled locally.
 
     Lasoo: Refunds_Create. Reverb: seller-initiated refund_requests (full refund).
+    MyDeal: POST /orders/{id}/cancel for unshipped orders.
     The order is always marked cancelled locally so fulfillment can stop;
     ``marketplace_ok`` reports whether the marketplace accepted the request.
     """
@@ -1068,6 +1080,9 @@ def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
     if kind == "reverb":
         from .reverb import orders as reverb_orders
         return reverb_orders.cancel(order, reason=reason)
+    if kind == "mydeal":
+        from .mydeal import orders as mydeal_orders
+        return mydeal_orders.cancel(order, reason=reason)
 
     _require_lasoo(order.store)
 

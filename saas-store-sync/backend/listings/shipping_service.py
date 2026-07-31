@@ -1,16 +1,22 @@
-"""Send shipping/tracking info to Lasoo via Shipments_Upsert.
+"""Send shipping/tracking info to marketplace (Lasoo Shipments_Upsert / MyDeal fulfill).
 
 Lasoo's shipment API:
 - ``Shipments_Upsert`` (/Shipments/Upsert/1.0.0): create/update a shipment with
   tracking number, carrier, status and the items that were shipped.
 There is no separate "complete" endpoint; marking complete is an upsert with
 ``status = "DELIVERED"``.
+
+MyDeal (WMP):
+- ``POST /orders/fulfill`` with OrderFulfillment + tracking per OrderItem.
 """
 import logging
 
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 
+from stores.credentials import marketplace_kind
+
+from .errors import MarketplaceError
 from .lasoo.client import LasooClient
 from .lasoo.queries import build_payload
 from .models import MarketplaceOrder, OrderShipment, OrderStatus
@@ -82,9 +88,82 @@ def _upsert(client: LasooClient, order: MarketplaceOrder, *, tracking_number, ca
     return payload, client.send("shipping", payload)
 
 
+def _submit_mydeal(order: MarketplaceOrder, *, tracking_number: str, carrier: str,
+                   shipped_date: str = "") -> dict:
+    from .mydeal import orders as mydeal_orders
+    from .mydeal.client import MyDealClient
+
+    shipment = OrderShipment.objects.create(
+        order=order,
+        tracking_number=(tracking_number or "").strip(),
+        carrier=(carrier or "").strip(),
+        tracking_url="",
+        shipped_at=_parse_dt(shipped_date),
+        status="submitted",
+    )
+    try:
+        client = MyDealClient(order.store)
+    except MarketplaceError as exc:
+        shipment.status = "failed"
+        shipment.marketplace_response_json = {"error": str(exc)}
+        shipment.save(update_fields=["status", "marketplace_response_json"])
+        return {"ok": False, "message": str(exc), "shipment_id": str(shipment.id)}
+
+    fulfillment = mydeal_orders.build_fulfillment_payload(
+        order,
+        tracking_number=tracking_number,
+        carrier=carrier,
+        shipped_date=shipped_date or _to_iso(""),
+    )
+    if not fulfillment.get("FulfillmentItems"):
+        shipment.status = "failed"
+        shipment.marketplace_response_json = {"error": "No line items to fulfill"}
+        shipment.save(update_fields=["status", "marketplace_response_json"])
+        return {
+            "ok": False,
+            "message": "No MyDeal line items available to fulfill.",
+            "shipment_id": str(shipment.id),
+        }
+
+    result = client.fulfill_orders([fulfillment])
+    shipment.marketplace_request_json = fulfillment
+    shipment.marketplace_response_json = result.data if result.ok else {"error": result.message, "data": result.data}
+    shipment.status = "submitted" if result.ok else "failed"
+    shipment.save(update_fields=["marketplace_request_json", "marketplace_response_json", "status"])
+
+    if result.ok:
+        order.shipping_status = "submitted"
+        order.status = OrderStatus.SHIPPING_SUBMITTED
+        order.save(update_fields=["shipping_status", "status", "updated_at"])
+
+    return {
+        "ok": result.ok,
+        "message": result.message or ("Shipping info sent to MyDeal." if result.ok else "MyDeal fulfill failed."),
+        "shipment_id": str(shipment.id),
+    }
+
+
 def submit(order: MarketplaceOrder, *, tracking_number: str, carrier: str,
            tracking_url: str = "", shipped_date: str = "", status: str = "") -> dict:
-    """Submit tracking info for an order (status defaults to OUT_FOR_DELIVERY)."""
+    """Submit tracking info for an order."""
+    kind = marketplace_kind(order.store.marketplace)
+    if kind == "mydeal":
+        return _submit_mydeal(
+            order,
+            tracking_number=tracking_number,
+            carrier=carrier,
+            shipped_date=shipped_date,
+        )
+    if kind == "reverb":
+        raise MarketplaceError(
+            "Shipping/tracking push is not supported for Reverb yet. "
+            "Mark shipped in Reverb seller tools, or ask for Reverb ship API support."
+        )
+    if kind != "lasoo":
+        raise MarketplaceError(
+            f'Shipping is not supported yet for "{kind or "this marketplace"}".'
+        )
+
     client = LasooClient(order.store, order.environment)
     ship_status = (status or "OUT_FOR_DELIVERY").strip()
 
@@ -125,7 +204,28 @@ def submit(order: MarketplaceOrder, *, tracking_number: str, carrier: str,
 
 
 def complete(order: MarketplaceOrder) -> dict:
-    """Mark a shipment delivered (Shipments_Upsert with status DELIVERED)."""
+    """Mark a shipment delivered (Lasoo) or confirm MyDeal already fulfilled."""
+    kind = marketplace_kind(order.store.marketplace)
+    if kind == "mydeal":
+        # MyDeal has no separate "delivered" call — fulfill already marks Shipped.
+        order.shipping_status = "complete"
+        order.status = OrderStatus.SHIPPING_COMPLETE
+        order.save(update_fields=["shipping_status", "status", "updated_at"])
+        last = order.shipments.first()
+        if last:
+            last.status = "complete"
+            last.save(update_fields=["status"])
+        return {
+            "ok": True,
+            "message": "Marked complete locally (MyDeal ships via /orders/fulfill).",
+        }
+    if kind == "reverb":
+        raise MarketplaceError("Shipping complete is not supported for Reverb yet.")
+    if kind != "lasoo":
+        raise MarketplaceError(
+            f'Shipping complete is not supported yet for "{kind or "this marketplace"}".'
+        )
+
     client = LasooClient(order.store, order.environment)
 
     last = order.shipments.first()  # ordered by -created_at

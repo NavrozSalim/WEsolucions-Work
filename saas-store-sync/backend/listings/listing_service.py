@@ -959,10 +959,10 @@ def _publish_reverb(user, store, publishable: list) -> dict:
 def publish(user, store, listing_ids=None) -> dict:
     """Push READY (or previously uploaded) listings to the store's marketplace."""
     kind = marketplace_kind(store.marketplace)
-    if kind not in ("lasoo", "reverb"):
+    if kind not in ("lasoo", "reverb", "mydeal"):
         raise MarketplaceError(
             f'Publishing created products is not supported yet for "{kind or "this marketplace"}". '
-            "Currently only Lasoo and Reverb stores can publish."
+            "Currently Lasoo, Reverb, and MyDeal stores can publish."
         )
 
     qs = StoreListing.objects.filter(
@@ -989,6 +989,10 @@ def publish(user, store, listing_ids=None) -> dict:
     # (partial remote success must still be persisted locally).
     if kind == "reverb":
         return _publish_reverb(user, store, publishable)
+    if kind == "mydeal":
+        from .mydeal import products as mydeal_products
+
+        return mydeal_products.publish_listings(user, store, publishable)
     with transaction.atomic():
         return _publish_lasoo(user, store, publishable)
 
@@ -1471,9 +1475,39 @@ def push_inventory(user, store, listing_ids=None) -> dict:
             "failed": 0 if pub.get("ok") else len(listings),
             "rows": [],
         }
+    if kind == "mydeal":
+        from .mydeal import products as mydeal_products
+
+        qs = StoreListing.objects.filter(
+            user=user,
+            store=store,
+            status__in=[
+                ListingStatus.UPLOADED_STAGING,
+                ListingStatus.UPLOADED_PRODUCTION,
+            ],
+        )
+        if listing_ids:
+            qs = qs.filter(id__in=listing_ids)
+        listings = list(qs)
+        if not listings:
+            raise MarketplaceError(
+                "No marketplace listings to push. Publish from Created products first."
+            )
+        result = mydeal_products.push_inventory(listings, store)
+        if result.get("ok"):
+            StoreListing.objects.filter(id__in=[l.id for l in listings]).update(
+                inventory_sync_status=InventorySyncStatus.SYNCED,
+            )
+        return {
+            "ok": bool(result.get("ok")),
+            "message": result.get("message") or "",
+            "pushed": result.get("updated") or 0,
+            "failed": 0 if result.get("ok") else len(listings),
+            "rows": [],
+        }
     if kind != "reverb":
         raise MarketplaceError(
-            "Inventory push is currently supported for Reverb and Lasoo managed stores."
+            "Inventory push is currently supported for Reverb, Lasoo, and MyDeal managed stores."
         )
 
     qs = StoreListing.objects.filter(

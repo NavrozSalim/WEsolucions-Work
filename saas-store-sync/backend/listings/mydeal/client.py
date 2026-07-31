@@ -347,6 +347,102 @@ class MyDealClient:
             ]
         )
 
+    # --- Products ---
+
+    def upsert_products(self, product_groups: list[dict]) -> MyDealResult:
+        """Create or update products via POST /products (async pending-responses)."""
+        if not product_groups:
+            return MyDealResult(ok=False, message="No products to send.")
+        return self.request("POST", "/products", json_body=product_groups)
+
+    def update_price_quantity(self, product_groups: list[dict]) -> MyDealResult:
+        """Update price/qty via POST /products/priceandquantity (doc §0.5.4)."""
+        if not product_groups:
+            return MyDealResult(ok=False, message="No products to update.")
+        # Endpoint name varies slightly across doc revisions — try common path.
+        return self.request("POST", "/products/priceandquantity", json_body=product_groups)
+
+    def get_pending_response(self, work_item_id: str) -> MyDealResult:
+        wid = str(work_item_id or "").strip()
+        if not wid:
+            return MyDealResult(ok=False, message="workItemId is required.")
+        return self.request(
+            "GET",
+            "/pending-responses",
+            params={"workItemId": wid},
+        )
+
+    def get_categories(self, *, page: int = 1, limit: int = 250) -> MyDealResult:
+        return self.request(
+            "GET",
+            "/categories",
+            params={"page": page, "Limit": limit},
+        )
+
+    # --- Orders ---
+
+    def list_orders(
+        self,
+        *,
+        order_status: str = "All",
+        page: int = 1,
+        limit: int = 100,
+    ) -> MyDealResult:
+        """GET /orders?orderStatus=&Page=&Limit="""
+        return self.request(
+            "GET",
+            "/orders",
+            params={
+                "orderStatus": order_status or "All",
+                "Page": max(1, int(page or 1)),
+                "Limit": min(250, max(1, int(limit or 100))),
+            },
+        )
+
+    def get_order(self, order_id) -> MyDealResult:
+        oid = str(order_id or "").strip()
+        if not oid:
+            return MyDealResult(ok=False, message="Order id is required.")
+        return self.request("GET", f"/orders/{oid}")
+
+    def list_unfulfilled(self, *, limit: int = 100) -> MyDealResult:
+        """GET /orders/unfulfilled — ReadytoFulfill orders not yet acknowledged."""
+        return self.request(
+            "GET",
+            "/orders/unfulfilled",
+            params={"Limit": min(250, max(1, int(limit or 100)))},
+        )
+
+    def acknowledge_order(self, order_id) -> MyDealResult:
+        oid = str(order_id or "").strip()
+        if not oid:
+            return MyDealResult(ok=False, message="Order id is required.")
+        return self.request("POST", f"/orders/{oid}/acknowledge")
+
+    def fulfill_orders(self, fulfillments: list[dict]) -> MyDealResult:
+        """POST /orders/fulfill — array of OrderFulfillment items."""
+        if not fulfillments:
+            return MyDealResult(ok=False, message="No fulfillments to send.")
+        return self.request("POST", "/orders/fulfill", json_body=fulfillments)
+
+    def cancel_order(self, order_id, cancellation: dict) -> MyDealResult:
+        """POST /orders/{id}/cancel — OrderCancellation body."""
+        oid = str(order_id or "").strip()
+        if not oid:
+            return MyDealResult(ok=False, message="Order id is required.")
+        if not isinstance(cancellation, dict):
+            return MyDealResult(ok=False, message="Cancellation payload is required.")
+        return self.request("POST", f"/orders/{oid}/cancel", json_body=cancellation)
+
+    def refund_order(self, order_id, refund: dict) -> MyDealResult:
+        """POST /orders/{id}/refund — OrderRefund body (shipped orders)."""
+        oid = str(order_id or "").strip()
+        if not oid:
+            return MyDealResult(ok=False, message="Order id is required.")
+        if not isinstance(refund, dict):
+            return MyDealResult(ok=False, message="Refund payload is required.")
+        return self.request("POST", f"/orders/{oid}/refund", json_body=refund)
+
 
 def _safe_json(resp):
     try:
