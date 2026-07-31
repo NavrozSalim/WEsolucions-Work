@@ -1,12 +1,18 @@
 """Parse uploaded CSV / Excel listing templates into normalized row dicts.
 
 Uses stdlib csv + openpyxl (no pandas dependency in this project).
-Supports Lasoo templates and Reverb-specific templates (by store marketplace).
+Supports Lasoo, Reverb, and MyDeal templates (by store marketplace).
+
+Optional columns are labeled with `` (Optional)`` in the template header.
+Import still accepts headers with or without that suffix.
 """
 import csv
 import io
+import re
 
-# Maps human template headers -> internal field names (Lasoo + Reverb shared).
+from stores.credentials import marketplace_kind
+
+# Maps human template headers -> internal field names (Lasoo + Reverb + MyDeal).
 COLUMN_MAP = {
     "action": "action",
     "product key": "product_key",
@@ -20,11 +26,15 @@ COLUMN_MAP = {
     "year": "year",
     "category": "category",
     "category uuid": "category_uuid",
+    "category id": "category",
+    "mydeal category id": "category",
     "condition": "condition",
     "condition uuid": "condition_uuid",
     "sku": "sku",
     "barcode": "barcode",
     "upc": "barcode",
+    "gtin": "gtin",
+    "mpn": "mpn",
     "upc does not apply": "upc_does_not_apply",
     "options": "options",
     "option": "options",
@@ -73,142 +83,245 @@ COLUMN_MAP = {
     "photo urls": "image_urls",
     "inventory": "inventory",
     "infinite quantity": "infinite_quantity",
+    "product unlimited": "infinite_quantity",
     "original price": "original_price",
+    "rrp": "original_price",
     "sale price": "sale_price",
-    # Reverb: draft vs live (publish flag); free shipping default true
     "status": "publish_status",
     "publish status": "publish_status",
     "listing status": "publish_status",
     "free_shipping": "free_shipping",
     "free shipping": "free_shipping",
+    # MyDeal / WMP ProductGroup extras
+    "tags": "tags",
+    "specifications": "specifications",
+    "weight": "weight",
+    "weight unit": "weight_unit",
+    "length": "length",
+    "height": "height",
+    "width": "width",
+    "dimension unit": "dimension_unit",
+    "shipping cost category": "shipping_cost_category",
+    "shipping cost standard": "shipping_cost_standard",
+    "custom freight scheme id": "custom_freight_scheme_id",
+    "is direct import": "is_direct_import",
+    "max days for delivery": "max_days_for_delivery",
+    "delivery time": "delivery_time",
+    "has 48 hours dispatch": "has_48_hours_dispatch",
 }
 
-# System routing columns first (vendor identity together), then marketplace payload.
+_OPTIONAL_SUFFIX_RE = re.compile(r"\s*\(optional\)\s*$", re.I)
+
+
+def _canonical_header(header: str) -> str:
+    """Lowercase header and strip a trailing ``(Optional)`` marker."""
+    text = str(header or "").strip().lower()
+    return _OPTIONAL_SUFFIX_RE.sub("", text).strip()
+
+
 LASOO_TEMPLATE_HEADERS = [
-    "Vendor Name",
-    "Vendor URL",
-    "Vendor ID",
-    "Marketplace Name",
-    "Store Name",
+    "Vendor Name (Optional)",
+    "Vendor URL (Optional)",
+    "Vendor ID (Optional)",
+    "Marketplace Name (Optional)",
+    "Store Name (Optional)",
     "Action",
     "Product Key",
     "Variant Key",
     "SKU",
-    "Option 1 Name",
-    "Option 1 Value",
-    "Option 2 Name",
-    "Option 2 Value",
-    "Option 3 Name",
-    "Option 3 Value",
-    "Option 4 Name",
-    "Option 4 Value",
-    "Variation Img URL",
+    "Option 1 Name (Optional)",
+    "Option 1 Value (Optional)",
+    "Option 2 Name (Optional)",
+    "Option 2 Value (Optional)",
+    "Option 3 Name (Optional)",
+    "Option 3 Value (Optional)",
+    "Option 4 Name (Optional)",
+    "Option 4 Value (Optional)",
+    "Variation Img URL (Optional)",
     "Title",
     "Description",
     "Brand",
-    "Category",
-    "Barcode",
+    "Category (Optional)",
+    "Barcode (Optional)",
     "Image URLs",
     "Inventory",
-    "Infinite Quantity",
-    "Original Price",
+    "Infinite Quantity (Optional)",
+    "Original Price (Optional)",
     "Sale Price",
 ]
 
-# Internal field -> template header for export (Lasoo Create/Mapped files).
 LASOO_EXPORT_FIELDS = [
-    ("vendor_name", "Vendor Name"),
-    ("vendor_url", "Vendor URL"),
-    ("vendor_id", "Vendor ID"),
-    ("marketplace_name", "Marketplace Name"),
-    ("store_name", "Store Name"),
+    ("vendor_name", "Vendor Name (Optional)"),
+    ("vendor_url", "Vendor URL (Optional)"),
+    ("vendor_id", "Vendor ID (Optional)"),
+    ("marketplace_name", "Marketplace Name (Optional)"),
+    ("store_name", "Store Name (Optional)"),
     ("action", "Action"),
     ("product_key", "Product Key"),
     ("variant_key", "Variant Key"),
     ("sku", "SKU"),
-    ("option_1_name", "Option 1 Name"),
-    ("option_1_value", "Option 1 Value"),
-    ("option_2_name", "Option 2 Name"),
-    ("option_2_value", "Option 2 Value"),
-    ("option_3_name", "Option 3 Name"),
-    ("option_3_value", "Option 3 Value"),
-    ("option_4_name", "Option 4 Name"),
-    ("option_4_value", "Option 4 Value"),
-    ("variation_image_url", "Variation Img URL"),
+    ("option_1_name", "Option 1 Name (Optional)"),
+    ("option_1_value", "Option 1 Value (Optional)"),
+    ("option_2_name", "Option 2 Name (Optional)"),
+    ("option_2_value", "Option 2 Value (Optional)"),
+    ("option_3_name", "Option 3 Name (Optional)"),
+    ("option_3_value", "Option 3 Value (Optional)"),
+    ("option_4_name", "Option 4 Name (Optional)"),
+    ("option_4_value", "Option 4 Value (Optional)"),
+    ("variation_image_url", "Variation Img URL (Optional)"),
     ("title", "Title"),
     ("description", "Description"),
     ("brand", "Brand"),
-    ("category", "Category"),
-    ("barcode", "Barcode"),
+    ("category", "Category (Optional)"),
+    ("barcode", "Barcode (Optional)"),
     ("image_urls", "Image URLs"),
     ("inventory", "Inventory"),
-    ("infinite_quantity", "Infinite Quantity"),
-    ("original_price", "Original Price"),
+    ("infinite_quantity", "Infinite Quantity (Optional)"),
+    ("original_price", "Original Price (Optional)"),
     ("sale_price", "Sale Price"),
 ]
 
 REVERB_EXPORT_FIELDS = [
-    ("vendor_name", "Vendor Name"),
-    ("vendor_url", "Vendor URL"),
-    ("marketplace_name", "Marketplace Name"),
-    ("store_name", "Store Name"),
+    ("vendor_name", "Vendor Name (Optional)"),
+    ("vendor_url", "Vendor URL (Optional)"),
+    ("marketplace_name", "Marketplace Name (Optional)"),
+    ("store_name", "Store Name (Optional)"),
     ("action", "Action"),
     ("sku", "SKU"),
     ("title", "Title"),
     ("make", "Make"),
     ("model", "Model"),
     ("description", "Description"),
-    ("finish", "Finish"),
-    ("year", "Year"),
+    ("finish", "Finish (Optional)"),
+    ("year", "Year (Optional)"),
     ("condition", "Condition"),
     ("category", "Category"),
     ("sale_price", "Price"),
-    ("currency", "Currency"),
+    ("currency", "Currency (Optional)"),
     ("inventory", "Inventory"),
-    ("barcode", "UPC"),
-    ("upc_does_not_apply", "UPC Does Not Apply"),
+    ("barcode", "UPC (Optional)"),
+    ("upc_does_not_apply", "UPC Does Not Apply (Optional)"),
     ("image_urls", "Photo URLs"),
-    ("publish_status", "status"),
-    ("free_shipping", "free_shipping"),
+    ("publish_status", "status (Optional)"),
+    ("free_shipping", "free_shipping (Optional)"),
 ]
 
 REVERB_TEMPLATE_HEADERS = [
-    "Vendor Name",
-    "Vendor URL",
-    "Marketplace Name",
-    "Store Name",
+    "Vendor Name (Optional)",
+    "Vendor URL (Optional)",
+    "Marketplace Name (Optional)",
+    "Store Name (Optional)",
     "Action",
     "SKU",
     "Title",
     "Make",
     "Model",
     "Description",
-    "Finish",
-    "Year",
+    "Finish (Optional)",
+    "Year (Optional)",
     "Condition",
     "Category",
     "Price",
-    "Currency",
+    "Currency (Optional)",
     "Inventory",
-    "UPC",
-    "UPC Does Not Apply",
+    "UPC (Optional)",
+    "UPC Does Not Apply (Optional)",
     "Photo URLs",
-    "status",
-    "free_shipping",
+    "status (Optional)",
+    "free_shipping (Optional)",
 ]
 
-# Back-compat alias
+MYDEAL_TEMPLATE_HEADERS = [
+    "Vendor Name (Optional)",
+    "Vendor URL (Optional)",
+    "Vendor ID (Optional)",
+    "Marketplace Name (Optional)",
+    "Store Name (Optional)",
+    "Action",
+    "SKU",
+    "Title",
+    "Description",
+    "Brand (Optional)",
+    "Tags (Optional)",
+    "Specifications (Optional)",
+    "Condition (Optional)",
+    "Category",
+    "GTIN (Optional)",
+    "MPN (Optional)",
+    "Image URLs",
+    "Inventory",
+    "Product Unlimited (Optional)",
+    "Price",
+    "RRP (Optional)",
+    "Weight (Optional)",
+    "Weight Unit (Optional)",
+    "Length (Optional)",
+    "Height (Optional)",
+    "Width (Optional)",
+    "Dimension Unit (Optional)",
+    "Shipping Cost Category",
+    "Shipping Cost Standard (Optional)",
+    "Custom Freight Scheme ID (Optional)",
+    "Is Direct Import",
+    "Max Days For Delivery",
+    "Delivery Time",
+    "Has 48 Hours Dispatch (Optional)",
+    "Option 1 Name (Optional)",
+    "Option 1 Value (Optional)",
+    "Option 2 Name (Optional)",
+    "Option 2 Value (Optional)",
+    "Option 3 Name (Optional)",
+    "Option 3 Value (Optional)",
+]
+
+MYDEAL_EXPORT_FIELDS = [
+    ("vendor_name", "Vendor Name (Optional)"),
+    ("vendor_url", "Vendor URL (Optional)"),
+    ("vendor_id", "Vendor ID (Optional)"),
+    ("marketplace_name", "Marketplace Name (Optional)"),
+    ("store_name", "Store Name (Optional)"),
+    ("action", "Action"),
+    ("sku", "SKU"),
+    ("title", "Title"),
+    ("description", "Description"),
+    ("brand", "Brand (Optional)"),
+    ("tags", "Tags (Optional)"),
+    ("specifications", "Specifications (Optional)"),
+    ("condition", "Condition (Optional)"),
+    ("category", "Category"),
+    ("gtin", "GTIN (Optional)"),
+    ("mpn", "MPN (Optional)"),
+    ("image_urls", "Image URLs"),
+    ("inventory", "Inventory"),
+    ("infinite_quantity", "Product Unlimited (Optional)"),
+    ("sale_price", "Price"),
+    ("original_price", "RRP (Optional)"),
+    ("weight", "Weight (Optional)"),
+    ("weight_unit", "Weight Unit (Optional)"),
+    ("length", "Length (Optional)"),
+    ("height", "Height (Optional)"),
+    ("width", "Width (Optional)"),
+    ("dimension_unit", "Dimension Unit (Optional)"),
+    ("shipping_cost_category", "Shipping Cost Category"),
+    ("shipping_cost_standard", "Shipping Cost Standard (Optional)"),
+    ("custom_freight_scheme_id", "Custom Freight Scheme ID (Optional)"),
+    ("is_direct_import", "Is Direct Import"),
+    ("max_days_for_delivery", "Max Days For Delivery"),
+    ("delivery_time", "Delivery Time"),
+    ("has_48_hours_dispatch", "Has 48 Hours Dispatch (Optional)"),
+    ("option_1_name", "Option 1 Name (Optional)"),
+    ("option_1_value", "Option 1 Value (Optional)"),
+    ("option_2_name", "Option 2 Name (Optional)"),
+    ("option_2_value", "Option 2 Value (Optional)"),
+    ("option_3_name", "Option 3 Name (Optional)"),
+    ("option_3_value", "Option 3 Value (Optional)"),
+]
+
 TEMPLATE_HEADERS = LASOO_TEMPLATE_HEADERS
-
-# Delete files only need the SKU (enough to remove the listing).
 DELETE_TEMPLATE_HEADERS = ["Action", "SKU"]
-
 VALID_ACTIONS = {"create", "mapped", "delete"}
-
 _TRUE_VALUES = {"true", "1", "yes", "y", "t"}
 
-# Headers that strongly indicate the real column row (vs a banner like
-# "System Required Headers").
 _HEADER_MARKERS = {
     "action",
     "sku",
@@ -220,15 +333,18 @@ _HEADER_MARKERS = {
     "title",
     "sale price",
     "original price",
+    "price",
+    "image urls",
+    "photo urls",
 }
 
 
 def _is_reverb_store(store) -> bool:
-    try:
-        code = (getattr(getattr(store, "marketplace", None), "code", None) or "").strip().lower()
-    except Exception:  # noqa: BLE001
-        code = ""
-    return code == "reverb"
+    return marketplace_kind(getattr(store, "marketplace", None)) == "reverb"
+
+
+def _is_mydeal_store(store) -> bool:
+    return marketplace_kind(getattr(store, "marketplace", None)) == "mydeal"
 
 
 def _coerce_bool(value) -> bool:
@@ -259,7 +375,7 @@ def _normalize_action(raw: str) -> str:
 def _header_score(cells: list[str]) -> int:
     score = 0
     for cell in cells:
-        key = str(cell or "").strip().lower()
+        key = _canonical_header(cell)
         if key in _HEADER_MARKERS or key in COLUMN_MAP:
             score += 1
     return score
@@ -313,7 +429,6 @@ def _read_xlsx_rows(content: bytes) -> list[dict]:
 
 def _read_csv_rows(content: bytes) -> list[dict]:
     text = content.decode("utf-8-sig", errors="replace")
-    # Detect banner: if first line isn't a real header, use the highest-scoring line.
     sample = text.splitlines()[:5]
     if len(sample) >= 2:
         scored = []
@@ -326,7 +441,6 @@ def _read_csv_rows(content: bytes) -> list[dict]:
         scored.sort(reverse=True)
         best_score, best_idx = scored[0]
         if best_score >= 2 and best_idx > 0:
-            # Rebuild CSV without the banner lines.
             lines = text.splitlines(keepends=True)
             text = "".join(lines[best_idx:])
     reader = csv.DictReader(io.StringIO(text))
@@ -348,9 +462,8 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
     for idx, raw in enumerate(records, start=2):
         normalized = {}
         for header, value in raw.items():
-            key = COLUMN_MAP.get(str(header).strip().lower())
+            key = COLUMN_MAP.get(_canonical_header(header))
             if key:
-                # Prefer first non-empty when duplicate logical columns collide.
                 existing = normalized.get(key)
                 if existing and not str(value).strip():
                     continue
@@ -358,23 +471,24 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
                     normalized[key] = str(value).strip()
                     continue
                 normalized[key] = str(value).strip()
-        if not any(normalized.values()):
-            continue
+        if not any(str(v).strip() for v in normalized.values() if not isinstance(v, bool)):
+            # Allow bool-only rows? skip empty
+            if not any(normalized.values()):
+                continue
         normalized["infinite_quantity"] = _coerce_bool(normalized.get("infinite_quantity", ""))
         normalized["upc_does_not_apply"] = _coerce_bool(normalized.get("upc_does_not_apply", ""))
-        # free_shipping defaults to True when blank (usual Reverb practice)
+        normalized["is_direct_import"] = _coerce_bool(normalized.get("is_direct_import", ""))
+        normalized["has_48_hours_dispatch"] = _coerce_bool(normalized.get("has_48_hours_dispatch", ""))
         fs_raw = normalized.get("free_shipping")
         if fs_raw is None or str(fs_raw).strip() == "":
             normalized["free_shipping"] = True
         else:
             normalized["free_shipping"] = _coerce_bool(fs_raw)
-        # status: draft | live (blank → draft)
         ps = str(normalized.get("publish_status") or "").strip().lower()
         if ps in ("live", "published", "publish"):
             normalized["publish_status"] = "live"
         else:
             normalized["publish_status"] = "draft"
-        # Reverb aliases
         if normalized.get("make") and not normalized.get("brand"):
             normalized["brand"] = normalized["make"]
         if normalized.get("condition") and not normalized.get("condition_uuid"):
@@ -384,7 +498,13 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
         if normalized.get("category") and not normalized.get("category_uuid"):
             normalized["category_uuid"] = normalized["category"]
         if normalized.get("sale_price") and not normalized.get("original_price"):
-            normalized["original_price"] = normalized["sale_price"]
+            # Don't overwrite RRP for MyDeal when only Price is set — only fill if blank.
+            if not str(normalized.get("original_price") or "").strip():
+                normalized["original_price"] = normalized["sale_price"]
+        # Default MyDeal required shipping/delivery fields when blank (template sample fills them).
+        if not str(normalized.get("shipping_cost_category") or "").strip():
+            # Leave blank for non-MyDeal rows; publish layer has its own defaults.
+            pass
         normalized["action"] = _normalize_action(normalized.get("action", ""))
         normalized["row_number"] = idx
         rows.append(normalized)
@@ -397,7 +517,7 @@ def _marketplace_label(store) -> str:
 
 
 def build_template_csv(action: str = "create", store=None) -> str:
-    """Template CSV for the given action. Reverb stores get Reverb columns."""
+    """Template CSV for the given action. Headers mark optional columns."""
     action = (action or "create").strip().lower()
     if action == "delete":
         out = io.StringIO()
@@ -411,28 +531,28 @@ def build_template_csv(action: str = "create", store=None) -> str:
 
     if _is_reverb_store(store):
         sample = {
-            "Vendor Name": "Amazon US",
-            "Marketplace Name": marketplace_name or "Reverb",
-            "Store Name": store_name,
+            "Vendor Name (Optional)": "Amazon US",
+            "Vendor URL (Optional)": "https://www.amazon.com/dp/EXAMPLE",
+            "Marketplace Name (Optional)": marketplace_name or "Reverb",
+            "Store Name (Optional)": store_name,
             "Action": "Mapped" if action == "mapped" else "Create",
             "SKU": "AMH-EXAMPLE-001",
             "Title": "Example Guitar Pedal",
             "Make": "Unbranded",
             "Model": "EXAMPLE-001",
             "Description": "Great pedal in excellent condition.",
-            "Finish": "",
-            "Year": "",
+            "Finish (Optional)": "",
+            "Year (Optional)": "",
             "Condition": "Brand New",
             "Category": "Accessories / Cables",
             "Price": "49.99",
-            "Currency": "USD",
+            "Currency (Optional)": "USD",
             "Inventory": "1",
-            "UPC": "",
-            "UPC Does Not Apply": "true",
-            "Vendor URL": "https://www.amazon.com/dp/EXAMPLE",
+            "UPC (Optional)": "",
+            "UPC Does Not Apply (Optional)": "true",
             "Photo URLs": "https://example.com/photo1.jpg|https://example.com/photo2.jpg",
-            "status": "draft",
-            "free_shipping": "TRUE",
+            "status (Optional)": "draft",
+            "free_shipping (Optional)": "TRUE",
         }
         out = io.StringIO()
         writer = csv.DictWriter(out, fieldnames=REVERB_TEMPLATE_HEADERS, lineterminator="\n")
@@ -440,49 +560,98 @@ def build_template_csv(action: str = "create", store=None) -> str:
         writer.writerow(sample)
         return out.getvalue()
 
+    if _is_mydeal_store(store):
+        sample = {
+            "Vendor Name (Optional)": "Amazon AU",
+            "Vendor URL (Optional)": "https://www.amazon.com.au/dp/EXAMPLE",
+            "Vendor ID (Optional)": "",
+            "Marketplace Name (Optional)": marketplace_name or "MyDeal",
+            "Store Name (Optional)": store_name,
+            "Action": "Mapped" if action == "mapped" else "Create",
+            "SKU": "MD-EXAMPLE-001",
+            "Title": "Example Kitchen Mixer",
+            "Description": "Example product description for MyDeal / WMP.",
+            "Brand (Optional)": "ExampleBrand",
+            "Tags (Optional)": "kitchen,mixer",
+            "Specifications (Optional)": "",
+            "Condition (Optional)": "New",
+            "Category": "3213",
+            "GTIN (Optional)": "",
+            "MPN (Optional)": "",
+            "Image URLs": "https://example.com/photo1.jpg|https://example.com/photo2.jpg",
+            "Inventory": "5",
+            "Product Unlimited (Optional)": "false",
+            "Price": "79.99",
+            "RRP (Optional)": "99.99",
+            "Weight (Optional)": "2.5",
+            "Weight Unit (Optional)": "kg",
+            "Length (Optional)": "30",
+            "Height (Optional)": "20",
+            "Width (Optional)": "15",
+            "Dimension Unit (Optional)": "cm",
+            "Shipping Cost Category": "Flat",
+            "Shipping Cost Standard (Optional)": "0",
+            "Custom Freight Scheme ID (Optional)": "",
+            "Is Direct Import": "false",
+            "Max Days For Delivery": "10",
+            "Delivery Time": "5-10 business days",
+            "Has 48 Hours Dispatch (Optional)": "false",
+            "Option 1 Name (Optional)": "",
+            "Option 1 Value (Optional)": "",
+            "Option 2 Name (Optional)": "",
+            "Option 2 Value (Optional)": "",
+            "Option 3 Name (Optional)": "",
+            "Option 3 Value (Optional)": "",
+        }
+        out = io.StringIO()
+        writer = csv.DictWriter(out, fieldnames=MYDEAL_TEMPLATE_HEADERS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(sample)
+        return out.getvalue()
+
     sample_black = {
-        "Vendor Name": "Nora Inventory",
-        "Marketplace Name": marketplace_name or "Lasoo",
-        "Store Name": store_name,
+        "Vendor Name (Optional)": "Nora Inventory",
+        "Vendor URL (Optional)": "https://www.example-vendor.com/product/jdxty-xl-b",
+        "Vendor ID (Optional)": "8FNZ100-DL-G1",
+        "Marketplace Name (Optional)": marketplace_name or "Lasoo",
+        "Store Name (Optional)": store_name,
         "Action": "Mapped" if action == "mapped" else "Create",
         "Product Key": "JDXTY",
         "Variant Key": "JDXTY-XL-B",
         "SKU": "JDXTY-XL-B",
-        "Option 1 Name": "Size",
-        "Option 1 Value": "XL",
-        "Option 2 Name": "Color",
-        "Option 2 Value": "Blue",
-        "Option 3 Name": "",
-        "Option 3 Value": "",
-        "Option 4 Name": "",
-        "Option 4 Value": "",
-        "Variation Img URL": "https://img.example.com/jdxty-xl-blue.jpg",
+        "Option 1 Name (Optional)": "Size",
+        "Option 1 Value (Optional)": "XL",
+        "Option 2 Name (Optional)": "Color",
+        "Option 2 Value (Optional)": "Blue",
+        "Option 3 Name (Optional)": "",
+        "Option 3 Value (Optional)": "",
+        "Option 4 Name (Optional)": "",
+        "Option 4 Value (Optional)": "",
+        "Variation Img URL (Optional)": "https://img.example.com/jdxty-xl-blue.jpg",
         "Title": "Example Product — XL Blue",
         "Description": "Same Product Key groups size/colour variants on Lasoo.",
         "Brand": "MyBrand",
-        "Category": "Apparel > T-Shirts",
-        "Barcode": "123456789012",
-        "Vendor URL": "https://www.example-vendor.com/product/jdxty-xl-b",
+        "Category (Optional)": "Apparel > T-Shirts",
+        "Barcode (Optional)": "123456789012",
         "Image URLs": "https://img.example.com/a.jpg|https://img.example.com/b.jpg",
         "Inventory": "10",
-        "Infinite Quantity": "false",
-        "Original Price": "29.99",
+        "Infinite Quantity (Optional)": "false",
+        "Original Price (Optional)": "29.99",
         "Sale Price": "24.99",
-        "Vendor ID": "8FNZ100-DL-G1",
     }
     sample_red = {
         **sample_black,
         "Variant Key": "JDXTY-S-R",
         "SKU": "JDXTY-S-R",
-        "Option 1 Name": "Size",
-        "Option 1 Value": "S",
-        "Option 2 Name": "Color",
-        "Option 2 Value": "Red",
-        "Variation Img URL": "https://img.example.com/jdxty-s-red.jpg",
+        "Option 1 Name (Optional)": "Size",
+        "Option 1 Value (Optional)": "S",
+        "Option 2 Name (Optional)": "Color",
+        "Option 2 Value (Optional)": "Red",
+        "Variation Img URL (Optional)": "https://img.example.com/jdxty-s-red.jpg",
         "Title": "Example Product — S Red",
-        "Vendor URL": "https://www.example-vendor.com/product/jdxty-s-r",
-        "Vendor ID": "8FNZ100-DL-G2",
-        "Barcode": "123456789013",
+        "Vendor URL (Optional)": "https://www.example-vendor.com/product/jdxty-s-r",
+        "Vendor ID (Optional)": "8FNZ100-DL-G2",
+        "Barcode (Optional)": "123456789013",
     }
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=LASOO_TEMPLATE_HEADERS, lineterminator="\n")
@@ -504,7 +673,6 @@ def snapshot_row_fields(row: dict) -> dict:
             out[key] = ""
         else:
             out[key] = str(value).strip() if not isinstance(value, (int, float)) else value
-    # Prefer human Action label in export snapshot
     action = str(out.get("action") or "").strip().lower()
     if action in VALID_ACTIONS:
         out["action"] = action.capitalize()
@@ -515,4 +683,6 @@ def export_field_specs(store=None) -> list[tuple[str, str]]:
     """Return (internal_key, header) pairs for the store's marketplace template."""
     if _is_reverb_store(store):
         return list(REVERB_EXPORT_FIELDS)
+    if _is_mydeal_store(store):
+        return list(MYDEAL_EXPORT_FIELDS)
     return list(LASOO_EXPORT_FIELDS)

@@ -217,6 +217,12 @@ def _apply_fields(listing: StoreListing, data: dict):
         )
         listing.infinite_quantity = False
         listing.external_data_object_json = reverb_listings.build_extras(data)
+    elif _store_kind(store) == "mydeal":
+        from .mydeal import products as mydeal_products
+
+        listing.image_urls = mapper.normalize_image_urls(data.get("image_urls"))
+        listing.infinite_quantity = bool(data.get("infinite_quantity"))
+        listing.external_data_object_json = mydeal_products.build_extras(data)
     else:
         listing.image_urls = mapper.normalize_image_urls(data.get("image_urls"))
         listing.infinite_quantity = bool(data.get("infinite_quantity"))
@@ -596,6 +602,40 @@ def delete_upload(
 def _listing_to_data(listing: StoreListing) -> dict:
     if _store_kind(listing.store) == "reverb":
         return reverb_listings.listing_to_data(listing)
+    if _store_kind(listing.store) == "mydeal":
+        from .mydeal import products as mydeal_products
+
+        extras = mydeal_products.parse_extras(listing)
+        return {
+            "product_key": listing.external_product_key,
+            "variant_key": listing.external_variant_key,
+            "title": listing.title,
+            "description": listing.description,
+            "brand": listing.brand,
+            "category": listing.category,
+            "sku": listing.sku,
+            "barcode": listing.barcode,
+            "options": listing.options,
+            "option_1_name": listing.option_1_name,
+            "option_1_value": listing.option_1_value,
+            "option_2_name": listing.option_2_name,
+            "option_2_value": listing.option_2_value,
+            "option_3_name": listing.option_3_name,
+            "option_3_value": listing.option_3_value,
+            "option_4_name": listing.option_4_name,
+            "option_4_value": listing.option_4_value,
+            "variation_image_url": listing.variation_image_url,
+            "vendor_url": listing.vendor_url,
+            "vendor_id": listing.vendor_id,
+            "source_vendor_code": listing.source_vendor_code,
+            "vendor_name": listing.source_vendor_code,
+            "image_urls": listing.image_urls,
+            "inventory": listing.inventory,
+            "infinite_quantity": listing.infinite_quantity,
+            "original_price": listing.original_price,
+            "sale_price": listing.sale_price,
+            **extras,
+        }
     return {
         "product_key": listing.external_product_key,
         "variant_key": listing.external_variant_key,

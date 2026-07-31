@@ -167,9 +167,9 @@ class CsvImportTests(TestCase):
     def test_lasoo_template_includes_options_column(self):
         header = csv_import.build_template_csv("create").splitlines()[0]
         cols = header.split(",")
-        self.assertIn("Option 1 Name", cols)
-        self.assertIn("Option 1 Value", cols)
-        self.assertIn("Variation Img URL", cols)
+        self.assertIn("Option 1 Name (Optional)", cols)
+        self.assertIn("Option 1 Value (Optional)", cols)
+        self.assertIn("Variation Img URL (Optional)", cols)
         self.assertIn("Product Key", cols)
         self.assertIn("Variant Key", cols)
         self.assertIn("SKU", cols)
@@ -177,9 +177,9 @@ class CsvImportTests(TestCase):
     def test_lasoo_template_vendor_columns_follow_vendor_name(self):
         header = csv_import.build_template_csv("create").splitlines()[0]
         cols = header.split(",")
-        self.assertEqual(cols[0], "Vendor Name")
-        self.assertEqual(cols[1], "Vendor URL")
-        self.assertEqual(cols[2], "Vendor ID")
+        self.assertEqual(cols[0], "Vendor Name (Optional)")
+        self.assertEqual(cols[1], "Vendor URL (Optional)")
+        self.assertEqual(cols[2], "Vendor ID (Optional)")
 
     def test_parse_action_instructional_text(self):
         content = (
@@ -679,8 +679,8 @@ class ListingServiceTests(TestCase):
         )
         csv_text = csv_import.build_template_csv("create", store=store2)
         cols = csv_text.splitlines()[0].split(",")
-        self.assertEqual(cols[0], "Vendor Name")
-        self.assertEqual(cols[1], "Vendor URL")
+        self.assertEqual(cols[0], "Vendor Name (Optional)")
+        self.assertEqual(cols[1], "Vendor URL (Optional)")
         self.assertIn("Make", csv_text)
         self.assertIn("Category", csv_text)
         self.assertIn("status", csv_text)
@@ -691,6 +691,25 @@ class ListingServiceTests(TestCase):
         self.assertEqual(rows[0]["publish_status"], "draft")
         self.assertTrue(rows[0]["free_shipping"])
         self.assertTrue(rows[0].get("category") or rows[0].get("category_uuid"))
+
+    def test_mydeal_template_headers(self):
+        mydeal, _ = Marketplace.objects.get_or_create(code="mydeal", defaults={"name": "MyDeal"})
+        store_md = Store.objects.create(
+            user=self.user, name="MyDeal Store", region="AU",
+            api_token="tok", marketplace=mydeal, management_mode="full_store",
+        )
+        csv_text = csv_import.build_template_csv("create", store=store_md)
+        cols = csv_text.splitlines()[0].split(",")
+        self.assertEqual(cols[0], "Vendor Name (Optional)")
+        self.assertIn("Shipping Cost Category", csv_text)
+        self.assertIn("Is Direct Import", csv_text)
+        self.assertIn("GTIN (Optional)", csv_text)
+        self.assertIn("RRP (Optional)", csv_text)
+        rows = csv_import.parse_upload("mydeal.csv", csv_text.encode())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sku"], "MD-EXAMPLE-001")
+        self.assertFalse(rows[0]["is_direct_import"])
+        self.assertEqual(rows[0]["shipping_cost_category"], "Flat")
 
 
 class ListingServiceVendorSelectTests(TestCase):

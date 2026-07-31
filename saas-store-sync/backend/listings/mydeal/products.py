@@ -1,6 +1,7 @@
 """Map managed StoreListing rows to MyDeal ProductGroup payloads and publish."""
 from __future__ import annotations
 
+import json
 import logging
 from decimal import Decimal, InvalidOperation
 
@@ -28,11 +29,61 @@ def _photo_urls(listing: StoreListing) -> list[str]:
     parts = []
     for sep in ("|", ";", "\n", ","):
         if sep in raw:
-            parts = [p.strip() for p in raw.replace(";", "|").replace("\n", "|").replace(",", "|").split("|") if p.strip()]
+            parts = [
+                p.strip()
+                for p in raw.replace(";", "|").replace("\n", "|").replace(",", "|").split("|")
+                if p.strip()
+            ]
             break
     if not parts:
         parts = [raw] if raw.startswith("http") else []
     return parts[:30]
+
+
+def parse_extras(listing_or_json) -> dict:
+    raw = listing_or_json
+    if hasattr(listing_or_json, "external_data_object_json"):
+        raw = listing_or_json.external_data_object_json
+    if isinstance(raw, dict):
+        data = raw
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            data = {}
+    else:
+        data = {}
+    if not isinstance(data, dict):
+        return {}
+    if data.get("marketplace") and str(data.get("marketplace")).lower() != "mydeal":
+        return {}
+    return data
+
+
+def build_extras(data: dict) -> str:
+    """Persist MyDeal-specific optional fields on StoreListing.external_data_object_json."""
+    extras = {
+        "marketplace": "mydeal",
+        "tags": str(data.get("tags") or "").strip(),
+        "specifications": str(data.get("specifications") or "").strip(),
+        "condition": str(data.get("condition") or "").strip() or "New",
+        "gtin": str(data.get("gtin") or data.get("barcode") or "").strip(),
+        "mpn": str(data.get("mpn") or "").strip(),
+        "weight": str(data.get("weight") or "").strip(),
+        "weight_unit": str(data.get("weight_unit") or "").strip() or "kg",
+        "length": str(data.get("length") or "").strip(),
+        "height": str(data.get("height") or "").strip(),
+        "width": str(data.get("width") or "").strip(),
+        "dimension_unit": str(data.get("dimension_unit") or "").strip() or "cm",
+        "shipping_cost_category": str(data.get("shipping_cost_category") or "").strip() or "Flat",
+        "shipping_cost_standard": str(data.get("shipping_cost_standard") or "").strip() or "0",
+        "custom_freight_scheme_id": str(data.get("custom_freight_scheme_id") or "").strip(),
+        "is_direct_import": bool(data.get("is_direct_import")),
+        "max_days_for_delivery": str(data.get("max_days_for_delivery") or "").strip() or "10",
+        "delivery_time": str(data.get("delivery_time") or "").strip() or "5-10 business days",
+        "has_48_hours_dispatch": bool(data.get("has_48_hours_dispatch")),
+    }
+    return json.dumps(extras)
 
 
 def listing_to_product_group(listing: StoreListing) -> dict:
@@ -47,7 +98,6 @@ def listing_to_product_group(listing: StoreListing) -> dict:
 
     price = _dec(listing.sale_price) if listing.sale_price else _dec(listing.original_price)
     if price <= 0:
-        # Fall back to cents fields
         cents = listing.sale_price_cents or listing.original_price_cents or 0
         price = (Decimal(cents) / Decimal(100)) if cents else Decimal("0")
     if price <= 0:
@@ -55,6 +105,7 @@ def listing_to_product_group(listing: StoreListing) -> dict:
 
     qty = int(listing.inventory or 0)
     unlimited = bool(listing.infinite_quantity)
+    extras = parse_extras(listing)
 
     category_raw = (listing.category or "").strip()
     try:
@@ -77,26 +128,61 @@ def listing_to_product_group(listing: StoreListing) -> dict:
         "ProductUnlimited": unlimited,
         "Options": [],
     }
+    options = []
+    for i in (1, 2, 3):
+        name = str(getattr(listing, f"option_{i}_name", "") or "").strip()
+        value = str(getattr(listing, f"option_{i}_value", "") or "").strip()
+        if name and value:
+            options.append({"OptionName": name[:10], "OptionValue": value, "Position": i})
+    buyable["Options"] = options
+
     if rrp and rrp > price:
         buyable["RRP"] = float(rrp)
 
-    return {
+    ship_cat = extras.get("shipping_cost_category") or "Flat"
+    group = {
         "ExternalProductID": ext,
         "ProductSKU": sku,
         "Title": (listing.title or sku)[:200],
         "Description": listing.description or listing.title or sku,
         "Brand": (listing.brand or "").strip() or None,
-        "Condition": "New",
+        "Condition": extras.get("condition") or "New",
         "Images": images,
         "Categories": [{"CategoryId": category_id}],
-        "ShippingCostCategory": "Flat",
-        "ShippingCostStandard": 0,
+        "ShippingCostCategory": ship_cat,
         "RequiresShipping": True,
-        "IsDirectImport": False,
-        "MaxDaysForDelivery": 10,
-        "DeliveryTime": "5-10 business days",
+        "IsDirectImport": bool(extras.get("is_direct_import")),
+        "MaxDaysForDelivery": int(extras.get("max_days_for_delivery") or 10),
+        "DeliveryTime": extras.get("delivery_time") or "5-10 business days",
         "BuyableProducts": [buyable],
     }
+    if extras.get("tags"):
+        group["Tags"] = extras["tags"]
+    if extras.get("specifications"):
+        group["Specifications"] = extras["specifications"]
+    if extras.get("gtin"):
+        group["GTIN"] = extras["gtin"]
+    if extras.get("mpn"):
+        group["MPN"] = extras["mpn"]
+    if extras.get("weight"):
+        group["Weight"] = float(_dec(extras["weight"]))
+        group["WeightUnit"] = extras.get("weight_unit") or "kg"
+    for dim_key, api_key in (("length", "Length"), ("height", "Height"), ("width", "Width")):
+        if extras.get(dim_key):
+            group[api_key] = float(_dec(extras[dim_key]))
+    if any(extras.get(k) for k in ("length", "height", "width")):
+        group["DimensionUnit"] = extras.get("dimension_unit") or "cm"
+    if ship_cat in ("Flat", "FlatAnyQty"):
+        group["ShippingCostStandard"] = float(_dec(extras.get("shipping_cost_standard") or "0"))
+    if ship_cat == "Custom" and extras.get("custom_freight_scheme_id"):
+        try:
+            group["CustomFreightSchemeID"] = int(extras["custom_freight_scheme_id"])
+        except (TypeError, ValueError):
+            group["CustomFreightSchemeID"] = extras["custom_freight_scheme_id"]
+    if extras.get("has_48_hours_dispatch"):
+        group["Has48HoursDispatch"] = True
+
+    return {k: v for k, v in group.items() if v is not None}
 
 
 def publish_listings(user, store, listings: list[StoreListing]) -> dict:

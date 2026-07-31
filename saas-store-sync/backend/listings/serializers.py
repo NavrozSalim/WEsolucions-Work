@@ -17,6 +17,25 @@ class StoreListingSerializer(serializers.ModelSerializer):
     free_shipping = serializers.SerializerMethodField()
     margin_pct = serializers.SerializerMethodField()
     margin_display = serializers.SerializerMethodField()
+    # MyDeal extra fields
+    tags = serializers.SerializerMethodField()
+    specifications = serializers.SerializerMethodField()
+    condition = serializers.SerializerMethodField()
+    gtin = serializers.SerializerMethodField()
+    mpn = serializers.SerializerMethodField()
+    weight = serializers.SerializerMethodField()
+    weight_unit = serializers.SerializerMethodField()
+    length = serializers.SerializerMethodField()
+    height = serializers.SerializerMethodField()
+    width = serializers.SerializerMethodField()
+    dimension_unit = serializers.SerializerMethodField()
+    shipping_cost_category = serializers.SerializerMethodField()
+    shipping_cost_standard = serializers.SerializerMethodField()
+    custom_freight_scheme_id = serializers.SerializerMethodField()
+    is_direct_import = serializers.SerializerMethodField()
+    max_days_for_delivery = serializers.SerializerMethodField()
+    delivery_time = serializers.SerializerMethodField()
+    has_48_hours_dispatch = serializers.SerializerMethodField()
 
     class Meta:
         model = StoreListing
@@ -31,6 +50,10 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'make', 'model', 'finish', 'year',
             'condition_uuid', 'category_uuid', 'currency', 'upc_does_not_apply',
             'publish_status', 'free_shipping', 'margin_pct', 'margin_display',
+            'tags', 'specifications', 'condition', 'gtin', 'mpn',
+            'weight', 'weight_unit', 'length', 'height', 'width', 'dimension_unit',
+            'shipping_cost_category', 'shipping_cost_standard', 'custom_freight_scheme_id',
+            'is_direct_import', 'max_days_for_delivery', 'delivery_time', 'has_48_hours_dispatch',
             'inventory_sync_status', 'last_scrape_at', 'last_scrape_error',
             'environment', 'action', 'status', 'validation_errors_json',
             'marketplace_response_json', 'last_uploaded_at',
@@ -44,11 +67,20 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'make', 'model', 'finish', 'year',
             'condition_uuid', 'category_uuid', 'currency', 'upc_does_not_apply',
             'publish_status', 'free_shipping', 'margin_pct', 'margin_display',
+            'tags', 'specifications', 'condition', 'gtin', 'mpn',
+            'weight', 'weight_unit', 'length', 'height', 'width', 'dimension_unit',
+            'shipping_cost_category', 'shipping_cost_standard', 'custom_freight_scheme_id',
+            'is_direct_import', 'max_days_for_delivery', 'delivery_time', 'has_48_hours_dispatch',
             'vendor_price', 'inventory_sync_status', 'last_scrape_at', 'last_scrape_error',
         ]
 
     def _extras(self, obj):
         return reverb_listings.parse_extras(obj)
+
+    def _mydeal_extras(self, obj):
+        from .mydeal import products as mydeal_products
+
+        return mydeal_products.parse_extras(obj)
 
     def get_make(self, obj):
         return self._extras(obj).get('make') or obj.brand or ''
@@ -83,6 +115,60 @@ class StoreListingSerializer(serializers.ModelSerializer):
         return reverb_listings.free_shipping_enabled(
             self._extras(obj).get('free_shipping')
         )
+
+    def get_tags(self, obj):
+        return self._mydeal_extras(obj).get('tags') or ''
+
+    def get_specifications(self, obj):
+        return self._mydeal_extras(obj).get('specifications') or ''
+
+    def get_condition(self, obj):
+        return self._mydeal_extras(obj).get('condition') or 'New'
+
+    def get_gtin(self, obj):
+        return self._mydeal_extras(obj).get('gtin') or obj.barcode or ''
+
+    def get_mpn(self, obj):
+        return self._mydeal_extras(obj).get('mpn') or ''
+
+    def get_weight(self, obj):
+        return self._mydeal_extras(obj).get('weight') or ''
+
+    def get_weight_unit(self, obj):
+        return self._mydeal_extras(obj).get('weight_unit') or 'kg'
+
+    def get_length(self, obj):
+        return self._mydeal_extras(obj).get('length') or ''
+
+    def get_height(self, obj):
+        return self._mydeal_extras(obj).get('height') or ''
+
+    def get_width(self, obj):
+        return self._mydeal_extras(obj).get('width') or ''
+
+    def get_dimension_unit(self, obj):
+        return self._mydeal_extras(obj).get('dimension_unit') or 'cm'
+
+    def get_shipping_cost_category(self, obj):
+        return self._mydeal_extras(obj).get('shipping_cost_category') or 'Flat'
+
+    def get_shipping_cost_standard(self, obj):
+        return self._mydeal_extras(obj).get('shipping_cost_standard') or '0'
+
+    def get_custom_freight_scheme_id(self, obj):
+        return self._mydeal_extras(obj).get('custom_freight_scheme_id') or ''
+
+    def get_is_direct_import(self, obj):
+        return bool(self._mydeal_extras(obj).get('is_direct_import', False))
+
+    def get_max_days_for_delivery(self, obj):
+        return self._mydeal_extras(obj).get('max_days_for_delivery') or '10'
+
+    def get_delivery_time(self, obj):
+        return self._mydeal_extras(obj).get('delivery_time') or '5-10 business days'
+
+    def get_has_48_hours_dispatch(self, obj):
+        return bool(self._mydeal_extras(obj).get('has_48_hours_dispatch', False))
 
     @staticmethod
     def _format_price_multiplier(sale, vendor):
@@ -213,6 +299,25 @@ class ListingInputSerializer(serializers.Serializer):
         choices=['draft', 'live'], required=False, default='draft',
     )
     free_shipping = serializers.BooleanField(required=False, default=True)
+    # MyDeal / WMP optional ProductGroup fields (stored in external_data_object_json)
+    tags = serializers.CharField(required=False, allow_blank=True, default='')
+    specifications = serializers.CharField(required=False, allow_blank=True, default='')
+    gtin = serializers.CharField(required=False, allow_blank=True, default='')
+    mpn = serializers.CharField(required=False, allow_blank=True, default='')
+    weight = serializers.CharField(required=False, allow_blank=True, default='')
+    weight_unit = serializers.CharField(required=False, allow_blank=True, default='')
+    length = serializers.CharField(required=False, allow_blank=True, default='')
+    height = serializers.CharField(required=False, allow_blank=True, default='')
+    width = serializers.CharField(required=False, allow_blank=True, default='')
+    dimension_unit = serializers.CharField(required=False, allow_blank=True, default='')
+    shipping_cost_category = serializers.CharField(required=False, allow_blank=True, default='')
+    shipping_cost_standard = serializers.CharField(required=False, allow_blank=True, default='')
+    custom_freight_scheme_id = serializers.CharField(required=False, allow_blank=True, default='')
+    is_direct_import = serializers.BooleanField(required=False, default=False)
+    max_days_for_delivery = serializers.CharField(required=False, allow_blank=True, default='')
+    delivery_time = serializers.CharField(required=False, allow_blank=True, default='')
+    has_48_hours_dispatch = serializers.BooleanField(required=False, default=False)
+    condition = serializers.CharField(required=False, allow_blank=True, default='')
 
 
 class OrderShipmentSerializer(serializers.ModelSerializer):

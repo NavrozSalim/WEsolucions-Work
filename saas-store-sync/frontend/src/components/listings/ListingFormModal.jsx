@@ -102,9 +102,53 @@ function Textarea({ label, rows = 3, ...props }) {
     );
 }
 
+const EMPTY_MYDEAL = {
+    action: 'create',
+    vendor_name: '',
+    vendor_url: '',
+    vendor_id: '',
+    marketplace_name: '',
+    store_name: '',
+    sku: '',
+    title: '',
+    description: '',
+    brand: '',
+    tags: '',
+    specifications: '',
+    condition: 'New',
+    category: '',
+    gtin: '',
+    mpn: '',
+    image_urls: '',
+    inventory: '1',
+    infinite_quantity: false,
+    sale_price: '',
+    original_price: '',
+    weight: '',
+    weight_unit: 'kg',
+    length: '',
+    height: '',
+    width: '',
+    dimension_unit: 'cm',
+    shipping_cost_category: 'Flat',
+    shipping_cost_standard: '0',
+    custom_freight_scheme_id: '',
+    is_direct_import: false,
+    max_days_for_delivery: '10',
+    delivery_time: '5-10 business days',
+    has_48_hours_dispatch: false,
+    option_1_name: '',
+    option_1_value: '',
+    option_2_name: '',
+    option_2_value: '',
+    option_3_name: '',
+    option_3_value: '',
+    source_vendor_code: '',
+};
+
 /**
  * Create or edit a single managed-store listing ("created product").
- * Field order matches the bulk listing CSV template for Reverb / Lasoo.
+ * Field order matches the bulk listing CSV template for Reverb / Lasoo / MyDeal.
  */
 export default function ListingFormModal({
     open,
@@ -115,8 +159,11 @@ export default function ListingFormModal({
     marketplaceCode = '',
 }) {
     const isEdit = !!listing;
-    const isReverb = String(marketplaceCode || '').trim().toLowerCase() === 'reverb';
-    const [form, setForm] = useState(isReverb ? EMPTY_REVERB : EMPTY_LASOO);
+    const code = String(marketplaceCode || '').trim().toLowerCase();
+    const isReverb = code === 'reverb';
+    const isMydeal = code === 'mydeal';
+    const emptyForm = isReverb ? EMPTY_REVERB : isMydeal ? EMPTY_MYDEAL : EMPTY_LASOO;
+    const [form, setForm] = useState(emptyForm);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
     const [storeVendors, setStoreVendors] = useState([]);
@@ -193,6 +240,52 @@ export default function ListingFormModal({
                     marketplace_name: listing.marketplace_name || defaults.marketplace_name,
                     store_name: listing.store_name || defaults.store_name,
                 });
+            } else if (isMydeal) {
+                setForm({
+                    ...EMPTY_MYDEAL,
+                    ...defaults,
+                    action: listing.action || 'create',
+                    sku: listing.sku || '',
+                    title: listing.title || '',
+                    description: listing.description || '',
+                    brand: listing.brand || '',
+                    tags: listing.tags || '',
+                    specifications: listing.specifications || '',
+                    condition: listing.condition || 'New',
+                    category: listing.category || '',
+                    gtin: listing.gtin || listing.barcode || '',
+                    mpn: listing.mpn || '',
+                    image_urls: listing.image_urls || '',
+                    inventory: String(listing.inventory ?? 1),
+                    infinite_quantity: !!listing.infinite_quantity,
+                    sale_price: String(listing.sale_price ?? ''),
+                    original_price: String(listing.original_price ?? ''),
+                    weight: listing.weight || '',
+                    weight_unit: listing.weight_unit || 'kg',
+                    length: listing.length || '',
+                    height: listing.height || '',
+                    width: listing.width || '',
+                    dimension_unit: listing.dimension_unit || 'cm',
+                    shipping_cost_category: listing.shipping_cost_category || 'Flat',
+                    shipping_cost_standard: String(listing.shipping_cost_standard ?? '0'),
+                    custom_freight_scheme_id: listing.custom_freight_scheme_id || '',
+                    is_direct_import: !!listing.is_direct_import,
+                    max_days_for_delivery: String(listing.max_days_for_delivery || '10'),
+                    delivery_time: listing.delivery_time || '5-10 business days',
+                    has_48_hours_dispatch: !!listing.has_48_hours_dispatch,
+                    option_1_name: listing.option_1_name || '',
+                    option_1_value: listing.option_1_value || '',
+                    option_2_name: listing.option_2_name || '',
+                    option_2_value: listing.option_2_value || '',
+                    option_3_name: listing.option_3_name || '',
+                    option_3_value: listing.option_3_value || '',
+                    source_vendor_code: listing.source_vendor_code || '',
+                    vendor_name: listing.vendor_name || '',
+                    vendor_url: listing.vendor_url || '',
+                    vendor_id: listing.vendor_id || '',
+                    marketplace_name: listing.marketplace_name || defaults.marketplace_name,
+                    store_name: listing.store_name || defaults.store_name,
+                });
             } else {
                 setForm({
                     ...EMPTY_LASOO,
@@ -230,11 +323,11 @@ export default function ListingFormModal({
             }
         } else {
             setForm({
-                ...(isReverb ? EMPTY_REVERB : EMPTY_LASOO),
+                ...(isReverb ? EMPTY_REVERB : isMydeal ? EMPTY_MYDEAL : EMPTY_LASOO),
                 ...defaults,
             });
         }
-    }, [open, listing, isReverb, storeMeta.name, storeMeta.marketplace_name]);
+    }, [open, listing, isReverb, isMydeal, storeMeta.name, storeMeta.marketplace_name]);
 
     const vendorOptions = useMemo(() => {
         const opts = [{ value: '', label: storeVendors.length ? 'Select vendor…' : 'No vendors on store Price settings' }];
@@ -332,6 +425,20 @@ export default function ListingFormModal({
                 publish_status: form.publish_status === 'live' ? 'live' : 'draft',
                 free_shipping: form.free_shipping !== false,
             };
+        } else if (isMydeal) {
+            payload = {
+                ...form,
+                vendor_name: selectedVendorName || form.vendor_name || '',
+                source_vendor_code: form.source_vendor_code || '',
+                inventory: parseInt(form.inventory, 10) || 0,
+                original_price: form.original_price === '' ? 0 : form.original_price,
+                sale_price: form.sale_price === '' ? 0 : form.sale_price,
+                barcode: form.gtin || form.barcode || '',
+                gtin: form.gtin || '',
+                is_direct_import: !!form.is_direct_import,
+                has_48_hours_dispatch: !!form.has_48_hours_dispatch,
+                infinite_quantity: !!form.infinite_quantity,
+            };
         } else {
             payload = {
                 ...form,
@@ -376,7 +483,9 @@ export default function ListingFormModal({
                             ? `Edit listing — ${listing.sku || listing.external_variant_key}`
                             : isReverb
                               ? 'Create Reverb listing'
-                              : 'Create listing'}
+                              : isMydeal
+                                ? 'Create MyDeal listing'
+                                : 'Create listing'}
                     </h2>
                     <button type="button" className="rounded-md p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={onClose}>
                         <X className="h-5 w-5" />
@@ -403,7 +512,7 @@ export default function ListingFormModal({
                             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                                 <div className="sm:col-span-2">
                                     <Select
-                                        label="Vendor Name"
+                                        label="Vendor Name (Optional)"
                                         value={form.source_vendor_code || ''}
                                         onChange={setVendor}
                                         options={vendorOptions}
@@ -418,7 +527,7 @@ export default function ListingFormModal({
                                 {noraSelected ? (
                                     <div className="sm:col-span-2">
                                         <Input
-                                            label="Vendor ID"
+                                            label="Vendor ID (Optional)"
                                             placeholder="Nora BarCode after cleaning, e.g. 8FNZ100-DL-G1"
                                             value={form.vendor_id}
                                             onChange={set('vendor_id')}
@@ -428,7 +537,7 @@ export default function ListingFormModal({
                                 ) : (
                                     <div className="sm:col-span-2">
                                         <Input
-                                            label="Vendor URL"
+                                            label="Vendor URL (Optional)"
                                             placeholder={vendorUrlPlaceholder(selectedVendor)}
                                             value={form.vendor_url}
                                             onChange={set('vendor_url')}
@@ -438,13 +547,13 @@ export default function ListingFormModal({
                                     </div>
                                 )}
                                 <Input
-                                    label="Marketplace Name"
+                                    label="Marketplace Name (Optional)"
                                     value={form.marketplace_name}
                                     onChange={set('marketplace_name')}
                                     placeholder="e.g. Reverb"
                                 />
                                 <Input
-                                    label="Store Name"
+                                    label="Store Name (Optional)"
                                     value={form.store_name}
                                     onChange={set('store_name')}
                                     placeholder="Defaults to this store"
@@ -481,8 +590,8 @@ export default function ListingFormModal({
                                         <span className="font-medium">-</span> become a bullet list on Reverb.
                                     </p>
                                 </div>
-                                <Input label="Finish" value={form.finish} onChange={set('finish')} />
-                                <Input label="Year" value={form.year} onChange={set('year')} />
+                                <Input label="Finish (Optional)" value={form.finish} onChange={set('finish')} />
+                                <Input label="Year (Optional)" value={form.year} onChange={set('year')} />
                                 <ReverbConditionSelect
                                     storeId={storeId}
                                     value={form.condition_uuid}
@@ -504,7 +613,7 @@ export default function ListingFormModal({
                                     onChange={set('sale_price')}
                                     required
                                 />
-                                <Input label="Currency" value={form.currency} onChange={set('currency')} />
+                                <Input label="Currency (Optional)" value={form.currency} onChange={set('currency')} />
                                 <Input
                                     label="Inventory"
                                     type="number"
@@ -515,7 +624,7 @@ export default function ListingFormModal({
                                     required
                                 />
                                 <Input
-                                    label="UPC"
+                                    label="UPC (Optional)"
                                     value={form.barcode}
                                     onChange={(e) => {
                                         const barcode = e.target.value;
@@ -536,7 +645,7 @@ export default function ListingFormModal({
                                         disabled={!!String(form.barcode || '').trim()}
                                         onChange={set('upc_does_not_apply')}
                                     />
-                                    UPC Does Not Apply
+                                    UPC Does Not Apply (Optional)
                                 </label>
                                 <ListingPhotoUploader
                                     storeId={storeId}
@@ -546,7 +655,7 @@ export default function ListingFormModal({
                                     label="Photo URLs"
                                 />
                                 <Select
-                                    label="status"
+                                    label="status (Optional)"
                                     value={form.publish_status}
                                     onChange={set('publish_status')}
                                     options={[
@@ -561,14 +670,112 @@ export default function ListingFormModal({
                                         checked={form.free_shipping !== false}
                                         onChange={set('free_shipping')}
                                     />
-                                    free_shipping
+                                    free_shipping (Optional)
                                 </label>
+                            </div>
+                        ) : isMydeal ? (
+                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                <div className="sm:col-span-2">
+                                    <Select
+                                        label="Vendor Name (Optional)"
+                                        value={form.source_vendor_code || ''}
+                                        onChange={setVendor}
+                                        options={vendorOptions}
+                                        required={storeVendors.length > 0}
+                                    />
+                                </div>
+                                {noraSelected ? (
+                                    <div className="sm:col-span-2">
+                                        <Input label="Vendor ID (Optional)" value={form.vendor_id} onChange={set('vendor_id')} />
+                                    </div>
+                                ) : (
+                                    <div className="sm:col-span-2">
+                                        <Input label="Vendor URL (Optional)" value={form.vendor_url} onChange={set('vendor_url')} type="url" />
+                                    </div>
+                                )}
+                                <Input label="Marketplace Name (Optional)" value={form.marketplace_name} onChange={set('marketplace_name')} placeholder="e.g. MyDeal" />
+                                <Input label="Store Name (Optional)" value={form.store_name} onChange={set('store_name')} />
+                                {!isEdit && (
+                                    <Select
+                                        label="Action"
+                                        value={form.action}
+                                        onChange={set('action')}
+                                        options={[
+                                            { value: 'create', label: 'Create — new listing' },
+                                            { value: 'mapped', label: 'Mapped — already on the store' },
+                                        ]}
+                                    />
+                                )}
+                                <Input label="SKU" value={form.sku} onChange={set('sku')} required />
+                                <div className="sm:col-span-2">
+                                    <Input label="Title" value={form.title} onChange={set('title')} required />
+                                </div>
+                                <div className="sm:col-span-2">
+                                    <Textarea label="Description" rows={4} value={form.description} onChange={set('description')} required />
+                                </div>
+                                <Input label="Brand (Optional)" value={form.brand} onChange={set('brand')} />
+                                <Input label="Tags (Optional)" value={form.tags} onChange={set('tags')} placeholder="comma,separated" />
+                                <div className="sm:col-span-2">
+                                    <Textarea label="Specifications (Optional)" rows={3} value={form.specifications} onChange={set('specifications')} />
+                                </div>
+                                <Input label="Condition (Optional)" value={form.condition} onChange={set('condition')} placeholder="New" />
+                                <Input label="Category" value={form.category} onChange={set('category')} placeholder="MyDeal Category ID e.g. 3213" required />
+                                <Input label="GTIN (Optional)" value={form.gtin} onChange={set('gtin')} />
+                                <Input label="MPN (Optional)" value={form.mpn} onChange={set('mpn')} />
+                                <ListingPhotoUploader
+                                    storeId={storeId}
+                                    value={form.image_urls}
+                                    onChange={(urls) => setForm((f) => ({ ...f, image_urls: urls }))}
+                                    required
+                                    label="Image URLs"
+                                />
+                                <Input label="Inventory" type="number" min="0" value={form.inventory} onChange={set('inventory')} required />
+                                <label className="mt-6 flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
+                                    <input type="checkbox" className="h-4 w-4 rounded border-slate-300" checked={!!form.infinite_quantity} onChange={set('infinite_quantity')} />
+                                    Product Unlimited (Optional)
+                                </label>
+                                <Input label="Price" type="number" min="0" step="0.01" value={form.sale_price} onChange={set('sale_price')} required />
+                                <Input label="RRP (Optional)" type="number" min="0" step="0.01" value={form.original_price} onChange={set('original_price')} />
+                                <Input label="Weight (Optional)" value={form.weight} onChange={set('weight')} />
+                                <Input label="Weight Unit (Optional)" value={form.weight_unit} onChange={set('weight_unit')} />
+                                <Input label="Length (Optional)" value={form.length} onChange={set('length')} />
+                                <Input label="Height (Optional)" value={form.height} onChange={set('height')} />
+                                <Input label="Width (Optional)" value={form.width} onChange={set('width')} />
+                                <Input label="Dimension Unit (Optional)" value={form.dimension_unit} onChange={set('dimension_unit')} />
+                                <Select
+                                    label="Shipping Cost Category"
+                                    value={form.shipping_cost_category || 'Flat'}
+                                    onChange={set('shipping_cost_category')}
+                                    options={[
+                                        { value: 'Flat', label: 'Flat' },
+                                        { value: 'FlatAnyQty', label: 'FlatAnyQty' },
+                                        { value: 'Custom', label: 'Custom' },
+                                    ]}
+                                />
+                                <Input label="Shipping Cost Standard (Optional)" value={form.shipping_cost_standard} onChange={set('shipping_cost_standard')} />
+                                <Input label="Custom Freight Scheme ID (Optional)" value={form.custom_freight_scheme_id} onChange={set('custom_freight_scheme_id')} />
+                                <label className="mt-6 flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
+                                    <input type="checkbox" className="h-4 w-4 rounded border-slate-300" checked={!!form.is_direct_import} onChange={set('is_direct_import')} />
+                                    Is Direct Import
+                                </label>
+                                <Input label="Max Days For Delivery" value={form.max_days_for_delivery} onChange={set('max_days_for_delivery')} required />
+                                <Input label="Delivery Time" value={form.delivery_time} onChange={set('delivery_time')} required />
+                                <label className="mt-6 flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 sm:col-span-2">
+                                    <input type="checkbox" className="h-4 w-4 rounded border-slate-300" checked={!!form.has_48_hours_dispatch} onChange={set('has_48_hours_dispatch')} />
+                                    Has 48 Hours Dispatch (Optional)
+                                </label>
+                                <Input label="Option 1 Name (Optional)" value={form.option_1_name} onChange={set('option_1_name')} />
+                                <Input label="Option 1 Value (Optional)" value={form.option_1_value} onChange={set('option_1_value')} />
+                                <Input label="Option 2 Name (Optional)" value={form.option_2_name} onChange={set('option_2_name')} />
+                                <Input label="Option 2 Value (Optional)" value={form.option_2_value} onChange={set('option_2_value')} />
+                                <Input label="Option 3 Name (Optional)" value={form.option_3_name} onChange={set('option_3_name')} />
+                                <Input label="Option 3 Value (Optional)" value={form.option_3_value} onChange={set('option_3_value')} />
                             </div>
                         ) : (
                             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                                 <div className="sm:col-span-2">
                                     <Select
-                                        label="Vendor Name"
+                                        label="Vendor Name (Optional)"
                                         value={form.source_vendor_code || ''}
                                         onChange={setVendor}
                                         options={vendorOptions}
@@ -583,7 +790,7 @@ export default function ListingFormModal({
                                 {noraSelected ? (
                                     <div className="sm:col-span-2">
                                         <Input
-                                            label="Vendor ID"
+                                            label="Vendor ID (Optional)"
                                             placeholder="Nora BarCode after cleaning, e.g. 8FNZ100-DL-G1"
                                             value={form.vendor_id}
                                             onChange={set('vendor_id')}
@@ -593,7 +800,7 @@ export default function ListingFormModal({
                                 ) : (
                                     <div className="sm:col-span-2">
                                         <Input
-                                            label="Vendor URL"
+                                            label="Vendor URL (Optional)"
                                             placeholder={vendorUrlPlaceholder(selectedVendor)}
                                             value={form.vendor_url}
                                             onChange={set('vendor_url')}
@@ -603,13 +810,13 @@ export default function ListingFormModal({
                                     </div>
                                 )}
                                 <Input
-                                    label="Marketplace Name"
+                                    label="Marketplace Name (Optional)"
                                     value={form.marketplace_name}
                                     onChange={set('marketplace_name')}
                                     placeholder="e.g. Lasoo"
                                 />
                                 <Input
-                                    label="Store Name"
+                                    label="Store Name (Optional)"
                                     value={form.store_name}
                                     onChange={set('store_name')}
                                     placeholder="Defaults to this store"
@@ -626,13 +833,13 @@ export default function ListingFormModal({
                                     />
                                 )}
                                 <Input
-                                    label="Product Key"
+                                    label="Product Key (Optional)"
                                     placeholder="Shared parent key (defaults to SKU)"
                                     value={form.product_key}
                                     onChange={set('product_key')}
                                 />
                                 <Input
-                                    label="Variant Key"
+                                    label="Variant Key (Optional)"
                                     placeholder="Unique per variant (defaults to SKU)"
                                     value={form.variant_key}
                                     onChange={set('variant_key')}
@@ -644,56 +851,56 @@ export default function ListingFormModal({
                                     <span className="font-medium">Variation Img URL</span> per variant.
                                 </div>
                                 <Input
-                                    label="Option 1 Name"
+                                    label="Option 1 Name (Optional)"
                                     placeholder="e.g. Size"
                                     value={form.option_1_name}
                                     onChange={set('option_1_name')}
                                 />
                                 <Input
-                                    label="Option 1 Value"
+                                    label="Option 1 Value (Optional)"
                                     placeholder="e.g. XL"
                                     value={form.option_1_value}
                                     onChange={set('option_1_value')}
                                 />
                                 <Input
-                                    label="Option 2 Name"
+                                    label="Option 2 Name (Optional)"
                                     placeholder="e.g. Color"
                                     value={form.option_2_name}
                                     onChange={set('option_2_name')}
                                 />
                                 <Input
-                                    label="Option 2 Value"
+                                    label="Option 2 Value (Optional)"
                                     placeholder="e.g. Blue"
                                     value={form.option_2_value}
                                     onChange={set('option_2_value')}
                                 />
                                 <Input
-                                    label="Option 3 Name"
+                                    label="Option 3 Name (Optional)"
                                     placeholder="Optional"
                                     value={form.option_3_name}
                                     onChange={set('option_3_name')}
                                 />
                                 <Input
-                                    label="Option 3 Value"
+                                    label="Option 3 Value (Optional)"
                                     placeholder="Optional"
                                     value={form.option_3_value}
                                     onChange={set('option_3_value')}
                                 />
                                 <Input
-                                    label="Option 4 Name"
+                                    label="Option 4 Name (Optional)"
                                     placeholder="Optional"
                                     value={form.option_4_name}
                                     onChange={set('option_4_name')}
                                 />
                                 <Input
-                                    label="Option 4 Value"
+                                    label="Option 4 Value (Optional)"
                                     placeholder="Optional"
                                     value={form.option_4_value}
                                     onChange={set('option_4_value')}
                                 />
                                 <div className="sm:col-span-2">
                                     <Input
-                                        label="Variation Img URL"
+                                        label="Variation Img URL (Optional)"
                                         placeholder="https://… (required for multi-variant rows)"
                                         value={form.variation_image_url}
                                         onChange={set('variation_image_url')}
@@ -706,8 +913,8 @@ export default function ListingFormModal({
                                     <Textarea label="Description" rows={4} value={form.description} onChange={set('description')} required />
                                 </div>
                                 <Input label="Brand" value={form.brand} onChange={set('brand')} required />
-                                <Input label="Category" placeholder="e.g. Apparel > T-Shirts" value={form.category} onChange={set('category')} />
-                                <Input label="Barcode" value={form.barcode} onChange={set('barcode')} />
+                                <Input label="Category (Optional)" placeholder="e.g. Apparel > T-Shirts" value={form.category} onChange={set('category')} />
+                                <Input label="Barcode (Optional)" value={form.barcode} onChange={set('barcode')} />
                                 <ListingPhotoUploader
                                     storeId={storeId}
                                     value={form.image_urls}
@@ -731,16 +938,15 @@ export default function ListingFormModal({
                                         checked={form.infinite_quantity}
                                         onChange={set('infinite_quantity')}
                                     />
-                                    Infinite Quantity
+                                    Infinite Quantity (Optional)
                                 </label>
                                 <Input
-                                    label="Original Price"
+                                    label="Original Price (Optional)"
                                     type="number"
                                     min="0"
                                     step="0.01"
                                     value={form.original_price}
                                     onChange={set('original_price')}
-                                    required
                                 />
                                 <Input
                                     label="Sale Price"
