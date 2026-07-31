@@ -2,7 +2,7 @@ import { useState, useContext, useEffect } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { AuthContext } from '../../context/AuthContext';
 import { ThemeContext } from '../../context/ThemeContext';
-import { WesolutionsLogo, WesolutionsLoading } from '../../components/brand';
+import { SellerPilotHubLogo, SellerPilotHubLoading } from '../../components/brand';
 import Input from '../../components/ui/Input';
 import Button from '../../components/ui/Button';
 import { Sun, Moon } from 'lucide-react';
@@ -53,7 +53,7 @@ const Login = () => {
     };
 
     if (loading) {
-        return <WesolutionsLoading />;
+        return <SellerPilotHubLoading />;
     }
 
     return (
@@ -70,10 +70,10 @@ const Login = () => {
 
             <div className="w-full max-w-[400px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-8 shadow-card dark:shadow-card-dark">
                 <div className="flex justify-center">
-                    <WesolutionsLogo />
+                    <SellerPilotHubLogo />
                 </div>
                 <h2 className="mt-6 text-center text-xl font-semibold text-slate-900 dark:text-slate-100">Sign in</h2>
-                <p className="mt-1 text-center text-sm text-slate-500 dark:text-slate-400">Wesolutions</p>
+                <p className="mt-1 text-center text-sm text-slate-500 dark:text-slate-400">SellerPilot Hub</p>
                 <form className="mt-8 space-y-5" onSubmit={handleSubmit}>
                     {error && (
                         <div className="rounded-md border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-900/20 px-3 py-2 text-sm text-center text-rose-700 dark:text-rose-400">

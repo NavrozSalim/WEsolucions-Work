@@ -1,2 +1,2 @@
-export { WesolutionsLogo } from './WesolutionsLogo';
-export { WesolutionsLoading } from './WesolutionsLoading';
+export { SellerPilotHubLogo, WesolutionsLogo } from './SellerPilotHubLogo';
+export { SellerPilotHubLoading, WesolutionsLoading } from './SellerPilotHubLoading';

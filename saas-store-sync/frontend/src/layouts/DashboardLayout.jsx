@@ -17,7 +17,7 @@ import {
     Sun,
     Moon,
 } from 'lucide-react';
-import { WesolutionsLogo } from '../components/brand';
+import { SellerPilotHubLogo } from '../components/brand';
 import { SidebarActivityProvider, useSidebarActivity } from '../context/SidebarActivityContext';
 import SidebarActivityPanel from '../components/layout/SidebarActivityPanel';
 
@@ -122,9 +122,9 @@ function DashboardLayoutInner() {
                         onClick={closeMobileSidebar}
                     >
                         {desktopCollapsed ? (
-                            <WesolutionsLogo iconOnly />
+                            <SellerPilotHubLogo iconOnly />
                         ) : (
-                            <WesolutionsLogo compact />
+                            <SellerPilotHubLogo compact />
                         )}
                     </Link>
                     <button

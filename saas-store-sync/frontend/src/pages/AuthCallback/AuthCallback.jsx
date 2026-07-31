@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { WesolutionsLoading } from '../../components/brand';
+import { SellerPilotHubLoading } from '../../components/brand';
 
 /**
  * Handles OAuth callback (e.g. Google). Backend redirects here with tokens in query.
@@ -27,5 +27,5 @@ export default function AuthCallback() {
         }
     }, []);
 
-    return <WesolutionsLoading />;
+    return <SellerPilotHubLoading />;
 }
