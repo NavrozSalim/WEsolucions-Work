@@ -12,7 +12,10 @@ const ACTION_OPTIONS = [
 
 /** Bulk listing upload: one action per file (Create, Mapped, or Delete). */
 export default function BulkListingModal({ open, onClose, onImported, storeId, marketplaceCode = '' }) {
-    const isReverb = String(marketplaceCode || '').trim().toLowerCase() === 'reverb';
+    const code = String(marketplaceCode || '').trim().toLowerCase();
+    const isReverb = code === 'reverb';
+    const isMydeal = code === 'mydeal';
+    const templateLabel = isReverb ? 'Reverb' : isMydeal ? 'MyDeal' : 'marketplace';
     const fileRef = useRef(null);
     const [file, setFile] = useState(null);
     const [action, setAction] = useState('create');
@@ -100,11 +103,12 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                 <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
                     <p className="text-sm text-slate-600 dark:text-slate-400">
                         Choose one action for the whole file, download the matching{' '}
-                        {isReverb ? 'Reverb' : 'marketplace'} template, fill rows, then upload.
+                        {templateLabel} template, fill rows, then upload.
                         Rows with errors appear under the <strong>Errors</strong> filter on Created products.
+                        Headers marked <strong>(Optional)</strong> can be left blank.
                         Optional columns <strong>Vendor Name</strong>, <strong>Marketplace Name</strong>, and{' '}
                         <strong>Store Name</strong> must match a source vendor and your store (or route to another of your stores).
-                        {!isReverb && (
+                        {!isReverb && !isMydeal && (
                             <>
                                 {' '}For colour/size variants use the same <strong>Product Key</strong>, unique{' '}
                                 <strong>Variant Key</strong> / <strong>SKU</strong>, fill{' '}
@@ -114,6 +118,9 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                         )}
                         {isReverb && (
                             <> Reverb columns include Make, Model, Condition, Category, Vendor URL, Price, Photo URLs, status, and free_shipping.</>
+                        )}
+                        {isMydeal && (
+                            <> MyDeal columns include Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
                         )}
                     </p>
 
