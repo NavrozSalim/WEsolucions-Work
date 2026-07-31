@@ -1,7 +1,8 @@
 """HTTP client for the MyDeal (WMP) Universal API.
 
-Auth flow (API doc §0.4):
-  1. POST /mydealaccesstoken with client_id + client_secret → bearer access_token
+Auth flow (API doc §0.4 / OpenIddict):
+  1. POST /mydealaccesstoken with HTTP Basic (client_id:client_secret) and
+     grant_type=client_credentials → bearer access_token
   2. Subsequent calls send Authorization: Bearer <token> plus SellerID / SellerToken
      headers for the active seller.
 
@@ -122,15 +123,12 @@ class MyDealClient:
             self.environment,
         )
         try:
-            # Doc §0.4.1 lists client_Id (capital I). Also send client_id for OAuth-style gateways.
+            # OpenIddict (MyDeal sandbox/prod) expects client credentials via HTTP Basic
+            # auth, not form-body client_id/client_secret (body-only → ID2029 missing client_id).
             resp = requests.post(
                 url,
-                data={
-                    "grant_type": "client_credentials",
-                    "client_id": self._client_id,
-                    "client_Id": self._client_id,
-                    "client_secret": self._client_secret,
-                },
+                data={"grant_type": "client_credentials"},
+                auth=(self._client_id, self._client_secret),
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
                     "Accept": "application/json",

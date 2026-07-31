@@ -411,11 +411,12 @@ class MyDealConnectionTests(SimpleTestCase):
         self.assertTrue(result.ok)
         mock_post.assert_called()
         self.assertIn('/mydealaccesstoken', mock_post.call_args[0][0])
-        token_body = mock_post.call_args.kwargs.get('data') or mock_post.call_args[1].get('data')
+        token_kwargs = mock_post.call_args.kwargs
+        token_body = token_kwargs.get('data') or (mock_post.call_args[1].get('data') if len(mock_post.call_args) > 1 else {})
         self.assertEqual(token_body.get('grant_type'), 'client_credentials')
-        self.assertEqual(token_body.get('client_id'), 'cid')
-        self.assertEqual(token_body.get('client_Id'), 'cid')
-        self.assertEqual(token_body.get('client_secret'), 'csecret')
+        self.assertNotIn('client_id', token_body)
+        self.assertNotIn('client_secret', token_body)
+        self.assertEqual(token_kwargs.get('auth'), ('cid', 'csecret'))
         mock_request.assert_called()
         args, kwargs = mock_request.call_args
         self.assertEqual(args[0], 'GET')
