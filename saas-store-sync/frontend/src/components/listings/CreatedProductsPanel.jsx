@@ -78,7 +78,10 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
             .catch((err) => onMessage?.(err.response?.data?.detail || 'Delete failed.', 'error'));
     };
 
-    const publishableCount = listings.filter((l) => l.status === 'ready' || l.status === 'failed').length;
+    const publishableIds = listings
+        .filter((l) => l.status === 'ready' || l.status === 'failed')
+        .map((l) => l.id);
+    const publishableCount = publishableIds.length;
 
     return (
         <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
@@ -113,7 +116,7 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                     <Button
                         variant="primary"
                         size="sm"
-                        onClick={() => handlePublish()}
+                        onClick={() => handlePublish(publishableIds)}
                         disabled={publishing || publishableCount === 0}
                     >
                         <Send className="mr-1.5 h-4 w-4" />

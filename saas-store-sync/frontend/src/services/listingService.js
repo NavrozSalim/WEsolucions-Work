@@ -7,7 +7,7 @@ export const getListing = (storeId, listingId) => api.get(`/stores/${storeId}/li
 export const updateListing = (storeId, listingId, data) => api.put(`/stores/${storeId}/listings/${listingId}/`, data);
 export const deleteListing = (storeId, listingId) => api.delete(`/stores/${storeId}/listings/${listingId}/`);
 
-/** Push READY listings to the store's marketplace; optionally only specific ids. */
+/** Push READY/FAILED created listings to the marketplace; optionally only specific ids. */
 export const publishListings = (storeId, listingIds = null) =>
     api.post(`/stores/${storeId}/listings/publish/`, listingIds ? { listing_ids: listingIds } : {});
 

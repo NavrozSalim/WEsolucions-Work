@@ -671,6 +671,46 @@ class ListingServiceTests(TestCase):
         with self.assertRaises(MarketplaceError):
             listing_service.publish(self.user, store2)
 
+    @patch("listings.listing_service.LasooClient")
+    def test_publish_excludes_already_uploaded_listings(self, mock_client_cls):
+        """Publish all must not re-send inventory rows (avoids marketplace duplicates)."""
+        uploaded = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        uploaded.status = ListingStatus.UPLOADED_STAGING
+        uploaded.save(update_fields=["status"])
+
+        ready_data = dict(VALID_DATA)
+        ready_data.update({
+            "sku": "TSHIRT-002-BLACK-M",
+            "variant_key": "TSHIRT-002-BLACK-M",
+            "product_key": "TSHIRT-002",
+        })
+        ready = listing_service.create(self.user, self.store, ready_data)
+        self.assertEqual(ready.status, ListingStatus.READY)
+
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.return_value = LasooResult(ok=True, message="ok", data={})
+
+        result = listing_service.publish(self.user, self.store)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["published"], 1)
+        mock_client.send.assert_called_once()
+        payload = mock_client.send.call_args[0][1]
+        data = payload.get("data") or payload
+        variants = data.get("variants") or []
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(
+            variants[0].get("externalVariantKey") or variants[0].get("sku"),
+            ready.sku,
+        )
+
+        ready.refresh_from_db()
+        uploaded.refresh_from_db()
+        self.assertEqual(ready.status, ListingStatus.UPLOADED_STAGING)
+        self.assertEqual(uploaded.status, ListingStatus.UPLOADED_STAGING)
+        self.assertIsNotNone(ready.last_uploaded_at)
+        self.assertIsNone(uploaded.last_uploaded_at)
+
     def test_reverb_template_headers(self):
         reverb, _ = Marketplace.objects.get_or_create(code="reverb", defaults={"name": "Reverb"})
         store2 = Store.objects.create(

@@ -909,6 +909,16 @@ def _publish_reverb(user, store, publishable: list) -> dict:
     failures = 0
 
     for listing in publishable:
+        # Already linked to a Reverb listing — never POST create again (duplicate SKU).
+        existing_id = (listing.external_product_key or "").strip()
+        sku = (listing.sku or listing.external_variant_key or "").strip()
+        if existing_id and _looks_like_reverb_listing_id(existing_id) and existing_id != sku:
+            listing.status = ListingStatus.UPLOADED_PRODUCTION
+            listing.last_uploaded_at = now
+            listing.save(update_fields=["status", "last_uploaded_at", "updated_at"])
+            published += 1
+            continue
+
         data = _listing_to_data(listing)
         condition_raw = data.get("condition_uuid") or data.get("condition") or ""
         condition_uuid = reverb_listings.resolve_condition_uuid(adapter, condition_raw)
@@ -997,7 +1007,11 @@ def _publish_reverb(user, store, publishable: list) -> dict:
 
 
 def publish(user, store, listing_ids=None) -> dict:
-    """Push READY (or previously uploaded) listings to the store's marketplace."""
+    """Push READY / FAILED created products to the store's marketplace.
+
+    Already-uploaded inventory rows are excluded — re-sync those via
+    ``push_inventory`` so publish never re-creates duplicates on the store.
+    """
     kind = marketplace_kind(store.marketplace)
     if kind not in ("lasoo", "reverb", "mydeal"):
         raise MarketplaceError(
@@ -1010,8 +1024,6 @@ def publish(user, store, listing_ids=None) -> dict:
         store=store,
         status__in=[
             ListingStatus.READY,
-            ListingStatus.UPLOADED_STAGING,
-            ListingStatus.UPLOADED_PRODUCTION,
             ListingStatus.FAILED,
         ],
     )
