@@ -2,6 +2,37 @@ import api from './api';
 
 // --- Managed store listings ---
 export const getListings = (storeId, params) => api.get(`/stores/${storeId}/listings/`, { params });
+
+/** Paginated Inventory management list (default 10 per page). All rows stay in DB. */
+export const getInventoryListings = async (storeId, options = {}) => {
+    const page = Math.max(1, options.page || 1);
+    const pageSize = Math.max(1, Math.min(100, options.pageSize || 10));
+    const params = {
+        view: 'inventory',
+        page,
+        page_size: pageSize,
+    };
+    const search = (options.search || '').trim();
+    if (search) params.search = search;
+    const syncStatus = (options.syncStatus || '').trim();
+    if (syncStatus && syncStatus !== 'all') params.sync_status = syncStatus;
+
+    const res = await api.get(`/stores/${storeId}/listings/`, { params });
+    const d = res.data;
+    const results = Array.isArray(d?.results) ? d.results : Array.isArray(d) ? d : [];
+    const count = Number.isFinite(d?.count) ? d.count : results.length;
+    return {
+        data: results,
+        count,
+        page,
+        pageSize,
+        totalPages: Math.max(1, Math.ceil(count / pageSize) || 1),
+        scrapeableCount: Number.isFinite(d?.scrapeable_count) ? d.scrapeable_count : null,
+        next: d?.next || null,
+        previous: d?.previous || null,
+    };
+};
+
 export const createListing = (storeId, data) => api.post(`/stores/${storeId}/listings/`, data);
 export const getListing = (storeId, listingId) => api.get(`/stores/${storeId}/listings/${listingId}/`);
 export const updateListing = (storeId, listingId, data) => api.put(`/stores/${storeId}/listings/${listingId}/`, data);

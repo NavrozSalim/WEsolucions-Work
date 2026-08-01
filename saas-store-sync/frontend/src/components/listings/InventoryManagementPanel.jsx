@@ -1,17 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, FileDown, Pencil, Play, RefreshCw, Send, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
 import {
     criticalZeroListingInventory,
     deleteListing,
     exportListingInventory,
+    getInventoryListings,
     getListingScrapeProgress,
-    getListings,
     pushListingInventory,
     resetListingInventory,
     scrapeListings,
 } from '../../services/listingService';
 import ListingFormModal from './ListingFormModal';
+
+const PAGE_SIZE = 10;
 
 const SYNC_STYLES = {
     pending: 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300',
@@ -163,6 +165,9 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     const isLasoo = marketplaceLabel.toLowerCase() === 'lasoo';
     const canScrape = isReverb || isLasoo;
     const [listings, setListings] = useState([]);
+    const [totalCount, setTotalCount] = useState(0);
+    const [scrapeableCount, setScrapeableCount] = useState(0);
+    const [page, setPage] = useState(1);
     const [loading, setLoading] = useState(false);
     const [scraping, setScraping] = useState(false);
     const [pushing, setPushing] = useState(false);
@@ -180,10 +185,15 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     const onMessageRef = useRef(onMessage);
     const loadGenRef = useRef(0);
     const scrapeListRefreshTickRef = useRef(0);
+    const pageRef = useRef(1);
 
     useEffect(() => {
         onMessageRef.current = onMessage;
     }, [onMessage]);
+
+    useEffect(() => {
+        pageRef.current = page;
+    }, [page]);
 
     // Debounce search so typing does not fire a request per keystroke.
     useEffect(() => {
@@ -191,19 +201,44 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
         return () => clearTimeout(t);
     }, [search]);
 
+    // Reset to first page when filters change.
+    useEffect(() => {
+        setPage(1);
+    }, [debouncedSearch, syncFilter, storeId]);
+
+    const applyInventoryPage = useCallback((res) => {
+        setListings(Array.isArray(res.data) ? res.data : []);
+        setTotalCount(Number.isFinite(res.count) ? res.count : 0);
+        if (Number.isFinite(res.scrapeableCount)) {
+            setScrapeableCount(res.scrapeableCount);
+        }
+    }, []);
+
     const load = useCallback(() => {
         if (!storeId) return;
         const gen = ++loadGenRef.current;
         setLoading(true);
-        const params = { view: 'inventory', search: debouncedSearch || undefined };
-        if (syncFilter !== 'all') params.sync_status = syncFilter;
-        getListings(storeId, params)
+        getInventoryListings(storeId, {
+            page,
+            pageSize: PAGE_SIZE,
+            search: debouncedSearch || undefined,
+            syncStatus: syncFilter,
+        })
             .then((res) => {
                 if (gen !== loadGenRef.current) return;
-                setListings(Array.isArray(res.data) ? res.data : []);
+                applyInventoryPage(res);
+                // If filters shrunk the result set past the current page, clamp.
+                if (res.page > res.totalPages && res.totalPages >= 1) {
+                    setPage(res.totalPages);
+                }
             })
             .catch((err) => {
                 if (gen !== loadGenRef.current) return;
+                // Page out of range after deletes/filters — jump back to page 1.
+                if (err.response?.status === 404 && page > 1) {
+                    setPage(1);
+                    return;
+                }
                 // Keep existing rows — clearing looks like inventory disappeared.
                 const msg = inventoryLoadError(err);
                 if (msg) onMessageRef.current?.(msg, 'error');
@@ -212,7 +247,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                 if (gen !== loadGenRef.current) return;
                 setLoading(false);
             });
-    }, [storeId, debouncedSearch, syncFilter]);
+    }, [storeId, page, debouncedSearch, syncFilter, applyInventoryPage]);
 
     useEffect(() => {
         load();
@@ -247,13 +282,14 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         // Refresh rows less often than progress (~every 4.5s) to avoid throttle spam.
                         scrapeListRefreshTickRef.current += 1;
                         if (scrapeListRefreshTickRef.current % 3 !== 0) return;
-                        getListings(storeId, {
-                            view: 'inventory',
+                        getInventoryListings(storeId, {
+                            page: pageRef.current,
+                            pageSize: PAGE_SIZE,
                             search: debouncedSearch || undefined,
-                            ...(syncFilter !== 'all' ? { sync_status: syncFilter } : {}),
+                            syncStatus: syncFilter,
                         })
                             .then((r) => {
-                                if (!cancelled) setListings(Array.isArray(r.data) ? r.data : []);
+                                if (!cancelled) applyInventoryPage(r);
                             })
                             .catch(() => {});
                     } else {
@@ -268,20 +304,15 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
             cancelled = true;
             clearInterval(id);
         };
-    }, [storeId, debouncedSearch, syncFilter, load]);
+    }, [storeId, debouncedSearch, syncFilter, load, applyInventoryPage]);
 
-    const withVendor = useMemo(
-        () => listings.filter((l) => (l.vendor_url || '').trim() || (l.vendor_id || '').trim()).length,
-        [listings],
-    );
+    const withVendor = scrapeableCount;
 
     const serverScraping = Boolean(scrapeProgress?.active);
     const scrapeBusy = scraping || serverScraping;
 
     const handleScrape = (ids = null) => {
-        const targetCount = ids?.length
-            ? ids.length
-            : listings.filter((l) => (l.vendor_url || '').trim() || (l.vendor_id || '').trim()).length;
+        const targetCount = ids?.length ? ids.length : withVendor;
         setJobCount(targetCount);
         setScrapeProgress({
             active: true,
@@ -325,7 +356,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     };
 
     const handlePush = (ids = null) => {
-        const targetCount = ids?.length || listings.length;
+        const targetCount = ids?.length || totalCount;
         setJobCount(targetCount);
         setPushing(true);
         pushListingInventory(storeId, ids)
@@ -387,6 +418,10 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     };
 
     const busy = scrapeBusy || pushing || resetting || criticalLoading;
+    const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE) || 1);
+    const safePage = Math.min(Math.max(1, page), totalPages);
+    const rangeStart = totalCount === 0 ? 0 : (safePage - 1) * PAGE_SIZE + 1;
+    const rangeEnd = Math.min(safePage * PAGE_SIZE, totalCount);
 
     return (
         <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
@@ -407,7 +442,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         <p className="text-xs text-slate-500 dark:text-slate-400">
                             {loading && listings.length === 0
                                 ? 'Loading…'
-                                : `${listings.length.toLocaleString()} listing${listings.length === 1 ? '' : 's'} on the marketplace`}
+                                : `${totalCount.toLocaleString()} listing${totalCount === 1 ? '' : 's'} on the marketplace`}
                             {canScrape ? (
                                 <span className="block mt-0.5">
                                     Start Scraping updates vendor price/stock locally (Scraped). Manual sync or your store schedule pushes to {marketplaceLabel}.
@@ -422,7 +457,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         variant="secondary"
                         size="sm"
                         onClick={() => handlePush()}
-                        disabled={busy || listings.length === 0}
+                        disabled={busy || totalCount === 0}
                         title="Push current price/stock to marketplace (no new vendor fetch)"
                     >
                         <RefreshCw className={`mr-1.5 h-4 w-4 ${pushing ? 'animate-spin' : ''}`} />
@@ -433,7 +468,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         <Button
                             variant="secondary"
                             size="sm"
-                            disabled={busy || listings.length === 0}
+                            disabled={busy || totalCount === 0}
                             className="border-rose-300 text-rose-700 dark:border-rose-700 dark:text-rose-300"
                             onClick={handleCriticalZero}
                         >
@@ -622,6 +657,64 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                     </table>
                 )}
             </div>
+
+            {totalCount > PAGE_SIZE && (
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 dark:border-slate-700 px-4 py-3">
+                    <p className="text-sm text-slate-500 dark:text-slate-400">
+                        Showing{' '}
+                        <span className="font-medium text-slate-700 dark:text-slate-300">{rangeStart}</span>
+                        –
+                        <span className="font-medium text-slate-700 dark:text-slate-300">{rangeEnd}</span>
+                        {' '}of{' '}
+                        <span className="font-medium text-slate-700 dark:text-slate-300">{totalCount.toLocaleString()}</span>
+                        {' '}listings
+                    </p>
+                    <div className="flex items-center gap-1">
+                        <button
+                            type="button"
+                            onClick={() => setPage((p) => Math.max(1, p - 1))}
+                            disabled={safePage <= 1 || loading}
+                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            Previous
+                        </button>
+                        {Array.from({ length: totalPages }, (_, i) => i + 1)
+                            .filter((pg) => pg === 1 || pg === totalPages || Math.abs(pg - safePage) <= 1)
+                            .reduce((acc, pg, idx, arr) => {
+                                if (idx > 0 && pg - arr[idx - 1] > 1) acc.push('...');
+                                acc.push(pg);
+                                return acc;
+                            }, [])
+                            .map((pg, i) =>
+                                pg === '...' ? (
+                                    <span key={`dot-${i}`} className="px-1 text-slate-400">…</span>
+                                ) : (
+                                    <button
+                                        key={pg}
+                                        type="button"
+                                        onClick={() => setPage(pg)}
+                                        disabled={loading}
+                                        className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                                            pg === safePage
+                                                ? 'bg-accent-600 text-white dark:bg-accent-500'
+                                                : 'border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
+                                        } disabled:opacity-40 disabled:cursor-not-allowed`}
+                                    >
+                                        {pg}
+                                    </button>
+                                )
+                            )}
+                        <button
+                            type="button"
+                            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                            disabled={safePage >= totalPages || loading}
+                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            Next
+                        </button>
+                    </div>
+                </div>
+            )}
 
             <ListingFormModal
                 open={editOpen}

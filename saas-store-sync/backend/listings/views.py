@@ -29,6 +29,7 @@ from . import (
 )
 from .errors import MarketplaceError
 from .models import ListingAction, ListingStatus, ListingUpload, MarketplaceOrder, StoreListing, SupportTicket
+from .pagination import ListingPagination
 from .photo_upload import PhotoUploadError
 from .reverb import listings as reverb_listings
 from .serializers import (
@@ -108,8 +109,37 @@ class StoreListingListCreateView(APIView):
                 'store__vendor_price_settings__range_margins__price_range',
             )
         )
-        qs = _filter_listings(qs, request)
-        return Response(StoreListingSerializer(qs, many=True).data)
+        qs = _filter_listings(qs, request).order_by('-updated_at', '-id')
+
+        # Opt-in pagination (Inventory UI). Created products / legacy clients
+        # omit page params and still receive a plain array.
+        wants_page = (
+            request.query_params.get('page') is not None
+            or request.query_params.get('page_size') is not None
+        )
+        if not wants_page:
+            return Response(StoreListingSerializer(qs, many=True).data)
+
+        paginator = ListingPagination()
+        page = paginator.paginate_queryset(qs, request)
+        payload = StoreListingSerializer(page, many=True).data
+        response = paginator.get_paginated_response(payload)
+
+        view = (request.query_params.get('view') or '').strip().lower()
+        if view == 'inventory':
+            # Store-wide scrapeable count (not limited to current page/search)
+            # so Start Scraping (N) matches what the scrape job will process.
+            inv_qs = StoreListing.objects.filter(
+                store=store,
+                user=request.user,
+                status__in=INVENTORY_STATUSES,
+            )
+            scrapeable_count = inv_qs.exclude(
+                (Q(vendor_url__isnull=True) | Q(vendor_url=''))
+                & (Q(vendor_id__isnull=True) | Q(vendor_id=''))
+            ).count()
+            response.data['scrapeable_count'] = scrapeable_count
+        return response
 
     def post(self, request, store_pk):
         store = _get_store(request, store_pk)
