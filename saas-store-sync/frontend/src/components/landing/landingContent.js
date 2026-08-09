@@ -11,19 +11,12 @@ export const NAV_LINKS = [
 export const SALES_EMAIL = 'sales@sellerpilothub.com';
 export const SALES_MAILTO = `mailto:${SALES_EMAIL}?subject=SellerPilot%20Hub%20Demo`;
 
-// Honest integration status — do not claim availability that isn't implemented.
+// Landing marquee: sell-to marketplaces only (no vendors / AU).
 export const INTEGRATIONS = [
-    { name: 'Amazon', status: 'available' },
-    { name: 'eBay', status: 'available' },
     { name: 'Walmart', status: 'available' },
     { name: 'Reverb', status: 'available' },
     { name: 'Sears', status: 'available' },
-    { name: 'Kogan', status: 'available' },
-    { name: 'Google Sheets', status: 'available' },
-    { name: 'Etsy', status: 'beta' },
-    { name: 'HEB', status: 'beta' },
-    { name: 'Vevor AU', status: 'beta' },
-    { name: 'Costco AU', status: 'planned' },
+    { name: 'Etsy', status: 'available' },
 ];
 
 export const STATUS_STYLES = {
@@ -233,7 +226,7 @@ export const SECURITY_POINTS = [
 export const FAQS = [
     {
         q: 'Which marketplaces can I connect?',
-        a: 'Core marketplaces like Amazon, eBay, Walmart, Reverb, Sears, and Kogan are available today, plus Google Sheets workflows. Etsy, HEB, and Vevor AU are in beta, and more are planned. Availability is labeled honestly in the Integrations section.',
+        a: 'You can connect Walmart, Reverb, Sears, and Etsy.',
     },
     {
         q: 'How does product mapping work?',
@@ -249,7 +242,7 @@ export const FAQS = [
     },
     {
         q: 'Can I invite team members?',
-        a: 'A Super User selects a seat plan and creates user accounts, then assigns per-module permissions for dashboard, stores, catalog, orders, tickets, and team.',
+        a: 'Yes. A Super User creates user accounts and assigns per-module permissions for dashboard, stores, catalog, orders, tickets, and team.',
     },
     {
         q: 'How are marketplace credentials protected?',
@@ -262,10 +255,6 @@ export const FAQS = [
     {
         q: 'What happens when a sync fails?',
         a: 'Failed jobs appear in sync visibility with status, logs, and activity so you can investigate and re-run them.',
-    },
-    {
-        q: 'Is there a free plan?',
-        a: 'Yes. The first five user accounts are free. Each additional pack of five seats is $10.',
     },
 ];
 

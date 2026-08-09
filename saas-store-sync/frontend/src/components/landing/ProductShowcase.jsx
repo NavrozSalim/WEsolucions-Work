@@ -196,7 +196,7 @@ export default function ProductShowcase() {
     const reduce = useReducedMotion();
 
     return (
-        <Section>
+        <Section id="product">
             <Container>
                 <Reveal>
                     <SectionHeading
@@ -223,7 +223,7 @@ export default function ProductShowcase() {
                                         tab === item.id ? 'text-white' : 'text-slate-400 hover:text-slate-200'
                                     }`}
                                 >
-                                    {tab === t ? (
+                                    {tab === item.id ? (
                                         <motion.span
                                             layoutId="spl-tab-pill"
                                             className="absolute inset-0 rounded-lg bg-sky-500/15 ring-1 ring-inset ring-sky-400/30"

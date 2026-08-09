@@ -1,22 +1,16 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
-import { Menu, X, Zap } from 'lucide-react';
+import { Menu, X } from 'lucide-react';
+import { SellerPilotHubLogo } from '../brand';
 import LanguageSwitcher from '../layout/LanguageSwitcher';
 import { useI18n } from '../../context/I18nContext';
 import { CTAButton, Container } from './primitives';
 
 export function BrandMark({ withText = true }) {
     return (
-        <Link to="/" className="group inline-flex items-center gap-2.5" aria-label="SellerPilot Hub home">
-            <span className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-sky-400 to-cyan-500 text-slate-950 shadow-[0_6px_20px_-6px_rgba(56,189,248,0.7)]">
-                <Zap className="h-5 w-5" strokeWidth={2.5} />
-            </span>
-            {withText ? (
-                <span className="font-display text-base font-semibold tracking-tight text-white">
-                    SellerPilot <span className="text-sky-400">Hub</span>
-                </span>
-            ) : null}
+        <Link to="/" className="group inline-flex items-center" aria-label="SellerPilot Hub home">
+            <SellerPilotHubLogo compact={withText} iconOnly={!withText} />
         </Link>
     );
 }

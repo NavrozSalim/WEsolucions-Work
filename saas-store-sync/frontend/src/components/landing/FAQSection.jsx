@@ -53,8 +53,8 @@ export default function FAQSection() {
         {
             q: isEs ? '¿Qué marketplaces puedo conectar?' : 'Which marketplaces can I connect?',
             a: isEs
-                ? 'Amazon, eBay, Walmart, Reverb, Sears y Kogan están disponibles, además de flujos con Google Sheets. Etsy, HEB y Vevor AU están en beta.'
-                : 'Core marketplaces like Amazon, eBay, Walmart, Reverb, Sears, and Kogan are available today, plus Google Sheets workflows. Etsy, HEB, and Vevor AU are in beta.',
+                ? 'Puedes conectar Walmart, Reverb, Sears y Etsy.'
+                : 'You can connect Walmart, Reverb, Sears, and Etsy.',
         },
         {
             q: isEs ? '¿Cómo funciona el mapeo de productos?' : 'How does product mapping work?',
@@ -79,8 +79,8 @@ export default function FAQSection() {
         {
             q: isEs ? '¿Puedo invitar miembros del equipo?' : 'Can I invite team members?',
             a: isEs
-                ? 'Sí. Un Super User define asientos y permisos por módulo para cada cuenta.'
-                : 'A Super User selects a seat plan and creates user accounts, then assigns per-module permissions.',
+                ? 'Sí. Un Super User crea cuentas y asigna permisos por módulo.'
+                : 'Yes. A Super User creates user accounts and assigns per-module permissions.',
         },
         {
             q: isEs ? '¿Cómo se protegen las credenciales?' : 'How are marketplace credentials protected?',
@@ -99,12 +99,6 @@ export default function FAQSection() {
             a: isEs
                 ? 'El fallo aparece en actividad y logs para que puedas revisarlo y reintentar.'
                 : 'Failed jobs appear in sync visibility with status, logs, and activity so you can investigate and re-run them.',
-        },
-        {
-            q: isEs ? '¿Hay plan gratuito?' : 'Is there a free plan?',
-            a: isEs
-                ? 'Sí. Los primeros cinco asientos son gratis; cada pack adicional de cinco cuesta $10.'
-                : 'Yes. The first five user accounts are free. Each additional pack of five seats is $10.',
         },
     ];
 

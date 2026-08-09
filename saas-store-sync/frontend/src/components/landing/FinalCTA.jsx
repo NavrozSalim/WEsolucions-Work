@@ -10,8 +10,7 @@ export default function FinalCTA() {
         <Section>
             <Container>
                 <Reveal>
-                    <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-b from-sky-500/[0.12] to-[#0b1120] px-6 py-16 text-center sm:px-12">
-                        <div className="spl-aurora" aria-hidden />
+                    <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-[#0b1120] px-6 py-16 text-center sm:px-12">
                         <GridBackground />
                         <div className="relative mx-auto max-w-2xl">
                             <h2 className="font-display text-3xl font-semibold tracking-tight text-white sm:text-4xl">

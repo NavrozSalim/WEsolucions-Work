@@ -1,4 +1,4 @@
-import { Container, Reveal, Section, SectionHeading } from './primitives';
+import { Container, GridBackground, Reveal, Section, SectionHeading } from './primitives';
 import { INTEGRATIONS } from './landingContent';
 import { useI18n } from '../../context/I18nContext';
 
@@ -20,7 +20,7 @@ function IntegrationBadge({ name, status, labels }) {
             dot: 'bg-slate-400',
         },
     };
-    const s = styles[status];
+    const s = styles[status] || styles.available;
     return (
         <div className="mx-3 flex items-center gap-2.5 rounded-xl border border-white/10 bg-white/[0.03] px-4 py-2.5">
             <span className="font-display text-sm font-semibold text-slate-100">{name}</span>
@@ -39,11 +39,13 @@ export default function IntegrationLogos() {
         beta: t('landing.integrations.beta'),
         planned: t('landing.integrations.planned'),
     };
-    const loop = [...INTEGRATIONS, ...INTEGRATIONS];
+    const marketplaces = INTEGRATIONS.filter((it) => it.status === 'available');
+    const loop = [...marketplaces, ...marketplaces];
 
     return (
         <Section id="integrations">
-            <Container>
+            <GridBackground />
+            <Container className="relative">
                 <Reveal>
                     <SectionHeading
                         eyebrow={t('landing.integrations.eyebrow')}
@@ -63,23 +65,13 @@ export default function IntegrationLogos() {
                 </div>
             </Reveal>
 
-            <Container>
+            <Container className="relative">
                 <Reveal delay={0.15}>
                     <div className="mt-8 flex flex-wrap items-center justify-center gap-4 text-xs text-slate-500">
-                        {Object.entries(labels).map(([key, label]) => (
-                            <span key={key} className="inline-flex items-center gap-1.5">
-                                <span
-                                    className={`h-2 w-2 rounded-full ${
-                                        key === 'available'
-                                            ? 'bg-emerald-400'
-                                            : key === 'beta'
-                                              ? 'bg-amber-400'
-                                              : 'bg-slate-400'
-                                    }`}
-                                />
-                                {label}
-                            </span>
-                        ))}
+                        <span className="inline-flex items-center gap-1.5">
+                            <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                            {labels.available}
+                        </span>
                     </div>
                 </Reveal>
             </Container>

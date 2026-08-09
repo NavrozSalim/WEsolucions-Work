@@ -7,11 +7,11 @@ function StepCard({ step, index }) {
     return (
         <div className="relative z-10 h-full rounded-2xl border border-white/10 bg-[#0b1120] p-6">
             <div className="flex items-center justify-between">
-                <span className="grid h-11 w-11 place-items-center rounded-xl border border-white/10 bg-gradient-to-br from-sky-400/15 to-cyan-400/10 text-sky-300">
+                <span className="grid h-11 w-11 place-items-center rounded-xl border border-white/10 bg-white/[0.03] text-sky-300">
                     <Icon className="h-5 w-5" />
                 </span>
-                <span className="font-display text-3xl font-semibold text-white/10">
-                    {String(index + 1).padStart(2, '0')}
+                <span className="rounded-full border border-white/10 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-slate-400">
+                    #{index + 1}
                 </span>
             </div>
             <h3 className="mt-5 font-display text-base font-semibold text-white">{step.title}</h3>

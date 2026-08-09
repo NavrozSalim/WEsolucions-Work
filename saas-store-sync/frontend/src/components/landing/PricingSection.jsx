@@ -30,7 +30,7 @@ export default function PricingSection() {
                             <div
                                 className={`relative flex h-full flex-col rounded-2xl border p-6 ${
                                     plan.highlight
-                                        ? 'spl-shimmer-border border-sky-400/40 bg-sky-500/[0.06]'
+                                        ? 'border-sky-400/45 bg-sky-500/[0.08]'
                                         : 'border-white/10 bg-white/[0.02]'
                                 }`}
                             >
