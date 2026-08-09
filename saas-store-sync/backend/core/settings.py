@@ -293,11 +293,36 @@ REST_FRAMEWORK = {
         'user': '5000/hour',
         'anon': '200/hour',
         'login': '5/minute',
+        'otp': '5/minute',
         'sync_trigger': '10/minute',
         # Progress/scrape/job polls during multi-hour sync (UI polls ~every 15s).
         'progress_read': '600/minute',
     },
 }
+
+# Email / OTP (Super User signup verification)
+OTP_EXPIRY_MINUTES = int(os.getenv('OTP_EXPIRY_MINUTES', '10'))
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@sellerpilothub.com').strip()
+EMAIL_HOST = os.getenv('EMAIL_HOST', '').strip()
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587') or '587')
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '').strip()
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '').strip()
+EMAIL_USE_TLS = _env_bool('EMAIL_USE_TLS', True)
+EMAIL_USE_SSL = _env_bool('EMAIL_USE_SSL', False)
+# Brevo: EMAIL_HOST_USER must be the SMTP Login (often xxx@smtp-brevo.com), NOT your Gmail.
+# DEFAULT_FROM_EMAIL is the verified sender address recipients see.
+if EMAIL_HOST:
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+else:
+    # Logs messages to the console in local/dev when SMTP is not configured.
+    EMAIL_BACKEND = os.getenv(
+        'EMAIL_BACKEND',
+        'django.core.mail.backends.console.EmailBackend',
+    ).strip()
+
+# Platform master admin (created via: python manage.py ensure_platform_admin)
+PLATFORM_ADMIN_EMAIL = os.getenv('PLATFORM_ADMIN_EMAIL', '').strip()
+PLATFORM_ADMIN_PASSWORD = os.getenv('PLATFORM_ADMIN_PASSWORD', '')
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(days=1),

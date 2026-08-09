@@ -55,11 +55,14 @@ CREATED_STATUSES = (
 
 
 def _get_store(request, store_pk) -> Store:
-    return get_object_or_404(Store, pk=store_pk, user=request.user)
+    from users.org_scope import stores_for_user
+
+    return get_object_or_404(stores_for_user(request.user), pk=store_pk)
 
 
 def _get_listing(request, store, pk) -> StoreListing:
-    return get_object_or_404(StoreListing, pk=pk, store=store, user=request.user)
+    # Listings are scoped by store (org-shared); do not require listing.user == request.user.
+    return get_object_or_404(StoreListing, pk=pk, store=store)
 
 
 def _filter_listings(qs, request):
@@ -103,7 +106,7 @@ class StoreListingListCreateView(APIView):
     def get(self, request, store_pk):
         store = _get_store(request, store_pk)
         qs = (
-            StoreListing.objects.filter(store=store, user=request.user)
+            StoreListing.objects.filter(store=store)
             .select_related('store')
             .prefetch_related(
                 'store__vendor_price_settings__range_margins__price_range',
@@ -129,17 +132,14 @@ class StoreListingListCreateView(APIView):
         if view == 'inventory':
             # Store-wide scrapeable count (not limited to current page/search)
             # so Start Scraping (N) matches what the scrape job will process.
-            inv_qs = StoreListing.objects.filter(
-                store=store,
-                user=request.user,
-                status__in=INVENTORY_STATUSES,
-            )
+            inv_qs = StoreListing.objects.filter(store=store, status__in=INVENTORY_STATUSES)
             scrapeable_count = inv_qs.exclude(
                 (Q(vendor_url__isnull=True) | Q(vendor_url=''))
                 & (Q(vendor_id__isnull=True) | Q(vendor_id=''))
             ).count()
             response.data['scrapeable_count'] = scrapeable_count
         return response
+
 
     def post(self, request, store_pk):
         store = _get_store(request, store_pk)
@@ -337,7 +337,7 @@ class StoreListingUploadHistoryView(APIView):
         store = _get_store(request, store_pk)
         scope = request.query_params.get('scope', 'history')
         qs = listing_service.filter_listing_uploads(
-            ListingUpload.objects.filter(store=store, user=request.user),
+            ListingUpload.objects.filter(store=store),
             scope=scope,
         )
         return Response(ListingUploadSerializer(qs, many=True).data)
@@ -522,7 +522,7 @@ class StoreListingUploadErrorFileView(APIView):
 
     def get(self, request, store_pk, upload_id):
         store = _get_store(request, store_pk)
-        upload = get_object_or_404(ListingUpload, id=upload_id, store=store, user=request.user)
+        upload = get_object_or_404(ListingUpload, id=upload_id, store=store)
         return _listing_upload_csv_response(upload, errors_only=True)
 
 
@@ -532,7 +532,7 @@ class StoreListingUploadExportView(APIView):
 
     def get(self, request, store_pk, upload_id):
         store = _get_store(request, store_pk)
-        upload = get_object_or_404(ListingUpload, id=upload_id, store=store, user=request.user)
+        upload = get_object_or_404(ListingUpload, id=upload_id, store=store)
         return _listing_upload_csv_response(upload, errors_only=False)
 
 
@@ -542,7 +542,7 @@ class StoreListingUploadDeleteView(APIView):
 
     def delete(self, request, store_pk, upload_id):
         store = _get_store(request, store_pk)
-        upload = get_object_or_404(ListingUpload, id=upload_id, store=store, user=request.user)
+        upload = get_object_or_404(ListingUpload, id=upload_id, store=store)
         # Accept JSON body or query params.
         data = request.data if isinstance(request.data, dict) else {}
         def _flag(name: str) -> bool:
@@ -868,11 +868,11 @@ class StoreOrdersView(APIView):
             except MarketplaceError as exc:
                 refresh_result = {'ok': False, 'message': str(exc), 'fetched': 0}
         orders = list(
-            MarketplaceOrder.objects.filter(store=store, user=request.user)
+            MarketplaceOrder.objects.filter(store=store)
             .prefetch_related('shipments')
         )
         tickets_by_order_key: dict[str, list] = {}
-        for ticket in SupportTicket.objects.filter(store=store, user=request.user).exclude(
+        for ticket in SupportTicket.objects.filter(store=store).exclude(
             related_order_key='',
         ).only(
             'id', 'subject', 'status', 'unread_count', 'customer_name', 'related_order_key',
@@ -907,7 +907,7 @@ class StoreOrdersExportView(APIView):
     def get(self, request, store_pk):
         store = _get_store(request, store_pk)
         qs = (
-            MarketplaceOrder.objects.filter(store=store, user=request.user)
+            MarketplaceOrder.objects.filter(store=store)
             .prefetch_related('shipments')
             .order_by('-created_at')
         )
@@ -946,7 +946,7 @@ class StoreOrderShippingView(APIView):
 
     def post(self, request, store_pk, pk):
         store = _get_store(request, store_pk)
-        order = get_object_or_404(MarketplaceOrder, pk=pk, store=store, user=request.user)
+        order = get_object_or_404(MarketplaceOrder, pk=pk, store=store)
         tracking_number = (request.data.get('tracking_number') or '').strip()
         carrier = (request.data.get('carrier') or '').strip()
         if not tracking_number or not carrier:
@@ -974,7 +974,7 @@ class StoreOrderShippingCompleteView(APIView):
 
     def post(self, request, store_pk, pk):
         store = _get_store(request, store_pk)
-        order = get_object_or_404(MarketplaceOrder, pk=pk, store=store, user=request.user)
+        order = get_object_or_404(MarketplaceOrder, pk=pk, store=store)
         try:
             result = shipping_service.complete(order)
         except MarketplaceError as exc:
@@ -989,7 +989,7 @@ class StoreOrderCancelView(APIView):
 
     def post(self, request, store_pk, pk):
         store = _get_store(request, store_pk)
-        order = get_object_or_404(MarketplaceOrder, pk=pk, store=store, user=request.user)
+        order = get_object_or_404(MarketplaceOrder, pk=pk, store=store)
         reason = (request.data.get('reason') or '').strip()
         try:
             result = order_service.cancel(order, reason=reason)
@@ -1025,7 +1025,7 @@ class StoreTicketsView(APIView):
             except MarketplaceError as exc:
                 refresh_result = {'ok': False, 'message': str(exc), 'fetched': 0}
         tickets = (
-            SupportTicket.objects.filter(store=store, user=request.user)
+            SupportTicket.objects.filter(store=store)
             .prefetch_related('messages')
         )
         return Response({
@@ -1041,7 +1041,7 @@ class StoreTicketsExportView(APIView):
     def get(self, request, store_pk):
         store = _get_store(request, store_pk)
         tickets = list(
-            SupportTicket.objects.filter(store=store, user=request.user)
+            SupportTicket.objects.filter(store=store)
             .order_by('-last_message_at', '-created_at')
         )
         content = export_xlsx.build_tickets_xlsx(
@@ -1077,7 +1077,7 @@ class StoreTicketReplyView(APIView):
 
     def post(self, request, store_pk, pk):
         store = _get_store(request, store_pk)
-        ticket = get_object_or_404(SupportTicket, pk=pk, store=store, user=request.user)
+        ticket = get_object_or_404(SupportTicket, pk=pk, store=store)
         body = (request.data.get('body') or request.data.get('message') or '').strip()
         if not body:
             return Response({'detail': 'body is required.'}, status=status.HTTP_400_BAD_REQUEST)

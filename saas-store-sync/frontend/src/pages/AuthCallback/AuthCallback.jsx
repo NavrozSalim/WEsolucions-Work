@@ -10,20 +10,21 @@ export default function AuthCallback() {
         const params = new URLSearchParams(window.location.search);
         const access = params.get('access');
         const refresh = params.get('refresh');
-        const nextPath = params.get('next') || '/';
+        const nextPath = params.get('next') || '/app';
 
         if (access) {
             localStorage.setItem('access_token', access);
             if (refresh) localStorage.setItem('refresh_token', refresh);
             // Sanitize nextPath - only allow relative paths to prevent open redirect
-            const safePath = nextPath.startsWith('/') && !nextPath.startsWith('//') ? nextPath : '/';
+            let safePath = nextPath.startsWith('/') && !nextPath.startsWith('//') ? nextPath : '/app';
+            if (safePath === '/') safePath = '/app';
             // Small delay so tokens are persisted before redirect (fixes Safari/Chrome timing)
             setTimeout(() => {
                 window.location.replace(safePath);
             }, 50);
         } else {
             // No tokens - backend likely redirected to /login?error=xxx instead of here
-            window.location.replace('/login');
+            window.location.replace('/login/choose');
         }
     }, []);
 

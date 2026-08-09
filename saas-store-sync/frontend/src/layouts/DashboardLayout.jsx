@@ -16,24 +16,30 @@ import {
     Store,
     Sun,
     Moon,
+    Users,
 } from 'lucide-react';
 import { SellerPilotHubLogo } from '../components/brand';
 import { SidebarActivityProvider, useSidebarActivity } from '../context/SidebarActivityContext';
 import SidebarActivityPanel from '../components/layout/SidebarActivityPanel';
+import { hasPermission } from '../services/authService';
+import { useI18n } from '../context/I18nContext';
 
 const navItems = [
-    { path: '/', label: 'Dashboard', icon: LayoutDashboard },
-    { path: '/store-settings', label: 'Stores', icon: Store },
-    { path: '/catalog', label: 'Catalog', icon: Package },
-    { path: '/orders', label: 'Orders', icon: ShoppingCart },
-    { path: '/tickets', label: 'Tickets', icon: MessageSquare },
+    { path: '/app', labelKey: 'navApp.dashboard', icon: LayoutDashboard, permission: 'dashboard' },
+    { path: '/store-settings', labelKey: 'navApp.stores', icon: Store, permission: 'stores' },
+    { path: '/catalog', labelKey: 'navApp.catalog', icon: Package, permission: 'catalog' },
+    { path: '/orders', labelKey: 'navApp.orders', icon: ShoppingCart, permission: 'orders' },
+    { path: '/tickets', labelKey: 'navApp.tickets', icon: MessageSquare, permission: 'tickets' },
+    { path: '/team', labelKey: 'navApp.team', icon: Users, permission: 'team' },
 ];
 
 function DashboardLayoutInner() {
     const { user, logout } = useContext(AuthContext);
     const { dark, toggleTheme } = useContext(ThemeContext);
+    const { t } = useI18n();
     const location = useLocation();
     const { activities } = useSidebarActivity();
+    const visibleNav = navItems.filter((item) => hasPermission(user, item.permission));
 
     // Mobile: drawer open/closed. Desktop: sidebar always visible, but can collapse.
     const [mobileOpen, setMobileOpen] = useState(false);
@@ -117,7 +123,7 @@ function DashboardLayoutInner() {
                     } ${desktopCollapsed ? 'lg:justify-center lg:px-0' : ''}`}
                 >
                     <Link
-                        to="/"
+                        to="/app"
                         className={`flex items-center overflow-hidden ${desktopCollapsed ? 'lg:justify-center lg:w-full' : 'min-w-0 flex-1'}`}
                         onClick={closeMobileSidebar}
                     >
@@ -139,10 +145,11 @@ function DashboardLayoutInner() {
 
                 <nav className="flex min-h-0 flex-1 flex-col overflow-hidden px-3 py-4">
                     <div className="shrink-0 space-y-0.5 overflow-x-hidden overflow-y-auto">
-                        {navItems.map(({ path, label, icon: Icon }) => {
+                        {visibleNav.map(({ path, labelKey, icon: Icon }) => {
+                            const label = t(labelKey);
                             const isActive =
                                 location.pathname === path ||
-                                (path !== '/' && location.pathname.startsWith(path));
+                                (path !== '/app' && location.pathname.startsWith(path));
                             return (
                                 <Link
                                     key={path}
@@ -281,7 +288,13 @@ function DashboardLayoutInner() {
                                             >
                                                 {user?.email}
                                             </p>
-                                            <p className="text-xs text-slate-500">Account</p>
+                                            <p className="text-xs text-slate-500">
+                                                {user?.account_type === 'super_user'
+                                                    ? 'Super User'
+                                                    : user?.account_type === 'user_account'
+                                                      ? 'User Account'
+                                                      : 'Account'}
+                                            </p>
                                         </div>
                                         <button
                                             type="button"

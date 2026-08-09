@@ -77,7 +77,7 @@ class GoogleLoginView(APIView):
         if settings.DEBUG and request.GET.get('debug'):
             return Response({'redirect_uri': redirect_uri, 'hint': 'Add this exact URL to Google Console > OAuth client > Authorized redirect URIs'})
         state = secrets.token_urlsafe(32)
-        next_path = request.GET.get('next', '/')
+        next_path = request.GET.get('next', '/app')
         origin = (request.GET.get('origin') or '').strip().rstrip('/')
         request.session['oauth_state'] = state
         request.session['oauth_next'] = next_path
@@ -109,18 +109,18 @@ class GoogleCallbackView(APIView):
         client_id = getattr(settings, 'GOOGLE_CLIENT_ID', None) or os.getenv('GOOGLE_CLIENT_ID')
         client_secret = getattr(settings, 'GOOGLE_CLIENT_SECRET', None) or os.getenv('GOOGLE_CLIENT_SECRET')
         if not client_id or not client_secret:
-            return redirect(self._frontend_url('/login?error=oauth_not_configured'))
+            return redirect(self._frontend_url('/login/user?error=oauth_not_configured'))
         state = request.GET.get('state')
         stored_state = request.session.get('oauth_state') or request.COOKIES.get('oauth_state')
         if not state or state != stored_state:
-            response = redirect(self._frontend_url('/login?error=invalid_state'))
+            response = redirect(self._frontend_url('/login/user?error=invalid_state'))
             response.delete_cookie('oauth_state', path='/api/v1/auth')
             response.delete_cookie('oauth_next', path='/api/v1/auth')
             response.delete_cookie('oauth_origin', path='/api/v1/auth')
             return response
         code = request.GET.get('code')
         if not code:
-            return redirect(self._frontend_url('/login?error=no_code'))
+            return redirect(self._frontend_url('/login/user?error=no_code'))
         redirect_uri = getattr(settings, 'GOOGLE_REDIRECT_URI', None) or os.getenv('GOOGLE_REDIRECT_URI') or request.build_absolute_uri('/api/v1/auth/google/callback/')
         try:
             import requests
@@ -147,10 +147,10 @@ class GoogleCallbackView(APIView):
             user_resp.raise_for_status()
             info = user_resp.json()
         except Exception as e:
-            return redirect(self._frontend_url(f'/login?error={str(e)[:50]}'))
+            return redirect(self._frontend_url(f'/login/user?error={str(e)[:50]}'))
         email = (info.get('email') or '').strip()
         if not email:
-            return redirect(self._frontend_url('/login?error=no_email'))
+            return redirect(self._frontend_url('/login/user?error=no_email'))
         google_id = info.get('id', '')
         user = User.objects.filter(email__iexact=email).first()
         if not user:
@@ -171,6 +171,12 @@ class GoogleCallbackView(APIView):
                 'is_valid': True,
             },
         )
+        from django.utils import timezone as dj_timezone
+        from users.login_tracking import record_login_event
+
+        record_login_event(request, user, success=True, account_type=user.account_type)
+        user.last_login = dj_timezone.now()
+        user.save(update_fields=['last_login'])
         refresh = RefreshToken.for_user(user)
         next_url = request.session.pop('oauth_next', None) or request.COOKIES.get('oauth_next', '/')
         origin = request.session.pop('oauth_origin', None) or request.COOKIES.get('oauth_origin', '')

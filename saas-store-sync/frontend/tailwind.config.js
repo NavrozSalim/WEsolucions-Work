@@ -29,7 +29,8 @@ export default {
                 },
             },
             fontFamily: {
-                sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'sans-serif'],
+                sans: ['Plus Jakarta Sans', 'ui-sans-serif', 'system-ui', '-apple-system', 'sans-serif'],
+                display: ['Syne', 'Plus Jakarta Sans', 'ui-sans-serif', 'system-ui', 'sans-serif'],
             },
             fontSize: {
                 'display': ['2rem', { lineHeight: '1.2' }],

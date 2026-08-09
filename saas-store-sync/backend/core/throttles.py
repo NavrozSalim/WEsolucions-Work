@@ -6,6 +6,10 @@ class LoginRateThrottle(AnonRateThrottle):
     scope = 'login'
 
 
+class OTPRateThrottle(AnonRateThrottle):
+    scope = 'otp'
+
+
 class SyncTriggerRateThrottle(UserRateThrottle):
     scope = 'sync_trigger'
 

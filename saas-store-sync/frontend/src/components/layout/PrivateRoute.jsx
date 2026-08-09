@@ -8,7 +8,7 @@ const PrivateRoute = () => {
 
     if (loading) return <SellerPilotHubLoading />;
 
-    if (!user) return <Navigate to="/login" replace />;
+    if (!user) return <Navigate to="/login/choose" replace />;
 
     return <Outlet />;
 };

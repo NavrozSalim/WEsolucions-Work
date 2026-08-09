@@ -35,13 +35,16 @@ export const AuthProvider = ({ children }) => {
         bootstrapAuth();
     }, []);
 
-    const login = async (email, password) => {
-        await authLogin(email, password);
+    const login = async (email, password, accountType) => {
+        const data = await authLogin(email, password, accountType);
         try {
             const profile = await getUserProfile();
             setUser(profile);
+            return profile;
         } catch {
-            setUser(getCurrentUser());
+            const fallback = data?.user || getCurrentUser();
+            setUser(fallback);
+            return fallback;
         }
     };
 
@@ -57,13 +60,25 @@ export const AuthProvider = ({ children }) => {
         }
     };
 
+    const refreshProfile = async () => {
+        try {
+            const profile = await getUserProfile();
+            setUser(profile);
+            return profile;
+        } catch {
+            return null;
+        }
+    };
+
     const logout = () => {
         authLogout();
         setUser(null);
     };
 
     return (
-        <AuthContext.Provider value={{ user, login, logout, setUserFromTokens, loading }}>
+        <AuthContext.Provider
+            value={{ user, login, logout, setUserFromTokens, refreshProfile, loading }}
+        >
             {children}
         </AuthContext.Provider>
     );

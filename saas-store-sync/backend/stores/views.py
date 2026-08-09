@@ -8,6 +8,8 @@ from stores.serializers import StoreSerializer
 from rest_framework.permissions import IsAuthenticated
 from audit.utils import log_action
 from core.throttles import ProgressReadRateThrottle
+from users.drf_permissions import HasProductPermission
+from users.org_scope import stores_for_user
 
 
 class StoreViewSet(viewsets.ModelViewSet):
@@ -15,18 +17,22 @@ class StoreViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     parser_classes = [JSONParser, MultiPartParser, FormParser]
 
+    def get_permissions(self):
+        # List/retrieve: any authenticated org member (catalog/orders need store lists).
+        # Mutations: require the stores module permission.
+        if getattr(self, 'action', None) in ('list', 'retrieve'):
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), HasProductPermission()]
+
+    required_product_permission = 'stores'
+
     def get_throttles(self):
         if getattr(self, 'action', None) in ('list', 'retrieve'):
             return [ProgressReadRateThrottle()]
         return super().get_throttles()
 
     def get_queryset(self):
-        user = self.request.user
-        # Admin users need cross-account visibility in Store Settings.
-        if getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
-            qs = Store.objects.all()
-        else:
-            qs = Store.objects.filter(user=user)
+        qs = stores_for_user(self.request.user)
         # List only needs metadata + nested settings; skip loading ciphertext columns.
         if getattr(self, 'action', None) == 'list':
             qs = qs.defer('api_token', 'kogan_service_account_json')

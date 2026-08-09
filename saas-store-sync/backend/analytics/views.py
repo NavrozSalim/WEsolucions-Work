@@ -112,7 +112,9 @@ class DashboardSummaryView(APIView):
         if cached is not None:
             return Response(cached)
 
-        stores = Store.objects.filter(user=user).select_related('marketplace').defer(
+        from users.org_scope import stores_for_user
+
+        stores = stores_for_user(user).select_related('marketplace').defer(
             'api_token', 'kogan_service_account_json',
         )
         if store_id:
@@ -254,7 +256,9 @@ class AnalyticsChartView(APIView):
         from .models import DailyStoreMetrics
 
         user = request.user
-        stores = Store.objects.filter(user=user)
+        from users.org_scope import stores_for_user as _stores_for_user
+
+        stores = _stores_for_user(user)
         store_id = request.query_params.get('store_id')
         if store_id:
             stores = stores.filter(id=store_id)

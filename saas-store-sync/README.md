@@ -1,6 +1,6 @@
-# SaaS Store Sync
+# SellerPilot Hub (SaaS Store Sync)
 
-Multi-tenant SaaS for **e‑commerce store connectivity**, **vendor price and stock intelligence**, and **syncing listings** to marketplaces. Teams connect stores, map catalog rows to vendor URLs, run scrapes (or alternate ingest flows), apply pricing and inventory rules, and push updates via background workers—with **analytics**, **audit**, and **sync** visibility.
+Multi-tenant SaaS for **e‑commerce store connectivity**, **vendor price and stock intelligence**, and **syncing listings** to marketplaces. Organizations are led by a **Super User** who picks a seat plan, verifies email via OTP, and creates **User Accounts** with module permissions. Teams connect stores, map catalog rows to vendor URLs, run scrapes (or alternate ingest flows), apply pricing and inventory rules, and push updates via background workers—with **analytics**, **audit**, and **sync** visibility.
 
 **Stack:** React (Vite) · Django REST Framework · PostgreSQL · Redis · Celery · Nginx (production).
 
@@ -9,6 +9,7 @@ Multi-tenant SaaS for **e‑commerce store connectivity**, **vendor price and st
 ## Contents
 
 - [What it does](#what-it-does)
+- [Accounts, seats, and access](#accounts-seats-and-access)
 - [Repository layout](#repository-layout)
 - [Development and production setups](#development-and-production-setups)
 - [Quick start (development)](#quick-start-development)
@@ -27,12 +28,77 @@ Multi-tenant SaaS for **e‑commerce store connectivity**, **vendor price and st
 
 | Area | Capabilities |
 |------|----------------|
-| **Stores & marketplaces** | Connect stores to marketplace adapters (e.g. **Reverb**, **Walmart**, **Sears**, **Etsy**, **Kogan** via Google Sheets). Encrypted API tokens; optional Google OAuth for sign-in. |
+| **Accounts & orgs** | Public landing + i18n (EN/ES/FR). Login chooser: **User Account** vs **Super User**. Super User signup with **real-email OTP**, seat plans, and team management. Module permissions gate UI and store mutations. |
+| **Stores & marketplaces** | Connect stores to marketplace adapters (e.g. **Reverb**, **Walmart**, **Sears**, **Etsy**, **Kogan** via Google Sheets). Encrypted API tokens; optional Google OAuth for user sign-in. Org members share the Super User’s stores. |
 | **Catalog** | Product mappings, vendor URLs, marketplace CSV templates, upload history, activity and sync-oriented workflows. |
 | **Pricing & inventory** | Per-store vendor price/inventory rules; tiered and marketplace-specific behavior where implemented. |
 | **Scraping & ingest** | Server-side scrapers for vendors such as **Amazon** and **eBay** (region-aware URL handling). **HEB** and **Costco AU** use separate ingest paths (not plain datacenter HTTP scrape); **Vevor AU** can use a public feed ingest. See `backend/scrapers/__init__.py` for the dispatcher and notes. |
 | **Sync** | Celery-backed jobs for scrape, push, and related pipelines; health and readiness endpoints for orchestration. |
 | **Observability** | Analytics API, sync logs, audit trail—aligned with the Django apps under `backend/`. |
+
+---
+
+## Accounts, seats, and access
+
+### Product roles
+
+| Role | Who | What they can do |
+|------|-----|------------------|
+| **Super User** | Org owner (OTP-verified email) | Choose seat plan, create/remove user accounts, assign module permissions, manage the organization. Full app access. |
+| **User Account** | Member created by a Super User | Sign in only via **Login with User Account**. Sees only modules the Super User enabled. Shares org store data. |
+| **Standalone** | Legacy accounts (pre-org model) | Full access for backward compatibility; not created by the new Super User signup path. |
+
+Django’s `is_superuser` / `is_staff` remain for internal ops and are **not** the same as the product Super User role.
+
+### Seat pricing (SaaS plan)
+
+Seat packs increase by **5**. Formula: first **5** seats free; each additional pack of **5** costs **$10**.
+
+| Seats | Price |
+|------:|------:|
+| 5 | $0 |
+| 10 | $10 |
+| 15 | $20 |
+| 20 | $30 |
+| … | +$10 per +5 seats |
+
+The Super User counts toward the seat limit. Plan selection sets `organization.seat_limit` / `plan_price_usd`. **Stripe (or other billing) is not wired yet**—upgrade/downgrade is available in the Team UI / `PATCH /api/v1/auth/organization/plan/`.
+
+### Public and app routes (frontend)
+
+| Path | Purpose |
+|------|---------|
+| `/` | Marketing landing (language switcher + Login) |
+| `/pricing` | Seat plan picker → Super User signup |
+| `/signup/super` | Super User form + OTP verification |
+| `/login/choose` | Choose User Account vs Super User login |
+| `/login/user` · `/login/super` | Typed login (wrong account type is rejected) |
+| `/register` | Redirects to `/pricing` (open self-signup is not the Super User path) |
+| `/app` | Authenticated dashboard (app shell) |
+| `/team` | Super User team + permissions (requires `team` permission) |
+
+Module permission keys: `dashboard`, `stores`, `catalog`, `orders`, `tickets`, `team`.
+
+### Auth API (backend)
+
+Mounted under `/api/v1/auth/`:
+
+| Method | Path | Notes |
+|--------|------|--------|
+| `GET` | `/pricing/` | Seat plans + permission key labels |
+| `POST` | `/super-user/signup/` | Start signup; emails OTP (real email required; disposable domains blocked) |
+| `POST` | `/super-user/verify-otp/` | Verify OTP → create Super User + organization → JWT |
+| `POST` | `/login/` | Optional `account_type`: `super_user` or `user_account` |
+| `GET`/`POST` | `/team/` | List / create members (Super User only) |
+| `PATCH`/`DELETE` | `/team/<id>/` | Update permissions or remove a member |
+| `PATCH` | `/organization/plan/` | Change seat limit |
+| `GET` | `/profile/` | User + `permissions` + `organization` summary |
+
+### Email / OTP
+
+- Without `EMAIL_HOST`, Django uses the **console** email backend (OTP appears in backend logs; in `DEBUG`, signup responses may include `debug_otp`).
+- For production, configure SMTP via `EMAIL_*` / `DEFAULT_FROM_EMAIL` (see [Environment variables](#environment-variables-reference) and `.env.example`).
+- OTP expiry: `OTP_EXPIRY_MINUTES` (default **10**).
 
 ---
 
@@ -88,7 +154,7 @@ Copy **`.env.example` → `.env`** (dev) and **`.env.prod.example` → `.env.pro
    cp .env.example .env
    ```
 
-   Edit `.env`: set `POSTGRES_PASSWORD`, `JWT_SECRET`, `ENCRYPTION_KEY`, and optional Google OAuth values.
+   Edit `.env`: set `POSTGRES_PASSWORD`, `JWT_SECRET`, `ENCRYPTION_KEY`, and optional Google OAuth / SMTP values. For Super User OTP in local Docker, leaving `EMAIL_HOST` unset is fine (console backend).
 
 2. Start the stack:
 
@@ -96,12 +162,14 @@ Copy **`.env.example` → `.env`** (dev) and **`.env.prod.example` → `.env.pro
    docker compose up -d
    ```
 
-3. Open the app at **http://localhost:3001** (Vite in Docker). API base: **http://localhost:8000/api/v1**. Postgres is exposed on the host at **localhost:5433** by default (see `POSTGRES_PORT` in `.env`).
+3. Open the **landing page** at **http://localhost:3001** (Vite in Docker). API base defaults to **http://localhost:8000/api/v1** unless you override `BACKEND_PORT` / `VITE_API_URL` in `.env`. Postgres is exposed on the host at **localhost:5433** by default (see `POSTGRES_PORT`).
+
+4. Typical first-run path: **Login** → Super User → **Pricing** → signup with a real email → enter OTP → **Team** to create user accounts.
 
 **How dev is wired**
 
 - **Backend:** Django `runserver` with `./backend` mounted (reloads on Python changes).
-- **Celery:** Worker + beat; migrations run on container start via `scripts/entrypoint.py`.
+- **Celery:** Worker + beat; migrations run on container start via `scripts/entrypoint.py` (includes org / Super User migrations under `users`).
 - **Frontend:** `npm run dev` in Docker with `./frontend` mounted; `node_modules` uses a named volume so the host does not clobber installs.
 
 **Optional: run the frontend on the host** (often faster HMR): bring up `db`, `redis`, `backend`, `celery_worker`, and `celery_beat` only, then `cd frontend && npm install && npm run dev` (commonly **http://localhost:3000**). Set `VITE_API_URL=http://localhost:8000/api/v1` and add that origin to `CORS_ALLOWED_ORIGINS`.
@@ -110,7 +178,7 @@ Copy **`.env.example` → `.env`** (dev) and **`.env.prod.example` → `.env.pro
 
 ## Production
 
-1. On the server, fill **`.env.prod`** from **`.env.prod.example`**: strong `POSTGRES_PASSWORD`, `JWT_SECRET`, `ENCRYPTION_KEY`, `DOMAIN_NAME`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, `FRONTEND_URL`, and `GOOGLE_*` if used. Register the same `GOOGLE_REDIRECT_URI` in Google Cloud Console.
+1. On the server, fill **`.env.prod`** from **`.env.prod.example`**: strong `POSTGRES_PASSWORD`, `JWT_SECRET`, `ENCRYPTION_KEY`, `DOMAIN_NAME`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, `FRONTEND_URL`, and `GOOGLE_*` if used. Register the same `GOOGLE_REDIRECT_URI` in Google Cloud Console. For Super User OTP email delivery, set **`EMAIL_HOST`**, **`EMAIL_PORT`**, **`EMAIL_HOST_USER`**, **`EMAIL_HOST_PASSWORD`**, and **`DEFAULT_FROM_EMAIL`** (see `.env.example`).
 
 2. Set **`server_name`** (and SSL paths when using HTTPS) in **`backend/config/nginx.conf`**.
 
@@ -190,6 +258,10 @@ Run these from the **`saas-store-sync`** directory (where `docker-compose.prod.y
 | `FRONTEND_URL` | OAuth redirects and related frontend base URL |
 | `DOMAIN_NAME` | Default CORS fallback in prod compose if `CORS_ALLOWED_ORIGINS` is unset |
 | `GOOGLE_*` | Optional Google OAuth |
+| `EMAIL_HOST` / `EMAIL_PORT` / `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | SMTP for Super User OTP (omit `EMAIL_HOST` → console backend in dev) |
+| `EMAIL_USE_TLS` / `EMAIL_USE_SSL` | SMTP TLS/SSL flags |
+| `DEFAULT_FROM_EMAIL` | From address for OTP mail (default `noreply@sellerpilothub.com`) |
+| `OTP_EXPIRY_MINUTES` | OTP lifetime in minutes (default **10**) |
 | `VITE_API_URL` | Frontend API base; **baked in at `npm run build` time** for production |
 
 Additional scraper- or feature-specific variables may appear in `.env.example` (e.g. proxy pools, catalog flags). Prefer the committed templates as the source of truth.
@@ -225,10 +297,12 @@ Run the same checks locally: `pre-commit run --all-files` and `python manage.py 
 
 ## Known limitations
 
+- **SaaS billing:** Seat plans set limits and displayed prices; payment capture (e.g. Stripe) is not integrated yet.
+- **Email delivery:** Super User signup requires working SMTP in production; disposable/fake domains are blocked client-side and server-side, but deliverability still depends on your mail provider.
 - **Repository weight:** Debug or snapshot-style paths (e.g. `backend/scrapers/debug_html/`, or server snapshot–style trees) can bloat clones if they remain tracked; prefer `.gitignore` and out-of-band storage for large captures.
 - **Secrets:** `JWT_SECRET` and encryption key handling must be set for production; code may expose insecure fallbacks in development—see `backend/core/settings.py` and `backend/core/fields.py` and do not rely on defaults in production.
 - **Session / HTTPS:** Some defaults favor local development; behind reverse proxies, configure secure cookies and TLS explicitly.
-- **Tests:** Test coverage is limited relative to app size; critical paths (sync, scrapers) benefit from focused tests and manual verification.
+- **Tests:** Test coverage is limited relative to app size; critical paths (sync, scrapers, Super User OTP / team) benefit from focused tests and manual verification.
 - **Scrapers:** External sites (bot protection, CAPTCHAs, layout changes) can break automation; plan for monitoring, retries, and alternative ingest flows where documented.
 
 ---

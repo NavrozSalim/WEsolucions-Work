@@ -135,8 +135,10 @@ class CatalogStoresView(APIView):
         from sync.models import SyncSchedule
         from stores.models import StorePriceRangeMargin
 
+        from users.org_scope import stores_for_user
+
         stores = (
-            Store.objects.filter(user=request.user)
+            stores_for_user(request.user)
             .defer('api_token', 'kogan_service_account_json')
             .select_related('marketplace')
             .annotate(
