@@ -7,6 +7,7 @@ import PrivateRoute from './components/layout/PrivateRoute';
 import PermissionRoute from './components/layout/PermissionRoute';
 import PlatformRoute from './components/layout/PlatformRoute';
 import DashboardLayout from './layouts/DashboardLayout';
+import PlatformLayout from './layouts/PlatformLayout';
 import Landing from './pages/Landing/Landing';
 import Login from './pages/Login/Login';
 import LoginChooser from './pages/Login/LoginChooser';
@@ -38,7 +39,9 @@ function App() {
                             <Route path="/auth/callback" element={<AuthCallback />} />
 
                             <Route element={<PlatformRoute />}>
-                                <Route path="/platform" element={<PlatformAdmin />} />
+                                <Route element={<PlatformLayout />}>
+                                    <Route path="/platform" element={<PlatformAdmin />} />
+                                </Route>
                             </Route>
 
                             <Route element={<PrivateRoute />}>
