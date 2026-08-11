@@ -102,25 +102,25 @@ class GoogleLoginView(APIView):
 
 
 class GoogleCallbackView(APIView):
-    """Google OAuth callback. Exchanges code for user info, creates/gets user, returns JWT via redirect."""
+    """Google OAuth callback for Super User accounts only. Issues JWT via frontend redirect."""
     permission_classes = (AllowAny,)
 
     def get(self, request):
         client_id = getattr(settings, 'GOOGLE_CLIENT_ID', None) or os.getenv('GOOGLE_CLIENT_ID')
         client_secret = getattr(settings, 'GOOGLE_CLIENT_SECRET', None) or os.getenv('GOOGLE_CLIENT_SECRET')
         if not client_id or not client_secret:
-            return redirect(self._frontend_url('/login/user?error=oauth_not_configured'))
+            return redirect(self._frontend_url('/login/super?error=oauth_not_configured'))
         state = request.GET.get('state')
         stored_state = request.session.get('oauth_state') or request.COOKIES.get('oauth_state')
         if not state or state != stored_state:
-            response = redirect(self._frontend_url('/login/user?error=invalid_state'))
+            response = redirect(self._frontend_url('/login/super?error=invalid_state'))
             response.delete_cookie('oauth_state', path='/api/v1/auth')
             response.delete_cookie('oauth_next', path='/api/v1/auth')
             response.delete_cookie('oauth_origin', path='/api/v1/auth')
             return response
         code = request.GET.get('code')
         if not code:
-            return redirect(self._frontend_url('/login/user?error=no_code'))
+            return redirect(self._frontend_url('/login/super?error=no_code'))
         redirect_uri = getattr(settings, 'GOOGLE_REDIRECT_URI', None) or os.getenv('GOOGLE_REDIRECT_URI') or request.build_absolute_uri('/api/v1/auth/google/callback/')
         try:
             import requests
@@ -147,22 +147,15 @@ class GoogleCallbackView(APIView):
             user_resp.raise_for_status()
             info = user_resp.json()
         except Exception as e:
-            return redirect(self._frontend_url(f'/login/user?error={str(e)[:50]}'))
+            return redirect(self._frontend_url(f'/login/super?error={str(e)[:50]}'))
         email = (info.get('email') or '').strip()
         if not email:
-            return redirect(self._frontend_url('/login/user?error=no_email'))
+            return redirect(self._frontend_url('/login/super?error=no_email'))
         google_id = info.get('id', '')
         user = User.objects.filter(email__iexact=email).first()
-        if not user:
-            user = User.objects.create_user(
-                username=email,
-                email=email,
-                password=None,
-                first_name=info.get('given_name', ''),
-                last_name=info.get('family_name', ''),
-            )
-            user.set_unusable_password()
-            user.save()
+        # Google sign-in is restricted to existing Super User accounts only
+        if not user or user.account_type != User.AccountType.SUPER_USER:
+            return redirect(self._frontend_url('/login/super?error=not_superuser'))
         GoogleOAuthCredentials.objects.update_or_create(
             user=user,
             defaults={

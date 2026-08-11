@@ -23,8 +23,8 @@ export default function AuthCallback() {
                 window.location.replace(safePath);
             }, 50);
         } else {
-            // No tokens - backend likely redirected to /login?error=xxx instead of here
-            window.location.replace('/login/choose');
+            // No tokens - backend likely redirected to /login/super?error=xxx instead of here
+            window.location.replace('/login/super');
         }
     }, []);
 

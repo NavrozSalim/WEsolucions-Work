@@ -16,6 +16,7 @@ const ERROR_MESSAGES = {
     no_code: 'Google did not return an authorization code. Please try again.',
     oauth_not_configured: 'Google sign-in is not configured.',
     no_email: 'Could not get your email from Google.',
+    not_superuser: 'Google sign-in is only available for Super User accounts.',
 };
 
 const Login = () => {
@@ -139,7 +140,7 @@ const Login = () => {
                         {t('login.signIn')}
                     </Button>
 
-                    {accountType === 'user_account' && (
+                    {accountType === 'super_user' && (
                         <>
                             <div className="relative my-4">
                                 <div className="absolute inset-0 flex items-center">
@@ -175,19 +176,16 @@ const Login = () => {
                                 </svg>
                                 {t('login.google')}
                             </a>
+                            <p className="text-center text-sm text-slate-500 dark:text-slate-400">
+                                {t('login.noAccount')}{' '}
+                                <Link
+                                    to="/signup/super"
+                                    className="font-medium text-accent-600 dark:text-accent-400 hover:underline"
+                                >
+                                    {t('login.createSuper')}
+                                </Link>
+                            </p>
                         </>
-                    )}
-
-                    {accountType === 'super_user' && (
-                        <p className="text-center text-sm text-slate-500 dark:text-slate-400">
-                            {t('login.noAccount')}{' '}
-                            <Link
-                                to="/signup/super"
-                                className="font-medium text-accent-600 dark:text-accent-400 hover:underline"
-                            >
-                                {t('login.createSuper')}
-                            </Link>
-                        </p>
                     )}
 
                     {accountType === 'platform_admin' ? null : (
