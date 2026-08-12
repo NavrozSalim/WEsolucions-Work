@@ -8,6 +8,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
+# shellcheck source=scripts/deploy/_common.sh
+source "$SCRIPT_DIR/_common.sh"
 
 REPORT_DIR="$PROJECT_ROOT/reports"
 mkdir -p "$REPORT_DIR"
@@ -54,6 +56,10 @@ else
   echo -e "\n⚠ .env.prod missing"
 fi
 
+DOMAIN_HOST="$(resolve_domain_host)"
+echo -e "\n--- Health check domain (DOMAIN_NAME) ---"
+echo "DOMAIN_HOST=$DOMAIN_HOST"
+
 echo -e "\n--- docker compose ps ---"
 docker compose -f docker-compose.prod.yml --env-file .env.prod ps 2>/dev/null || docker compose -f docker-compose.prod.yml ps 2>/dev/null || true
 
@@ -72,16 +78,18 @@ sed -n '1,100p' "$PROJECT_ROOT/backend/config/nginx.conf" 2>/dev/null || true
 echo -e "\n--- Test nginx config inside container ---"
 docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T nginx nginx -t 2>&1 || true
 
-PUB=$(curl -4 -sS --max-time 5 ifconfig.me 2>/dev/null || echo "173.212.218.31")
+PUB=$(curl -4 -sS --max-time 5 ifconfig.me 2>/dev/null || echo "")
 
-echo -e "\n--- curl /health/ (Host: wesolucions.com) ---"
-curl -sS -o /dev/null -w "HTTP %{http_code}\n" -H 'Host: wesolucions.com' "http://127.0.0.1/health/" 2>/dev/null || echo failed
+echo -e "\n--- curl /health/ (Host: $DOMAIN_HOST) ---"
+curl -sS -o /dev/null -w "HTTP %{http_code}\n" -H "Host: ${DOMAIN_HOST}" "http://127.0.0.1/health/" 2>/dev/null || echo failed
 
-echo -e "\n--- curl /health/ (Host: $PUB) ---"
-curl -sS -o /dev/null -w "HTTP %{http_code}\n" -H "Host: ${PUB}" "http://127.0.0.1/health/" 2>/dev/null || echo failed
+if [ -n "$PUB" ]; then
+  echo -e "\n--- curl /health/ (Host: $PUB) ---"
+  curl -sS -o /dev/null -w "HTTP %{http_code}\n" -H "Host: ${PUB}" "http://127.0.0.1/health/" 2>/dev/null || echo failed
+fi
 
-echo -e "\n--- curl /api/v1/ (Host: wesolucions.com) ---"
-curl -sS -o /dev/null -w "HTTP %{http_code}\n" -H 'Host: wesolucions.com' "http://127.0.0.1/api/v1/" 2>/dev/null || echo failed
+echo -e "\n--- curl /api/v1/ (Host: $DOMAIN_HOST) ---"
+curl -sS -o /dev/null -w "HTTP %{http_code}\n" -H "Host: ${DOMAIN_HOST}" "http://127.0.0.1/api/v1/" 2>/dev/null || echo failed
 
 if [ -d "$PROJECT_ROOT/frontend/dist/assets" ]; then
   echo -e "\n--- dist: strings mentioning //api or double slash (sample) ---"

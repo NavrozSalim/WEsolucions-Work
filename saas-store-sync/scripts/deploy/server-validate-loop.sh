@@ -7,8 +7,11 @@ MAX="${1:-15}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
+# shellcheck source=scripts/deploy/_common.sh
+source "$SCRIPT_DIR/_common.sh"
 
 PUB_IP="${PUB_IP:-$(curl -4 -sS --max-time 6 ifconfig.me 2>/dev/null || echo '')}"
+DOMAIN_HOST="$(resolve_domain_host)"
 
 pass=0
 for i in $(seq 1 "$MAX"); do
@@ -16,13 +19,13 @@ for i in $(seq 1 "$MAX"); do
   echo "========== Validate pass $i / $MAX ($(date -u +%H:%M:%SZ)) =========="
   bash "$SCRIPT_DIR/server-audit.sh" || true
 
-  ok_domain=$(curl -sS -o /dev/null -w "%{http_code}" -H 'Host: wesolucions.com' "http://127.0.0.1/health/" 2>/dev/null || echo 000)
+  ok_domain=$(curl -sS -o /dev/null -w "%{http_code}" -H "Host: ${DOMAIN_HOST}" "http://127.0.0.1/health/" 2>/dev/null || echo 000)
   ok_ip=000
   if [ -n "$PUB_IP" ]; then
     ok_ip=$(curl -sS -o /dev/null -w "%{http_code}" -H "Host: ${PUB_IP}" "http://127.0.0.1/health/" 2>/dev/null || echo 000)
   fi
 
-  echo "--- Quick check: /health/ domain -> HTTP $ok_domain | IP $PUB_IP -> HTTP $ok_ip ---"
+  echo "--- Quick check: /health/ domain ($DOMAIN_HOST) -> HTTP $ok_domain | IP $PUB_IP -> HTTP $ok_ip ---"
 
   if [ "$ok_domain" = "200" ] || [ "$ok_ip" = "200" ]; then
     echo "PASS: /health/ returned 200"
