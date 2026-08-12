@@ -570,16 +570,173 @@ class EtsyAdapter(BaseStoreAdapter):
                         return str(lid)
         return None
 
+    # ------------------------------------------------------------------ managed helpers
+
+    def list_seller_taxonomy_nodes(self) -> list[dict]:
+        """GET /application/seller-taxonomy/nodes — flat-ish tree of taxonomy nodes."""
+        data = self._request("GET", "/application/seller-taxonomy/nodes")
+        results = []
+        if isinstance(data, dict):
+            results = data.get("results") or []
+        return [r for r in results if isinstance(r, dict)]
+
+    def list_shipping_profiles(self) -> list[dict]:
+        shop_id = self.resolve_shop_id()
+        data = self._request(
+            "GET",
+            f"/application/shops/{quote(str(shop_id))}/shipping-profiles",
+        )
+        results = []
+        if isinstance(data, dict):
+            results = data.get("results") or []
+        return [r for r in results if isinstance(r, dict)]
+
+    def list_readiness_state_definitions(self) -> list[dict]:
+        shop_id = self.resolve_shop_id()
+        data = self._request(
+            "GET",
+            f"/application/shops/{quote(str(shop_id))}/readiness-state-definitions",
+        )
+        results = []
+        if isinstance(data, dict):
+            results = data.get("results") or []
+        return [r for r in results if isinstance(r, dict)]
+
+    def ensure_default_shipping_profile_id(self) -> str | None:
+        profiles = self.list_shipping_profiles()
+        if not profiles:
+            return None
+        for row in profiles:
+            pid = row.get("shipping_profile_id") or row.get("shippingProfileId")
+            if pid is not None:
+                return str(pid)
+        return None
+
+    def ensure_default_readiness_state_id(self) -> str | None:
+        rows = self.list_readiness_state_definitions()
+        if not rows:
+            return None
+        for row in rows:
+            rid = row.get("readiness_state_id") or row.get("readinessStateId")
+            if rid is not None:
+                return str(rid)
+        return None
+
+    def upload_listing_image_from_url(self, listing_id: str, image_url: str) -> dict | None:
+        """Download ``image_url`` and POST as listing image."""
+        lid = str(listing_id or "").strip()
+        url = str(image_url or "").strip()
+        if not lid or not url:
+            return None
+        shop_id = self.resolve_shop_id()
+        try:
+            img_resp = requests.get(url, timeout=45)
+            img_resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise EtsyAPIError(f"Could not download listing image: {exc}") from exc
+        content_type = (img_resp.headers.get("Content-Type") or "image/jpeg").split(";")[0]
+        filename = "listing.jpg"
+        if "png" in content_type:
+            filename = "listing.png"
+        elif "webp" in content_type:
+            filename = "listing.webp"
+        path = (
+            f"{self._base_url}/application/shops/{quote(str(shop_id))}"
+            f"/listings/{quote(lid)}/images"
+        )
+        headers = self._auth_headers()
+        headers.pop("Content-Type", None)
+        try:
+            resp = self._session.post(
+                path,
+                headers=headers,
+                files={"image": (filename, img_resp.content, content_type)},
+                timeout=60,
+            )
+        except requests.RequestException as exc:
+            raise EtsyAPIError(str(exc)) from exc
+        if resp.status_code >= 400:
+            raise EtsyAPIError(
+                f"Etsy image upload failed: {resp.status_code} — {(resp.text or '')[:300]}",
+                status_code=resp.status_code,
+                response_body=resp.text[:500] if resp.text else None,
+            )
+        return resp.json() if resp.text else None
+
+    def create_draft_listing(self, form: dict) -> dict:
+        """POST draft listing; ``form`` is application/x-www-form-urlencoded fields."""
+        shop_id = self.resolve_shop_id()
+        data = self._request(
+            "POST",
+            f"/application/shops/{quote(str(shop_id))}/listings",
+            data=form or {},
+        )
+        return data if isinstance(data, dict) else {"raw": data}
+
+    def publish_listing(self, listing_id: str) -> dict | None:
+        """Activate a draft listing (state=active). Requires image + complete profiles."""
+        lid = str(listing_id or "").strip()
+        if not lid:
+            raise EtsyAPIError("listing_id is required to publish")
+        shop_id = self.resolve_shop_id()
+        return self._request(
+            "PATCH",
+            f"/application/shops/{quote(str(shop_id))}/listings/{quote(lid)}",
+            data={"state": "active"},
+        )
+
+    def get_shop_receipts(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        min_created: int | None = None,
+        was_paid: bool | None = True,
+    ) -> dict:
+        shop_id = self.resolve_shop_id()
+        params: dict = {"limit": int(limit), "offset": int(offset)}
+        if min_created is not None:
+            params["min_created"] = int(min_created)
+        if was_paid is not None:
+            params["was_paid"] = "true" if was_paid else "false"
+        data = self._request(
+            "GET",
+            f"/application/shops/{quote(str(shop_id))}/receipts",
+            params=params,
+        )
+        return data if isinstance(data, dict) else {}
+
+    def create_receipt_shipment(
+        self,
+        receipt_id: str,
+        *,
+        tracking_code: str,
+        carrier_name: str,
+        send_bcc: bool = False,
+    ) -> dict | None:
+        """POST tracking for a receipt (marks shipped on Etsy)."""
+        rid = str(receipt_id or "").strip()
+        if not rid:
+            raise EtsyAPIError("receipt_id is required")
+        shop_id = self.resolve_shop_id()
+        return self._request(
+            "POST",
+            f"/application/shops/{quote(str(shop_id))}/receipts/{quote(rid)}/tracking",
+            data={
+                "tracking_code": (tracking_code or "").strip(),
+                "carrier_name": (carrier_name or "").strip() or "other",
+                "send_bcc": "true" if send_bcc else "false",
+            },
+        )
+
     # ------------------------------------------------------------------ CRUD
 
     def create_product(self, sku, title, price, stock, **kwargs):
         """
         Create an Etsy draft listing when enough fields are supplied.
 
-        Inventory-only sync does not use this path; managed full-store create
-        requires taxonomy / shipping / readiness IDs from kwargs.
+        Managed publish prefers ``create_draft_listing`` + image upload + inventory.
         """
-        shop_id = self.resolve_shop_id()
         required = {
             "who_made": kwargs.get("who_made"),
             "when_made": kwargs.get("when_made"),
@@ -589,9 +746,14 @@ class EtsyAdapter(BaseStoreAdapter):
         if missing:
             raise EtsyAPIError(
                 "Etsy create_product requires who_made, when_made, and taxonomy_id "
-                f"(missing: {', '.join(missing)}). Inventory-only mode should map "
-                "existing listings instead of creating them."
+                f"(missing: {', '.join(missing)})."
             )
+        shipping_profile_id = kwargs.get("shipping_profile_id")
+        readiness_state_id = kwargs.get("readiness_state_id")
+        if not shipping_profile_id:
+            shipping_profile_id = self.ensure_default_shipping_profile_id()
+        if not readiness_state_id:
+            readiness_state_id = self.ensure_default_readiness_state_id()
         form = {
             "quantity": max(0, int(stock or 0)) or 1,
             "title": title,
@@ -604,20 +766,15 @@ class EtsyAdapter(BaseStoreAdapter):
             "taxonomy_id": int(kwargs["taxonomy_id"]),
             "type": kwargs.get("listing_type") or kwargs.get("type") or "physical",
         }
-        if kwargs.get("shipping_profile_id"):
-            form["shipping_profile_id"] = int(kwargs["shipping_profile_id"])
-        if kwargs.get("readiness_state_id"):
-            form["readiness_state_id"] = int(kwargs["readiness_state_id"])
+        if shipping_profile_id:
+            form["shipping_profile_id"] = int(shipping_profile_id)
+        if readiness_state_id:
+            form["readiness_state_id"] = int(readiness_state_id)
         if kwargs.get("image_ids"):
             form["image_ids"] = kwargs["image_ids"]
-        data = self._request(
-            "POST",
-            f"/application/shops/{quote(str(shop_id))}/listings",
-            data=form,
-        )
+        data = self.create_draft_listing(form)
         if isinstance(data, dict) and data.get("listing_id") is not None:
             listing_id = str(data["listing_id"])
-            # Attach SKU / stock via inventory when possible
             try:
                 self.update_product(listing_id, stock=stock, price=price, sku=sku)
             except EtsyAPIError as exc:
@@ -658,7 +815,7 @@ class EtsyAdapter(BaseStoreAdapter):
         return True
 
     def update_inventory(self, external_id, stock):
-        """Update only stock for the listing (all offerings, or SKU match via kwargs not used)."""
+        """Update only stock for the listing."""
         return self.update_product(external_id, stock=stock)
 
     def delete_product(self, external_id):

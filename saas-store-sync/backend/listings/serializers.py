@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from .models import ListingUpload, MarketplaceOrder, OrderShipment, StoreListing, SupportTicket, TicketMessage
+from .etsy import listings as etsy_listings
 from .reverb import listings as reverb_listings
 
 
@@ -36,6 +37,12 @@ class StoreListingSerializer(serializers.ModelSerializer):
     max_days_for_delivery = serializers.SerializerMethodField()
     delivery_time = serializers.SerializerMethodField()
     has_48_hours_dispatch = serializers.SerializerMethodField()
+    # Etsy extra fields
+    taxonomy_id = serializers.SerializerMethodField()
+    who_made = serializers.SerializerMethodField()
+    when_made = serializers.SerializerMethodField()
+    shipping_profile_id = serializers.SerializerMethodField()
+    readiness_state_id = serializers.SerializerMethodField()
 
     class Meta:
         model = StoreListing
@@ -54,6 +61,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'weight', 'weight_unit', 'length', 'height', 'width', 'dimension_unit',
             'shipping_cost_category', 'shipping_cost_standard', 'custom_freight_scheme_id',
             'is_direct_import', 'max_days_for_delivery', 'delivery_time', 'has_48_hours_dispatch',
+            'taxonomy_id', 'who_made', 'when_made', 'shipping_profile_id', 'readiness_state_id',
             'inventory_sync_status', 'last_scrape_at', 'last_scrape_error',
             'environment', 'action', 'status', 'validation_errors_json',
             'marketplace_response_json', 'last_uploaded_at',
@@ -71,11 +79,15 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'weight', 'weight_unit', 'length', 'height', 'width', 'dimension_unit',
             'shipping_cost_category', 'shipping_cost_standard', 'custom_freight_scheme_id',
             'is_direct_import', 'max_days_for_delivery', 'delivery_time', 'has_48_hours_dispatch',
+            'taxonomy_id', 'who_made', 'when_made', 'shipping_profile_id', 'readiness_state_id',
             'vendor_price', 'inventory_sync_status', 'last_scrape_at', 'last_scrape_error',
         ]
 
     def _extras(self, obj):
         return reverb_listings.parse_extras(obj)
+
+    def _etsy_extras(self, obj):
+        return etsy_listings.parse_extras(obj)
 
     def _mydeal_extras(self, obj):
         from .mydeal import products as mydeal_products
@@ -107,14 +119,33 @@ class StoreListingSerializer(serializers.ModelSerializer):
         return bool(self._extras(obj).get('upc_does_not_apply', False))
 
     def get_publish_status(self, obj):
-        return reverb_listings.normalize_publish_status(
-            self._extras(obj).get('publish_status')
-        )
+        extras = self._extras(obj)
+        if extras.get('publish_status') is not None or extras.get('marketplace') == 'reverb':
+            return reverb_listings.normalize_publish_status(extras.get('publish_status'))
+        etsy = self._etsy_extras(obj)
+        if etsy:
+            return etsy_listings.normalize_publish_status(etsy.get('publish_status'))
+        return reverb_listings.normalize_publish_status(None)
 
     def get_free_shipping(self, obj):
         return reverb_listings.free_shipping_enabled(
             self._extras(obj).get('free_shipping')
         )
+
+    def get_taxonomy_id(self, obj):
+        return self._etsy_extras(obj).get('taxonomy_id') or obj.category or ''
+
+    def get_who_made(self, obj):
+        return self._etsy_extras(obj).get('who_made') or ''
+
+    def get_when_made(self, obj):
+        return self._etsy_extras(obj).get('when_made') or ''
+
+    def get_shipping_profile_id(self, obj):
+        return self._etsy_extras(obj).get('shipping_profile_id') or ''
+
+    def get_readiness_state_id(self, obj):
+        return self._etsy_extras(obj).get('readiness_state_id') or ''
 
     def get_tags(self, obj):
         return self._mydeal_extras(obj).get('tags') or ''
@@ -318,6 +349,12 @@ class ListingInputSerializer(serializers.Serializer):
     delivery_time = serializers.CharField(required=False, allow_blank=True, default='')
     has_48_hours_dispatch = serializers.BooleanField(required=False, default=False)
     condition = serializers.CharField(required=False, allow_blank=True, default='')
+    # Etsy-specific (stored in external_data_object_json)
+    taxonomy_id = serializers.CharField(required=False, allow_blank=True, default='')
+    who_made = serializers.CharField(required=False, allow_blank=True, default='')
+    when_made = serializers.CharField(required=False, allow_blank=True, default='')
+    shipping_profile_id = serializers.CharField(required=False, allow_blank=True, default='')
+    readiness_state_id = serializers.CharField(required=False, allow_blank=True, default='')
 
 
 class OrderShipmentSerializer(serializers.ModelSerializer):

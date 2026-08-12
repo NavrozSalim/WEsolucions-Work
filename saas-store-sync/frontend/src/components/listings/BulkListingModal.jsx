@@ -15,7 +15,8 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
     const code = String(marketplaceCode || '').trim().toLowerCase();
     const isReverb = code === 'reverb';
     const isMydeal = code === 'mydeal';
-    const templateLabel = isReverb ? 'Reverb' : isMydeal ? 'MyDeal' : 'marketplace';
+    const isEtsy = code === 'etsy';
+    const templateLabel = isReverb ? 'Reverb' : isMydeal ? 'MyDeal' : isEtsy ? 'Etsy' : 'marketplace';
     const fileRef = useRef(null);
     const [file, setFile] = useState(null);
     const [action, setAction] = useState('create');

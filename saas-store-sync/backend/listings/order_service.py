@@ -29,10 +29,13 @@ def fetch(user, store, page: int = 1, take: int = 50) -> dict:
     if kind == "mydeal":
         from .mydeal import orders as mydeal_orders
         return mydeal_orders.fetch(user, store, page=page, take=take)
+    if kind == "etsy":
+        from .etsy import orders as etsy_orders
+        return etsy_orders.fetch(user, store)
     if kind != "lasoo":
         raise MarketplaceError(
             f'Order management is not supported yet for "{kind or "this marketplace"}". '
-            'Currently Lasoo, Reverb, and MyDeal managed stores can fetch orders.'
+            'Currently Lasoo, Reverb, MyDeal, and Etsy managed stores can fetch orders.'
         )
     return _fetch_lasoo(user, store, page=page, take=take)
 
@@ -1033,6 +1036,15 @@ def cancel_reasons(store) -> dict:
     if kind == "mydeal":
         from .mydeal import orders as mydeal_orders
         return mydeal_orders.cancel_reasons()
+    if kind == "etsy":
+        from .etsy import orders as etsy_orders
+        return {
+            "ok": True,
+            "marketplace": "etsy",
+            "environment": "production",
+            "source": "etsy_unsupported",
+            "reasons": etsy_orders.cancel_reasons(store),
+        }
     if kind != "lasoo":
         raise MarketplaceError(
             f'Cancel reasons are not available for "{kind or "this marketplace"}" yet.'
@@ -1083,6 +1095,9 @@ def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
     if kind == "mydeal":
         from .mydeal import orders as mydeal_orders
         return mydeal_orders.cancel(order, reason=reason)
+    if kind == "etsy":
+        from .etsy import orders as etsy_orders
+        return etsy_orders.cancel(order, reason=reason)
 
     _require_lasoo(order.store)
 

@@ -163,7 +163,8 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     const marketplaceLabel = String(marketplaceCode || '').trim() || 'marketplace';
     const isReverb = marketplaceLabel.toLowerCase() === 'reverb';
     const isLasoo = marketplaceLabel.toLowerCase() === 'lasoo';
-    const canScrape = isReverb || isLasoo;
+    const isEtsy = marketplaceLabel.toLowerCase() === 'etsy';
+    const canScrape = isReverb || isLasoo || isEtsy;
     const [listings, setListings] = useState([]);
     const [totalCount, setTotalCount] = useState(0);
     const [scrapeableCount, setScrapeableCount] = useState(0);

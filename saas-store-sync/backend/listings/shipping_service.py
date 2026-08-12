@@ -143,6 +143,61 @@ def _submit_mydeal(order: MarketplaceOrder, *, tracking_number: str, carrier: st
     }
 
 
+def _submit_etsy(order: MarketplaceOrder, *, tracking_number: str, carrier: str) -> dict:
+    from store_adapters import get_adapter
+    from store_adapters.etsy_adapter import EtsyAPIError
+
+    tracking = (tracking_number or "").strip()
+    if not tracking:
+        raise MarketplaceError("Tracking number is required for Etsy shipments.")
+    receipt_id = (order.external_order_key or order.invoice_number or "").strip()
+    if not receipt_id:
+        raise MarketplaceError("Etsy receipt id is missing on this order.")
+
+    shipment = OrderShipment.objects.create(
+        order=order,
+        tracking_number=tracking,
+        carrier=(carrier or "").strip(),
+        tracking_url="",
+        shipped_at=timezone.now(),
+        status="submitted",
+    )
+    adapter = get_adapter(order.store)
+    try:
+        resp = adapter.create_receipt_shipment(
+            receipt_id,
+            tracking_code=tracking,
+            carrier_name=(carrier or "").strip() or "other",
+        )
+        shipment.marketplace_request_json = {
+            "receipt_id": receipt_id,
+            "tracking_code": tracking,
+            "carrier_name": carrier,
+        }
+        shipment.marketplace_response_json = resp
+        shipment.status = "submitted"
+        shipment.save(
+            update_fields=["marketplace_request_json", "marketplace_response_json", "status"]
+        )
+        order.shipping_status = "submitted"
+        order.status = OrderStatus.SHIPPING_SUBMITTED
+        order.save(update_fields=["shipping_status", "status", "updated_at"])
+        return {
+            "ok": True,
+            "message": "Shipping info sent to Etsy.",
+            "shipment_id": str(shipment.id),
+        }
+    except EtsyAPIError as exc:
+        shipment.status = "failed"
+        shipment.marketplace_response_json = {"error": str(exc)}
+        shipment.save(update_fields=["status", "marketplace_response_json"])
+        return {
+            "ok": False,
+            "message": str(exc) or "Etsy tracking submit failed.",
+            "shipment_id": str(shipment.id),
+        }
+
+
 def submit(order: MarketplaceOrder, *, tracking_number: str, carrier: str,
            tracking_url: str = "", shipped_date: str = "", status: str = "") -> dict:
     """Submit tracking info for an order."""
@@ -153,6 +208,12 @@ def submit(order: MarketplaceOrder, *, tracking_number: str, carrier: str,
             tracking_number=tracking_number,
             carrier=carrier,
             shipped_date=shipped_date,
+        )
+    if kind == "etsy":
+        return _submit_etsy(
+            order,
+            tracking_number=tracking_number,
+            carrier=carrier,
         )
     if kind == "reverb":
         raise MarketplaceError(
@@ -218,6 +279,18 @@ def complete(order: MarketplaceOrder) -> dict:
         return {
             "ok": True,
             "message": "Marked complete locally (MyDeal ships via /orders/fulfill).",
+        }
+    if kind == "etsy":
+        order.shipping_status = "complete"
+        order.status = OrderStatus.SHIPPING_COMPLETE
+        order.save(update_fields=["shipping_status", "status", "updated_at"])
+        last = order.shipments.first()
+        if last:
+            last.status = "complete"
+            last.save(update_fields=["status"])
+        return {
+            "ok": True,
+            "message": "Marked complete locally (Etsy tracking already marks shipped).",
         }
     if kind == "reverb":
         raise MarketplaceError("Shipping complete is not supported for Reverb yet.")

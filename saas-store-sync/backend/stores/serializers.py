@@ -185,9 +185,9 @@ class StoreSerializer(serializers.ModelSerializer):
         if management_mode == 'full_store':
             from stores.credentials import marketplace_kind
             kind = marketplace_kind(mkt)
-            if kind not in ('reverb', 'lasoo', 'mydeal'):
+            if kind not in ('reverb', 'lasoo', 'mydeal', 'etsy'):
                 raise ValidationError({
-                    'marketplace': 'Managed stores are only available for Reverb, Lasoo, and MyDeal right now.',
+                    'marketplace': 'Managed stores are only available for Reverb, Lasoo, MyDeal, and Etsy right now.',
                 })
             if kind == 'mydeal':
                 method = (req.get('mydeal_setup_method') or validated_data.get('mydeal_setup_method') or 'upload').strip()

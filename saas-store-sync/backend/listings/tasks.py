@@ -61,7 +61,7 @@ def sync_store_tickets(*, region: str | None = None) -> dict:
 
 def sync_store_orders(*, region: str | None = None, marketplace_codes=None) -> dict:
     """Pull orders for managed stores (default Lasoo + Reverb; optional region)."""
-    codes = marketplace_codes if marketplace_codes is not None else ["lasoo", "reverb", "mydeal"]
+    codes = marketplace_codes if marketplace_codes is not None else ["lasoo", "reverb", "mydeal", "etsy"]
     stores = _managed_stores_qs(region=region, marketplace_codes=codes)
     total_fetched = 0
     store_count = 0

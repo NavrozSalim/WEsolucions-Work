@@ -38,7 +38,7 @@ const FREQUENCY_OPTIONS = [
 const DEFAULT_TZ = { USA: 'America/New_York', AU: 'Australia/Sydney' };
 
 // Marketplaces where we can create listings + manage orders (managed store mode).
-const FULL_STORE_MARKETPLACES = ['reverb', 'lasoo', 'mydeal'];
+const FULL_STORE_MARKETPLACES = ['reverb', 'lasoo', 'mydeal', 'etsy'];
 const LASOO_DEFAULT_STAGING_URL = 'https://stage.api.lasoo.com.au';
 const LASOO_DEFAULT_PRODUCTION_URL = 'https://api.lasoo.com.au';
 const emptyMydealApiFields = () => ({
@@ -437,7 +437,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         if (!form.name?.trim()) errs.push('Store name is required');
         if (!form.marketplace_id) errs.push('Marketplace is required');
         if (isFullStore && selectedMarketplace && !FULL_STORE_MARKETPLACES.includes(marketplaceCode(selectedMarketplace))) {
-            errs.push('Managed stores are only available for Reverb, Lasoo, and MyDeal right now');
+            errs.push('Managed stores are only available for Reverb, Lasoo, MyDeal, and Etsy right now');
         }
         if (isLasoo) {
             const env = form.lasoo_environment || 'staging';
@@ -939,7 +939,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                         />
                                         {isFullStore && (
                                             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                                                Managed store mode currently supports Reverb, Lasoo, and MyDeal.
+                                                Managed store mode currently supports Reverb, Lasoo, MyDeal, and Etsy.
                                             </p>
                                         )}
                                     </div>

@@ -67,6 +67,28 @@ const EMPTY_REVERB = {
     free_shipping: true,
 };
 
+const EMPTY_ETSY = {
+    action: 'create',
+    vendor_name: '',
+    vendor_url: '',
+    vendor_id: '',
+    marketplace_name: '',
+    store_name: '',
+    sku: '',
+    title: '',
+    description: '',
+    taxonomy_id: '',
+    who_made: 'someone_else',
+    when_made: '2020_2024',
+    sale_price: '',
+    inventory: '1',
+    image_urls: '',
+    shipping_profile_id: '',
+    readiness_state_id: '',
+    publish_status: 'draft',
+    source_vendor_code: '',
+};
+
 function isNoraCode(code) {
     return /nora/i.test(String(code || ''));
 }
@@ -162,7 +184,8 @@ export default function ListingFormModal({
     const code = String(marketplaceCode || '').trim().toLowerCase();
     const isReverb = code === 'reverb';
     const isMydeal = code === 'mydeal';
-    const emptyForm = isReverb ? EMPTY_REVERB : isMydeal ? EMPTY_MYDEAL : EMPTY_LASOO;
+    const isEtsy = code === 'etsy';
+    const emptyForm = isReverb ? EMPTY_REVERB : isMydeal ? EMPTY_MYDEAL : isEtsy ? EMPTY_ETSY : EMPTY_LASOO;
     const [form, setForm] = useState(emptyForm);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
@@ -286,6 +309,30 @@ export default function ListingFormModal({
                     marketplace_name: listing.marketplace_name || defaults.marketplace_name,
                     store_name: listing.store_name || defaults.store_name,
                 });
+            } else if (isEtsy) {
+                setForm({
+                    ...EMPTY_ETSY,
+                    ...defaults,
+                    action: listing.action || 'create',
+                    sku: listing.sku || '',
+                    title: listing.title || '',
+                    description: listing.description || '',
+                    taxonomy_id: listing.taxonomy_id || listing.category || '',
+                    who_made: listing.who_made || 'someone_else',
+                    when_made: listing.when_made || '2020_2024',
+                    sale_price: String(listing.sale_price ?? listing.original_price ?? ''),
+                    inventory: String(listing.inventory ?? 1),
+                    image_urls: listing.image_urls || '',
+                    shipping_profile_id: listing.shipping_profile_id || '',
+                    readiness_state_id: listing.readiness_state_id || '',
+                    publish_status: listing.publish_status === 'live' ? 'live' : 'draft',
+                    source_vendor_code: listing.source_vendor_code || '',
+                    vendor_name: listing.vendor_name || '',
+                    vendor_url: listing.vendor_url || '',
+                    vendor_id: listing.vendor_id || '',
+                    marketplace_name: listing.marketplace_name || defaults.marketplace_name,
+                    store_name: listing.store_name || defaults.store_name,
+                });
             } else {
                 setForm({
                     ...EMPTY_LASOO,
@@ -323,11 +370,11 @@ export default function ListingFormModal({
             }
         } else {
             setForm({
-                ...(isReverb ? EMPTY_REVERB : isMydeal ? EMPTY_MYDEAL : EMPTY_LASOO),
+                ...(isReverb ? EMPTY_REVERB : isMydeal ? EMPTY_MYDEAL : isEtsy ? EMPTY_ETSY : EMPTY_LASOO),
                 ...defaults,
             });
         }
-    }, [open, listing, isReverb, isMydeal, storeMeta.name, storeMeta.marketplace_name]);
+    }, [open, listing, isReverb, isMydeal, isEtsy, storeMeta.name, storeMeta.marketplace_name]);
 
     const vendorOptions = useMemo(() => {
         const opts = [{ value: '', label: storeVendors.length ? 'Select vendor…' : 'No vendors on store Price settings' }];
@@ -425,6 +472,31 @@ export default function ListingFormModal({
                 publish_status: form.publish_status === 'live' ? 'live' : 'draft',
                 free_shipping: form.free_shipping !== false,
             };
+        } else if (isEtsy) {
+            const price = form.sale_price === '' ? 0 : form.sale_price;
+            payload = {
+                action: form.action,
+                vendor_name: selectedVendorName || form.vendor_name || '',
+                vendor_url: form.vendor_url,
+                vendor_id: form.vendor_id || '',
+                marketplace_name: form.marketplace_name || '',
+                store_name: form.store_name || '',
+                sku: form.sku,
+                title: form.title,
+                description: form.description,
+                taxonomy_id: form.taxonomy_id,
+                category: form.taxonomy_id,
+                who_made: form.who_made || 'someone_else',
+                when_made: form.when_made || '2020_2024',
+                sale_price: price,
+                original_price: price,
+                inventory: parseInt(form.inventory, 10) || 0,
+                image_urls: form.image_urls,
+                shipping_profile_id: form.shipping_profile_id || '',
+                readiness_state_id: form.readiness_state_id || '',
+                publish_status: form.publish_status === 'live' ? 'live' : 'draft',
+                source_vendor_code: form.source_vendor_code || '',
+            };
         } else if (isMydeal) {
             payload = {
                 ...form,
@@ -483,6 +555,8 @@ export default function ListingFormModal({
                             ? `Edit listing — ${listing.sku || listing.external_variant_key}`
                             : isReverb
                               ? 'Create Reverb listing'
+                              : isEtsy
+                                ? 'Create Etsy listing'
                               : isMydeal
                                 ? 'Create MyDeal listing'
                                 : 'Create listing'}
@@ -672,6 +746,75 @@ export default function ListingFormModal({
                                     />
                                     free_shipping (Optional)
                                 </label>
+                            </div>
+                        ) : isEtsy ? (
+                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                <div className="sm:col-span-2">
+                                    <Select
+                                        label="Vendor Name (Optional)"
+                                        value={form.source_vendor_code || ''}
+                                        onChange={setVendor}
+                                        options={vendorOptions}
+                                        required={storeVendors.length > 0}
+                                    />
+                                </div>
+                                {noraSelected ? (
+                                    <div className="sm:col-span-2">
+                                        <Input label="Vendor ID (Optional)" value={form.vendor_id} onChange={set('vendor_id')} required />
+                                    </div>
+                                ) : (
+                                    <div className="sm:col-span-2">
+                                        <Input
+                                            label="Vendor URL (Optional)"
+                                            placeholder={vendorUrlPlaceholder(selectedVendor)}
+                                            value={form.vendor_url}
+                                            onChange={set('vendor_url')}
+                                            type="url"
+                                            required={!!selectedVendor}
+                                        />
+                                    </div>
+                                )}
+                                <Input label="SKU" value={form.sku} onChange={set('sku')} required />
+                                <Input label="Price" type="number" step="0.01" min="0" value={form.sale_price} onChange={set('sale_price')} required />
+                                <div className="sm:col-span-2">
+                                    <Input label="Title" value={form.title} onChange={set('title')} required maxLength={140} />
+                                </div>
+                                <div className="sm:col-span-2">
+                                    <Textarea label="Description" rows={5} value={form.description} onChange={set('description')} required />
+                                </div>
+                                <Input label="Taxonomy ID" value={form.taxonomy_id} onChange={set('taxonomy_id')} required placeholder="Etsy numeric taxonomy_id" />
+                                <Input label="Inventory" type="number" min="0" value={form.inventory} onChange={set('inventory')} required />
+                                <Select
+                                    label="Who Made"
+                                    value={form.who_made || 'someone_else'}
+                                    onChange={set('who_made')}
+                                    options={[
+                                        { value: 'i_did', label: 'i_did' },
+                                        { value: 'someone_else', label: 'someone_else' },
+                                        { value: 'collective', label: 'collective' },
+                                    ]}
+                                />
+                                <Input label="When Made" value={form.when_made} onChange={set('when_made')} placeholder="e.g. 2020_2024 or made_to_order" required />
+                                <Input label="Shipping Profile ID (Optional)" value={form.shipping_profile_id} onChange={set('shipping_profile_id')} placeholder="Auto-picked from shop if blank" />
+                                <Input label="Readiness State ID (Optional)" value={form.readiness_state_id} onChange={set('readiness_state_id')} placeholder="Auto-picked from shop if blank" />
+                                <div className="sm:col-span-2">
+                                    <ListingPhotoUploader
+                                        storeId={storeId}
+                                        value={form.image_urls}
+                                        onChange={(urls) => setForm((f) => ({ ...f, image_urls: urls }))}
+                                        required={form.publish_status === 'live'}
+                                        label="Photo URLs"
+                                    />
+                                </div>
+                                <Select
+                                    label="status (Optional)"
+                                    value={form.publish_status}
+                                    onChange={set('publish_status')}
+                                    options={[
+                                        { value: 'draft', label: 'draft — save unpublished' },
+                                        { value: 'live', label: 'live — publish immediately' },
+                                    ]}
+                                />
                             </div>
                         ) : isMydeal ? (
                             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

@@ -27,6 +27,16 @@ COLUMN_MAP = {
     "category": "category",
     "category uuid": "category_uuid",
     "category id": "category",
+    "taxonomy id": "taxonomy_id",
+    "taxonomy_id": "taxonomy_id",
+    "who made": "who_made",
+    "who_made": "who_made",
+    "when made": "when_made",
+    "when_made": "when_made",
+    "shipping profile id": "shipping_profile_id",
+    "shipping_profile_id": "shipping_profile_id",
+    "readiness state id": "readiness_state_id",
+    "readiness_state_id": "readiness_state_id",
     "mydeal category id": "category",
     "condition": "condition",
     "condition uuid": "condition_uuid",
@@ -231,6 +241,46 @@ REVERB_TEMPLATE_HEADERS = [
     "free_shipping (Optional)",
 ]
 
+ETSY_EXPORT_FIELDS = [
+    ("vendor_name", "Vendor Name (Optional)"),
+    ("vendor_url", "Vendor URL (Optional)"),
+    ("marketplace_name", "Marketplace Name (Optional)"),
+    ("store_name", "Store Name (Optional)"),
+    ("action", "Action"),
+    ("sku", "SKU"),
+    ("title", "Title"),
+    ("description", "Description"),
+    ("taxonomy_id", "Taxonomy ID"),
+    ("who_made", "Who Made"),
+    ("when_made", "When Made"),
+    ("sale_price", "Price"),
+    ("inventory", "Inventory"),
+    ("image_urls", "Photo URLs"),
+    ("shipping_profile_id", "Shipping Profile ID (Optional)"),
+    ("readiness_state_id", "Readiness State ID (Optional)"),
+    ("publish_status", "status (Optional)"),
+]
+
+ETSY_TEMPLATE_HEADERS = [
+    "Vendor Name (Optional)",
+    "Vendor URL (Optional)",
+    "Marketplace Name (Optional)",
+    "Store Name (Optional)",
+    "Action",
+    "SKU",
+    "Title",
+    "Description",
+    "Taxonomy ID",
+    "Who Made",
+    "When Made",
+    "Price",
+    "Inventory",
+    "Photo URLs",
+    "Shipping Profile ID (Optional)",
+    "Readiness State ID (Optional)",
+    "status (Optional)",
+]
+
 MYDEAL_TEMPLATE_HEADERS = [
     "Vendor Name (Optional)",
     "Vendor URL (Optional)",
@@ -345,6 +395,10 @@ def _is_reverb_store(store) -> bool:
 
 def _is_mydeal_store(store) -> bool:
     return marketplace_kind(getattr(store, "marketplace", None)) == "mydeal"
+
+
+def _is_etsy_store(store) -> bool:
+    return marketplace_kind(getattr(store, "marketplace", None)) == "etsy"
 
 
 def _coerce_bool(value) -> bool:
@@ -560,6 +614,32 @@ def build_template_csv(action: str = "create", store=None) -> str:
         writer.writerow(sample)
         return out.getvalue()
 
+    if _is_etsy_store(store):
+        sample = {
+            "Vendor Name (Optional)": "Amazon US",
+            "Vendor URL (Optional)": "https://www.amazon.com/dp/EXAMPLE",
+            "Marketplace Name (Optional)": marketplace_name or "Etsy",
+            "Store Name (Optional)": store_name,
+            "Action": "Mapped" if action == "mapped" else "Create",
+            "SKU": "ETSY-EXAMPLE-001",
+            "Title": "Handmade Example Pendant",
+            "Description": "Example Etsy listing description.",
+            "Taxonomy ID": "1",
+            "Who Made": "someone_else",
+            "When Made": "2020_2024",
+            "Price": "24.99",
+            "Inventory": "3",
+            "Photo URLs": "https://example.com/photo1.jpg",
+            "Shipping Profile ID (Optional)": "",
+            "Readiness State ID (Optional)": "",
+            "status (Optional)": "draft",
+        }
+        out = io.StringIO()
+        writer = csv.DictWriter(out, fieldnames=ETSY_TEMPLATE_HEADERS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(sample)
+        return out.getvalue()
+
     if _is_mydeal_store(store):
         sample = {
             "Vendor Name (Optional)": "Amazon AU",
@@ -683,6 +763,8 @@ def export_field_specs(store=None) -> list[tuple[str, str]]:
     """Return (internal_key, header) pairs for the store's marketplace template."""
     if _is_reverb_store(store):
         return list(REVERB_EXPORT_FIELDS)
+    if _is_etsy_store(store):
+        return list(ETSY_EXPORT_FIELDS)
     if _is_mydeal_store(store):
         return list(MYDEAL_EXPORT_FIELDS)
     return list(LASOO_EXPORT_FIELDS)

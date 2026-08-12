@@ -1,6 +1,6 @@
 """Listing CRUD, validation, bulk import, and publish to the store's marketplace.
 
-Lasoo and Reverb managed stores are supported. Dispatch happens in
+Lasoo, Reverb, MyDeal, and Etsy managed stores are supported. Dispatch happens in
 ``publish()`` / validation helpers by marketplace kind.
 """
 import logging
@@ -11,12 +11,14 @@ from django.db.models import Q
 from django.utils import timezone
 
 from store_adapters import get_adapter
+from store_adapters.etsy_adapter import EtsyAPIError
 from store_adapters.reverb_adapter import ReverbAPIError
 from stores.credentials import marketplace_kind
 
 from . import csv_import
 from . import template_routing
 from .errors import MarketplaceError
+from .etsy import listings as etsy_listings
 from .lasoo import mapper, validator
 from .lasoo.client import LasooClient
 from .models import (
@@ -157,22 +159,31 @@ def _store_kind(store) -> str:
 
 
 def _listing_env(store) -> str:
-    """Reverb has no staging API — always production. Lasoo uses store setting."""
-    if _store_kind(store) == "reverb":
+    """Reverb/Etsy have no staging API — always production. Lasoo/MyDeal use store setting."""
+    if _store_kind(store) in ("reverb", "etsy"):
         return Environment.PRODUCTION
+    if _store_kind(store) == "mydeal":
+        env = (getattr(store, "mydeal_environment", None) or "sandbox").strip().lower()
+        return Environment.PRODUCTION if env == "production" else Environment.STAGING
     return store.lasoo_environment or Environment.STAGING
 
 
 def _validate_listing(store, data: dict) -> list[str]:
     source_errors = template_routing.validate_source_vendor_for_store(store, data)
-    if _store_kind(store) == "reverb":
+    kind = _store_kind(store)
+    if kind == "reverb":
         return source_errors + reverb_listings.validate_listing(data)
+    if kind == "etsy":
+        return source_errors + etsy_listings.validate_listing(data)
     return source_errors + validator.validate_listing(data)
 
 
 def _resolve_keys(store, data: dict) -> tuple[str, str]:
-    if _store_kind(store) == "reverb":
+    kind = _store_kind(store)
+    if kind == "reverb":
         return reverb_listings.resolve_keys(data)
+    if kind == "etsy":
+        return etsy_listings.resolve_keys(data)
     return mapper.resolve_keys(data)
 
 
@@ -217,6 +228,14 @@ def _apply_fields(listing: StoreListing, data: dict):
         )
         listing.infinite_quantity = False
         listing.external_data_object_json = reverb_listings.build_extras(data)
+    elif _store_kind(store) == "etsy":
+        listing.image_urls = "|".join(etsy_listings.parse_image_urls(data.get("image_urls") or ""))
+        listing.infinite_quantity = False
+        listing.external_data_object_json = etsy_listings.build_extras(data)
+        # Persist taxonomy id on category for display/export
+        tax = str(data.get("taxonomy_id") or data.get("category") or "").strip()
+        if tax:
+            listing.category = tax
     elif _store_kind(store) == "mydeal":
         from .mydeal import products as mydeal_products
 
@@ -230,8 +249,8 @@ def _apply_fields(listing: StoreListing, data: dict):
         listing.inventory = 0 if listing.infinite_quantity else int(data.get("inventory") or 0)
     except (TypeError, ValueError):
         listing.inventory = 0
-    # Reverb uses a single Price → store as both original + sale
-    if _store_kind(store) == "reverb":
+    # Reverb/Etsy use a single Price → store as both original + sale
+    if _store_kind(store) in ("reverb", "etsy"):
         price = data.get("sale_price")
         if price in (None, ""):
             price = data.get("price")
@@ -258,7 +277,7 @@ def _finalize_validation(listing: StoreListing, data: dict) -> list[str]:
     if errors:
         listing.validation_errors_json = errors
         listing.status = ListingStatus.VALIDATION_FAILED
-        if _store_kind(store) != "reverb":
+        if _store_kind(store) not in ("reverb", "etsy"):
             listing.external_data_object_json = ""
         listing.original_price_cents = 0
         listing.sale_price_cents = 0
@@ -274,6 +293,16 @@ def _finalize_validation(listing: StoreListing, data: dict) -> list[str]:
             listing.original_price_cents = cents
             listing.sale_price_cents = cents
             listing.external_data_object_json = reverb_listings.build_extras(data)
+        elif _store_kind(store) == "etsy":
+            price = data.get("sale_price")
+            if price in (None, ""):
+                price = data.get("price")
+            if price in (None, ""):
+                price = data.get("original_price")
+            cents = int((_safe_decimal(price) * 100))
+            listing.original_price_cents = cents
+            listing.sale_price_cents = cents
+            listing.external_data_object_json = etsy_listings.build_extras(data)
         else:
             listing.original_price_cents = mapper.dollars_to_cents(data.get("original_price"))
             listing.sale_price_cents = mapper.dollars_to_cents(data.get("sale_price"))
@@ -306,7 +335,7 @@ def create(user, store, data: dict, action: str = ListingAction.CREATE) -> Store
             + (' Use the Mapped action to update it.' if action == ListingAction.CREATE else '')
         )
     _finalize_validation(listing, data)
-    link_errors = _attach_reverb_mapped_listing(listing)
+    link_errors = _attach_mapped_listing(listing)
     if link_errors:
         merged = list(listing.validation_errors_json or []) + link_errors
         listing.validation_errors_json = merged
@@ -318,7 +347,7 @@ def create(user, store, data: dict, action: str = ListingAction.CREATE) -> Store
 def update(listing: StoreListing, data: dict) -> StoreListing:
     _apply_fields(listing, data)
     _finalize_validation(listing, data)
-    link_errors = _attach_reverb_mapped_listing(listing)
+    link_errors = _attach_mapped_listing(listing)
     if link_errors:
         merged = list(listing.validation_errors_json or []) + link_errors
         listing.validation_errors_json = merged
@@ -347,29 +376,33 @@ def _resolve_reverb_listing_id(adapter, listing: StoreListing) -> str:
     return ""
 
 
-def _attach_reverb_mapped_listing(listing: StoreListing) -> list[str]:
-    """For Mapped Reverb rows, resolve and store the live/draft listing id.
-
-    Returns human-readable errors (empty == linked or not applicable).
-    """
+def _attach_mapped_listing(listing: StoreListing) -> list[str]:
+    """Resolve marketplace listing id for Mapped rows (Reverb / Etsy)."""
     store = listing.store
-    if listing.action != ListingAction.MAPPED or _store_kind(store) != "reverb":
+    kind = _store_kind(store)
+    if listing.action != ListingAction.MAPPED or kind not in ("reverb", "etsy"):
         return []
     sku = (listing.sku or listing.external_variant_key or "").strip()
     if not sku:
-        return ["SKU is required to map a Reverb listing."]
+        return [f"SKU is required to map a {kind.title()} listing."]
+    label = "Reverb" if kind == "reverb" else "Etsy"
     try:
         adapter = get_adapter(store)
         lid = adapter.lookup_listing_by_sku(sku)
-    except ReverbAPIError as exc:
-        return [f"Could not look up SKU on Reverb: {exc}"]
+    except (ReverbAPIError, EtsyAPIError) as exc:
+        return [f"Could not look up SKU on {label}: {exc}"]
     if not lid:
         return [
-            f'No listing with SKU "{sku}" was found on Reverb (live or draft). '
+            f'No listing with SKU "{sku}" was found on {label}. '
             "Mapped is for products already on the marketplace — use Create for new ones."
         ]
     listing.external_product_key = str(lid).strip()
     return []
+
+
+def _attach_reverb_mapped_listing(listing: StoreListing) -> list[str]:
+    """Backward-compatible alias."""
+    return _attach_mapped_listing(listing)
 
 
 def _end_listing_on_marketplace(store, listing: StoreListing) -> bool:
@@ -416,6 +449,26 @@ def _end_listing_on_marketplace(store, listing: StoreListing) -> bool:
             ) from exc
     if kind == "mydeal":
         return _end_mydeal_listing(store, listing)
+    if kind == "etsy":
+        adapter = get_adapter(store)
+        lid = (listing.external_product_key or "").strip()
+        sku = (listing.sku or listing.external_variant_key or "").strip()
+        if not lid or lid == sku or not etsy_listings.looks_like_etsy_listing_id(lid):
+            try:
+                lid = adapter.lookup_listing_by_sku(sku) or lid
+            except EtsyAPIError as exc:
+                raise MarketplaceError(str(exc) or "Could not look up Etsy listing.") from exc
+        if not lid or not etsy_listings.looks_like_etsy_listing_id(str(lid)):
+            return False
+        try:
+            adapter.delete_product(str(lid))
+            return True
+        except EtsyAPIError as exc:
+            code = getattr(exc, "status_code", None)
+            msg = str(exc or "").lower()
+            if code == 404 or "not found" in msg:
+                return False
+            raise MarketplaceError(str(exc) or "Could not delete the listing on Etsy.") from exc
     # Unsupported marketplace — local-only delete.
     return False
 
@@ -602,6 +655,8 @@ def delete_upload(
 def _listing_to_data(listing: StoreListing) -> dict:
     if _store_kind(listing.store) == "reverb":
         return reverb_listings.listing_to_data(listing)
+    if _store_kind(listing.store) == "etsy":
+        return etsy_listings.listing_to_data(listing)
     if _store_kind(listing.store) == "mydeal":
         from .mydeal import products as mydeal_products
 
@@ -816,7 +871,7 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
         listing.action = file_action
         _apply_fields(listing, row)
         _finalize_validation(listing, row)
-        link_errors = _attach_reverb_mapped_listing(listing)
+        link_errors = _attach_mapped_listing(listing)
         if link_errors:
             merged = list(listing.validation_errors_json or []) + link_errors
             listing.validation_errors_json = merged
@@ -1006,6 +1061,140 @@ def _publish_reverb(user, store, publishable: list) -> dict:
     }
 
 
+def _publish_etsy(user, store, publishable: list) -> dict:
+    """Create draft listings on Etsy, upload images, set inventory, optionally activate."""
+    adapter = get_adapter(store)
+    environment = Environment.PRODUCTION
+    now = timezone.now()
+    published = 0
+    failures = 0
+
+    shipping_profile_id = None
+    readiness_state_id = None
+    try:
+        shipping_profile_id = adapter.ensure_default_shipping_profile_id()
+        readiness_state_id = adapter.ensure_default_readiness_state_id()
+    except EtsyAPIError as exc:
+        logger.warning("Etsy profile lookup failed: %s", exc)
+
+    for listing in publishable:
+        existing_id = (listing.external_product_key or "").strip()
+        sku = (listing.sku or listing.external_variant_key or "").strip()
+        if (
+            existing_id
+            and etsy_listings.looks_like_etsy_listing_id(existing_id)
+            and existing_id != sku
+        ):
+            listing.status = ListingStatus.UPLOADED_PRODUCTION
+            listing.last_uploaded_at = now
+            listing.save(update_fields=["status", "last_uploaded_at", "updated_at"])
+            published += 1
+            continue
+
+        data = _listing_to_data(listing)
+        form = etsy_listings.build_create_form(
+            data,
+            shipping_profile_id=data.get("shipping_profile_id") or shipping_profile_id,
+            readiness_state_id=data.get("readiness_state_id") or readiness_state_id,
+        )
+        if not form.get("shipping_profile_id"):
+            listing.validation_errors_json = [
+                "No Etsy shipping profile found. Create one in Etsy Shop Manager "
+                "or set shipping_profile_id on the listing."
+            ]
+            listing.status = ListingStatus.VALIDATION_FAILED
+            listing.save(update_fields=["validation_errors_json", "status", "updated_at"])
+            failures += 1
+            continue
+        if not form.get("readiness_state_id"):
+            listing.validation_errors_json = [
+                "No Etsy processing/readiness profile found. Create one in Etsy Shop Manager "
+                "or set readiness_state_id on the listing."
+            ]
+            listing.status = ListingStatus.VALIDATION_FAILED
+            listing.save(update_fields=["validation_errors_json", "status", "updated_at"])
+            failures += 1
+            continue
+
+        try:
+            response = adapter.create_draft_listing(form)
+            listing_id = ""
+            if isinstance(response, dict):
+                listing_id = str(response.get("listing_id") or "").strip()
+            if not listing_id:
+                raise EtsyAPIError("Etsy create returned no listing_id")
+
+            for image_url in etsy_listings.parse_image_urls(listing.image_urls):
+                try:
+                    adapter.upload_listing_image_from_url(listing_id, image_url)
+                except EtsyAPIError as img_exc:
+                    logger.warning(
+                        "Etsy image upload failed listing=%s url=%s: %s",
+                        listing_id,
+                        image_url,
+                        img_exc,
+                    )
+
+            price = listing.sale_price if listing.sale_price not in (None, Decimal("0")) else listing.original_price
+            try:
+                adapter.update_product(
+                    listing_id,
+                    price=price,
+                    stock=listing.inventory,
+                    sku=sku,
+                )
+            except EtsyAPIError as inv_exc:
+                logger.warning("Etsy inventory attach failed listing=%s: %s", listing_id, inv_exc)
+
+            if etsy_listings.should_publish(data):
+                adapter.publish_listing(listing_id)
+
+            listing.status = ListingStatus.UPLOADED_PRODUCTION
+            listing.marketplace_request_json = form
+            listing.marketplace_response_json = response
+            listing.last_uploaded_at = now
+            listing.external_product_key = listing_id
+            listing.save(
+                update_fields=[
+                    "status",
+                    "external_product_key",
+                    "marketplace_request_json",
+                    "marketplace_response_json",
+                    "last_uploaded_at",
+                    "updated_at",
+                ]
+            )
+            published += 1
+        except EtsyAPIError as exc:
+            listing.status = ListingStatus.FAILED
+            listing.marketplace_request_json = form
+            listing.marketplace_response_json = {"error": str(exc)}
+            listing.save(
+                update_fields=[
+                    "status",
+                    "marketplace_request_json",
+                    "marketplace_response_json",
+                    "updated_at",
+                ]
+            )
+            failures += 1
+            logger.warning("Etsy publish failed for SKU %s: %s", listing.sku, exc)
+
+    ok = published > 0 and failures == 0
+    if published and failures:
+        message = f"Published {published} listing(s); {failures} failed."
+    elif published:
+        message = f"Published {published} listing(s) to Etsy."
+    else:
+        message = "Could not publish any listings to Etsy. Check validation errors."
+    return {
+        "ok": ok,
+        "message": message,
+        "published": published,
+        "environment": environment,
+    }
+
+
 def publish(user, store, listing_ids=None) -> dict:
     """Push READY / FAILED created products to the store's marketplace.
 
@@ -1013,10 +1202,10 @@ def publish(user, store, listing_ids=None) -> dict:
     ``push_inventory`` so publish never re-creates duplicates on the store.
     """
     kind = marketplace_kind(store.marketplace)
-    if kind not in ("lasoo", "reverb", "mydeal"):
+    if kind not in ("lasoo", "reverb", "mydeal", "etsy"):
         raise MarketplaceError(
             f'Publishing created products is not supported yet for "{kind or "this marketplace"}". '
-            "Currently Lasoo, Reverb, and MyDeal stores can publish."
+            "Currently Lasoo, Reverb, MyDeal, and Etsy stores can publish."
         )
 
     qs = StoreListing.objects.filter(
@@ -1037,10 +1226,10 @@ def publish(user, store, listing_ids=None) -> dict:
     if not publishable:
         raise MarketplaceError("All selected listings failed validation. Fix the errors and retry.")
 
-    # Reverb: one API call per listing — do not wrap in a single atomic block
-    # (partial remote success must still be persisted locally).
     if kind == "reverb":
         return _publish_reverb(user, store, publishable)
+    if kind == "etsy":
+        return _publish_etsy(user, store, publishable)
     if kind == "mydeal":
         from .mydeal import products as mydeal_products
 
@@ -1557,9 +1746,86 @@ def push_inventory(user, store, listing_ids=None) -> dict:
             "failed": 0 if result.get("ok") else len(listings),
             "rows": [],
         }
+    if kind == "etsy":
+        qs = StoreListing.objects.filter(
+            user=user,
+            store=store,
+            status__in=[
+                ListingStatus.UPLOADED_STAGING,
+                ListingStatus.UPLOADED_PRODUCTION,
+            ],
+        )
+        if listing_ids:
+            qs = qs.filter(id__in=listing_ids)
+        listings = list(qs)
+        if not listings:
+            raise MarketplaceError(
+                "No marketplace listings to push. Publish from Created products first."
+            )
+        adapter = get_adapter(store)
+        pushed = 0
+        failed = 0
+        rows = []
+        now = timezone.now()
+        for listing in listings:
+            row = {
+                "id": str(listing.id),
+                "sku": listing.sku or listing.external_variant_key,
+                "ok": False,
+                "error": "",
+            }
+            listing_id = (listing.external_product_key or "").strip()
+            sku = (listing.sku or listing.external_variant_key or "").strip()
+            if not listing_id or listing_id == sku or not etsy_listings.looks_like_etsy_listing_id(listing_id):
+                try:
+                    listing_id = adapter.lookup_listing_by_sku(sku) or listing_id
+                except EtsyAPIError as exc:
+                    row["error"] = str(exc) or "Could not look up Etsy listing."
+                    failed += 1
+                    rows.append(row)
+                    continue
+            if not listing_id or not etsy_listings.looks_like_etsy_listing_id(str(listing_id)):
+                row["error"] = "No Etsy listing id. Publish the listing first."
+                failed += 1
+                rows.append(row)
+                continue
+            price = listing.sale_price if listing.sale_price not in (None, Decimal("0")) else listing.original_price
+            try:
+                adapter.update_product(
+                    str(listing_id),
+                    price=price,
+                    stock=listing.inventory,
+                    sku=sku,
+                )
+                listing.external_product_key = str(listing_id)
+                listing.last_uploaded_at = now
+                listing.inventory_sync_status = InventorySyncStatus.SYNCED
+                listing.save(
+                    update_fields=[
+                        "external_product_key",
+                        "last_uploaded_at",
+                        "inventory_sync_status",
+                        "updated_at",
+                    ]
+                )
+                row["ok"] = True
+                pushed += 1
+            except EtsyAPIError as exc:
+                row["error"] = str(exc)
+                failed += 1
+                listing.inventory_sync_status = InventorySyncStatus.FAILED
+                listing.save(update_fields=["inventory_sync_status", "updated_at"])
+            rows.append(row)
+        return {
+            "ok": pushed > 0 and failed == 0,
+            "message": f"Pushed {pushed} listing(s) to Etsy." + (f" {failed} failed." if failed else ""),
+            "pushed": pushed,
+            "failed": failed,
+            "rows": rows,
+        }
     if kind != "reverb":
         raise MarketplaceError(
-            "Inventory push is currently supported for Reverb, Lasoo, and MyDeal managed stores."
+            "Inventory push is currently supported for Reverb, Lasoo, MyDeal, and Etsy managed stores."
         )
 
     qs = StoreListing.objects.filter(

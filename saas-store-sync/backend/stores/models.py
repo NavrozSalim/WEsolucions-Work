@@ -66,6 +66,13 @@ class Store(models.Model):
         db_index=True,
         help_text='Last successful Reverb order sync cutoff (UTC). Used for incremental pulls.',
     )
+    # --- Etsy (managed stores / order sync) ---
+    etsy_last_order_sync_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text='Last successful Etsy receipt sync cutoff (UTC). Used for incremental pulls.',
+    )
     # --- Kogan via Google Sheets ---
     # Users upload a Google Service Account JSON key; we use it to update a specific spreadsheet tab.
     kogan_service_account_json = EncryptedTextField(null=True, blank=True)
