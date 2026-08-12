@@ -1,0 +1,105 @@
+"""Marketplace helpers: store marketplace checks, eBay vendor rows, listing SKU order."""
+
+_EBAY_VENDOR_CODES = frozenset({'ebay', 'ebayus', 'ebayau', 'ebay_au', 'ebay_us'})
+
+
+def vendor_is_ebay(vendor, vendor_name_raw: str = '') -> bool:
+    """True when the row's vendor is eBay (DB code or name contains 'ebay')."""
+    if vendor is not None and (getattr(vendor, 'code', None) or '').lower() in _EBAY_VENDOR_CODES:
+        return True
+    vn = (vendor_name_raw or '').strip().lower()
+    if not vn or vn == 'n/a':
+        return False
+    return 'ebay' in vn
+
+
+def store_is_reverb(store) -> bool:
+    """True when the store's marketplace is Reverb (code ``reverb``)."""
+    m = getattr(store, 'marketplace', None)
+    if m is not None:
+        return getattr(m, 'code', None) == 'reverb'
+    mk_id = getattr(store, 'marketplace_id', None)
+    if not mk_id:
+        return False
+    from marketplace.models import Marketplace
+
+    code = Marketplace.objects.filter(pk=mk_id).values_list('code', flat=True).first()
+    return code == 'reverb'
+
+
+def store_is_sears(store) -> bool:
+    """True when the store's marketplace is Sears (code ``sears``)."""
+    m = getattr(store, 'marketplace', None)
+    if m is not None:
+        return getattr(m, 'code', None) == 'sears'
+    mk_id = getattr(store, 'marketplace_id', None)
+    if not mk_id:
+        return False
+    from marketplace.models import Marketplace
+
+    code = Marketplace.objects.filter(pk=mk_id).values_list('code', flat=True).first()
+    return code == 'sears'
+
+
+def store_is_walmart(store) -> bool:
+    """True when the store's marketplace is Walmart (code ``walmart``)."""
+    m = getattr(store, 'marketplace', None)
+    if m is not None:
+        return getattr(m, 'code', None) == 'walmart'
+    mk_id = getattr(store, 'marketplace_id', None)
+    if not mk_id:
+        return False
+    from marketplace.models import Marketplace
+
+    code = Marketplace.objects.filter(pk=mk_id).values_list('code', flat=True).first()
+    return code == 'walmart'
+
+
+def store_is_kogan(store) -> bool:
+    """True when the store's marketplace is Kogan (code ``kogan``)."""
+    m = getattr(store, 'marketplace', None)
+    if m is not None:
+        code = (getattr(m, 'code', None) or '').strip().lower()
+        name = (getattr(m, 'name', None) or '').strip().lower()
+        return code == 'kogan' or name == 'kogan'
+    mk_id = getattr(store, 'marketplace_id', None)
+    if not mk_id:
+        return False
+    from marketplace.models import Marketplace
+
+    row = Marketplace.objects.filter(pk=mk_id).values('code', 'name').first() or {}
+    code = (row.get('code') or '').strip().lower()
+    name = (row.get('name') or '').strip().lower()
+    return code == 'kogan' or name == 'kogan'
+
+
+def store_is_etsy(store) -> bool:
+    """True when the store's marketplace is Etsy (code ``etsy``)."""
+    m = getattr(store, 'marketplace', None)
+    if m is not None:
+        return (getattr(m, 'code', None) or '').strip().lower() == 'etsy'
+    mk_id = getattr(store, 'marketplace_id', None)
+    if not mk_id:
+        return False
+    from marketplace.models import Marketplace
+
+    code = Marketplace.objects.filter(pk=mk_id).values_list('code', flat=True).first()
+    return (code or '').strip().lower() == 'etsy'
+
+
+def listing_sku_lookup_order(pm, store):
+    """
+    SKUs to try for adapters that resolve listing id by SKU.
+
+    Reverb stores and eBay-sourced products use Marketplace Parent SKU first.
+    Sears / Walmart use child SKU only. Others (including Etsy) try child, parent, vendor.
+    """
+    prod_sku = pm.product.vendor_sku if pm.product else None
+    ebay_source = bool(
+        pm.product and pm.product.vendor and vendor_is_ebay(pm.product.vendor, '')
+    )
+    if store_is_sears(store) or store_is_walmart(store):
+        return [x for x in (pm.marketplace_child_sku,) if x]
+    if store_is_reverb(store) or ebay_source:
+        return [x for x in (pm.marketplace_parent_sku, pm.marketplace_child_sku, prod_sku) if x]
+    return [x for x in (pm.marketplace_child_sku, pm.marketplace_parent_sku, prod_sku) if x]

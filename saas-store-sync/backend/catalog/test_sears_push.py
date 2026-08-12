@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase
 
 from catalog.marketplace_rrp import adapter_push_kwargs, compute_marketplace_rrp
-from catalog.reverb_catalog import store_is_sears
+from catalog.marketplace_catalog import store_is_sears
 from store_adapters.sears_adapter import (
     SearsAPIError,
     SearsAdapter,

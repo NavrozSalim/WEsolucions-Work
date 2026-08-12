@@ -4,7 +4,7 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
-from catalog.reverb_catalog import store_is_kogan, store_is_sears, store_is_walmart
+from catalog.marketplace_catalog import store_is_kogan, store_is_sears, store_is_walmart
 
 _TWOPL = Decimal('0.01')
 

@@ -54,7 +54,7 @@ class FailProductMappingTests(SimpleTestCase):
                 'sync.tasks._build_store_vendor_pricing_inventory_caches',
                 return_value=({}, None, {}, None),
             ),
-            patch('catalog.reverb_catalog.store_is_sears', return_value=False),
+            patch('catalog.marketplace_catalog.store_is_sears', return_value=False),
         ):
             from catalog.scrape_failure import _push_zero_stock_for_failed
 
@@ -72,7 +72,7 @@ class FailProductMappingTests(SimpleTestCase):
 
         with (
             patch('catalog.marketplace_push.push_product_mapping_to_marketplace') as mock_push,
-            patch('catalog.reverb_catalog.store_is_sears', return_value=True),
+            patch('catalog.marketplace_catalog.store_is_sears', return_value=True),
         ):
             from catalog.scrape_failure import _push_zero_stock_for_failed
 
@@ -108,7 +108,7 @@ class ApplyNoVendorPriceFallbackTests(SimpleTestCase):
         with (
             patch('catalog.marketplace_push.push_product_mapping_to_marketplace') as mock_push,
             patch('catalog.marketplace_push.apply_post_scrape_marketplace_push') as mock_post,
-            patch('catalog.reverb_catalog.store_is_sears', return_value=True),
+            patch('catalog.marketplace_catalog.store_is_sears', return_value=True),
         ):
             from catalog.scrape_failure import _push_fallback_listing
 

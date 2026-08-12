@@ -35,7 +35,7 @@ from .models import (
     ProductMapping,
     StoreCatalogCeleryScrapeState,
 )
-from .reverb_catalog import listing_sku_lookup_order, store_is_reverb, store_is_sears, vendor_is_ebay
+from .marketplace_catalog import listing_sku_lookup_order, store_is_reverb, store_is_sears, vendor_is_ebay
 from .services import _normalize
 from products.models import Product
 from vendor.models import Vendor

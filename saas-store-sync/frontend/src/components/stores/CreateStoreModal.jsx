@@ -3,7 +3,7 @@ import { X, Plus, Clock, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
-import { createStore, getMarketplaces, getVendors, testSearsConnection, testWalmartConnection, uploadNoraInventory } from '../../services/storeService';
+import { createStore, getMarketplaces, getVendors, testEtsyConnection, testSearsConnection, testWalmartConnection, uploadNoraInventory } from '../../services/storeService';
 import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
 import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
@@ -79,6 +79,9 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const [searsTestLoading, setSearsTestLoading] = useState(false);
     const [searsTestMessage, setSearsTestMessage] = useState('');
     const [searsTestOk, setSearsTestOk] = useState(null);
+    const [etsyTestLoading, setEtsyTestLoading] = useState(false);
+    const [etsyTestMessage, setEtsyTestMessage] = useState('');
+    const [etsyTestOk, setEtsyTestOk] = useState(null);
     const [selectedVendorPrice, setSelectedVendorPrice] = useState('');
     const [selectedVendorInventory, setSelectedVendorInventory] = useState('');
     const [mydealUploadOpen, setMydealUploadOpen] = useState(false);
@@ -150,6 +153,9 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             setSearsTestLoading(false);
             setSearsTestMessage('');
             setSearsTestOk(null);
+            setEtsyTestLoading(false);
+            setEtsyTestMessage('');
+            setEtsyTestOk(null);
         }
     }, [open, copyFromStore, isDuplicate, extMarketplaces.length]);
 
@@ -229,6 +235,50 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             .finally(() => setWalmartTestLoading(false));
     };
 
+    const handleTestEtsyConnection = () => {
+        const errs = [];
+        if (!form.api_token?.trim()) errs.push('Enter Etsy credentials JSON first.');
+        else {
+            try {
+                const data = JSON.parse(form.api_token.trim());
+                if (!data || typeof data !== 'object' || Array.isArray(data)) {
+                    errs.push('Credentials must be a JSON object');
+                } else {
+                    const apiKey = String(data.api_key || data.x_api_key || '').trim();
+                    const keystring = String(data.keystring || data.client_id || '').trim();
+                    const secret = String(data.shared_secret || data.client_secret || '').trim();
+                    if (!apiKey && !(keystring && secret)) {
+                        errs.push('Etsy JSON must include api_key (keystring:secret) or keystring + shared_secret');
+                    }
+                    if (!String(data.access_token || '').trim() && !String(data.refresh_token || '').trim()) {
+                        errs.push('Etsy JSON must include access_token and/or refresh_token');
+                    }
+                }
+            } catch {
+                errs.push('Credentials must be valid JSON');
+            }
+        }
+        if (errs.length) {
+            setEtsyTestOk(false);
+            setEtsyTestMessage(errs.join('. '));
+            return;
+        }
+        setEtsyTestLoading(true);
+        setEtsyTestMessage('');
+        setEtsyTestOk(null);
+        testEtsyConnection({ api_token: form.api_token.trim() })
+            .then((res) => {
+                setEtsyTestOk(true);
+                setEtsyTestMessage(res.data?.message || 'Etsy account connected successfully.');
+            })
+            .catch((err) => {
+                setEtsyTestOk(false);
+                const d = err.response?.data;
+                setEtsyTestMessage(d?.message || d?.detail || 'Connection test failed.');
+            })
+            .finally(() => setEtsyTestLoading(false));
+    };
+
     const regionTimezones = TIMEZONE_OPTIONS[form.region] || TIMEZONE_OPTIONS.USA;
     const isFullStore = form.management_mode === 'full_store';
     const marketplaceCode = (m) => (m?.code || m?.name || '').toString().trim().toLowerCase();
@@ -240,18 +290,24 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const isMydeal = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'mydeal';
     const isSears = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'sears';
     const isWalmart = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'walmart';
+    const isEtsy = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'etsy';
     const isLasoo = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'lasoo';
     const showRrpDiscount = isMydeal || isSears || isKogan;
     const credentialsLabel = isSears
         ? 'Sears credentials (JSON)'
         : isWalmart
             ? 'Walmart credentials (JSON)'
-            : 'API Key / Credentials JSON';
+            : isEtsy
+                ? 'Etsy credentials (JSON)'
+                : 'API Key / Credentials JSON';
     const credentialsPlaceholder = isSears
         ? '{"seller_id":"...","email":"...","secret_key":"...","location_id":"..."}'
         : isWalmart
             ? '{"client_id":"...","client_secret":"..."}'
-            : 'Enter marketplace API key or JSON credentials';
+            : isEtsy
+                ? '{"api_key":"keystring:shared_secret","access_token":"...","refresh_token":"...","shop_id":"..."}'
+                : 'Enter marketplace API key or JSON credentials';
+    const isStructuredCreds = isSears || isWalmart || isEtsy;
     const mydealSetup = (form.mydeal_setup_method || 'upload') === 'api' ? 'api' : 'upload';
     const koganAuth = (form.kogan_auth_method || 'json') === 'token' ? 'token' : 'json';
 
@@ -416,7 +472,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             }
         } else {
             if (!form.api_token?.trim()) errs.push('API key is required');
-            else if (isSears || isWalmart) {
+            else if (isSears || isWalmart || isEtsy) {
                 try {
                     const data = JSON.parse(form.api_token.trim());
                     if (!data || typeof data !== 'object' || Array.isArray(data)) {
@@ -428,6 +484,16 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     } else if (isWalmart) {
                         for (const k of ['client_id', 'client_secret']) {
                             if (!String(data[k] ?? '').trim()) errs.push(`Walmart JSON must include ${k}`);
+                        }
+                    } else if (isEtsy) {
+                        const apiKey = String(data.api_key || data.x_api_key || '').trim();
+                        const keystring = String(data.keystring || data.client_id || '').trim();
+                        const secret = String(data.shared_secret || data.client_secret || '').trim();
+                        if (!apiKey && !(keystring && secret)) {
+                            errs.push('Etsy JSON must include api_key (keystring:secret) or keystring + shared_secret');
+                        }
+                        if (!String(data.access_token || '').trim() && !String(data.refresh_token || '').trim()) {
+                            errs.push('Etsy JSON must include access_token and/or refresh_token');
                         }
                     }
                 } catch {
@@ -901,37 +967,65 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                     onChange={(e) => setForm((f) => ({ ...f, api_token: e.target.value }))}
                                                     required
                                                 />
-                                                {(isSears || isWalmart) && (
+                                                {isStructuredCreds && (
                                                     <p className="text-xs text-gray-500 dark:text-gray-400">
                                                         {isSears
                                                             ? 'Required: seller_id, email, secret_key. Optional: location_id (needed for inventory sync). Use Test Connection before continuing.'
-                                                            : 'Required keys: client_id, client_secret. Use Test Connection to verify with Walmart (GET /v3/items) before continuing.'}
+                                                            : isWalmart
+                                                                ? 'Required keys: client_id, client_secret. Use Test Connection to verify with Walmart (GET /v3/items) before continuing.'
+                                                                : 'Required: api_key (keystring:shared_secret) and access_token and/or refresh_token. Optional: shop_id. Use Test Connection before continuing.'}
                                                     </p>
                                                 )}
-                                                {(isSears || isWalmart) && (
+                                                {isStructuredCreds && (
                                                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                                                         <Button
                                                             type="button"
                                                             variant="secondary"
-                                                            onClick={isSears ? handleTestSearsConnection : handleTestWalmartConnection}
+                                                            onClick={
+                                                                isSears
+                                                                    ? handleTestSearsConnection
+                                                                    : isWalmart
+                                                                        ? handleTestWalmartConnection
+                                                                        : handleTestEtsyConnection
+                                                            }
                                                             disabled={
-                                                                (isSears ? searsTestLoading : walmartTestLoading)
+                                                                (isSears
+                                                                    ? searsTestLoading
+                                                                    : isWalmart
+                                                                        ? walmartTestLoading
+                                                                        : etsyTestLoading)
                                                                 || !form.api_token?.trim()
                                                             }
                                                         >
-                                                            {(isSears ? searsTestLoading : walmartTestLoading)
+                                                            {(isSears
+                                                                ? searsTestLoading
+                                                                : isWalmart
+                                                                    ? walmartTestLoading
+                                                                    : etsyTestLoading)
                                                                 ? 'Testing…'
                                                                 : 'Test Connection'}
                                                         </Button>
-                                                        {(isSears ? searsTestMessage : walmartTestMessage) && (
+                                                        {(isSears
+                                                            ? searsTestMessage
+                                                            : isWalmart
+                                                                ? walmartTestMessage
+                                                                : etsyTestMessage) && (
                                                             <p
                                                                 className={`text-sm ${
-                                                                    (isSears ? searsTestOk : walmartTestOk)
+                                                                    (isSears
+                                                                        ? searsTestOk
+                                                                        : isWalmart
+                                                                            ? walmartTestOk
+                                                                            : etsyTestOk)
                                                                         ? 'text-emerald-600 dark:text-emerald-400'
                                                                         : 'text-red-600 dark:text-red-400'
                                                                 }`}
                                                             >
-                                                                {isSears ? searsTestMessage : walmartTestMessage}
+                                                                {isSears
+                                                                    ? searsTestMessage
+                                                                    : isWalmart
+                                                                        ? walmartTestMessage
+                                                                        : etsyTestMessage}
                                                             </p>
                                                         )}
                                                     </div>

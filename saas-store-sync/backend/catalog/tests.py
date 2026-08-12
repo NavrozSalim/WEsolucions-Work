@@ -16,7 +16,7 @@ from catalog.marketplace_templates import (
     upload_row_to_cells,
     validate_marketplace_headers,
 )
-from catalog.reverb_catalog import listing_sku_lookup_order, store_is_sears, store_is_walmart
+from catalog.marketplace_catalog import listing_sku_lookup_order, store_is_sears, store_is_walmart
 from store_adapters import _resolve_adapter_class
 from store_adapters.walmart_adapter import WalmartAdapter
 from scrapers.core import parse_price_text, classify_failure

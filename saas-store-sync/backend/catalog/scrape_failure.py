@@ -105,7 +105,7 @@ def _push_fallback_listing(pm, store, price_by_vendor_id=None, price_fallback=No
             apply_post_scrape_marketplace_push,
             push_product_mapping_to_marketplace,
         )
-        from catalog.reverb_catalog import store_is_sears
+        from catalog.marketplace_catalog import store_is_sears
 
         # Sears pricing PUTs are rate-limited; per-row pushes during parallel scrape
         # chunks cause cascading 403s. Defer to the end-of-scrape bulk feed instead.
@@ -153,7 +153,7 @@ def _push_zero_stock_for_failed(pm, store) -> None:
 
     try:
         from catalog.marketplace_push import push_product_mapping_to_marketplace
-        from catalog.reverb_catalog import store_is_sears
+        from catalog.marketplace_catalog import store_is_sears
         from sync.tasks import _build_store_vendor_pricing_inventory_caches
 
         if store_is_sears(store):

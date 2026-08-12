@@ -443,3 +443,43 @@ class StoreViewSet(viewsets.ModelViewSet):
             {'valid': False, 'message': msg or 'Invalid Sears API credentials.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+    @action(detail=False, methods=['post'], url_path='test-etsy-connection')
+    def test_etsy_connection(self, request):
+        """
+        Test Etsy credentials from JSON before saving a store (create flow).
+        Body: { "api_token": "{...}" }.
+        """
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+        from stores.credentials import (
+            validate_api_token_shape,
+            verify_etsy_credentials_from_token,
+        )
+
+        api_token = (request.data.get('api_token') or '').strip()
+        if not api_token:
+            return Response(
+                {'valid': False, 'message': 'API credentials are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            mkt = type('M', (), {'code': 'etsy', 'name': 'Etsy'})()
+            normalized = validate_api_token_shape(mkt, api_token)
+        except DRFValidationError as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                msg = detail.get('api_token')
+                if isinstance(msg, list):
+                    msg = msg[0] if msg else str(detail)
+            else:
+                msg = str(detail)
+            return Response({'valid': False, 'message': str(msg)}, status=status.HTTP_400_BAD_REQUEST)
+
+        ok, err_msg = verify_etsy_credentials_from_token(normalized)
+        if ok:
+            from store_adapters.etsy_adapter import MSG_ETSY_CONNECTED
+            return Response({'valid': True, 'message': MSG_ETSY_CONNECTED})
+        return Response(
+            {'valid': False, 'message': err_msg or 'Invalid Etsy API credentials.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 from stores.models import Store, StoreVendorPriceSettings, StoreVendorInventorySettings
 from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
 from catalog.models import ProductMapping
-from catalog.reverb_catalog import listing_sku_lookup_order, store_is_sears, store_is_walmart
+from catalog.marketplace_catalog import listing_sku_lookup_order, store_is_sears, store_is_walmart
 from vendor.models import VendorPrice
 from sync.models import StoreSyncRun
 from scrapers import get_price_and_stock, close_amazon_session

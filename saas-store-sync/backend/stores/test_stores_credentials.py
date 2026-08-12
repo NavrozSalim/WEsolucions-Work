@@ -41,6 +41,7 @@ class CredentialShapeTests(SimpleTestCase):
     def test_requires_structured_credentials(self):
         self.assertTrue(requires_structured_credentials(_mkt('sears')))
         self.assertTrue(requires_structured_credentials(_mkt('walmart')))
+        self.assertTrue(requires_structured_credentials(_mkt('etsy')))
         self.assertFalse(requires_structured_credentials(_mkt('reverb')))
 
     def test_sears_missing_secret_key(self):
@@ -77,6 +78,30 @@ class CredentialShapeTests(SimpleTestCase):
         raw = json.dumps({'client_id': 'a', 'client_secret': 'b'})
         out = validate_api_token_shape(_mkt('walmart'), raw)
         self.assertIn('client_id', out)
+
+    def test_etsy_missing_api_key(self):
+        raw = json.dumps({'access_token': 'tok'})
+        with self.assertRaises(ValidationError) as ctx:
+            validate_api_token_shape(_mkt('etsy'), raw)
+        self.assertIn('api_key', str(ctx.exception.detail))
+
+    def test_etsy_missing_oauth_token(self):
+        raw = json.dumps({'api_key': 'key:secret'})
+        with self.assertRaises(ValidationError) as ctx:
+            validate_api_token_shape(_mkt('etsy'), raw)
+        self.assertIn('access_token', str(ctx.exception.detail))
+
+    def test_etsy_valid(self):
+        raw = json.dumps({
+            'api_key': 'keystring:secret',
+            'access_token': '123.token',
+            'refresh_token': '123.refresh',
+            'shop_id': '99',
+        })
+        out = validate_api_token_shape(_mkt('etsy'), raw)
+        data = json.loads(out)
+        self.assertEqual(data['shop_id'], '99')
+        self.assertEqual(data['api_key'], 'keystring:secret')
 
     def test_not_json_object_rejected(self):
         with self.assertRaises(ValidationError):

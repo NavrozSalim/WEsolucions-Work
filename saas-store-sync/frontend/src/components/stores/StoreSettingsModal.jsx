@@ -333,6 +333,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const isMydeal = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'mydeal';
     const isSears = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'sears';
     const isWalmart = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'walmart';
+    const isEtsy = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'etsy';
     const isLasoo = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'lasoo';
     const showRrpDiscount = isMydeal || isSears || isKogan;
     // Same Store / Price / Inventory flow as inventory-only stores (including managed).
@@ -343,12 +344,16 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
         ? 'Sears credentials (JSON)'
         : isWalmart
             ? 'Walmart credentials (JSON)'
-            : 'API Token / Credentials JSON';
+            : isEtsy
+                ? 'Etsy credentials (JSON)'
+                : 'API Token / Credentials JSON';
     const credentialsPlaceholder = isSears
         ? '{"seller_id":"...","email":"...","secret_key":"...","location_id":"..."}'
         : isWalmart
             ? '{"client_id":"...","client_secret":"..."}'
-            : 'Leave blank to keep current token';
+            : isEtsy
+                ? '{"api_key":"keystring:shared_secret","access_token":"...","refresh_token":"...","shop_id":"..."}'
+                : 'Leave blank to keep current token';
     const mydealSetup = (form.mydeal_setup_method || 'upload') === 'api' ? 'api' : 'upload';
     const koganAuth = (form.kogan_auth_method || 'json') === 'token' ? 'token' : 'json';
 
@@ -638,7 +643,9 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                                     ? 'Leave empty to keep current credentials. Required for connection: seller_id, email, secret_key. location_id is optional for connection but required for inventory sync.'
                                                     : isWalmart
                                                         ? 'Leave empty to keep the current credentials. If you paste new JSON, it must include all required keys and will be verified with the marketplace.'
-                                                        : 'Leave empty to keep the existing token unchanged.'}
+                                                        : isEtsy
+                                                            ? 'Leave empty to keep current credentials. New JSON must include api_key (keystring:shared_secret) and access_token and/or refresh_token. Optional: shop_id.'
+                                                            : 'Leave empty to keep the existing token unchanged.'}
                                             </p>
                                         </>
                                     ) : (

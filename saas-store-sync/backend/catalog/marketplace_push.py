@@ -5,7 +5,7 @@ import logging
 from decimal import Decimal, ROUND_HALF_UP
 
 from catalog.marketplace_rrp import adapter_push_kwargs
-from catalog.reverb_catalog import store_is_kogan, store_is_sears, store_is_walmart
+from catalog.marketplace_catalog import store_is_kogan, store_is_sears, store_is_walmart
 
 logger = logging.getLogger(__name__)
 

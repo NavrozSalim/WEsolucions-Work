@@ -9,6 +9,7 @@ from rest_framework.exceptions import ValidationError
 SEARS_AUTH_KEYS = ('seller_id', 'email', 'secret_key')
 SEARS_REQUIRED_KEYS = SEARS_AUTH_KEYS  # location_id optional at connection time
 WALMART_REQUIRED_KEYS = ('client_id', 'client_secret')
+ETSY_TOKEN_KEYS = ('access_token', 'refresh_token')
 
 
 def marketplace_kind(marketplace) -> str:
@@ -16,7 +17,7 @@ def marketplace_kind(marketplace) -> str:
         return ''
     code = (getattr(marketplace, 'code', None) or '').strip().lower()
     name = (getattr(marketplace, 'name', None) or '').strip().lower()
-    if code in ('sears', 'walmart', 'kogan', 'mydeal', 'reverb', 'lasoo'):
+    if code in ('sears', 'walmart', 'kogan', 'mydeal', 'reverb', 'lasoo', 'etsy'):
         return code
     if 'walmart' in name:
         return 'walmart'
@@ -30,12 +31,31 @@ def marketplace_kind(marketplace) -> str:
         return 'reverb'
     if 'lasoo' in name:
         return 'lasoo'
+    if 'etsy' in name:
+        return 'etsy'
     return code or name
 
 
 def requires_structured_credentials(marketplace) -> bool:
-    return marketplace_kind(marketplace) in ('sears', 'walmart')
+    return marketplace_kind(marketplace) in ('sears', 'walmart', 'etsy')
 
+
+def _etsy_has_api_key(data: dict) -> bool:
+    api_key = (
+        data.get('api_key')
+        or data.get('x_api_key')
+        or data.get('x-api-key')
+        or ''
+    )
+    if str(api_key).strip():
+        return True
+    keystring = str(data.get('keystring') or data.get('client_id') or '').strip()
+    secret = str(data.get('shared_secret') or data.get('client_secret') or '').strip()
+    return bool(keystring and secret)
+
+
+def _etsy_has_oauth_token(data: dict) -> bool:
+    return any(str(data.get(k) or '').strip() for k in ETSY_TOKEN_KEYS)
 
 def parse_credentials_json(api_token: str) -> dict:
     raw = (api_token or '').strip()
@@ -80,6 +100,22 @@ def validate_api_token_shape(marketplace, api_token: str) -> str:
                     'Walmart credentials must include client_id and client_secret. '
                     f'Missing: {", ".join(missing)}. '
                     'Example: {"client_id":"...","client_secret":"..."}'
+                ),
+            })
+    elif kind == 'etsy':
+        if not _etsy_has_api_key(data):
+            raise ValidationError({
+                'api_token': (
+                    'Etsy credentials must include api_key as "keystring:shared_secret" '
+                    '(or keystring + shared_secret). '
+                    'Example: {"api_key":"keystring:secret","access_token":"...","refresh_token":"...","shop_id":"..."}'
+                ),
+            })
+        if not _etsy_has_oauth_token(data):
+            raise ValidationError({
+                'api_token': (
+                    'Etsy credentials must include access_token and/or refresh_token. '
+                    'Example: {"api_key":"keystring:secret","access_token":"...","refresh_token":"...","shop_id":"..."}'
                 ),
             })
     return json.dumps(data, separators=(',', ':'))
@@ -160,6 +196,9 @@ def verify_store_connection(store) -> tuple[bool, str | None]:
         if kind == 'sears' and hasattr(adapter, 'test_sears_connection'):
             ok, msg, _code, _loc = adapter.test_sears_connection()
             return ok, msg
+        if kind == 'etsy' and hasattr(adapter, 'test_etsy_connection'):
+            ok, msg, _shop = adapter.test_etsy_connection()
+            return ok, None if ok else msg
         if getattr(adapter, 'validate_connection', lambda: False)():
             return True, None
         if kind == 'sears':
@@ -168,6 +207,9 @@ def verify_store_connection(store) -> tuple[bool, str | None]:
         if kind == 'walmart':
             from store_adapters.walmart_adapter import MSG_WALMART_INVALID_CREDS
             return False, MSG_WALMART_INVALID_CREDS
+        if kind == 'etsy':
+            from store_adapters.etsy_adapter import MSG_ETSY_INVALID_CREDS
+            return False, MSG_ETSY_INVALID_CREDS
         return False, 'Marketplace rejected these credentials.'
     except Exception as exc:
         return False, str(exc)[:500]
@@ -210,3 +252,19 @@ def verify_sears_credentials_from_token(api_token: str) -> tuple[bool, str | Non
     adapter = SearsAdapter(store)
     ok, msg, _code, _loc = adapter.test_sears_connection()
     return ok, msg
+
+
+def verify_etsy_credentials_from_token(api_token: str) -> tuple[bool, str | None]:
+    """Test Etsy JSON credentials before a store is saved (create flow)."""
+    from types import SimpleNamespace
+
+    from store_adapters.etsy_adapter import EtsyAdapter
+
+    store = SimpleNamespace(
+        api_token=api_token,
+        marketplace=SimpleNamespace(code='etsy', name='Etsy'),
+        id=None,
+    )
+    adapter = EtsyAdapter(store)
+    ok, msg, _shop = adapter.test_etsy_connection()
+    return ok, None if ok else msg

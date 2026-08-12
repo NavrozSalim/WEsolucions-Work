@@ -1673,7 +1673,7 @@ class CatalogPushListingsCancelView(APIView):
     def post(self, request, store_pk):
         from catalog.activity_log import append_catalog_log
         from catalog.models import CatalogActivityLog
-        from catalog.reverb_catalog import store_is_sears
+        from catalog.marketplace_catalog import store_is_sears
         from sync.push_listings_cancel import request_push_listings_cancel
         from sync.push_listings_lock import (
             force_release_push_listings_lock,

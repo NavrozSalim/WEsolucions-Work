@@ -15,7 +15,7 @@ from django.db import transaction
 
 from .models import CatalogUpload, CatalogUploadRow
 from .marketplace_templates import INTERNAL_FIELDS, build_field_indices, validate_marketplace_headers
-from .reverb_catalog import store_is_reverb, store_is_sears, store_is_walmart, vendor_is_ebay
+from .marketplace_catalog import store_is_reverb, store_is_sears, store_is_walmart, vendor_is_ebay
 from stores.models import Store
 from vendor.models import Vendor
 

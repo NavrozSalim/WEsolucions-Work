@@ -20,6 +20,9 @@ export const testWalmartConnection = (data) => api.post('/stores/test-walmart-co
 /** Test Sears JSON credentials before creating a store. */
 export const testSearsConnection = (data) => api.post('/stores/test-sears-connection/', data);
 
+/** Test Etsy JSON credentials before creating a store. */
+export const testEtsyConnection = (data) => api.post('/stores/test-etsy-connection/', data);
+
 /** Upload / overwrite Nora Inventory Excel for a store. */
 export const uploadNoraInventory = (storeId, file) => {
     const form = new FormData();

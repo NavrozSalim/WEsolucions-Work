@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase
 
-from catalog.reverb_catalog import listing_sku_lookup_order, store_is_walmart
+from catalog.marketplace_catalog import listing_sku_lookup_order, store_is_walmart
 from store_adapters.walmart_adapter import WalmartAdapter
 
 
