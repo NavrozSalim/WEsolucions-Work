@@ -21,20 +21,27 @@ def organization_user_ids(user) -> list:
 
 
 def stores_for_user(user) -> QuerySet:
-    """Stores owned by the user or any member of their organization."""
+    """Stores owned by the user or any member of their organization.
+
+    Orphaned stores (owner deleted, waiting reclaim/purge) are excluded.
+    """
     from stores.models import Store
 
+    base = Store.objects.filter(orphaned_at__isnull=True, user__isnull=False)
+
     if getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
-        return Store.objects.all()
+        return base
 
     ids = organization_user_ids(user)
     if not ids:
         return Store.objects.none()
-    return Store.objects.filter(user_id__in=ids)
+    return base.filter(user_id__in=ids)
 
 
 def user_can_access_store(user, store) -> bool:
     if not user or not store:
+        return False
+    if getattr(store, 'orphaned_at', None) is not None or store.user_id is None:
         return False
     if getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
         return True

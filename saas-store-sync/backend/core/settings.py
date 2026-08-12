@@ -111,7 +111,7 @@ INSTALLED_APPS = [
     
     # Local apps
     'users',
-    'stores',
+    'stores.apps.StoresConfig',
     'marketplace',
     'vendor',
     'products',
@@ -243,6 +243,14 @@ try:
     )
 except ValueError:
     VENDOR_PRICE_RETENTION_DAYS = 90
+
+# Orphaned marketplace stores (after user hard-delete) retained this many days for reconnect reclaim.
+try:
+    STORE_ORPHAN_RETENTION_DAYS = max(
+        1, min(3650, int(os.getenv('STORE_ORPHAN_RETENTION_DAYS', '90'))),
+    )
+except ValueError:
+    STORE_ORPHAN_RETENTION_DAYS = 90
 
 # DB persistent connections (seconds). Default 60 reduces new TCP/TLS handshakes to remote Postgres.
 # Use PG_CONN_MAX_AGE=0 when sitting behind PgBouncer (transaction pool) or if you see connection exhaustion.

@@ -27,7 +27,14 @@ class Store(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='stores')
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='stores',
+        help_text='Null while orphaned after the owning user was deleted (retention window).',
+    )
     name = models.CharField(max_length=255)
     region = models.CharField(max_length=10, choices=[('USA', 'USA'), ('AU', 'Australia')])
     management_mode = models.CharField(
@@ -109,6 +116,19 @@ class Store(models.Model):
     )
     last_validated_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True, help_text='Whether store is active for syncing')
+    orphaned_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text='When the owning user was deleted; store is retained until purge after STORE_ORPHAN_RETENTION_DAYS.',
+    )
+    credential_fingerprint = models.CharField(
+        max_length=64,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text='SHA-256 of marketplace credentials used to reclaim an orphaned store on reconnect.',
+    )
     catalog_pending_reset_at = models.DateTimeField(
         null=True,
         blank=True,

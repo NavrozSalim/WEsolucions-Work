@@ -348,10 +348,19 @@ class PlatformUserDetailView(APIView):
         hard = _parse_bool(request.query_params.get('hard'))
         email = user.email
         if hard:
-            # Deleting an org owner cascades the organization.
+            from django.conf import settings as dj_settings
+
+            # Stores are orphaned (retained) via stores.signals before user row removal.
             _log_platform_action(request, 'platform_user_deleted', user, metadata={'hard_delete': True})
             user.delete()
-            return Response({'detail': f'Permanently deleted {email}.'}, status=status.HTTP_200_OK)
+            days = getattr(dj_settings, 'STORE_ORPHAN_RETENTION_DAYS', 90)
+            return Response({
+                'detail': (
+                    f'Permanently deleted {email}. '
+                    f'Marketplace stores were retained for reconnect '
+                    f'(purged after {days} days if unused).'
+                ),
+            }, status=status.HTTP_200_OK)
 
         if not user.is_active:
             return Response({'detail': f'{email} is already deactivated.', 'user': _serialize_user(user)})

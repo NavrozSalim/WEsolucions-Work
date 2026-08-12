@@ -290,10 +290,38 @@ class StoreSerializer(serializers.ModelSerializer):
         }
         if store_data.get('name'):
             store_data['name'] = store_data['name'].strip()
-        if mkt and Store.objects.filter(user=user, name=store_data.get('name', ''), marketplace=mkt).exists():
+        if mkt and Store.objects.filter(
+            user=user, name=store_data.get('name', ''), marketplace=mkt, orphaned_at__isnull=True,
+        ).exists():
             raise ValidationError({
                 'name': f'A store named "{store_data.get("name")}" already exists for this marketplace.',
             })
+
+        from stores.orphan import (
+            find_orphaned_store,
+            fingerprint_from_create_payload,
+            reclaim_store,
+            re_orphan_store,
+        )
+
+        fingerprint = fingerprint_from_create_payload(marketplace=mkt, store_data=store_data)
+        orphan = find_orphaned_store(marketplace=mkt, fingerprint=fingerprint)
+        if orphan is not None:
+            store = reclaim_store(orphan, user, store_data=store_data)
+            self._validate_inventory_covers_price_vendors(price_settings_data, inventory_settings_data)
+            self._save_vendor_price_settings(store, price_settings_data, Vendor)
+            self._save_vendor_inventory_settings(store, inventory_settings_data, Vendor)
+            self._save_sync_schedule(store, req.get('sync_schedule'), SyncSchedule)
+            if is_structured or (is_mydeal and store.mydeal_setup_method == 'api'):
+                ok, err_msg = verify_store_connection(store)
+                if not ok:
+                    re_orphan_store(store)
+                    field = 'mydeal_setup_method' if is_mydeal else 'api_token'
+                    raise ValidationError({
+                        field: err_msg or 'Marketplace rejected these credentials.',
+                    })
+            return store
+
         try:
             store = Store.objects.create(user=user, **store_data)
         except IntegrityError as exc:

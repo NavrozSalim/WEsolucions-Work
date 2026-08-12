@@ -34,6 +34,11 @@ app.conf.beat_schedule = {
         'task': 'vendor.prune_old_vendor_prices',
         'schedule': crontab(minute=30, hour=3),
     },
+    # Purge marketplace stores orphaned after user delete (past retention window).
+    'purge-orphaned-stores': {
+        'task': 'stores.purge_orphaned_stores',
+        'schedule': crontab(minute=45, hour=3),
+    },
     # Orders / tickets: region-split queues (US VPS → orders-us, AU VPS → orders-au).
     'fetch-marketplace-tickets-us-hourly': {
         'task': 'listings.fetch_us_store_tickets',

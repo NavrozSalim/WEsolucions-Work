@@ -56,7 +56,13 @@ class OrderStatus(models.TextChoices):
 class StoreListing(models.Model):
     """A product created in the system and pushed to the store's marketplace."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='store_listings')
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='store_listings',
+    )
     store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='managed_listings', db_index=True)
 
     external_product_key = models.CharField(max_length=255)
@@ -162,7 +168,13 @@ class ListingUpload(models.Model):
         FAILED = 'failed', 'Failed'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='listing_uploads')
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='listing_uploads',
+    )
     store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='listing_uploads', db_index=True)
 
     filename = models.CharField(max_length=500, blank=True, default='')
@@ -188,7 +200,13 @@ class ListingUpload(models.Model):
 class MarketplaceOrder(models.Model):
     """Order/invoice pulled from the marketplace for a managed store."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='marketplace_orders')
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='marketplace_orders',
+    )
     store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='marketplace_orders', db_index=True)
 
     external_order_key = models.CharField(max_length=255, blank=True, default='', db_index=True)
@@ -255,7 +273,13 @@ class TicketMessageDirection(models.TextChoices):
 class SupportTicket(models.Model):
     """Customer support ticket / message thread for a managed marketplace store."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='support_tickets')
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='support_tickets',
+    )
     store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='support_tickets', db_index=True)
 
     external_ticket_key = models.CharField(max_length=255, blank=True, default='', db_index=True)
