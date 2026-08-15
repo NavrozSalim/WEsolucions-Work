@@ -58,13 +58,16 @@ services:
     restart: always
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    # Celery broker: disable RDB snapshots (--save "") so high churn cannot spawn
+    # multi‑GB temp-*.rdb BGSAVE files that fill the disk and peg Redis CPU.
+    # AOF remains for restart durability; everysec is enough for queue durability.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         if [ -n "$$REDIS_PASSWORD" ]; then
-          exec redis-server --appendonly yes --appendfsync everysec --maxmemory 512mb --maxmemory-policy allkeys-lru --tcp-keepalive 60 --requirepass "$$REDIS_PASSWORD"
+          exec redis-server --save "" --appendonly yes --appendfsync everysec --maxmemory 512mb --maxmemory-policy allkeys-lru --tcp-keepalive 60 --stop-writes-on-bgsave-error no --requirepass "$$REDIS_PASSWORD"
         else
-          exec redis-server --appendonly yes --appendfsync everysec --maxmemory 512mb --maxmemory-policy allkeys-lru --tcp-keepalive 60
+          exec redis-server --save "" --appendonly yes --appendfsync everysec --maxmemory 512mb --maxmemory-policy allkeys-lru --tcp-keepalive 60 --stop-writes-on-bgsave-error no
         fi
     volumes:
       - redisdata:/data
