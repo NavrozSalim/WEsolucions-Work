@@ -93,14 +93,18 @@ class SyncScheduleInlineSerializer(serializers.Serializer):
 class StoreSerializer(serializers.ModelSerializer):
     marketplace_id = serializers.UUIDField(source='marketplace.id', read_only=True, allow_null=True)
     marketplace_name = serializers.CharField(source='marketplace.name', read_only=True, allow_null=True)
+    marketplace_code = serializers.CharField(source='marketplace.code', read_only=True, allow_null=True)
     vendor_price_settings = StoreVendorPriceSettingsReadSerializer(many=True, read_only=True)
     vendor_inventory_settings = StoreVendorInventorySettingsReadSerializer(many=True, read_only=True)
     sync_schedule = serializers.SerializerMethodField()
+    shopify_connected = serializers.SerializerMethodField()
+    shopify_has_credentials = serializers.SerializerMethodField()
 
     class Meta:
         model = Store
         fields = [
             'id', 'name', 'region', 'management_mode', 'api_token', 'marketplace', 'marketplace_id', 'marketplace_name',
+            'marketplace_code',
             'kogan_service_account_json', 'kogan_sheet_id', 'kogan_tab_name',
             'kogan_sku_column', 'kogan_stock_column', 'kogan_price_column', 'kogan_rrp_column', 'kogan_first_price_column',
             'mydeal_setup_method',
@@ -112,6 +116,9 @@ class StoreSerializer(serializers.ModelSerializer):
             'mydeal_production_seller_id', 'mydeal_production_seller_token',
             'lasoo_environment', 'lasoo_staging_base_url', 'lasoo_production_base_url',
             'lasoo_staging_auth_key', 'lasoo_production_auth_key',
+            'shopify_enabled', 'shopify_shop_domain', 'shopify_location_id',
+            'shopify_client_id', 'shopify_client_secret',
+            'shopify_connected', 'shopify_has_credentials',
             'connection_status', 'last_validated_at',
             'is_active', 'created_at', 'updated_at',
             'vendor_price_settings', 'vendor_inventory_settings',
@@ -124,6 +131,8 @@ class StoreSerializer(serializers.ModelSerializer):
             'kogan_service_account_json': {'write_only': True},
             'lasoo_staging_auth_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'lasoo_production_auth_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'shopify_client_id': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'shopify_client_secret': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'mydeal_sandbox_client_id': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'mydeal_sandbox_client_secret': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'mydeal_sandbox_seller_id': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
@@ -136,6 +145,107 @@ class StoreSerializer(serializers.ModelSerializer):
             'connection_status': {'read_only': True},
             'last_validated_at': {'read_only': True},
         }
+
+    def get_shopify_connected(self, obj):
+        return bool(
+            getattr(obj, 'shopify_enabled', False)
+            and (getattr(obj, 'shopify_shop_domain', None) or '').strip()
+            and (getattr(obj, 'shopify_client_id', None) or '').strip()
+            and (getattr(obj, 'shopify_client_secret', None) or '').strip()
+        )
+
+    def get_shopify_has_credentials(self, obj):
+        return bool(
+            (getattr(obj, 'shopify_client_id', None) or '').strip()
+            and (getattr(obj, 'shopify_client_secret', None) or '').strip()
+        )
+
+    def _apply_shopify_fields(self, validated_data, *, instance=None, marketplace=None, management_mode=''):
+        from listings.shopify.client import normalize_location_id, normalize_shop_domain
+        from listings.shopify.orders import SHOPIFY_ORDER_MARKETPLACES
+        from stores.credentials import marketplace_kind
+
+        req = self.context['request'].data
+        touched = any(
+            key in req
+            for key in (
+                'shopify_enabled',
+                'shopify_shop_domain',
+                'shopify_client_id',
+                'shopify_client_secret',
+                'shopify_location_id',
+            )
+        )
+        if not touched and instance is None:
+            validated_data['shopify_enabled'] = False
+            return
+        if not touched:
+            return
+
+        enabled_raw = req.get('shopify_enabled', validated_data.get('shopify_enabled'))
+        if enabled_raw is None and instance is not None:
+            enabled = bool(instance.shopify_enabled)
+        elif isinstance(enabled_raw, str):
+            enabled = enabled_raw.strip().lower() in ('1', 'true', 'yes', 'on')
+        else:
+            enabled = bool(enabled_raw)
+
+        kind = marketplace_kind(marketplace)
+        if enabled:
+            if (management_mode or '') != 'full_store':
+                raise ValidationError({
+                    'shopify_enabled': 'Shopify order sync is only available for managed stores.',
+                })
+            if kind not in SHOPIFY_ORDER_MARKETPLACES:
+                raise ValidationError({
+                    'shopify_enabled': 'Shopify order sync is only available for Reverb, Lasoo, MyDeal, and Etsy.',
+                })
+
+        if 'shopify_shop_domain' in req:
+            domain = normalize_shop_domain(req.get('shopify_shop_domain') or '')
+            validated_data['shopify_shop_domain'] = domain
+        else:
+            domain = normalize_shop_domain(
+                validated_data.get('shopify_shop_domain')
+                or (instance.shopify_shop_domain if instance else '')
+                or ''
+            )
+
+        if 'shopify_location_id' in req:
+            validated_data['shopify_location_id'] = normalize_location_id(req.get('shopify_location_id') or '')
+
+        incoming_id = (req.get('shopify_client_id') or '').strip()
+        incoming_secret = (req.get('shopify_client_secret') or '').strip()
+        if incoming_id:
+            validated_data['shopify_client_id'] = incoming_id
+        elif instance is None:
+            validated_data.pop('shopify_client_id', None)
+        else:
+            validated_data.pop('shopify_client_id', None)
+        if incoming_secret:
+            validated_data['shopify_client_secret'] = incoming_secret
+        else:
+            validated_data.pop('shopify_client_secret', None)
+
+        existing_id = incoming_id or ((instance.shopify_client_id or '').strip() if instance else '')
+        existing_secret = incoming_secret or ((instance.shopify_client_secret or '').strip() if instance else '')
+        if enabled:
+            if not domain.endswith('.myshopify.com'):
+                raise ValidationError({
+                    'shopify_shop_domain': 'Enter the shop .myshopify.com domain (not the public website).',
+                })
+            if not existing_id:
+                raise ValidationError({
+                    'shopify_client_id': 'Shopify Client ID is required when Connect Shopify is on.',
+                })
+            if not existing_secret:
+                raise ValidationError({
+                    'shopify_client_secret': 'Shopify Client secret is required when Connect Shopify is on.',
+                })
+        validated_data['shopify_enabled'] = enabled
+        if incoming_id or incoming_secret:
+            validated_data['shopify_access_token'] = ''
+            validated_data['shopify_token_expires_at'] = None
 
     def get_sync_schedule(self, obj):
         try:
@@ -195,6 +305,11 @@ class StoreSerializer(serializers.ModelSerializer):
                     raise ValidationError({
                         'mydeal_setup_method': 'MyDeal managed store requires API connection (not upload templates).',
                     })
+        self._apply_shopify_fields(
+            validated_data,
+            marketplace=mkt,
+            management_mode=management_mode,
+        )
         if is_lasoo:
             # Lasoo uses per-environment AuthKeys, not Store.api_token.
             staging_key = (req.get('lasoo_staging_auth_key') or '').strip()
@@ -286,6 +401,13 @@ class StoreSerializer(serializers.ModelSerializer):
                 'lasoo_production_base_url',
                 'lasoo_staging_auth_key',
                 'lasoo_production_auth_key',
+                'shopify_enabled',
+                'shopify_shop_domain',
+                'shopify_client_id',
+                'shopify_client_secret',
+                'shopify_location_id',
+                'shopify_access_token',
+                'shopify_token_expires_at',
             )
         }
         if store_data.get('name'):
@@ -361,6 +483,12 @@ class StoreSerializer(serializers.ModelSerializer):
             'mydeal_production_seller_id',
             'mydeal_production_seller_token',
         )
+        self._apply_shopify_fields(
+            validated_data,
+            instance=instance,
+            marketplace=instance.marketplace,
+            management_mode=req.get('management_mode') or instance.management_mode,
+        )
         for attr, value in validated_data.items():
             if attr in (
                 'name',
@@ -389,12 +517,21 @@ class StoreSerializer(serializers.ModelSerializer):
                 'lasoo_production_base_url',
                 'lasoo_staging_auth_key',
                 'lasoo_production_auth_key',
+                'shopify_enabled',
+                'shopify_shop_domain',
+                'shopify_client_id',
+                'shopify_client_secret',
+                'shopify_location_id',
+                'shopify_access_token',
+                'shopify_token_expires_at',
             ):
                 if attr in (
                     'lasoo_staging_auth_key',
                     'lasoo_production_auth_key',
+                    'shopify_client_id',
+                    'shopify_client_secret',
                     *MYDEAL_SECRET_FIELDS,
-                ) and not (value or '').strip():
+                ) and not (value or '').strip() and attr != 'shopify_access_token':
                     # Blank secret in a PATCH means "keep the existing value".
                     continue
                 setattr(instance, attr, value)

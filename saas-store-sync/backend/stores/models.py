@@ -110,6 +110,27 @@ class Store(models.Model):
     mydeal_production_client_secret = EncryptedTextField(null=True, blank=True)
     mydeal_production_seller_id = EncryptedTextField(null=True, blank=True)
     mydeal_production_seller_token = EncryptedTextField(null=True, blank=True)
+    # --- Shopify (optional: push new marketplace orders into Shopify Admin) ---
+    shopify_enabled = models.BooleanField(
+        default=False,
+        help_text='When True, newly fetched marketplace orders are also created in Shopify.',
+    )
+    shopify_shop_domain = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text='Store domain, e.g. t4nx6h-ds.myshopify.com',
+    )
+    shopify_client_id = EncryptedTextField(null=True, blank=True)
+    shopify_client_secret = EncryptedTextField(null=True, blank=True)
+    shopify_access_token = EncryptedTextField(null=True, blank=True)
+    shopify_token_expires_at = models.DateTimeField(null=True, blank=True)
+    shopify_location_id = models.CharField(
+        max_length=64,
+        blank=True,
+        default='',
+        help_text='Optional Shopify location numeric id or GID.',
+    )
     marketplace = models.ForeignKey(
         'marketplace.Marketplace',
         on_delete=models.SET_NULL,

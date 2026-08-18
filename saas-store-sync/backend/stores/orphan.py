@@ -205,6 +205,11 @@ def reclaim_store(store, user, *, store_data: dict | None = None):
         'lasoo_production_base_url',
         'lasoo_staging_auth_key',
         'lasoo_production_auth_key',
+        'shopify_enabled',
+        'shopify_shop_domain',
+        'shopify_client_id',
+        'shopify_client_secret',
+        'shopify_location_id',
     )
     for key in updatable:
         if key in store_data and store_data[key] is not None:

@@ -370,6 +370,7 @@ class MarketplaceOrderSerializer(serializers.ModelSerializer):
     shipments = OrderShipmentSerializer(many=True, read_only=True)
     details = serializers.SerializerMethodField()
     related_tickets = serializers.SerializerMethodField()
+    shopify_admin_url = serializers.SerializerMethodField()
 
     class Meta:
         model = MarketplaceOrder
@@ -379,6 +380,8 @@ class MarketplaceOrderSerializer(serializers.ModelSerializer):
             'status', 'shipping_status', 'total_amount_cents',
             'environment', 'shipments', 'raw_response_json',
             'details', 'related_tickets', 'created_at', 'updated_at',
+            'shopify_order_id', 'shopify_order_name', 'shopify_synced_at',
+            'shopify_sync_error', 'shopify_admin_url',
         ]
 
     def get_details(self, obj):
@@ -391,6 +394,11 @@ class MarketplaceOrderSerializer(serializers.ModelSerializer):
             total_cents=obj.total_amount_cents,
         )
         return enrich_order_line_items(details, obj.store)
+
+    def get_shopify_admin_url(self, obj):
+        from .shopify.orders import admin_order_url
+
+        return admin_order_url(obj.store, obj)
 
     def get_related_tickets(self, obj):
         """Tickets whose related_order_key matches this order's invoice/key."""

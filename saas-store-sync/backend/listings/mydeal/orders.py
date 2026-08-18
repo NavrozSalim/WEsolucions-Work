@@ -224,7 +224,7 @@ def upsert_order(user, store, raw: dict) -> MarketplaceOrder | None:
     lines = ui.get("lineItems") or []
     total_cents = ui.get("totalCents")
 
-    order, _created = MarketplaceOrder.objects.update_or_create(
+    order, created = MarketplaceOrder.objects.update_or_create(
         store=store,
         external_order_key=key,
         environment=environment,
@@ -239,6 +239,8 @@ def upsert_order(user, store, raw: dict) -> MarketplaceOrder | None:
             "shipping_status": map_shipping_status(status_raw),
         },
     )
+    from ..shopify.orders import push_new_order_to_shopify
+    push_new_order_to_shopify(order, store, created=created)
     return order
 
 

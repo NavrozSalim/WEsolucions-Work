@@ -156,27 +156,31 @@ def upsert_order(user, store, raw: dict) -> MarketplaceOrder | None:
     customer = normalize_customer(raw)
     lines = normalize_line_items(raw)
 
+    currency = str(
+        (raw.get("grandtotal") or {}).get("currency_code")
+        if isinstance(raw.get("grandtotal"), dict)
+        else raw.get("currency_code") or "USD"
+    ).upper()
+    ui_raw = dict(raw) if isinstance(raw, dict) else {}
+    ui_raw.setdefault("currency", currency)
     defaults = {
         "user": user,
+        "invoice_number": external_key,
         "status": status,
         "shipping_status": shipping_status,
-        "currency": str(
-            (raw.get("grandtotal") or {}).get("currency_code")
-            if isinstance(raw.get("grandtotal"), dict)
-            else raw.get("currency_code") or "USD"
-        ).upper(),
-        "total_cents": total_cents,
+        "total_amount_cents": total_cents,
         "customer_info_json": customer,
         "line_items_json": lines,
-        "raw_payload_json": raw,
-        "external_order_number": external_key,
+        "raw_response_json": ui_raw,
     }
-    order, _created = MarketplaceOrder.objects.update_or_create(
+    order, created = MarketplaceOrder.objects.update_or_create(
         store=store,
         environment=environment,
         external_order_key=external_key,
         defaults=defaults,
     )
+    from ..shopify.orders import push_new_order_to_shopify
+    push_new_order_to_shopify(order, store, created=created)
     return order
 
 

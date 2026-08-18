@@ -9,6 +9,11 @@ import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
 import LasooConnectionFields from './LasooConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor } from './NoraInventoryUploadField';
+import ShopifyConnectFields, {
+    buildShopifyPayload,
+    shopifyFieldsFromStore,
+    validateShopifyFields,
+} from './ShopifyConnectFields';
 
 const LASOO_DEFAULT_STAGING_URL = 'https://stage.api.lasoo.com.au';
 const LASOO_DEFAULT_PRODUCTION_URL = 'https://api.lasoo.com.au';
@@ -77,6 +82,7 @@ function storeToForm(store) {
         lasoo_staging_auth_key: '',
         lasoo_production_base_url: LASOO_DEFAULT_PRODUCTION_URL,
         lasoo_production_auth_key: '',
+        ...shopifyFieldsFromStore(null),
         vendor_price_settings: [],
         vendor_inventory_settings: [],
         schedule_enabled: false,
@@ -110,6 +116,7 @@ function storeToForm(store) {
         lasoo_staging_auth_key: '',
         lasoo_production_base_url: store.lasoo_production_base_url || LASOO_DEFAULT_PRODUCTION_URL,
         lasoo_production_auth_key: '',
+        ...shopifyFieldsFromStore(store),
         vendor_price_settings: (store.vendor_price_settings || []).map((vp) => ({
             vendor_id: vp.vendor || vp.vendor_id,
             purchase_tax_percentage: vp.purchase_tax_percentage ?? 0,
@@ -335,6 +342,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const isWalmart = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'walmart';
     const isEtsy = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'etsy';
     const isLasoo = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'lasoo';
+    const marketplaceCode = (store?.marketplace_code || store?.marketplace_name || '').toString().trim().toLowerCase();
+    const showShopifyConnect = isManaged && ['reverb', 'lasoo', 'mydeal', 'etsy'].includes(marketplaceCode);
     const showRrpDiscount = isMydeal || isSears || isKogan;
     // Same Store / Price / Inventory flow as inventory-only stores (including managed).
     const maxStep = 3;
@@ -443,6 +452,9 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
             payload.kogan_tab_name = form.kogan_tab_name?.trim();
             if (form.kogan_service_account_json?.trim()) payload.kogan_service_account_json = form.kogan_service_account_json;
         }
+        if (showShopifyConnect) {
+            Object.assign(payload, buildShopifyPayload(form));
+        }
         return payload;
     };
 
@@ -466,6 +478,11 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
             if (!form[`${prefix}_base_url`]?.trim() && !existingUrl.trim()) {
                 errs.push(`MyDeal ${env} API base URL is required`);
             }
+        }
+        if (showShopifyConnect) {
+            errs.push(...validateShopifyFields(form, {
+                requireSecrets: !store?.shopify_has_credentials,
+            }));
         }
         return errs;
     };
@@ -725,6 +742,15 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                     )}
                                 </div>
                             </div>
+
+                            {showShopifyConnect && (
+                                <ShopifyConnectFields
+                                    form={form}
+                                    setForm={setForm}
+                                    mode="edit"
+                                    hasExistingCredentials={!!store?.shopify_has_credentials}
+                                />
+                            )}
 
                             <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-5 space-y-4">
                                 <div className="flex items-center gap-3">

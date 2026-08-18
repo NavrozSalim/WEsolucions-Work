@@ -35,7 +35,7 @@ class StoreViewSet(viewsets.ModelViewSet):
         qs = stores_for_user(self.request.user)
         # List only needs metadata + nested settings; skip loading ciphertext columns.
         if getattr(self, 'action', None) == 'list':
-            qs = qs.defer('api_token', 'kogan_service_account_json')
+            qs = qs.defer('api_token', 'kogan_service_account_json', 'shopify_access_token')
         return qs
 
     def create(self, request, *args, **kwargs):

@@ -847,12 +847,14 @@ def _upsert_order(user, store, environment, raw: dict) -> MarketplaceOrder:
         "status": _map_status(_first(raw.get("status"), _dig(raw, "invoice.status"))),
         "raw_response_json": raw,
     }
-    order, _ = MarketplaceOrder.objects.update_or_create(
+    order, created = MarketplaceOrder.objects.update_or_create(
         store=store,
         external_order_key=order_key,
         environment=environment,
         defaults=defaults,
     )
+    from .shopify.orders import push_new_order_to_shopify
+    push_new_order_to_shopify(order, store, created=created)
     return order
 
 

@@ -218,6 +218,11 @@ class MarketplaceOrder(models.Model):
     total_amount_cents = models.IntegerField(null=True, blank=True)
     raw_response_json = models.JSONField(null=True, blank=True)
     environment = models.CharField(max_length=20, choices=Environment.choices, default=Environment.STAGING)
+    shopify_order_id = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    shopify_order_gid = models.CharField(max_length=128, blank=True, default='')
+    shopify_order_name = models.CharField(max_length=64, blank=True, default='')
+    shopify_synced_at = models.DateTimeField(null=True, blank=True)
+    shopify_sync_error = models.CharField(max_length=500, blank=True, default='')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

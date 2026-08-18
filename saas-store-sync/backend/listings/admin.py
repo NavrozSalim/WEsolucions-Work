@@ -12,7 +12,10 @@ class StoreListingAdmin(admin.ModelAdmin):
 
 @admin.register(MarketplaceOrder)
 class MarketplaceOrderAdmin(admin.ModelAdmin):
-    list_display = ('invoice_number', 'external_order_key', 'store', 'status', 'shipping_status', 'environment')
+    list_display = (
+        'invoice_number', 'external_order_key', 'store', 'status',
+        'shipping_status', 'environment', 'shopify_order_name',
+    )
     list_filter = ('status', 'environment')
     search_fields = ('invoice_number', 'external_order_key')
 

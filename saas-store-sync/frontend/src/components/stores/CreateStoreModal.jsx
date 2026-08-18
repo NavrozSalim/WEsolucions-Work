@@ -9,6 +9,11 @@ import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
 import LasooConnectionFields from './LasooConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor } from './NoraInventoryUploadField';
+import ShopifyConnectFields, {
+    buildShopifyPayload,
+    emptyShopifyFields,
+    validateShopifyFields,
+} from './ShopifyConnectFields';
 
 const emptyPriceRange = () => ({ from_value: 0, to_value: null, margin_type: 'percentage', margin_percentage: 25 });
 const emptyInventoryRange = () => ({ from_value: 0, to_value: 999999999, range_type: 'multiplier', multiplier: 0.5, fixed_value: null });
@@ -103,6 +108,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         lasoo_staging_auth_key: '',
         lasoo_production_base_url: LASOO_DEFAULT_PRODUCTION_URL,
         lasoo_production_auth_key: '',
+        ...emptyShopifyFields(),
         region: 'USA',
         vendor_price_settings: [],
         vendor_inventory_settings: [],
@@ -135,6 +141,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 lasoo_staging_auth_key: '',
                 lasoo_production_base_url: LASOO_DEFAULT_PRODUCTION_URL,
                 lasoo_production_auth_key: '',
+                ...emptyShopifyFields(),
                 region,
                 vendor_price_settings: [],
                 vendor_inventory_settings: [],
@@ -292,6 +299,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const isWalmart = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'walmart';
     const isEtsy = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'etsy';
     const isLasoo = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'lasoo';
+    const showShopifyConnect = isFullStore && selectedMarketplace && FULL_STORE_MARKETPLACES.includes(marketplaceCode(selectedMarketplace));
     const showRrpDiscount = isMydeal || isSears || isKogan;
     const credentialsLabel = isSears
         ? 'Sears credentials (JSON)'
@@ -438,6 +446,9 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         if (!form.marketplace_id) errs.push('Marketplace is required');
         if (isFullStore && selectedMarketplace && !FULL_STORE_MARKETPLACES.includes(marketplaceCode(selectedMarketplace))) {
             errs.push('Managed stores are only available for Reverb, Lasoo, MyDeal, and Etsy right now');
+        }
+        if (showShopifyConnect) {
+            errs.push(...validateShopifyFields(form, { requireSecrets: true }));
         }
         if (isLasoo) {
             const env = form.lasoo_environment || 'staging';
@@ -655,6 +666,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                         ? buildLasooPayload()
                     : { api_token: form.api_token }),
                 region: form.region,
+                ...buildShopifyPayload(form),
                 sync_schedule: buildSchedulePayload(),
             };
             if (copyFromStore?.vendor_price_settings?.length || copyFromStore?.vendor_inventory_settings?.length) {
@@ -751,6 +763,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     ? buildLasooPayload()
                 : { api_token: form.api_token }),
             region: form.region,
+            ...buildShopifyPayload(form),
             ...buildSettingsPayload(),
             sync_schedule: buildSchedulePayload(),
         };
@@ -1148,6 +1161,9 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                 <p className="text-xs text-slate-500 dark:text-slate-400">
                                     Credentials are encrypted at rest. For Kogan, upload a Google service account JSON key and your sheet details.
                                 </p>
+                                {showShopifyConnect && (
+                                    <ShopifyConnectFields form={form} setForm={setForm} mode="create" />
+                                )}
 
                                 {/* Schedule section */}
                                 <div className="mt-6 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-5 space-y-4">

@@ -447,6 +447,24 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice' }) {
                                 <span className="capitalize">{String(d.marketplaceStatus)}</span>
                             </InfoRow>
                         )}
+                        {order.shopify_admin_url && (
+                            <InfoRow label="Shopify">
+                                <a
+                                    href={order.shopify_admin_url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="inline-flex items-center gap-1 text-accent-600 hover:underline dark:text-accent-400"
+                                >
+                                    <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                                    {order.shopify_order_name || 'View order'}
+                                </a>
+                            </InfoRow>
+                        )}
+                        {order.shopify_sync_error && !order.shopify_admin_url && (
+                            <InfoRow label="Shopify">
+                                <span className="text-amber-700 dark:text-amber-300">{order.shopify_sync_error}</span>
+                            </InfoRow>
+                        )}
                         <InfoRow label="Environment">
                             <span className="capitalize">{order.environment}</span>
                         </InfoRow>
@@ -988,6 +1006,17 @@ export default function Orders() {
                                                     <p className="font-medium text-slate-900 dark:text-slate-100">
                                                         {o.invoice_number || o.external_order_key || '—'}
                                                     </p>
+                                                    {o.shopify_admin_url && (
+                                                        <a
+                                                            href={o.shopify_admin_url}
+                                                            target="_blank"
+                                                            rel="noreferrer"
+                                                            className="mt-0.5 inline-flex items-center gap-1 text-xs text-accent-600 hover:underline dark:text-accent-400"
+                                                        >
+                                                            <ExternalLink className="h-3 w-3" />
+                                                            View on Shopify
+                                                        </a>
+                                                    )}
                                                     <p className="mt-0.5 truncate text-sm text-slate-600 dark:text-slate-300">
                                                         {customerName(o)}
                                                     </p>
@@ -1089,6 +1118,17 @@ export default function Orders() {
                                                         <td className="px-4 py-2.5 font-medium text-slate-900 dark:text-slate-100">
                                                             {o.invoice_number || o.external_order_key || '—'}
                                                             <p className="text-[11px] font-normal capitalize text-slate-400">{o.environment}</p>
+                                                            {o.shopify_admin_url && (
+                                                                <a
+                                                                    href={o.shopify_admin_url}
+                                                                    target="_blank"
+                                                                    rel="noreferrer"
+                                                                    className="mt-0.5 inline-flex items-center gap-1 text-[11px] font-normal text-accent-600 hover:underline dark:text-accent-400"
+                                                                >
+                                                                    <ExternalLink className="h-3 w-3" />
+                                                                    Shopify {o.shopify_order_name || ''}
+                                                                </a>
+                                                            )}
                                                         </td>
                                                         <td className="px-4 py-2.5 text-slate-700 dark:text-slate-300">
                                                             <p>{customerName(o)}</p>
