@@ -16,6 +16,7 @@ from store_adapters.reverb_adapter import ReverbAPIError
 
 from ..errors import MarketplaceError
 from ..models import Environment, MarketplaceOrder, OrderStatus
+from ..order_upsert import persist_marketplace_order
 
 logger = logging.getLogger("listings.reverb")
 
@@ -45,10 +46,10 @@ def read_money(value) -> dict:
     }
 
 
-def map_reverb_status(raw_status) -> str:
-    """Map Reverb order status → local OrderStatus."""
+def map_reverb_status(raw_status) -> str | None:
+    """Map Reverb order status → local OrderStatus. Unknown/empty → None."""
     if not raw_status:
-        return OrderStatus.NEW
+        return None
     text = str(raw_status).strip().lower().replace(" ", "_").replace("-", "_")
     mapping = {
         "unpaid": OrderStatus.NEW,
@@ -63,7 +64,7 @@ def map_reverb_status(raw_status) -> str:
         "cancelled": OrderStatus.CANCELLED,
         "canceled": OrderStatus.CANCELLED,
     }
-    return mapping.get(text, OrderStatus.NEW)
+    return mapping.get(text)
 
 
 def map_shipping_status(raw_status) -> str:
@@ -249,7 +250,7 @@ def upsert_order(user, store, raw: dict) -> MarketplaceOrder | None:
     status = map_reverb_status(raw.get("status"))
     shipping_status = map_shipping_status(raw.get("status"))
 
-    order, created = MarketplaceOrder.objects.update_or_create(
+    order, created = persist_marketplace_order(
         store=store,
         external_order_key=order_key,
         environment=Environment.PRODUCTION,

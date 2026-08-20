@@ -7,6 +7,7 @@ from .errors import MarketplaceError
 from .lasoo.client import LasooClient
 from .lasoo.queries import build_payload
 from .models import MarketplaceOrder, OrderStatus
+from .order_upsert import persist_marketplace_order
 
 logger = logging.getLogger("listings")
 
@@ -844,10 +845,10 @@ def _upsert_order(user, store, environment, raw: dict) -> MarketplaceOrder:
         "customer_info_json": customer,
         "line_items_json": line_items,
         "total_amount_cents": totals.get("totalCents"),
-        "status": _map_status(_first(raw.get("status"), _dig(raw, "invoice.status"))),
+        "status": _map_status(_lasoo_status_value(raw)),
         "raw_response_json": raw,
     }
-    order, created = MarketplaceOrder.objects.update_or_create(
+    order, created = persist_marketplace_order(
         store=store,
         external_order_key=order_key,
         environment=environment,
@@ -876,10 +877,34 @@ def _to_cents(value):
         return None
 
 
-def _map_status(raw_status) -> str:
-    if not raw_status:
-        return OrderStatus.NEW
-    text = str(raw_status).strip().lower().replace(" ", "_").replace("-", "_")
+def _lasoo_status_value(raw: dict):
+    """Invoice status from Lasoo Connect shapes (string, nested, or status object)."""
+    return _status_text(_first(
+        raw.get("status"),
+        raw.get("invoiceStatus"),
+        _dig(raw, "invoice.status"),
+        _dig(raw, "invoice.invoiceStatus"),
+    ))
+
+
+def _status_text(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, dict):
+        return _status_text(_first(
+            value.get("name"), value.get("code"), value.get("status"),
+            value.get("label"), value.get("value"),
+        ))
+    text = str(value).strip()
+    return text or None
+
+
+def _map_status(raw_status) -> str | None:
+    """Map a Lasoo/Marketplacer status string. Unknown/empty → None (keep local)."""
+    text = _status_text(raw_status)
+    if not text:
+        return None
+    text = text.lower().replace(" ", "_").replace("-", "_")
     mapping = {
         "new": OrderStatus.NEW,
         "paid": OrderStatus.PAID,
@@ -895,7 +920,7 @@ def _map_status(raw_status) -> str:
         "complete": OrderStatus.SHIPPING_COMPLETE,
         "completed": OrderStatus.SHIPPING_COMPLETE,
     }
-    return mapping.get(text, OrderStatus.NEW)
+    return mapping.get(text)
 
 
 _CANCEL_BLOCKED = {

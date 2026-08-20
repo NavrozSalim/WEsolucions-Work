@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 
 from ..errors import MarketplaceError
 from ..models import Environment, MarketplaceOrder, OrderStatus
+from ..order_upsert import persist_marketplace_order
 from .client import MyDealClient
 
 logger = logging.getLogger("listings.mydeal")
@@ -46,16 +47,18 @@ def _money_to_cents(value) -> int | None:
         return None
 
 
-def map_order_status(raw_status) -> str:
-    text = str(raw_status or "").strip().lower().replace(" ", "").replace("_", "")
+def map_order_status(raw_status) -> str | None:
+    """Map MyDeal OrderStatus → local status. Unknown/empty → None (keep local)."""
+    if raw_status is None or str(raw_status).strip() == "":
+        return None
+    text = str(raw_status).strip().lower().replace(" ", "").replace("_", "")
     mapping = {
         "readytofulfill": OrderStatus.PAID,
         "selleracknowledged": OrderStatus.PAID,
         "shipped": OrderStatus.SENT,
         "refunded": OrderStatus.REFUNDED,
-        "all": OrderStatus.NEW,
     }
-    return mapping.get(text, OrderStatus.NEW)
+    return mapping.get(text)
 
 
 def map_shipping_status(raw_status) -> str:
@@ -224,7 +227,7 @@ def upsert_order(user, store, raw: dict) -> MarketplaceOrder | None:
     lines = ui.get("lineItems") or []
     total_cents = ui.get("totalCents")
 
-    order, created = MarketplaceOrder.objects.update_or_create(
+    order, created = persist_marketplace_order(
         store=store,
         external_order_key=key,
         environment=environment,

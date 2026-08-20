@@ -12,6 +12,7 @@ from store_adapters.etsy_adapter import EtsyAPIError
 
 from ..errors import MarketplaceError
 from ..models import Environment, MarketplaceOrder, OrderStatus
+from ..order_upsert import persist_marketplace_order
 
 logger = logging.getLogger("listings.etsy")
 
@@ -173,7 +174,7 @@ def upsert_order(user, store, raw: dict) -> MarketplaceOrder | None:
         "line_items_json": lines,
         "raw_response_json": ui_raw,
     }
-    order, created = MarketplaceOrder.objects.update_or_create(
+    order, created = persist_marketplace_order(
         store=store,
         environment=environment,
         external_order_key=external_key,
