@@ -76,6 +76,7 @@ query ShopifyOrderMirror($id: ID!) {
     name
     tags
     customAttributes { key value }
+    shippingLines(first: 5) { nodes { title } }
   }
 }
 """
@@ -92,6 +93,51 @@ mutation OrderUpdate($input: OrderInput!) {
       field
       message
     }
+  }
+}
+"""
+
+TAGS_REMOVE_MUTATION = """
+mutation TagsRemove($id: ID!, $tags: [String!]!) {
+  tagsRemove(id: $id, tags: $tags) {
+    node { id }
+    userErrors { field message }
+  }
+}
+"""
+
+TAGS_ADD_MUTATION = """
+mutation TagsAdd($id: ID!, $tags: [String!]!) {
+  tagsAdd(id: $id, tags: $tags) {
+    node { id }
+    userErrors { field message }
+  }
+}
+"""
+
+ORDER_EDIT_BEGIN_MUTATION = """
+mutation OrderEditBegin($id: ID!) {
+  orderEditBegin(id: $id) {
+    calculatedOrder { id }
+    userErrors { field message }
+  }
+}
+"""
+
+ORDER_EDIT_ADD_SHIPPING_MUTATION = """
+mutation OrderEditAddShippingLine($id: ID!, $shippingLine: OrderEditAddShippingLineInput!) {
+  orderEditAddShippingLine(id: $id, shippingLine: $shippingLine) {
+    calculatedOrder { id }
+    userErrors { field message }
+  }
+}
+"""
+
+ORDER_EDIT_COMMIT_MUTATION = """
+mutation OrderEditCommit($id: ID!, $notifyCustomer: Boolean) {
+  orderEditCommit(id: $id, notifyCustomer: $notifyCustomer) {
+    order { id name }
+    userErrors { field message }
   }
 }
 """
@@ -428,15 +474,17 @@ def _update_existing(order, store, kind: str, existing: dict | None = None) -> N
     gid = _order_gid(order, existing)
     if not gid:
         raise ShopifyError("Shopify order id is missing.")
-    if existing is None or existing.get("tags") is None:
-        data = graphql(store, GET_ORDER_QUERY, {"id": gid})
-        existing = (data.get("order") or {}) if isinstance(data, dict) else {}
-        if existing.get("id") and not (getattr(order, "shopify_order_gid", None) or "").strip():
-            _save_shopify_ids(order, gid=existing.get("id") or gid, name=existing.get("name") or "")
+    data = graphql(store, GET_ORDER_QUERY, {"id": gid})
+    current = (data.get("order") or {}) if isinstance(data, dict) else {}
+    if not current:
+        current = existing or {}
+    if current.get("id") and not (getattr(order, "shopify_order_gid", None) or "").strip():
+        _save_shopify_ids(order, gid=current.get("id") or gid, name=current.get("name") or "")
     order_key = str(order.external_order_key or order.invoice_number or "").strip()
     meta = _order_metadata(order, kind, tag=tracking_tag(kind, order_key))
+    _replace_order_tags(store, gid, current.get("tags") or [], meta["tags"])
     attrs = {}
-    for row in existing.get("customAttributes") or []:
+    for row in current.get("customAttributes") or []:
         if isinstance(row, dict) and row.get("key"):
             attrs[str(row["key"])] = str(row.get("value") or "")
     for row in meta["customAttributes"]:
@@ -444,7 +492,6 @@ def _update_existing(order, store, kind: str, existing: dict | None = None) -> N
     update_input = {
         "id": gid,
         "note": meta["note"],
-        "tags": meta["tags"],
         "customAttributes": [{"key": k, "value": v} for k, v in attrs.items()],
     }
     customer = _customer(order)
@@ -471,6 +518,74 @@ def _update_existing(order, store, kind: str, existing: dict | None = None) -> N
     updated = result.get("order") or {}
     if updated.get("id"):
         _save_shopify_ids(order, gid=updated.get("id") or gid, name=updated.get("name") or "")
+    _ensure_shipping_line(order, store, gid, current)
+
+
+def _raise_user_errors(data: dict | None, key: str, *, label: str = "") -> dict:
+    result = (data or {}).get(key) or {}
+    errors = result.get("userErrors") or []
+    if errors:
+        first = errors[0] if isinstance(errors[0], dict) else {"message": str(errors[0])}
+        raise ShopifyError(first.get("message") or f"Shopify {label or key} failed.")
+    return result if isinstance(result, dict) else {}
+
+
+def _replace_order_tags(store, gid: str, existing_tags, wanted: list[str]) -> None:
+    wanted = [str(t).strip() for t in (wanted or []) if str(t or "").strip()]
+    existing_list = [str(t).strip() for t in (existing_tags or []) if str(t or "").strip()]
+    to_remove = [tag for tag in existing_list if tag not in wanted]
+    if to_remove:
+        data = graphql(store, TAGS_REMOVE_MUTATION, {"id": gid, "tags": to_remove})
+        _raise_user_errors(data, "tagsRemove")
+    remaining_lower = {tag.lower() for tag in existing_list if tag in wanted}
+    to_add = [tag for tag in wanted if tag.lower() not in remaining_lower]
+    if to_add:
+        data = graphql(store, TAGS_ADD_MUTATION, {"id": gid, "tags": to_add})
+        _raise_user_errors(data, "tagsAdd")
+
+
+def _ensure_shipping_line(order, store, gid: str, current: dict) -> None:
+    lines = current.get("shippingLines") or []
+    if isinstance(lines, dict):
+        lines = lines.get("nodes") or lines.get("edges") or []
+    titles = []
+    for row in lines:
+        if isinstance(row, dict):
+            titles.append(str(row.get("title") or "").strip())
+        elif isinstance(row, str):
+            titles.append(row.strip())
+    if any(titles):
+        return
+    currency = _currency(order, store)
+    try:
+        began = graphql(store, ORDER_EDIT_BEGIN_MUTATION, {"id": gid})
+        calc = (_raise_user_errors(began, "orderEditBegin").get("calculatedOrder") or {})
+        calc_id = str(calc.get("id") or "").strip()
+        if not calc_id:
+            return
+        added = graphql(store, ORDER_EDIT_ADD_SHIPPING_MUTATION, {
+            "id": calc_id,
+            "shippingLine": {
+                "title": _shipping_title(order),
+                "price": {
+                    "amount": _money(_shipping_cents(order), currency)["shopMoney"]["amount"],
+                    "currencyCode": currency[:3],
+                },
+            },
+        })
+        _raise_user_errors(added, "orderEditAddShippingLine")
+        committed = graphql(store, ORDER_EDIT_COMMIT_MUTATION, {
+            "id": calc_id,
+            "notifyCustomer": False,
+        })
+        _raise_user_errors(committed, "orderEditCommit")
+    except Exception as exc:
+        logger.info(
+            "Shopify shipping-line edit skipped store=%s order=%s err=%s",
+            getattr(store, "id", None),
+            getattr(order, "external_order_key", None),
+            exc,
+        )
 
 
 def _fulfill_existing(order, store, *, tracking_number: str, carrier: str = "",
@@ -560,6 +675,7 @@ def build_order_create_input(order, store, *, kind: str, tag: str) -> dict:
         line_items = [{
             "title": f"{marketplace_tag(kind).title()} order {order.external_order_key}",
             "quantity": 1,
+            "requiresShipping": True,
             "priceSet": _money(order.total_amount_cents or 0, currency),
         }]
     meta = _order_metadata(order, kind, tag=tag)
@@ -596,11 +712,10 @@ def build_order_create_input(order, store, *, kind: str, tag: str) -> dict:
         }],
     }
     ship_cents = _shipping_cents(order)
-    if ship_cents > 0:
-        order_input["shippingLines"] = [{
-            "title": _shipping_title(order),
-            "priceSet": _money(ship_cents, currency),
-        }]
+    order_input["shippingLines"] = [{
+        "title": _shipping_title(order),
+        "priceSet": _money(ship_cents, currency),
+    }]
     if _tax_inclusive(order, kind):
         gst_cents = _gst_cents_from_inclusive(total_cents)
         order_input["taxesIncluded"] = True
@@ -842,6 +957,7 @@ def _line_items(order, store, currency: str) -> list[dict]:
         row = {
             "title": (item.get("title") or item.get("name") or "Item")[:255],
             "quantity": qty,
+            "requiresShipping": True,
             "priceSet": _money(cents or 0, currency),
         }
         sku = str(item.get("sku") or item.get("marketplaceSku") or item.get("externalVariantKey") or "").strip()

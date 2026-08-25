@@ -132,6 +132,20 @@ class ShopifyOrderPushTests(TestCase):
                             }],
                         }
                     }
+                if "ShopifyOrderMirror" in query:
+                    return {
+                        "order": {
+                            "id": "gid://shopify/Order/999",
+                            "name": "#1042",
+                            "tags": ["sp-mydeal-343544536"],
+                            "customAttributes": [],
+                            "shippingLines": {"nodes": [{"title": "Standard Delivery"}]},
+                        }
+                    }
+                if "tagsRemove" in query:
+                    return {"tagsRemove": {"node": {"id": "gid://shopify/Order/999"}, "userErrors": []}}
+                if "tagsAdd" in query:
+                    return {"tagsAdd": {"node": {"id": "gid://shopify/Order/999"}, "userErrors": []}}
                 if "orderUpdate" in query:
                     return {
                         "orderUpdate": {
@@ -190,7 +204,9 @@ class ShopifyOrderPushTests(TestCase):
         self.assertEqual(built["order"]["taxLines"][0]["title"], "GST (AU)")
         self.assertEqual(built["order"]["taxLines"][0]["rate"], "0.1")
         self.assertEqual(built["order"]["taxLines"][0]["priceSet"]["shopMoney"]["amount"], "5.45")
-        self.assertNotIn("shippingLines", built["order"])
+        self.assertEqual(built["order"]["shippingLines"][0]["title"], "Standard Delivery")
+        self.assertEqual(built["order"]["shippingLines"][0]["priceSet"]["shopMoney"]["amount"], "0.00")
+        self.assertTrue(built["order"]["lineItems"][0]["requiresShipping"])
         attrs = {a["key"]: a["value"] for a in built["order"]["customAttributes"]}
         self.assertEqual(attrs["marketplace"], "mydeal")
         self.assertEqual(attrs["Woolworths MarketPlus order ID"], "343544536")
@@ -255,13 +271,46 @@ class ShopifyOrderPushTests(TestCase):
                         "order": {
                             "id": "gid://shopify/Order/777",
                             "name": "#1100",
-                            "tags": ["sellerpilot", "mydeal"],
+                            "tags": ["sellerpilot", "mydeal", "bigw", "sp-mydeal-343544536"],
                             "customAttributes": [{"key": "marketplace", "value": "mydeal"}],
+                            "shippingLines": {"nodes": []},
+                        }
+                    }
+                if "tagsRemove" in query:
+                    removed = list((variables or {}).get("tags") or [])
+                    self.assertEqual(
+                        sorted(t.lower() for t in removed),
+                        ["bigw", "mydeal", "sellerpilot", "sp-mydeal-343544536"],
+                    )
+                    return {"tagsRemove": {"node": {"id": "gid://shopify/Order/777"}, "userErrors": []}}
+                if "tagsAdd" in query:
+                    self.assertEqual((variables or {}).get("tags"), ["BigW"])
+                    return {"tagsAdd": {"node": {"id": "gid://shopify/Order/777"}, "userErrors": []}}
+                if "orderEditBegin" in query:
+                    return {
+                        "orderEditBegin": {
+                            "calculatedOrder": {"id": "gid://shopify/CalculatedOrder/1"},
+                            "userErrors": [],
+                        }
+                    }
+                if "orderEditAddShippingLine" in query:
+                    shipping = (variables or {}).get("shippingLine") or {}
+                    self.assertEqual(shipping.get("title"), "Standard Delivery")
+                    return {
+                        "orderEditAddShippingLine": {
+                            "calculatedOrder": {"id": "gid://shopify/CalculatedOrder/1"},
+                            "userErrors": [],
+                        }
+                    }
+                if "orderEditCommit" in query:
+                    return {
+                        "orderEditCommit": {
+                            "order": {"id": "gid://shopify/Order/777", "name": "#1100"},
+                            "userErrors": [],
                         }
                     }
                 if "orderUpdate" in query:
-                    tags = ((variables or {}).get("input") or {}).get("tags") or []
-                    self.assertEqual(tags, ["BigW"])
+                    self.assertNotIn("tags", (variables or {}).get("input") or {})
                     self.assertEqual(((variables or {}).get("input") or {}).get("phone"), "+61412345678")
                     attrs = {
                         a["key"]: a["value"]
@@ -283,6 +332,9 @@ class ShopifyOrderPushTests(TestCase):
             gql.side_effect = _side_effect
             push_new_order_to_shopify(order, self.store, created=False)
         self.assertTrue(any("orderUpdate" in str(c.args[1]) for c in gql.call_args_list))
+        self.assertTrue(any("tagsRemove" in str(c.args[1]) for c in gql.call_args_list))
+        self.assertTrue(any("tagsAdd" in str(c.args[1]) for c in gql.call_args_list))
+        self.assertTrue(any("orderEditAddShippingLine" in str(c.args[1]) for c in gql.call_args_list))
 
     def test_push_fulfillment_creates_shopify_fulfillment(self):
         order = self._order(
