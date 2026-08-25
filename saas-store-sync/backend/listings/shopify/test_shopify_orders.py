@@ -51,6 +51,7 @@ class ShopifyClientHelpersTests(TestCase):
         self.assertEqual(normalize_shopify_phone("0", "AU"), "")
         self.assertEqual(normalize_shopify_phone("n/a", "AU"), "")
         self.assertEqual(normalize_shopify_phone("202-555-0123", "US"), "+12025550123")
+        self.assertEqual(normalize_shopify_phone("346-615-8598", "AU"), "+13466158598")
 
 
 class ShopifyOrderPushTests(TestCase):
@@ -177,8 +178,7 @@ class ShopifyOrderPushTests(TestCase):
                 order, self.store, kind="mydeal", tag="sp-mydeal-343544536",
             )
         self.assertEqual(built["order"]["financialStatus"], "PAID")
-        self.assertIn("mydeal", built["order"]["tags"])
-        self.assertIn("sp-mydeal-343544536", built["order"]["tags"])
+        self.assertEqual(built["order"]["tags"], ["mydeal"])
         self.assertEqual(built["order"]["lineItems"][0]["sku"], "SKU-1")
         self.assertEqual(built["order"]["lineItems"][0]["quantity"], 2)
         self.assertEqual(built["order"]["phone"], "+61412345678")
@@ -210,8 +210,7 @@ class ShopifyOrderPushTests(TestCase):
         self.assertEqual(attrs["marketplace"], "mydeal")
         self.assertEqual(attrs["order_source"], "BigW")
         self.assertEqual(attrs["Woolworths MarketPlus order ID"], "343544536")
-        self.assertIn("bigw", built["order"]["tags"])
-        self.assertIn("mydeal", built["order"]["tags"])
+        self.assertEqual(built["order"]["tags"], ["BigW"])
         self.assertEqual(built["order"]["note"], "Woolworths MarketPlus order number: 343544536")
 
     def test_build_payload_shipping_line_and_gst(self):
@@ -262,7 +261,8 @@ class ShopifyOrderPushTests(TestCase):
                     }
                 if "orderUpdate" in query:
                     tags = ((variables or {}).get("input") or {}).get("tags") or []
-                    self.assertIn("bigw", [str(t).lower() for t in tags])
+                    self.assertEqual(tags, ["BigW"])
+                    self.assertEqual(((variables or {}).get("input") or {}).get("phone"), "+61412345678")
                     attrs = {
                         a["key"]: a["value"]
                         for a in ((variables or {}).get("input") or {}).get("customAttributes") or []
@@ -353,6 +353,29 @@ class ShopifyOrderPushTests(TestCase):
             )
         self.assertNotIn("phone", built["order"])
         self.assertNotIn("phone", built["order"].get("shippingAddress") or {})
+
+    def test_build_payload_keeps_us_phone_on_au_address(self):
+        order = self._order(customer_info_json={
+            "firstName": "Madilyn",
+            "lastName": "Romaguera",
+            "email": "dispatch@example.com",
+            "phone": "346-615-8598",
+            "shippingAddress": {
+                "line1": "938 Nelle Well",
+                "line2": "692 Goldner Junction",
+                "city": "Melbourne",
+                "state": "VIC",
+                "postcode": "3000",
+                "country": "AU",
+                "phone": "346-615-8598",
+            },
+        })
+        with patch("listings.shopify.orders.graphql", return_value={"productVariants": {"nodes": []}}):
+            built = build_order_create_input(
+                order, self.store, kind="mydeal", tag="sp-mydeal-136554825",
+            )
+        self.assertEqual(built["order"]["phone"], "+13466158598")
+        self.assertEqual(built["order"]["shippingAddress"]["phone"], "+13466158598")
 
     def test_retry_after_sync_error(self):
         order = self._order(shopify_sync_error="Order Phone is invalid")

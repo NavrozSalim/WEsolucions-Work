@@ -209,16 +209,24 @@ def normalize_shopify_phone(raw, country_code: str = "") -> str:
         country = ""
     dial = _COUNTRY_DIAL.get(country, "")
 
+    nanp = len(digits) == 10 and digits[0] not in "01"
     if compact.startswith("+"):
         body = digits.lstrip("0")
+    elif country == "AU" and digits.startswith("0") and len(digits) == 10:
+        body = "61" + digits.lstrip("0")
+    elif country == "AU" and len(digits) == 9:
+        body = "61" + digits
+    elif country == "AU" and nanp:
+        # MyDeal/WMP sandbox often sends a US NANP number on an AU address.
+        body = "1" + digits
     elif dial and digits.startswith("0"):
         body = dial + digits.lstrip("0")
     elif dial and digits.startswith(dial):
         body = digits
-    elif country in ("US", "CA") and len(digits) == 10:
+    elif country in ("US", "CA") and nanp:
         body = "1" + digits
-    elif country == "AU" and len(digits) == 9:
-        body = "61" + digits
+    elif nanp:
+        body = "1" + digits
     elif dial:
         body = dial + digits.lstrip("0")
     else:
@@ -394,7 +402,7 @@ def _push(order, store, kind: str) -> None:
     if not order_key:
         raise ShopifyError("Marketplace order is missing an order key.")
     tag = tracking_tag(kind, order_key)
-    existing = _find_existing(store, tag)
+    existing = _find_existing(store, order_key=order_key, tag=tag)
     if existing:
         _save_shopify_ids(order, gid=existing.get("id") or "", name=existing.get("name") or "")
         _update_existing(order, store, kind, existing=existing)
@@ -427,30 +435,33 @@ def _update_existing(order, store, kind: str, existing: dict | None = None) -> N
             _save_shopify_ids(order, gid=existing.get("id") or gid, name=existing.get("name") or "")
     order_key = str(order.external_order_key or order.invoice_number or "").strip()
     meta = _order_metadata(order, kind, tag=tracking_tag(kind, order_key))
-    seen = set()
-    merged_tags = []
-    for tag in list(existing.get("tags") or []) + list(meta["tags"]):
-        text = str(tag or "").strip()
-        if not text:
-            continue
-        key = text.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        merged_tags.append(text)
     attrs = {}
     for row in existing.get("customAttributes") or []:
         if isinstance(row, dict) and row.get("key"):
             attrs[str(row["key"])] = str(row.get("value") or "")
     for row in meta["customAttributes"]:
         attrs[row["key"]] = row["value"]
+    update_input = {
+        "id": gid,
+        "note": meta["note"],
+        "tags": meta["tags"],
+        "customAttributes": [{"key": k, "value": v} for k, v in attrs.items()],
+    }
+    customer = _customer(order)
+    country_hint = _country_code(getattr(store, "region", "") or "")
+    address = _shipping_address(customer, country_hint=country_hint)
+    phone = normalize_shopify_phone(
+        customer.get("phone") or "",
+        (address or {}).get("countryCode") or country_hint,
+    )
+    if not phone and address:
+        phone = address.get("phone") or ""
+    if phone:
+        update_input["phone"] = phone
+    if address:
+        update_input["shippingAddress"] = address
     data = graphql(store, ORDER_UPDATE_MUTATION, {
-        "input": {
-            "id": gid,
-            "note": meta["note"],
-            "tags": merged_tags,
-            "customAttributes": [{"key": k, "value": v} for k, v in attrs.items()],
-        }
+        "input": update_input,
     })
     result = (data.get("orderUpdate") or {}) if isinstance(data, dict) else {}
     errors = result.get("userErrors") or []
@@ -514,15 +525,29 @@ def _fulfill_existing(order, store, *, tracking_number: str, carrier: str = "",
         raise ShopifyError(message)
 
 
-def _find_existing(store, tag: str) -> dict | None:
-    data = graphql(store, FIND_ORDER_QUERY, {"query": f"tag:{tag}"})
+def _find_existing(store, tag: str = "", *, order_key: str = "") -> dict | None:
+    parts = []
+    key = (order_key or "").strip()
+    if key:
+        parts.append(f"source_identifier:{key}")
+    if tag:
+        parts.append(f"tag:{tag}")
+    if not parts:
+        return None
+    data = graphql(store, FIND_ORDER_QUERY, {"query": " OR ".join(parts)})
     nodes = ((data.get("orders") or {}).get("nodes")) or []
+    tag_l = (tag or "").lower()
+    if tag_l:
+        for node in nodes:
+            if not isinstance(node, dict) or not node.get("id"):
+                continue
+            tags = [str(t).lower() for t in (node.get("tags") or [])]
+            if tag_l in tags:
+                return node
     for node in nodes:
         if isinstance(node, dict) and node.get("id"):
-            tags = [str(t).lower() for t in (node.get("tags") or [])]
-            if tag.lower() in tags:
-                return node
-    return nodes[0] if nodes else None
+            return node
+    return None
 
 
 def build_order_create_input(order, store, *, kind: str, tag: str) -> dict:
@@ -611,15 +636,21 @@ def _channel_label(kind: str, order_source: str = "") -> str:
     return marketplace_tag(kind).title()
 
 
+def _display_tags(kind: str, order_source: str = "") -> list[str]:
+    """Single Shopify tag: marketplace OrderSource (BigW) or the marketplace code."""
+    source = (order_source or "").strip()
+    if source:
+        return [source[:40]]
+    fallback = marketplace_tag(kind)
+    return [fallback] if fallback else []
+
+
 def _order_metadata(order, kind: str, *, tag: str) -> dict:
     order_source = _order_source(order)
     label = _channel_label(kind, order_source)
     ref = _order_ref(order)
     note = f"{label} order number: {ref}"
-    tags = ["sellerpilot", marketplace_tag(kind), tag]
-    src_tag = re.sub(r"[^a-z0-9]+", "-", order_source.lower()).strip("-") if order_source else ""
-    if src_tag and src_tag != marketplace_tag(kind) and src_tag not in tags:
-        tags.append(src_tag)
+    tags = _display_tags(kind, order_source)
     attrs = [
         {"key": f"{label} order ID", "value": ref},
         {"key": "marketplace", "value": marketplace_tag(kind)},
