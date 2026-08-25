@@ -65,14 +65,43 @@ function money(cents, currency = 'AUD') {
     }
 }
 
-function formatDate(value) {
+const MYDEAL_TZ = 'Australia/Sydney';
+
+const MYDEAL_CARRIERS = [
+    { value: 'Australia Post', label: 'Australia Post', requiresTracking: true },
+    { value: 'Couriers Please', label: 'Couriers Please', requiresTracking: true },
+    { value: 'StarTrack', label: 'StarTrack', requiresTracking: true },
+    { value: 'Toll', label: 'Toll', requiresTracking: true },
+    { value: 'TNT', label: 'TNT', requiresTracking: true },
+    { value: 'Allied Express', label: 'Allied Express', requiresTracking: true },
+    { value: 'Fastway', label: 'Fastway', requiresTracking: true },
+    { value: 'Hunter Express', label: 'Hunter Express', requiresTracking: true },
+    { value: 'Direct Couriers', label: 'Direct Couriers', requiresTracking: true },
+    { value: 'Sendle', label: 'Sendle', requiresTracking: true },
+    { value: 'Aramex', label: 'Aramex', requiresTracking: true },
+    { value: 'DHL', label: 'DHL', requiresTracking: true },
+    { value: 'Border Express', label: 'Border Express', requiresTracking: true },
+    { value: 'Click and Collect', label: 'Click and Collect', requiresTracking: false },
+    { value: 'Other', label: 'Other', requiresTracking: true, customName: true },
+];
+
+function mydealCarrier(value) {
+    return MYDEAL_CARRIERS.find((c) => c.value === value) || null;
+}
+
+function formatDate(value, timeZone) {
     if (!value) return '—';
     const d = new Date(value);
     if (Number.isNaN(d.getTime())) return String(value);
-    return d.toLocaleString(undefined, {
+    const opts = {
         year: 'numeric', month: 'short', day: 'numeric',
         hour: '2-digit', minute: '2-digit',
-    });
+    };
+    if (timeZone) {
+        opts.timeZone = timeZone;
+        return d.toLocaleString('en-AU', opts);
+    }
+    return d.toLocaleString(undefined, opts);
 }
 
 function orderDetails(order) {
@@ -161,13 +190,19 @@ function formatAddress(addr) {
     return lines.length ? lines : null;
 }
 
-function ShippingModal({ open, onClose, onSubmit, order, loading }) {
-    const [form, setForm] = useState({ tracking_number: '', carrier: '', tracking_url: '', shipped_date: '' });
+function ShippingModal({ open, onClose, onSubmit, order, loading, marketplaceCode = '' }) {
+    const [form, setForm] = useState({
+        tracking_number: '', carrier: '', carrier_other: '', tracking_url: '', shipped_date: '',
+    });
     const [error, setError] = useState('');
+    const isMydeal = (marketplaceCode || '').toLowerCase() === 'mydeal';
+    const selectedCarrier = isMydeal ? mydealCarrier(form.carrier) : null;
+    const needsTracking = isMydeal ? selectedCarrier?.requiresTracking !== false : true;
+    const needsCustomName = Boolean(selectedCarrier?.customName);
 
     useEffect(() => {
         if (open) {
-            setForm({ tracking_number: '', carrier: '', tracking_url: '', shipped_date: '' });
+            setForm({ tracking_number: '', carrier: '', carrier_other: '', tracking_url: '', shipped_date: '' });
             setError('');
         }
     }, [open]);
@@ -176,6 +211,31 @@ function ShippingModal({ open, onClose, onSubmit, order, loading }) {
 
     const handleSubmit = (e) => {
         e.preventDefault();
+        if (isMydeal) {
+            if (!form.carrier) {
+                setError('Select a carrier.');
+                return;
+            }
+            let carrier = form.carrier;
+            if (needsCustomName) {
+                carrier = form.carrier_other.trim();
+                if (!carrier) {
+                    setError('Enter the carrier name.');
+                    return;
+                }
+            }
+            if (needsTracking && !form.tracking_number.trim()) {
+                setError('Tracking number is required for this carrier.');
+                return;
+            }
+            onSubmit({
+                tracking_number: form.tracking_number.trim(),
+                carrier,
+                tracking_url: '',
+                shipped_date: form.shipped_date,
+            });
+            return;
+        }
         if (!form.tracking_number.trim() || !form.carrier.trim()) {
             setError('Tracking number and carrier are required.');
             return;
@@ -204,30 +264,79 @@ function ShippingModal({ open, onClose, onSubmit, order, loading }) {
                             {error}
                         </div>
                     )}
-                    <Input
-                        label="Tracking number"
-                        value={form.tracking_number}
-                        onChange={(e) => setForm((f) => ({ ...f, tracking_number: e.target.value }))}
-                        required
-                    />
-                    <Input
-                        label="Carrier"
-                        placeholder="e.g. Australia Post"
-                        value={form.carrier}
-                        onChange={(e) => setForm((f) => ({ ...f, carrier: e.target.value }))}
-                        required
-                    />
-                    <Input
-                        label="Tracking URL (optional)"
-                        value={form.tracking_url}
-                        onChange={(e) => setForm((f) => ({ ...f, tracking_url: e.target.value }))}
-                    />
-                    <Input
-                        label="Shipped date (optional)"
-                        type="date"
-                        value={form.shipped_date}
-                        onChange={(e) => setForm((f) => ({ ...f, shipped_date: e.target.value }))}
-                    />
+                    {isMydeal ? (
+                        <>
+                            <Select
+                                label="Carrier"
+                                required
+                                value={form.carrier}
+                                onChange={(e) => setForm((f) => ({ ...f, carrier: e.target.value, carrier_other: '' }))}
+                                options={[
+                                    { value: '', label: 'Select carrier' },
+                                    ...MYDEAL_CARRIERS.map((c) => ({ value: c.value, label: c.label })),
+                                ]}
+                            />
+                            {needsCustomName && (
+                                <Input
+                                    label="Carrier name"
+                                    placeholder="Carrier used for this shipment"
+                                    value={form.carrier_other}
+                                    onChange={(e) => setForm((f) => ({ ...f, carrier_other: e.target.value }))}
+                                    required
+                                />
+                            )}
+                            {form.carrier && needsTracking && (
+                                <Input
+                                    label="Tracking number"
+                                    value={form.tracking_number}
+                                    onChange={(e) => setForm((f) => ({ ...f, tracking_number: e.target.value }))}
+                                    required
+                                />
+                            )}
+                            {form.carrier && !needsTracking && (
+                                <Input
+                                    label="Tracking number (optional)"
+                                    value={form.tracking_number}
+                                    onChange={(e) => setForm((f) => ({ ...f, tracking_number: e.target.value }))}
+                                />
+                            )}
+                            {form.carrier && (
+                                <Input
+                                    label="Shipped date (optional)"
+                                    type="date"
+                                    value={form.shipped_date}
+                                    onChange={(e) => setForm((f) => ({ ...f, shipped_date: e.target.value }))}
+                                />
+                            )}
+                        </>
+                    ) : (
+                        <>
+                            <Input
+                                label="Tracking number"
+                                value={form.tracking_number}
+                                onChange={(e) => setForm((f) => ({ ...f, tracking_number: e.target.value }))}
+                                required
+                            />
+                            <Input
+                                label="Carrier"
+                                placeholder="e.g. Australia Post"
+                                value={form.carrier}
+                                onChange={(e) => setForm((f) => ({ ...f, carrier: e.target.value }))}
+                                required
+                            />
+                            <Input
+                                label="Tracking URL (optional)"
+                                value={form.tracking_url}
+                                onChange={(e) => setForm((f) => ({ ...f, tracking_url: e.target.value }))}
+                            />
+                            <Input
+                                label="Shipped date (optional)"
+                                type="date"
+                                value={form.shipped_date}
+                                onChange={(e) => setForm((f) => ({ ...f, shipped_date: e.target.value }))}
+                            />
+                        </>
+                    )}
                     <div className="flex justify-end gap-2 pt-2">
                         <Button variant="secondary" type="button" onClick={onClose} disabled={loading}>
                             Cancel
@@ -383,7 +492,7 @@ function InfoRow({ label, children }) {
     );
 }
 
-function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice' }) {
+function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone }) {
     const d = orderDetails(order);
     const customer = d.customer || {};
     const shippingAddr = formatAddress(d.shippingAddress);
@@ -438,9 +547,9 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice' }) {
                         <InfoRow label="Order key">
                             <span className="font-mono text-xs">{order.external_order_key || '—'}</span>
                         </InfoRow>
-                        <InfoRow label="Ordered">{formatDate(dates.orderedAt || order.created_at)}</InfoRow>
+                        <InfoRow label="Ordered">{formatDate(dates.orderedAt || order.created_at, dateTimeZone)}</InfoRow>
                         {dates.paidAt && (
-                            <InfoRow label="Paid">{formatDate(dates.paidAt)}</InfoRow>
+                            <InfoRow label="Paid">{formatDate(dates.paidAt, dateTimeZone)}</InfoRow>
                         )}
                         {d.marketplaceStatus && (
                             <InfoRow label="Marketplace status">
@@ -588,7 +697,7 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice' }) {
                                 </InfoRow>
                             )}
                             {marketplaceShip.dispatchedAt && (
-                                <InfoRow label="Dispatched">{formatDate(marketplaceShip.dispatchedAt)}</InfoRow>
+                                <InfoRow label="Dispatched">{formatDate(marketplaceShip.dispatchedAt, dateTimeZone)}</InfoRow>
                             )}
                         </dl>
                     ) : null}
@@ -607,7 +716,7 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice' }) {
                                             </a>
                                         </>
                                     )}
-                                    {sh.created_at && ` · ${formatDate(sh.created_at)}`}
+                                    {sh.created_at && ` · ${formatDate(sh.created_at, dateTimeZone)}`}
                                 </li>
                             ))}
                         </ul>
@@ -833,7 +942,9 @@ export default function Orders() {
     );
 
     const isReverb = (selectedStoreData?.marketplace_code || '').toLowerCase() === 'reverb';
+    const isMydeal = (selectedStoreData?.marketplace_code || '').toLowerCase() === 'mydeal';
     const orderIdLabel = isReverb ? 'Order ID' : 'Invoice';
+    const orderDateTz = isMydeal ? MYDEAL_TZ : undefined;
 
     const filteredOrders = useMemo(() => {
         if (!statusFilter || statusFilter === 'all') return orders;
@@ -1021,7 +1132,7 @@ export default function Orders() {
                                                         {customerName(o)}
                                                     </p>
                                                     <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                                                        {itemsSummary(o)} · {formatDate(orderedAt)}
+                                                        {itemsSummary(o)} · {formatDate(orderedAt, orderDateTz)}
                                                     </p>
                                                 </div>
                                                 <div className="shrink-0 text-right">
@@ -1082,7 +1193,7 @@ export default function Orders() {
                                             </div>
                                             {expandedId === o.id && (
                                                 <div className="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} onOpenTicket={openTicket} />
+                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} />
                                                 </div>
                                             )}
                                         </li>
@@ -1169,7 +1280,7 @@ export default function Orders() {
                                                             )}
                                                         </td>
                                                         <td className="whitespace-nowrap px-4 py-2.5 text-xs text-slate-500 dark:text-slate-400">
-                                                            {formatDate(orderedAt)}
+                                                            {formatDate(orderedAt, orderDateTz)}
                                                         </td>
                                                         <td className="px-4 py-2.5">
                                                             <div className="flex items-center justify-end gap-1">
@@ -1214,7 +1325,7 @@ export default function Orders() {
                                                     {expandedId === o.id && (
                                                         <tr className="border-t border-slate-100 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/40">
                                                             <td colSpan={9} className="px-4 py-4">
-                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} onOpenTicket={openTicket} />
+                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} />
                                                             </td>
                                                         </tr>
                                                     )}
@@ -1232,6 +1343,7 @@ export default function Orders() {
             <ShippingModal
                 open={!!shippingOrder}
                 order={shippingOrder}
+                marketplaceCode={selectedStoreData?.marketplace_code || ''}
                 onClose={() => setShippingOrder(null)}
                 onSubmit={handleSubmitShipping}
                 loading={shippingLoading}
