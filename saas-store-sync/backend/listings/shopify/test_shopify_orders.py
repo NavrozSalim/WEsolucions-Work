@@ -169,6 +169,26 @@ class ShopifyOrderPushTests(TestCase):
         self.assertEqual(built["order"]["lineItems"][0]["quantity"], 2)
         self.assertEqual(built["order"]["phone"], "+61412345678")
         self.assertEqual(built["order"]["shippingAddress"]["phone"], "+61412345678")
+        attrs = {a["key"]: a["value"] for a in built["order"]["customAttributes"]}
+        self.assertEqual(attrs["marketplace"], "mydeal")
+        self.assertNotIn("order_source", attrs)
+
+    def test_build_payload_includes_bigw_order_source(self):
+        order = self._order(raw_response_json={
+            "currency": "AUD",
+            "orderSource": "BigW",
+            "_mydeal": {"OrderSource": "BigW", "OrderId": 343544536},
+        })
+        with patch("listings.shopify.orders.graphql", return_value={"productVariants": {"nodes": []}}):
+            built = build_order_create_input(
+                order, self.store, kind="mydeal", tag="sp-mydeal-343544536",
+            )
+        attrs = {a["key"]: a["value"] for a in built["order"]["customAttributes"]}
+        self.assertEqual(attrs["marketplace"], "mydeal")
+        self.assertEqual(attrs["order_source"], "BigW")
+        self.assertIn("bigw", built["order"]["tags"])
+        self.assertIn("mydeal", built["order"]["tags"])
+        self.assertIn("Mydeal / BigW order 343544536", built["order"]["note"])
 
     def test_build_payload_omits_invalid_phone(self):
         order = self._order(customer_info_json={

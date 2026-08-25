@@ -279,11 +279,15 @@ def build_order_create_input(order, store, *, kind: str, tag: str) -> dict:
             "quantity": 1,
             "priceSet": _money(order.total_amount_cents or 0, currency),
         }]
+    order_source = _order_source(order)
     note = (
-        f"{marketplace_tag(kind).title()} order {order.invoice_number or order.external_order_key}. "
+        f"{_channel_note_prefix(kind, order_source)} {order.invoice_number or order.external_order_key}. "
         "Created by SellerPilot. Do not duplicate if Omnivore already imported this order."
     )
     tags = ["sellerpilot", marketplace_tag(kind), tag]
+    src_tag = re.sub(r"[^a-z0-9]+", "-", order_source.lower()).strip("-") if order_source else ""
+    if src_tag and src_tag != marketplace_tag(kind) and src_tag not in tags:
+        tags.append(src_tag)
     email = (customer.get("email") or "").strip()
     country = (address or {}).get("countryCode") or country_hint
     phone = normalize_shopify_phone(customer.get("phone") or "", country)
@@ -311,6 +315,7 @@ def build_order_create_input(order, store, *, kind: str, tag: str) -> dict:
             {"key": "marketplace", "value": marketplace_tag(kind)},
             {"key": "marketplace_order_key", "value": str(order.external_order_key or "")},
             {"key": "marketplace_invoice", "value": str(order.invoice_number or "")},
+            *([{"key": "order_source", "value": order_source}] if order_source else []),
         ],
         "lineItems": line_items,
         "transactions": [{
@@ -330,6 +335,27 @@ def build_order_create_input(order, store, *, kind: str, tag: str) -> dict:
     if loc:
         options["inventoryBehaviour"] = "DECREMENT_IGNORING_POLICY"
     return {"order": order_input, "options": options}
+
+
+def _order_source(order) -> str:
+    """Storefront channel from the marketplace payload (e.g. MyDeal OrderSource=BigW)."""
+    raw = order.raw_response_json if isinstance(order.raw_response_json, dict) else {}
+    source = raw.get("orderSource") or raw.get("OrderSource") or ""
+    nested = raw.get("_mydeal") if isinstance(raw.get("_mydeal"), dict) else {}
+    if not source:
+        source = nested.get("OrderSource") or nested.get("orderSource") or ""
+    text = str(source or "").strip()
+    if not text or text == "-":
+        return ""
+    return text[:255]
+
+
+def _channel_note_prefix(kind: str, order_source: str) -> str:
+    mp = marketplace_tag(kind).title()
+    src = (order_source or "").strip()
+    if src and src.lower() != marketplace_tag(kind):
+        return f"{mp} / {src} order"
+    return f"{mp} order"
 
 
 def _customer(order) -> dict:
