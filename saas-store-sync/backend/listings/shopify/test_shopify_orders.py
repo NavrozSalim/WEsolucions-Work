@@ -183,8 +183,17 @@ class ShopifyOrderPushTests(TestCase):
         self.assertEqual(built["order"]["lineItems"][0]["quantity"], 2)
         self.assertEqual(built["order"]["phone"], "+61412345678")
         self.assertEqual(built["order"]["shippingAddress"]["phone"], "+61412345678")
+        self.assertEqual(built["order"]["note"], "Woolworths MarketPlus order number: 343544536")
+        self.assertEqual(built["order"]["sourceName"], "sellerpilot")
+        self.assertEqual(built["order"]["sourceIdentifier"], "343544536")
+        self.assertTrue(built["order"]["taxesIncluded"])
+        self.assertEqual(built["order"]["taxLines"][0]["title"], "GST (AU)")
+        self.assertEqual(built["order"]["taxLines"][0]["rate"], "0.1")
+        self.assertEqual(built["order"]["taxLines"][0]["priceSet"]["shopMoney"]["amount"], "5.45")
+        self.assertNotIn("shippingLines", built["order"])
         attrs = {a["key"]: a["value"] for a in built["order"]["customAttributes"]}
         self.assertEqual(attrs["marketplace"], "mydeal")
+        self.assertEqual(attrs["Woolworths MarketPlus order ID"], "343544536")
         self.assertNotIn("order_source", attrs)
 
     def test_build_payload_includes_bigw_order_source(self):
@@ -200,9 +209,39 @@ class ShopifyOrderPushTests(TestCase):
         attrs = {a["key"]: a["value"] for a in built["order"]["customAttributes"]}
         self.assertEqual(attrs["marketplace"], "mydeal")
         self.assertEqual(attrs["order_source"], "BigW")
+        self.assertEqual(attrs["Woolworths MarketPlus order ID"], "343544536")
         self.assertIn("bigw", built["order"]["tags"])
         self.assertIn("mydeal", built["order"]["tags"])
-        self.assertIn("Mydeal / BigW order 343544536", built["order"]["note"])
+        self.assertEqual(built["order"]["note"], "Woolworths MarketPlus order number: 343544536")
+
+    def test_build_payload_shipping_line_and_gst(self):
+        order = self._order(
+            total_amount_cents=8727,
+            raw_response_json={
+                "currency": "AUD",
+                "shippingCents": 2727,
+                "orderSource": "BigW",
+                "_mydeal": {
+                    "OrderSource": "BigW",
+                    "TaxInclusive": True,
+                    "TotalShippingPrice": 27.27,
+                    "ShippingMethod": "Standard Delivery - 5-7 Business Days",
+                },
+            },
+        )
+        with patch("listings.shopify.orders.graphql", return_value={"productVariants": {"nodes": []}}):
+            built = build_order_create_input(
+                order, self.store, kind="mydeal", tag="sp-mydeal-343544536",
+            )
+        shipping = built["order"]["shippingLines"][0]
+        self.assertEqual(shipping["title"], "Standard Delivery - 5-7 Business Days")
+        self.assertEqual(shipping["priceSet"]["shopMoney"]["amount"], "27.27")
+        self.assertTrue(built["order"]["taxesIncluded"])
+        tax = built["order"]["taxLines"][0]
+        self.assertEqual(tax["title"], "GST (AU)")
+        self.assertEqual(tax["rate"], "0.1")
+        self.assertEqual(tax["priceSet"]["shopMoney"]["amount"], "7.93")
+        self.assertEqual(built["order"]["note"], "Woolworths MarketPlus order number: 343544536")
 
     def test_fetch_updates_existing_shopify_order_tags(self):
         order = self._order(
@@ -229,6 +268,11 @@ class ShopifyOrderPushTests(TestCase):
                         for a in ((variables or {}).get("input") or {}).get("customAttributes") or []
                     }
                     self.assertEqual(attrs.get("order_source"), "BigW")
+                    self.assertEqual(attrs.get("Woolworths MarketPlus order ID"), "343544536")
+                    self.assertEqual(
+                        ((variables or {}).get("input") or {}).get("note"),
+                        "Woolworths MarketPlus order number: 343544536",
+                    )
                     return {
                         "orderUpdate": {
                             "order": {"id": "gid://shopify/Order/777", "name": "#1100"},
@@ -267,7 +311,9 @@ class ShopifyOrderPushTests(TestCase):
                     }
                 if "fulfillmentCreate" in query:
                     fulfillment = (variables or {}).get("fulfillment") or {}
-                    self.assertEqual(fulfillment.get("trackingInfo", {}).get("number"), "ABC123")
+                    tracking = fulfillment.get("trackingInfo") or {}
+                    self.assertEqual(tracking.get("number"), "ABC123")
+                    self.assertEqual(tracking.get("company"), "Australia Post")
                     return {"fulfillmentCreate": {"fulfillment": {"id": "gid://shopify/Fulfillment/1"}, "userErrors": []}}
                 return {}
             gql.side_effect = _side_effect

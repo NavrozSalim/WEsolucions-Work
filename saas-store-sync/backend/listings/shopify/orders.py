@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.utils import timezone
 
@@ -569,6 +570,21 @@ def build_order_create_input(order, store, *, kind: str, tag: str) -> dict:
             "amountSet": _money(total_cents, currency),
         }],
     }
+    ship_cents = _shipping_cents(order)
+    if ship_cents > 0:
+        order_input["shippingLines"] = [{
+            "title": _shipping_title(order),
+            "priceSet": _money(ship_cents, currency),
+        }]
+    if _tax_inclusive(order, kind):
+        gst_cents = _gst_cents_from_inclusive(total_cents)
+        order_input["taxesIncluded"] = True
+        if gst_cents > 0:
+            order_input["taxLines"] = [{
+                "title": "GST (AU)",
+                "rate": "0.1",
+                "priceSet": _money(gst_cents, currency),
+            }]
     if address:
         order_input["shippingAddress"] = address
         order_input["billingAddress"] = address
@@ -581,17 +597,31 @@ def build_order_create_input(order, store, *, kind: str, tag: str) -> dict:
     return {"order": order_input, "options": options}
 
 
+def _order_ref(order) -> str:
+    return str(order.invoice_number or order.external_order_key or "").strip()
+
+
+def _channel_label(kind: str, order_source: str = "") -> str:
+    """Omnivore-style channel name shown in Shopify notes and attributes."""
+    if kind == "mydeal":
+        return "Woolworths MarketPlus"
+    src = (order_source or "").strip()
+    if src and src.lower() != marketplace_tag(kind):
+        return src
+    return marketplace_tag(kind).title()
+
+
 def _order_metadata(order, kind: str, *, tag: str) -> dict:
     order_source = _order_source(order)
-    note = (
-        f"{_channel_note_prefix(kind, order_source)} {order.invoice_number or order.external_order_key}. "
-        "Created by SellerPilot. Do not duplicate if Omnivore already imported this order."
-    )
+    label = _channel_label(kind, order_source)
+    ref = _order_ref(order)
+    note = f"{label} order number: {ref}"
     tags = ["sellerpilot", marketplace_tag(kind), tag]
     src_tag = re.sub(r"[^a-z0-9]+", "-", order_source.lower()).strip("-") if order_source else ""
     if src_tag and src_tag != marketplace_tag(kind) and src_tag not in tags:
         tags.append(src_tag)
     attrs = [
+        {"key": f"{label} order ID", "value": ref},
         {"key": "marketplace", "value": marketplace_tag(kind)},
         {"key": "marketplace_order_key", "value": str(order.external_order_key or "")},
         {"key": "marketplace_invoice", "value": str(order.invoice_number or "")},
@@ -614,12 +644,77 @@ def _order_source(order) -> str:
     return text[:255]
 
 
-def _channel_note_prefix(kind: str, order_source: str) -> str:
-    mp = marketplace_tag(kind).title()
-    src = (order_source or "").strip()
-    if src and src.lower() != marketplace_tag(kind):
-        return f"{mp} / {src} order"
-    return f"{mp} order"
+def _raw_payload(order) -> dict:
+    raw = order.raw_response_json if isinstance(order.raw_response_json, dict) else {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _mydeal_raw(order) -> dict:
+    raw = _raw_payload(order)
+    nested = raw.get("_mydeal")
+    return nested if isinstance(nested, dict) else {}
+
+
+def _cents_from_money(value) -> int:
+    if value is None or value == "":
+        return 0
+    try:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return max(0, value)
+        return max(0, int((Decimal(str(value)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)))
+    except Exception:
+        return 0
+
+
+def _shipping_cents(order) -> int:
+    raw = _raw_payload(order)
+    nested = _mydeal_raw(order)
+    for candidate in (raw.get("shippingCents"), raw.get("shippingTotalCents")):
+        if candidate is None or candidate == "":
+            continue
+        try:
+            return max(0, int(candidate))
+        except (TypeError, ValueError):
+            pass
+    for source in (nested, raw):
+        for key in ("TotalShippingPrice", "totalShippingPrice"):
+            if source.get(key) is not None:
+                return _cents_from_money(source.get(key))
+    return 0
+
+
+def _shipping_title(order) -> str:
+    raw = _raw_payload(order)
+    nested = _mydeal_raw(order)
+    for source in (nested, raw):
+        for key in ("ShippingMethod", "shippingMethod", "DeliveryMethod", "deliveryMethod"):
+            text = str(source.get(key) or "").strip()
+            if text and text != "-":
+                return text[:255]
+    return "Standard Delivery"
+
+
+def _tax_inclusive(order, kind: str) -> bool:
+    raw = _raw_payload(order)
+    nested = _mydeal_raw(order)
+    for source in (nested, raw):
+        if "TaxInclusive" in source:
+            return bool(source.get("TaxInclusive"))
+        if "taxInclusive" in source:
+            return bool(source.get("taxInclusive"))
+    return kind == "mydeal"
+
+
+def _gst_cents_from_inclusive(total_cents) -> int:
+    try:
+        total = int(total_cents or 0)
+    except (TypeError, ValueError):
+        return 0
+    if total <= 0:
+        return 0
+    return int((Decimal(total) * Decimal("10") / Decimal("110")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def _customer(order) -> dict:
