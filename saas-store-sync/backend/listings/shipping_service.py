@@ -203,28 +203,50 @@ def submit(order: MarketplaceOrder, *, tracking_number: str, carrier: str,
     """Submit tracking info for an order."""
     kind = marketplace_kind(order.store.marketplace)
     if kind == "mydeal":
-        return _submit_mydeal(
+        result = _submit_mydeal(
             order,
             tracking_number=tracking_number,
             carrier=carrier,
             shipped_date=shipped_date,
         )
-    if kind == "etsy":
-        return _submit_etsy(
+    elif kind == "etsy":
+        result = _submit_etsy(
             order,
             tracking_number=tracking_number,
             carrier=carrier,
         )
-    if kind == "reverb":
+    elif kind == "reverb":
         raise MarketplaceError(
             "Shipping/tracking push is not supported for Reverb yet. "
             "Mark shipped in Reverb seller tools, or ask for Reverb ship API support."
         )
-    if kind != "lasoo":
+    elif kind != "lasoo":
         raise MarketplaceError(
             f'Shipping is not supported yet for "{kind or "this marketplace"}".'
         )
+    else:
+        result = _submit_lasoo(
+            order,
+            tracking_number=tracking_number,
+            carrier=carrier,
+            tracking_url=tracking_url,
+            shipped_date=shipped_date,
+            status=status,
+        )
+    if result.get("ok"):
+        from .shopify.orders import push_fulfillment_to_shopify
+        push_fulfillment_to_shopify(
+            order,
+            order.store,
+            tracking_number=tracking_number,
+            carrier=carrier,
+            tracking_url=tracking_url,
+        )
+    return result
 
+
+def _submit_lasoo(order: MarketplaceOrder, *, tracking_number: str, carrier: str,
+                  tracking_url: str = "", shipped_date: str = "", status: str = "") -> dict:
     client = LasooClient(order.store, order.environment)
     ship_status = (status or "OUT_FOR_DELIVERY").strip()
 

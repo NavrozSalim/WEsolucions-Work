@@ -12,7 +12,9 @@ from listings.shopify.client import normalize_location_id, normalize_shop_domain
 from listings.shopify.orders import (
     admin_order_url,
     build_order_create_input,
+    cancel_shopify_order,
     normalize_shopify_phone,
+    push_fulfillment_to_shopify,
     push_new_order_to_shopify,
     tracking_tag,
 )
@@ -117,21 +119,33 @@ class ShopifyOrderPushTests(TestCase):
     def test_attach_existing_shopify_order(self):
         order = self._order()
         with patch("listings.shopify.orders.graphql") as gql:
-            gql.return_value = {
-                "orders": {
-                    "nodes": [{
-                        "id": "gid://shopify/Order/999",
-                        "name": "#1042",
-                        "tags": ["sp-mydeal-343544536"],
-                    }],
-                }
-            }
+            def _side_effect(_store, query, variables=None):
+                if "FindMarketplaceOrder" in query:
+                    return {
+                        "orders": {
+                            "nodes": [{
+                                "id": "gid://shopify/Order/999",
+                                "name": "#1042",
+                                "tags": ["sp-mydeal-343544536"],
+                                "customAttributes": [],
+                            }],
+                        }
+                    }
+                if "orderUpdate" in query:
+                    return {
+                        "orderUpdate": {
+                            "order": {"id": "gid://shopify/Order/999", "name": "#1042"},
+                            "userErrors": [],
+                        }
+                    }
+                return {}
+            gql.side_effect = _side_effect
             push_new_order_to_shopify(order, self.store, created=True)
         order.refresh_from_db()
         self.assertEqual(order.shopify_order_id, "999")
         self.assertEqual(order.shopify_order_name, "#1042")
         self.assertTrue(admin_order_url(self.store, order).endswith("/orders/999"))
-        self.assertEqual(gql.call_count, 1)
+        self.assertGreaterEqual(gql.call_count, 2)
 
     def test_create_shopify_order(self):
         order = self._order()
@@ -189,6 +203,88 @@ class ShopifyOrderPushTests(TestCase):
         self.assertIn("bigw", built["order"]["tags"])
         self.assertIn("mydeal", built["order"]["tags"])
         self.assertIn("Mydeal / BigW order 343544536", built["order"]["note"])
+
+    def test_fetch_updates_existing_shopify_order_tags(self):
+        order = self._order(
+            shopify_order_id="777",
+            shopify_order_gid="gid://shopify/Order/777",
+            raw_response_json={"currency": "AUD", "orderSource": "BigW"},
+        )
+        with patch("listings.shopify.orders.graphql") as gql:
+            def _side_effect(_store, query, variables=None):
+                if "ShopifyOrderMirror" in query:
+                    return {
+                        "order": {
+                            "id": "gid://shopify/Order/777",
+                            "name": "#1100",
+                            "tags": ["sellerpilot", "mydeal"],
+                            "customAttributes": [{"key": "marketplace", "value": "mydeal"}],
+                        }
+                    }
+                if "orderUpdate" in query:
+                    tags = ((variables or {}).get("input") or {}).get("tags") or []
+                    self.assertIn("bigw", [str(t).lower() for t in tags])
+                    attrs = {
+                        a["key"]: a["value"]
+                        for a in ((variables or {}).get("input") or {}).get("customAttributes") or []
+                    }
+                    self.assertEqual(attrs.get("order_source"), "BigW")
+                    return {
+                        "orderUpdate": {
+                            "order": {"id": "gid://shopify/Order/777", "name": "#1100"},
+                            "userErrors": [],
+                        }
+                    }
+                return {}
+            gql.side_effect = _side_effect
+            push_new_order_to_shopify(order, self.store, created=False)
+        self.assertTrue(any("orderUpdate" in str(c.args[1]) for c in gql.call_args_list))
+
+    def test_push_fulfillment_creates_shopify_fulfillment(self):
+        order = self._order(
+            shopify_order_id="777",
+            shopify_order_gid="gid://shopify/Order/777",
+        )
+        with patch("listings.shopify.orders.graphql") as gql:
+            def _side_effect(_store, query, variables=None):
+                if "OrderFulfillmentOrders" in query:
+                    return {
+                        "order": {
+                            "id": "gid://shopify/Order/777",
+                            "fulfillmentOrders": {
+                                "nodes": [{
+                                    "id": "gid://shopify/FulfillmentOrder/1",
+                                    "status": "OPEN",
+                                    "lineItems": {
+                                        "nodes": [{
+                                            "id": "gid://shopify/FulfillmentOrderLineItem/9",
+                                            "remainingQuantity": 2,
+                                        }],
+                                    },
+                                }],
+                            },
+                        }
+                    }
+                if "fulfillmentCreate" in query:
+                    fulfillment = (variables or {}).get("fulfillment") or {}
+                    self.assertEqual(fulfillment.get("trackingInfo", {}).get("number"), "ABC123")
+                    return {"fulfillmentCreate": {"fulfillment": {"id": "gid://shopify/Fulfillment/1"}, "userErrors": []}}
+                return {}
+            gql.side_effect = _side_effect
+            push_fulfillment_to_shopify(
+                order, self.store, tracking_number="ABC123", carrier="Australia Post",
+            )
+        self.assertTrue(any("fulfillmentCreate" in str(c.args[1]) for c in gql.call_args_list))
+
+    def test_cancel_shopify_order(self):
+        order = self._order(
+            shopify_order_id="777",
+            shopify_order_gid="gid://shopify/Order/777",
+        )
+        with patch("listings.shopify.orders.graphql") as gql:
+            gql.return_value = {"orderCancel": {"job": {"id": "gid://shopify/Job/1"}, "orderCancelUserErrors": []}}
+            cancel_shopify_order(order, self.store)
+        self.assertTrue(any("orderCancel" in str(c.args[1]) for c in gql.call_args_list))
 
     def test_build_payload_omits_invalid_phone(self):
         order = self._order(customer_info_json={

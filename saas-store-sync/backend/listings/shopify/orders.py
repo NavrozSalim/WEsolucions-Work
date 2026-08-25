@@ -1,8 +1,7 @@
-"""Create Shopify Admin orders for newly fetched marketplace orders.
+"""Create and update Shopify Admin orders for marketplace orders.
 
-Existing MarketplaceOrder rows are never backfilled unless a previous Shopify
-create failed (retry). If Shopify already has the order (Omnivore or a previous
-push), we attach that id instead of duplicating.
+Create on first fetch (or retry after a failed create). Later fetch / ship /
+cancel updates the existing Shopify order instead of duplicating it.
 
 Phone numbers are converted to E.164; invalid/sandbox phones are omitted so
 Shopify ``orderCreate`` does not fail with "Order Phone is invalid".
@@ -37,6 +36,7 @@ query FindMarketplaceOrder($query: String!) {
       id
       name
       tags
+      customAttributes { key value }
     }
   }
 }
@@ -64,6 +64,83 @@ mutation OrderCreate($order: OrderCreateOrderInput!, $options: OrderCreateOption
       field
       message
     }
+  }
+}
+"""
+
+GET_ORDER_QUERY = """
+query ShopifyOrderMirror($id: ID!) {
+  order(id: $id) {
+    id
+    name
+    tags
+    customAttributes { key value }
+  }
+}
+"""
+
+ORDER_UPDATE_MUTATION = """
+mutation OrderUpdate($input: OrderInput!) {
+  orderUpdate(input: $input) {
+    order {
+      id
+      name
+      tags
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+"""
+
+ORDER_FULFILLMENT_ORDERS_QUERY = """
+query OrderFulfillmentOrders($id: ID!) {
+  order(id: $id) {
+    id
+    fulfillmentOrders(first: 20) {
+      nodes {
+        id
+        status
+        lineItems(first: 50) {
+          nodes {
+            id
+            remainingQuantity
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+FULFILLMENT_CREATE_MUTATION = """
+mutation FulfillmentCreate($fulfillment: FulfillmentInput!) {
+  fulfillmentCreate(fulfillment: $fulfillment) {
+    fulfillment { id status }
+    userErrors { field message }
+  }
+}
+"""
+
+ORDER_CANCEL_MUTATION = """
+mutation OrderCancel(
+  $orderId: ID!,
+  $reason: OrderCancelReason!,
+  $refund: Boolean!,
+  $restock: Boolean!,
+  $notifyCustomer: Boolean
+) {
+  orderCancel(
+    orderId: $orderId,
+    reason: $reason,
+    refund: $refund,
+    restock: $restock,
+    notifyCustomer: $notifyCustomer
+  ) {
+    job { id done }
+    orderCancelUserErrors { field message code }
   }
 }
 """
@@ -180,27 +257,94 @@ def normalize_shopify_phone(raw, country_code: str = "") -> str:
 
 
 def push_new_order_to_shopify(order, store, *, created: bool) -> None:
-    """Push on first insert, or retry when a previous Shopify create failed.
-
-    Older local orders that were never attempted are not backfilled.
-    """
+    """Create on first insert; update tags/note/source when Shopify already has the order."""
     if order is None or store is None:
-        return
-    if (getattr(order, "shopify_order_id", None) or "").strip():
-        return
-    prev_error = (getattr(order, "shopify_sync_error", None) or "").strip()
-    if not created and not prev_error:
         return
     kind = marketplace_kind(getattr(store, "marketplace", None))
     if kind not in SHOPIFY_ORDER_MARKETPLACES:
         return
     if not store_shopify_ready(store):
         return
+    has_id = bool(
+        (getattr(order, "shopify_order_id", None) or "").strip()
+        or (getattr(order, "shopify_order_gid", None) or "").strip()
+    )
     try:
+        if has_id:
+            _update_existing(order, store, kind)
+            return
+        prev_error = (getattr(order, "shopify_sync_error", None) or "").strip()
+        if not created and not prev_error:
+            return
         _push(order, store, kind)
     except Exception as exc:
         logger.warning(
-            "Shopify order push failed store=%s order=%s err=%s",
+            "Shopify order sync failed store=%s order=%s err=%s",
+            getattr(store, "id", None),
+            getattr(order, "external_order_key", None),
+            exc,
+        )
+        _save_sync_error(order, str(exc)[:500])
+
+
+def push_fulfillment_to_shopify(order, store, *, tracking_number: str, carrier: str = "",
+                                tracking_url: str = "") -> None:
+    """Create a Shopify fulfillment when SellerPilot submits tracking."""
+    if order is None or store is None:
+        return
+    if not store_shopify_ready(store):
+        return
+    kind = marketplace_kind(getattr(store, "marketplace", None))
+    if kind not in SHOPIFY_ORDER_MARKETPLACES:
+        return
+    if not _order_gid(order):
+        return
+    tracking = (tracking_number or "").strip()
+    if not tracking:
+        return
+    try:
+        _fulfill_existing(order, store, tracking_number=tracking, carrier=carrier, tracking_url=tracking_url)
+    except Exception as exc:
+        logger.warning(
+            "Shopify fulfillment failed store=%s order=%s err=%s",
+            getattr(store, "id", None),
+            getattr(order, "external_order_key", None),
+            exc,
+        )
+        _save_sync_error(order, str(exc)[:500])
+
+
+def cancel_shopify_order(order, store) -> None:
+    """Cancel the mirrored Shopify order when SellerPilot cancels."""
+    if order is None or store is None:
+        return
+    if not store_shopify_ready(store):
+        return
+    kind = marketplace_kind(getattr(store, "marketplace", None))
+    if kind not in SHOPIFY_ORDER_MARKETPLACES:
+        return
+    gid = _order_gid(order)
+    if not gid:
+        return
+    try:
+        data = graphql(store, ORDER_CANCEL_MUTATION, {
+            "orderId": gid,
+            "reason": "OTHER",
+            "refund": False,
+            "restock": False,
+            "notifyCustomer": False,
+        })
+        errors = ((data.get("orderCancel") or {}).get("orderCancelUserErrors") or [])
+        if errors:
+            first = errors[0] if isinstance(errors[0], dict) else {"message": str(errors[0])}
+            message = str(first.get("message") or "Shopify orderCancel failed.")
+            lowered = message.lower()
+            if "already" in lowered and "cancel" in lowered:
+                return
+            raise ShopifyError(message)
+    except Exception as exc:
+        logger.warning(
+            "Shopify cancel failed store=%s order=%s err=%s",
             getattr(store, "id", None),
             getattr(order, "external_order_key", None),
             exc,
@@ -230,6 +374,20 @@ def _save_shopify_ids(order, *, gid: str, name: str = "") -> None:
     ])
 
 
+def _order_gid(order, existing: dict | None = None) -> str:
+    if existing and existing.get("id"):
+        return str(existing.get("id") or "").strip()
+    gid = (getattr(order, "shopify_order_gid", None) or "").strip()
+    if gid:
+        return gid
+    numeric = (getattr(order, "shopify_order_id", None) or "").strip()
+    if numeric:
+        if numeric.startswith("gid://"):
+            return numeric
+        return f"gid://shopify/Order/{numeric}"
+    return ""
+
+
 def _push(order, store, kind: str) -> None:
     order_key = str(order.external_order_key or order.invoice_number or "").strip()
     if not order_key:
@@ -238,6 +396,7 @@ def _push(order, store, kind: str) -> None:
     existing = _find_existing(store, tag)
     if existing:
         _save_shopify_ids(order, gid=existing.get("id") or "", name=existing.get("name") or "")
+        _update_existing(order, store, kind, existing=existing)
         return
     payload = build_order_create_input(order, store, kind=kind, tag=tag)
     data = graphql(store, ORDER_CREATE_MUTATION, {
@@ -254,6 +413,104 @@ def _push(order, store, kind: str) -> None:
     if not gid:
         raise ShopifyError("Shopify orderCreate returned no order id.")
     _save_shopify_ids(order, gid=gid, name=created.get("name") or "")
+
+
+def _update_existing(order, store, kind: str, existing: dict | None = None) -> None:
+    gid = _order_gid(order, existing)
+    if not gid:
+        raise ShopifyError("Shopify order id is missing.")
+    if existing is None or existing.get("tags") is None:
+        data = graphql(store, GET_ORDER_QUERY, {"id": gid})
+        existing = (data.get("order") or {}) if isinstance(data, dict) else {}
+        if existing.get("id") and not (getattr(order, "shopify_order_gid", None) or "").strip():
+            _save_shopify_ids(order, gid=existing.get("id") or gid, name=existing.get("name") or "")
+    order_key = str(order.external_order_key or order.invoice_number or "").strip()
+    meta = _order_metadata(order, kind, tag=tracking_tag(kind, order_key))
+    seen = set()
+    merged_tags = []
+    for tag in list(existing.get("tags") or []) + list(meta["tags"]):
+        text = str(tag or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged_tags.append(text)
+    attrs = {}
+    for row in existing.get("customAttributes") or []:
+        if isinstance(row, dict) and row.get("key"):
+            attrs[str(row["key"])] = str(row.get("value") or "")
+    for row in meta["customAttributes"]:
+        attrs[row["key"]] = row["value"]
+    data = graphql(store, ORDER_UPDATE_MUTATION, {
+        "input": {
+            "id": gid,
+            "note": meta["note"],
+            "tags": merged_tags,
+            "customAttributes": [{"key": k, "value": v} for k, v in attrs.items()],
+        }
+    })
+    result = (data.get("orderUpdate") or {}) if isinstance(data, dict) else {}
+    errors = result.get("userErrors") or []
+    if errors:
+        first = errors[0] if isinstance(errors[0], dict) else {"message": str(errors[0])}
+        raise ShopifyError(first.get("message") or "Shopify orderUpdate failed.")
+    updated = result.get("order") or {}
+    if updated.get("id"):
+        _save_shopify_ids(order, gid=updated.get("id") or gid, name=updated.get("name") or "")
+
+
+def _fulfill_existing(order, store, *, tracking_number: str, carrier: str = "",
+                      tracking_url: str = "") -> None:
+    gid = _order_gid(order)
+    data = graphql(store, ORDER_FULFILLMENT_ORDERS_QUERY, {"id": gid})
+    nodes = ((((data.get("order") or {}).get("fulfillmentOrders") or {}).get("nodes")) or [])
+    line_items_by_fo = []
+    for node in nodes:
+        if not isinstance(node, dict) or not node.get("id"):
+            continue
+        status = str(node.get("status") or "").upper()
+        if status not in ("OPEN", "IN_PROGRESS", "SCHEDULED"):
+            continue
+        remaining = []
+        for li in ((node.get("lineItems") or {}).get("nodes") or []):
+            if not isinstance(li, dict) or not li.get("id"):
+                continue
+            try:
+                qty = int(li.get("remainingQuantity") or 0)
+            except (TypeError, ValueError):
+                qty = 0
+            if qty > 0:
+                remaining.append({"id": li["id"], "quantity": qty})
+        if remaining:
+            line_items_by_fo.append({
+                "fulfillmentOrderId": node["id"],
+                "fulfillmentOrderLineItems": remaining,
+            })
+    if not line_items_by_fo:
+        return
+    tracking = {"number": tracking_number[:255]}
+    if (carrier or "").strip():
+        tracking["company"] = (carrier or "").strip()[:255]
+    if (tracking_url or "").strip():
+        tracking["url"] = (tracking_url or "").strip()
+    data = graphql(store, FULFILLMENT_CREATE_MUTATION, {
+        "fulfillment": {
+            "lineItemsByFulfillmentOrder": line_items_by_fo,
+            "notifyCustomer": False,
+            "trackingInfo": tracking,
+        }
+    })
+    result = (data.get("fulfillmentCreate") or {}) if isinstance(data, dict) else {}
+    errors = result.get("userErrors") or []
+    if errors:
+        first = errors[0] if isinstance(errors[0], dict) else {"message": str(errors[0])}
+        message = str(first.get("message") or "Shopify fulfillmentCreate failed.")
+        lowered = message.lower()
+        if "already" in lowered and "fulfill" in lowered:
+            return
+        raise ShopifyError(message)
 
 
 def _find_existing(store, tag: str) -> dict | None:
@@ -279,15 +536,7 @@ def build_order_create_input(order, store, *, kind: str, tag: str) -> dict:
             "quantity": 1,
             "priceSet": _money(order.total_amount_cents or 0, currency),
         }]
-    order_source = _order_source(order)
-    note = (
-        f"{_channel_note_prefix(kind, order_source)} {order.invoice_number or order.external_order_key}. "
-        "Created by SellerPilot. Do not duplicate if Omnivore already imported this order."
-    )
-    tags = ["sellerpilot", marketplace_tag(kind), tag]
-    src_tag = re.sub(r"[^a-z0-9]+", "-", order_source.lower()).strip("-") if order_source else ""
-    if src_tag and src_tag != marketplace_tag(kind) and src_tag not in tags:
-        tags.append(src_tag)
+    meta = _order_metadata(order, kind, tag=tag)
     email = (customer.get("email") or "").strip()
     country = (address or {}).get("countryCode") or country_hint
     phone = normalize_shopify_phone(customer.get("phone") or "", country)
@@ -306,17 +555,12 @@ def build_order_create_input(order, store, *, kind: str, tag: str) -> dict:
     order_input = {
         "email": email or None,
         "phone": phone or None,
-        "note": note[:5000],
-        "tags": tags,
+        "note": meta["note"],
+        "tags": meta["tags"],
         "financialStatus": "PAID",
         "sourceName": "sellerpilot",
         "sourceIdentifier": str(order.external_order_key or "")[:255],
-        "customAttributes": [
-            {"key": "marketplace", "value": marketplace_tag(kind)},
-            {"key": "marketplace_order_key", "value": str(order.external_order_key or "")},
-            {"key": "marketplace_invoice", "value": str(order.invoice_number or "")},
-            *([{"key": "order_source", "value": order_source}] if order_source else []),
-        ],
+        "customAttributes": meta["customAttributes"],
         "lineItems": line_items,
         "transactions": [{
             "kind": "SALE",
@@ -335,6 +579,26 @@ def build_order_create_input(order, store, *, kind: str, tag: str) -> dict:
     if loc:
         options["inventoryBehaviour"] = "DECREMENT_IGNORING_POLICY"
     return {"order": order_input, "options": options}
+
+
+def _order_metadata(order, kind: str, *, tag: str) -> dict:
+    order_source = _order_source(order)
+    note = (
+        f"{_channel_note_prefix(kind, order_source)} {order.invoice_number or order.external_order_key}. "
+        "Created by SellerPilot. Do not duplicate if Omnivore already imported this order."
+    )
+    tags = ["sellerpilot", marketplace_tag(kind), tag]
+    src_tag = re.sub(r"[^a-z0-9]+", "-", order_source.lower()).strip("-") if order_source else ""
+    if src_tag and src_tag != marketplace_tag(kind) and src_tag not in tags:
+        tags.append(src_tag)
+    attrs = [
+        {"key": "marketplace", "value": marketplace_tag(kind)},
+        {"key": "marketplace_order_key", "value": str(order.external_order_key or "")},
+        {"key": "marketplace_invoice", "value": str(order.invoice_number or "")},
+    ]
+    if order_source:
+        attrs.append({"key": "order_source", "value": order_source})
+    return {"note": note[:5000], "tags": tags, "customAttributes": attrs}
 
 
 def _order_source(order) -> str:

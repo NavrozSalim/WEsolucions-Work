@@ -1118,16 +1118,22 @@ def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
     kind = marketplace_kind(order.store.marketplace)
     if kind == "reverb":
         from .reverb import orders as reverb_orders
-        return reverb_orders.cancel(order, reason=reason)
-    if kind == "mydeal":
+        result = reverb_orders.cancel(order, reason=reason)
+    elif kind == "mydeal":
         from .mydeal import orders as mydeal_orders
-        return mydeal_orders.cancel(order, reason=reason)
-    if kind == "etsy":
+        result = mydeal_orders.cancel(order, reason=reason)
+    elif kind == "etsy":
         from .etsy import orders as etsy_orders
-        return etsy_orders.cancel(order, reason=reason)
+        result = etsy_orders.cancel(order, reason=reason)
+    else:
+        result = _cancel_lasoo(order, reason=reason)
+    from .shopify.orders import cancel_shopify_order
+    cancel_shopify_order(order, order.store)
+    return result
 
+
+def _cancel_lasoo(order: MarketplaceOrder, *, reason: str = "") -> dict:
     _require_lasoo(order.store)
-
     if order.status in _CANCEL_BLOCKED:
         return {
             "ok": True,
