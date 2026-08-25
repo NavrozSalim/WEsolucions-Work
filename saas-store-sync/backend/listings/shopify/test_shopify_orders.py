@@ -12,6 +12,7 @@ from listings.shopify.client import normalize_location_id, normalize_shop_domain
 from listings.shopify.orders import (
     admin_order_url,
     build_order_create_input,
+    normalize_shopify_phone,
     push_new_order_to_shopify,
     tracking_tag,
 )
@@ -39,6 +40,15 @@ class ShopifyClientHelpersTests(TestCase):
 
     def test_tracking_tag(self):
         self.assertEqual(tracking_tag("mydeal", "343544536"), "sp-mydeal-343544536")
+
+    def test_normalize_shopify_phone(self):
+        self.assertEqual(normalize_shopify_phone("0412 345 678", "AU"), "+61412345678")
+        self.assertEqual(normalize_shopify_phone("+61 412 345 678", "AU"), "+61412345678")
+        self.assertEqual(normalize_shopify_phone("+610412345678", "AU"), "+61412345678")
+        self.assertEqual(normalize_shopify_phone("0400000000", "AU"), "")
+        self.assertEqual(normalize_shopify_phone("0", "AU"), "")
+        self.assertEqual(normalize_shopify_phone("n/a", "AU"), "")
+        self.assertEqual(normalize_shopify_phone("202-555-0123", "US"), "+12025550123")
 
 
 class ShopifyOrderPushTests(TestCase):
@@ -71,7 +81,7 @@ class ShopifyOrderPushTests(TestCase):
                 "firstName": "Sam",
                 "lastName": "Seller",
                 "email": "buyer@example.com",
-                "phone": "0400000000",
+                "phone": "0412 345 678",
                 "shippingAddress": {
                     "line1": "1 Test St",
                     "city": "Sydney",
@@ -157,6 +167,108 @@ class ShopifyOrderPushTests(TestCase):
         self.assertIn("sp-mydeal-343544536", built["order"]["tags"])
         self.assertEqual(built["order"]["lineItems"][0]["sku"], "SKU-1")
         self.assertEqual(built["order"]["lineItems"][0]["quantity"], 2)
+        self.assertEqual(built["order"]["phone"], "+61412345678")
+        self.assertEqual(built["order"]["shippingAddress"]["phone"], "+61412345678")
+
+    def test_build_payload_omits_invalid_phone(self):
+        order = self._order(customer_info_json={
+            "firstName": "Sam",
+            "lastName": "Seller",
+            "email": "buyer@example.com",
+            "phone": "0400000000",
+            "shippingAddress": {
+                "line1": "1 Test St",
+                "city": "Sydney",
+                "state": "NSW",
+                "postcode": "2000",
+                "country": "AU",
+                "phone": "0",
+            },
+        })
+        with patch("listings.shopify.orders.graphql", return_value={"productVariants": {"nodes": []}}):
+            built = build_order_create_input(
+                order, self.store, kind="mydeal", tag="sp-mydeal-343544536",
+            )
+        self.assertNotIn("phone", built["order"])
+        self.assertNotIn("phone", built["order"].get("shippingAddress") or {})
+
+    def test_retry_after_sync_error(self):
+        order = self._order(shopify_sync_error="Order Phone is invalid")
+        with patch("listings.shopify.orders.graphql") as gql:
+            def _side_effect(_store, query, variables=None):
+                if "FindMarketplaceOrder" in query:
+                    return {"orders": {"nodes": []}}
+                if "VariantBySku" in query:
+                    return {"productVariants": {"nodes": []}}
+                if "OrderCreate" in query:
+                    return {
+                        "orderCreate": {
+                            "order": {"id": "gid://shopify/Order/888", "name": "#1200"},
+                            "userErrors": [],
+                        }
+                    }
+                return {}
+            gql.side_effect = _side_effect
+            push_new_order_to_shopify(order, self.store, created=False)
+        order.refresh_from_db()
+        self.assertEqual(order.shopify_order_id, "888")
+        self.assertEqual(order.shopify_sync_error, "")
+
+    def test_mydeal_upsert_retries_failed_shopify_push(self):
+        from listings.mydeal.orders import upsert_order
+
+        raw = {
+            "OrderId": 136554825,
+            "OrderStatus": "SellerAcknowledged",
+            "TotalPrice": 60.0,
+            "Currency": "AUD",
+            "CustomerEmail": "buyer@example.com",
+            "ShippingAddress": {
+                "FirstName": "Sam",
+                "LastName": "Seller",
+                "Address1": "1 Test St",
+                "Suburb": "Sydney",
+                "State": "NSW",
+                "PostalCode": "2000",
+                "CountryCode": "AU",
+                "Phone": "0400000000",
+            },
+            "LineItems": [{"SKU": "SKU-1", "Quantity": 1, "UnitPrice": 60.0, "ProductTitle": "Widget"}],
+        }
+        with patch("listings.shopify.orders.graphql") as gql:
+            gql.side_effect = [
+                {"orders": {"nodes": []}},
+                {"productVariants": {"nodes": []}},
+                {"orderCreate": {"order": None, "userErrors": [{"field": ["phone"], "message": "Order Phone is invalid"}]}},
+            ]
+            first = upsert_order(self.user, self.store, raw)
+        first.refresh_from_db()
+        self.assertEqual(first.shopify_sync_error, "Order Phone is invalid")
+        self.assertEqual(first.shopify_order_id, "")
+
+        with patch("listings.shopify.orders.graphql") as gql:
+            def _side_effect(_store, query, variables=None):
+                if "FindMarketplaceOrder" in query:
+                    return {"orders": {"nodes": []}}
+                if "VariantBySku" in query:
+                    return {"productVariants": {"nodes": []}}
+                if "OrderCreate" in query:
+                    payload = (variables or {}).get("order") or {}
+                    self.assertNotIn("phone", payload)
+                    self.assertNotIn("phone", payload.get("shippingAddress") or {})
+                    return {
+                        "orderCreate": {
+                            "order": {"id": "gid://shopify/Order/42", "name": "#42"},
+                            "userErrors": [],
+                        }
+                    }
+                return {}
+            gql.side_effect = _side_effect
+            second = upsert_order(self.user, self.store, raw)
+        self.assertEqual(first.id, second.id)
+        second.refresh_from_db()
+        self.assertEqual(second.shopify_order_id, "42")
+        self.assertEqual(second.shopify_sync_error, "")
 
     def test_mydeal_upsert_only_pushes_on_create(self):
         from listings.mydeal.orders import upsert_order

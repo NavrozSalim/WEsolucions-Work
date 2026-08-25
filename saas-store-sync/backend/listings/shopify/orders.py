@@ -1,7 +1,11 @@
 """Create Shopify Admin orders for newly fetched marketplace orders.
 
-Existing MarketplaceOrder rows are never backfilled. If Shopify already has
-the order (Omnivore or a previous push), we attach that id instead of duplicating.
+Existing MarketplaceOrder rows are never backfilled unless a previous Shopify
+create failed (retry). If Shopify already has the order (Omnivore or a previous
+push), we attach that id instead of duplicating.
+
+Phone numbers are converted to E.164; invalid/sandbox phones are omitted so
+Shopify ``orderCreate`` does not fail with "Order Phone is invalid".
 """
 from __future__ import annotations
 
@@ -79,6 +83,14 @@ _COUNTRY_ALIASES = {
     "ca": "CA",
 }
 
+# ISO 3166-1 alpha-2 → ITU country calling code (no plus).
+_COUNTRY_DIAL = {
+    "AU": "61",
+    "US": "1",
+    "CA": "1",
+    "GB": "44",
+    "NZ": "64",
+}
 
 def marketplace_tag(kind: str) -> str:
     code = re.sub(r"[^a-z0-9]+", "-", (kind or "").strip().lower()).strip("-")
@@ -99,11 +111,85 @@ def admin_order_url(store, order) -> str | None:
     return f"https://admin.shopify.com/store/{handle}/orders/{numeric}"
 
 
+def normalize_shopify_phone(raw, country_code: str = "") -> str:
+    """Return E.164 (``+61412345678``) or ``''`` so Shopify will not reject the order.
+
+    Marketplace sandbox phones (``0400000000``, ``0``, placeholders) are omitted
+    rather than sent. Shopify ``orderCreate`` requires a valid E.164 number.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    compact = re.sub(r"[^\d+]", "", text)
+    if compact.startswith("00"):
+        compact = "+" + compact[2:]
+    digits = compact[1:] if compact.startswith("+") else compact
+    if not digits.isdigit():
+        return ""
+    country = (country_code or "").strip().upper()
+    if len(country) != 2:
+        country = ""
+    dial = _COUNTRY_DIAL.get(country, "")
+
+    if compact.startswith("+"):
+        body = digits.lstrip("0")
+    elif dial and digits.startswith("0"):
+        body = dial + digits.lstrip("0")
+    elif dial and digits.startswith(dial):
+        body = digits
+    elif country in ("US", "CA") and len(digits) == 10:
+        body = "1" + digits
+    elif country == "AU" and len(digits) == 9:
+        body = "61" + digits
+    elif dial:
+        body = dial + digits.lstrip("0")
+    else:
+        body = digits.lstrip("0")
+
+    if not re.fullmatch(r"\d{8,15}", body or ""):
+        return ""
+    if len(set(body)) <= 1:
+        return ""
+
+    # Longest calling code first so "61" wins over "1".
+    for iso, code in sorted(_COUNTRY_DIAL.items(), key=lambda kv: -len(kv[1])):
+        if not body.startswith(code):
+            continue
+        national = body[len(code):]
+        if iso == "AU" and national.startswith("0"):
+            national = national.lstrip("0")
+            body = code + national
+        if not national or set(national) == {"0"}:
+            return ""
+        if iso == "AU":
+            if len(national) != 9 or national[0] not in "23478":
+                return ""
+            # Reject sandbox-style 400000000 / 200000000.
+            if set(national[1:]) == {"0"}:
+                return ""
+        elif iso in ("US", "CA"):
+            if len(national) != 10 or national[0] in "01":
+                return ""
+        break
+    else:
+        # Unknown country: keep only if it already looked international.
+        if not compact.startswith("+") and not (dial and digits.startswith(dial)):
+            return ""
+
+    return f"+{body}"
+
+
 def push_new_order_to_shopify(order, store, *, created: bool) -> None:
-    """No-op unless this is a brand-new local order and Shopify is connected."""
-    if not created or order is None or store is None:
+    """Push on first insert, or retry when a previous Shopify create failed.
+
+    Older local orders that were never attempted are not backfilled.
+    """
+    if order is None or store is None:
         return
     if (getattr(order, "shopify_order_id", None) or "").strip():
+        return
+    prev_error = (getattr(order, "shopify_sync_error", None) or "").strip()
+    if not created and not prev_error:
         return
     kind = marketplace_kind(getattr(store, "marketplace", None))
     if kind not in SHOPIFY_ORDER_MARKETPLACES:
@@ -183,7 +269,8 @@ def _find_existing(store, tag: str) -> dict | None:
 
 def build_order_create_input(order, store, *, kind: str, tag: str) -> dict:
     customer = _customer(order)
-    address = _shipping_address(customer)
+    country_hint = _country_code(getattr(store, "region", "") or "")
+    address = _shipping_address(customer, country_hint=country_hint)
     currency = _currency(order, store)
     line_items = _line_items(order, store, currency)
     if not line_items:
@@ -198,7 +285,10 @@ def build_order_create_input(order, store, *, kind: str, tag: str) -> dict:
     )
     tags = ["sellerpilot", marketplace_tag(kind), tag]
     email = (customer.get("email") or "").strip()
-    phone = (customer.get("phone") or (address.get("phone") if address else "") or "").strip()
+    country = (address or {}).get("countryCode") or country_hint
+    phone = normalize_shopify_phone(customer.get("phone") or "", country)
+    if not phone and address:
+        phone = address.get("phone") or ""
     total_cents = order.total_amount_cents
     if total_cents is None:
         total_cents = 0
@@ -249,7 +339,7 @@ def _customer(order) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-def _shipping_address(customer: dict) -> dict | None:
+def _shipping_address(customer: dict, *, country_hint: str = "") -> dict | None:
     addr = customer.get("shippingAddress") or customer.get("shipping_address") or {}
     if not isinstance(addr, dict):
         addr = {}
@@ -260,7 +350,11 @@ def _shipping_address(customer: dict) -> dict | None:
         parts = name.split(None, 1)
         first = parts[0]
         last = parts[1] if len(parts) > 1 else last
-    country = _country_code(addr.get("country") or "")
+    country = _country_code(addr.get("country") or "") or (country_hint or "").strip().upper()
+    phone = normalize_shopify_phone(
+        addr.get("phone") or customer.get("phone") or "",
+        country,
+    )
     out = {
         "firstName": first or "Customer",
         "lastName": last or "-",
@@ -270,7 +364,7 @@ def _shipping_address(customer: dict) -> dict | None:
         "province": (addr.get("state") or addr.get("province") or "").strip(),
         "zip": (addr.get("postcode") or addr.get("zip") or "").strip(),
         "countryCode": country,
-        "phone": (addr.get("phone") or customer.get("phone") or "").strip(),
+        "phone": phone,
         "company": (addr.get("company") or "").strip(),
     }
     if not any(out.get(k) for k in ("address1", "city", "zip")):
