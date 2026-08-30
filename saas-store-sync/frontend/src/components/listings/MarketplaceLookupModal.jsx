@@ -178,6 +178,7 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
         <Modal open={open} onClose={onClose} title="Check on marketplace">
             <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
                 Search {storeName || 'this store'} live on the marketplace by SKU / variant key.
+                For Lasoo, &quot;found&quot; means the SKU is in seller inventory — it may still be hidden on the public website until data mapping succeeds.
             </p>
 
             <div className="mb-4 inline-flex rounded-md border border-slate-200 dark:border-slate-600 p-0.5 bg-slate-50 dark:bg-slate-800">
@@ -368,8 +369,20 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
             {mode === 'single' && result ? (
                 <div className="mt-5 space-y-4 border-t border-slate-200 dark:border-slate-700 pt-4">
                     <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant={result.found ? 'success' : 'warning'}>
-                            {result.found ? 'Found on marketplace' : 'Not found'}
+                        <Badge
+                            variant={
+                                result.found
+                                    ? (result.advertised === true ? 'success' : 'warning')
+                                    : 'warning'
+                            }
+                        >
+                            {result.found
+                                ? (result.advertised === true
+                                    ? 'Found and advertised'
+                                    : result.advertised === false
+                                        ? 'In seller catalog — not live'
+                                        : 'Found in seller catalog')
+                                : 'Not found'}
                         </Badge>
                         <span className="text-xs uppercase tracking-wide text-slate-400">
                             {result.marketplace}
@@ -377,6 +390,14 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
                         </span>
                     </div>
                     <p className="text-sm text-slate-700 dark:text-slate-300">{result.message}</p>
+
+                    {Array.isArray(result.mapping_errors) && result.mapping_errors.length > 0 ? (
+                        <ul className="rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-800 dark:text-amber-200 space-y-1 list-disc list-inside">
+                            {result.mapping_errors.map((err) => (
+                                <li key={err}>{err}</li>
+                            ))}
+                        </ul>
+                    ) : null}
 
                     {hit ? (
                         <dl className="grid grid-cols-1 gap-2 text-sm">
@@ -398,6 +419,12 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
                                 <dt className="text-slate-500 dark:text-slate-400">Status</dt>
                                 <dd className="font-medium text-slate-900 dark:text-slate-100 capitalize">
                                     {hit.status || '—'}
+                                </dd>
+                            </div>
+                            <div className="flex justify-between gap-3">
+                                <dt className="text-slate-500 dark:text-slate-400">Live on website</dt>
+                                <dd className="font-medium text-slate-900 dark:text-slate-100">
+                                    {hit.advertised === true ? 'Yes' : hit.advertised === false ? 'No' : 'Unknown'}
                                 </dd>
                             </div>
                             <div className="flex justify-between gap-3">

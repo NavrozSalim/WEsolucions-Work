@@ -185,6 +185,15 @@ export default function ListingFormModal({
     const isReverb = code === 'reverb';
     const isMydeal = code === 'mydeal';
     const isEtsy = code === 'etsy';
+    const isLasoo = code === 'lasoo';
+    const willPushLasoo = Boolean(
+        isLasoo
+        && isEdit
+        && (
+            String(listing?.status || '').startsWith('uploaded')
+            || listing?.last_uploaded_at
+        )
+    );
     const emptyForm = isReverb ? EMPTY_REVERB : isMydeal ? EMPTY_MYDEAL : isEtsy ? EMPTY_ETSY : EMPTY_LASOO;
     const [form, setForm] = useState(emptyForm);
     const [saving, setSaving] = useState(false);
@@ -575,6 +584,9 @@ export default function ListingFormModal({
                         )}
                         <p className="mb-4 text-xs text-slate-500 dark:text-slate-400">
                             Fields match the bulk listing template. Marketplace Name / Store Name can route to another of your stores (same as CSV).
+                            {willPushLasoo
+                                ? ' Saving will push this listing to Lasoo so the marketplace stays in sync with what you edit here.'
+                                : ''}
                         </p>
                         {isEdit && Array.isArray(listing?.validation_errors_json) && listing.validation_errors_json.length > 0 && (
                             <div className="mb-4 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3 text-xs text-amber-700 dark:text-amber-300">
@@ -1108,7 +1120,11 @@ export default function ListingFormModal({
                             Cancel
                         </Button>
                         <Button variant="primary" type="submit" disabled={saving}>
-                            {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Create listing'}
+                            {saving
+                                ? (willPushLasoo ? 'Saving and pushing…' : 'Saving…')
+                                : isEdit
+                                    ? (willPushLasoo ? 'Save and push to Lasoo' : 'Save changes')
+                                    : 'Create listing'}
                         </Button>
                     </div>
                 </form>

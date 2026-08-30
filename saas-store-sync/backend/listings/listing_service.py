@@ -21,6 +21,7 @@ from .errors import MarketplaceError
 from .etsy import listings as etsy_listings
 from .lasoo import mapper, validator
 from .lasoo.client import LasooClient
+from .lasoo.response import interpret_bulk_upsert
 from .models import (
     Environment,
     InventorySyncStatus,
@@ -271,7 +272,12 @@ def _uploaded_status(environment: str) -> str:
     )
 
 
-def _finalize_validation(listing: StoreListing, data: dict) -> list[str]:
+def _was_on_marketplace(listing: StoreListing) -> bool:
+    """True when this row was already pushed (or mapped) to the marketplace."""
+    return listing.status in ON_MARKETPLACE_STATUSES or bool(listing.last_uploaded_at)
+
+
+def _finalize_validation(listing: StoreListing, data: dict, *, keep_uploaded: bool = False) -> list[str]:
     store = listing.store
     errors = _validate_listing(store, data)
     if errors:
@@ -307,7 +313,7 @@ def _finalize_validation(listing: StoreListing, data: dict) -> list[str]:
             listing.original_price_cents = mapper.dollars_to_cents(data.get("original_price"))
             listing.sale_price_cents = mapper.dollars_to_cents(data.get("sale_price"))
             listing.external_data_object_json = mapper.build_external_data_object(data)
-        if listing.action == ListingAction.MAPPED:
+        if listing.action == ListingAction.MAPPED or keep_uploaded:
             listing.status = _uploaded_status(listing.environment)
         else:
             listing.status = ListingStatus.READY
@@ -345,14 +351,33 @@ def create(user, store, data: dict, action: str = ListingAction.CREATE) -> Store
 
 
 def update(listing: StoreListing, data: dict) -> StoreListing:
+    """Save listing fields locally, then push to Lasoo when it was already uploaded.
+
+    Editing a Create listing used to reset status to ``ready`` (local-only), so
+    Lasoo never received title/price/image changes. Uploaded Lasoo rows are
+    now kept on-marketplace and re-sent via Variants_BulkUpsert.
+    """
+    was_on_marketplace = _was_on_marketplace(listing)
     _apply_fields(listing, data)
-    _finalize_validation(listing, data)
+    _finalize_validation(listing, data, keep_uploaded=was_on_marketplace)
     link_errors = _attach_mapped_listing(listing)
     if link_errors:
         merged = list(listing.validation_errors_json or []) + link_errors
         listing.validation_errors_json = merged
         listing.status = ListingStatus.VALIDATION_FAILED
     listing.save()
+    if (
+        was_on_marketplace
+        and listing.status != ListingStatus.VALIDATION_FAILED
+        and _store_kind(listing.store) == "lasoo"
+    ):
+        pub = _publish_lasoo(listing.user, listing.store, [listing])
+        listing.refresh_from_db()
+        if not pub.get("ok"):
+            raise MarketplaceError(
+                pub.get("message")
+                or "Lasoo did not accept the listing update. It was saved here but not on the marketplace."
+            )
     return listing
 
 
@@ -925,18 +950,26 @@ def _publish_lasoo(user, store, publishable: list) -> dict:
     variants = [_listing_to_data(l) for l in publishable]
     payload = mapper.build_bulk_upsert_payload(variants, client.auth_key)
     result = client.send("bulk_upsert", payload)
+    ok, mapping_message, mapping_errors = interpret_bulk_upsert(result)
 
     now = timezone.now()
     request_for_storage = {**payload, "auth": "***"}  # never persist the raw key
     new_status = (
-        _uploaded_status(environment) if result.ok else ListingStatus.FAILED
+        _uploaded_status(environment) if ok else ListingStatus.FAILED
     )
+    response_body = result.data if result.ok else result.error
     for listing in publishable:
         listing.status = new_status
         listing.marketplace_request_json = request_for_storage
-        listing.marketplace_response_json = result.data if result.ok else result.error
-        if result.ok:
+        listing.marketplace_response_json = response_body
+        extra_fields = []
+        if ok:
             listing.last_uploaded_at = now
+            listing.validation_errors_json = None
+            extra_fields = ["validation_errors_json"]
+        elif mapping_errors:
+            listing.validation_errors_json = mapping_errors
+            extra_fields = ["validation_errors_json"]
         listing.save(
             update_fields=[
                 "status",
@@ -944,13 +977,21 @@ def _publish_lasoo(user, store, publishable: list) -> dict:
                 "marketplace_response_json",
                 "last_uploaded_at",
                 "updated_at",
+                *extra_fields,
             ]
         )
+    if ok:
+        message = mapping_message or result.message or (
+            f"Published {len(publishable)} listing(s) to Lasoo {environment}."
+        )
+    else:
+        message = mapping_message or result.message or (
+            "Lasoo did not publish the listing to the public website."
+        )
     return {
-        "ok": result.ok,
-        "message": result.message
-        or (f"Published {len(publishable)} listing(s) to Lasoo {environment}." if result.ok else ""),
-        "published": len(publishable) if result.ok else 0,
+        "ok": ok,
+        "message": message,
+        "published": len(publishable) if ok else 0,
         "environment": environment,
     }
 

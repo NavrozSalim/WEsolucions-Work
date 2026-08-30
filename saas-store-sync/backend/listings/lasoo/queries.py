@@ -138,16 +138,40 @@ def extract_lasoo_failure_message(body) -> str | None:
     if not isinstance(body, dict):
         return None
 
-    for key in ("message", "error", "detail", "title", "description"):
-        val = body.get(key)
+    def _fail_text(val) -> str | None:
         if isinstance(val, str) and val.strip().lower().startswith("fail"):
             return val.strip()
+        return None
+
+    if body.get("success") is False:
+        for key in ("message", "error", "detail", "title", "description"):
+            text = _fail_text(body.get(key))
+            if text:
+                return text
+            val = body.get(key)
+            if isinstance(val, str) and val.strip() and val.strip().lower() != "no message":
+                return val.strip()
+        return "Lasoo request failed."
+
+    for key in ("message", "error", "detail", "title", "description"):
+        text = _fail_text(body.get(key))
+        if text:
+            return text
 
     results = body.get("results")
     if isinstance(results, dict):
+        if results.get("success") is False:
+            for key in ("message", "error", "detail", "name", "description"):
+                text = _fail_text(results.get(key))
+                if text:
+                    return text
+                val = results.get(key)
+                if isinstance(val, str) and val.strip() and val.strip().lower() != "no message":
+                    return val.strip()
+            return "Lasoo request failed."
         for key in ("message", "error", "detail", "name", "description"):
-            val = results.get(key)
-            if isinstance(val, str) and val.strip().lower().startswith("fail"):
-                return val.strip()
+            text = _fail_text(results.get(key))
+            if text:
+                return text
 
     return None

@@ -256,8 +256,15 @@ class StoreListingDetailView(APIView):
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
         data.pop('action', None)
-        listing = listing_service.update(listing, data)
+        try:
+            listing = listing_service.update(listing, data)
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         has_errors = listing.status == ListingStatus.VALIDATION_FAILED
+        pushed = listing.status in (
+            ListingStatus.UPLOADED_STAGING,
+            ListingStatus.UPLOADED_PRODUCTION,
+        )
         listing_service.record_activity(
             request.user, store,
             action=listing.action,
@@ -266,7 +273,11 @@ class StoreListingDetailView(APIView):
             total=1,
             success=0 if has_errors else 1,
             errors=1 if has_errors else 0,
-            message=f'Updated listing {listing.external_variant_key}.',
+            message=(
+                f'Updated listing {listing.external_variant_key} and pushed to Lasoo.'
+                if pushed and marketplace_kind(store.marketplace) == 'lasoo'
+                else f'Updated listing {listing.external_variant_key}.'
+            ),
         )
         return Response(StoreListingSerializer(listing).data)
 

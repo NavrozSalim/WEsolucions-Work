@@ -12,109 +12,16 @@ from stores.credentials import marketplace_kind
 from .errors import MarketplaceError
 from .lasoo.client import LasooClient
 from .lasoo.queries import build_payload
+from .lasoo.response import (
+    SEARCH_DATA_FLAGS,
+    collect_mapping_errors,
+    collect_variant_rows,
+    lookup_message,
+    normalize_variant_hit,
+)
 from .models import StoreListing
 
 logger = logging.getLogger("listings")
-
-
-def _collect_lasoo_rows(body) -> list:
-    if not isinstance(body, dict):
-        return []
-    candidates = []
-    results = body.get("results")
-    if isinstance(results, dict):
-        for key in ("variants", "items", "records", "data", "rows", "results"):
-            val = results.get(key)
-            if isinstance(val, list):
-                candidates.append(val)
-        for nest_key in ("body", "data"):
-            nested = results.get(nest_key)
-            if isinstance(nested, dict):
-                for key in ("variants", "items", "records", "rows"):
-                    val = nested.get(key)
-                    if isinstance(val, list):
-                        candidates.append(val)
-            elif isinstance(nested, list):
-                candidates.append(nested)
-    elif isinstance(results, list):
-        candidates.append(results)
-    for key in ("variants", "items", "data", "records"):
-        val = body.get(key)
-        if isinstance(val, list):
-            candidates.append(val)
-    for rows in candidates:
-        if rows:
-            return rows
-    return candidates[0] if candidates else []
-
-
-def _first_str(row: dict, *keys: str) -> str:
-    for key in keys:
-        val = row.get(key)
-        if val is None:
-            continue
-        text = str(val).strip()
-        if text:
-            return text
-    return ""
-
-
-def _normalize_lasoo_hit(row: dict) -> dict:
-    product_key = _first_str(
-        row,
-        "externalProductKey",
-        "ExternalProductKey",
-        "productKey",
-        "product_key",
-    )
-    variant_key = _first_str(
-        row,
-        "externalVariantKey",
-        "ExternalVariantKey",
-        "variantKey",
-        "variant_key",
-        "sku",
-        "SKU",
-    )
-    status = _first_str(
-        row,
-        "status",
-        "Status",
-        "state",
-        "State",
-        "listingStatus",
-        "publishStatus",
-        "publishedStatus",
-    )
-    created_at = _first_str(
-        row,
-        "createdAt",
-        "created_at",
-        "CreatedAt",
-        "dateCreated",
-        "createdDate",
-        "insertedAt",
-    )
-    updated_at = _first_str(
-        row,
-        "updatedAt",
-        "updated_at",
-        "UpdatedAt",
-        "dateUpdated",
-        "modifiedAt",
-    )
-    title = _first_str(row, "title", "Title", "name", "Name")
-    return {
-        "product_key": product_key,
-        "variant_key": variant_key,
-        "sku": variant_key or product_key,
-        "title": title,
-        "status": status or "found",
-        "created_at": created_at or None,
-        "updated_at": updated_at or None,
-        "marketplace_id": _first_str(row, "id", "Id", "variantId", "VariantId") or None,
-        "url": _first_str(row, "url", "Url", "webUrl", "permalink") or None,
-    }
 
 
 def _normalize_reverb_hit(row: dict) -> dict:
@@ -188,11 +95,7 @@ def _lookup_lasoo(store, sku: str) -> dict:
         data={
             "externalProductKey": product_key,
             "externalVariantKey": variant_key,
-            "take": 25,
-            "page": 1,
-            "returnDataObject": False,
-            "dataMappingErrors": False,
-            "returnMappingInfo": False,
+            **SEARCH_DATA_FLAGS,
         },
         auth=client.auth_key,
     )
@@ -202,10 +105,15 @@ def _lookup_lasoo(store, sku: str) -> dict:
             result.message or "Could not search Lasoo for this SKU."
         )
 
-    rows = [r for r in _collect_lasoo_rows(result.data) if isinstance(r, dict)]
+    rows = collect_variant_rows(result.data)
+    envelope_errors = collect_mapping_errors(result.data)
     matched = []
     for row in rows:
-        hit = _normalize_lasoo_hit(row)
+        hit = normalize_variant_hit(row)
+        if envelope_errors and not hit.get("mapping_errors"):
+            hit["mapping_errors"] = envelope_errors
+            if hit.get("advertised") is None:
+                hit["advertised"] = False
         if (
             hit["variant_key"] == variant_key
             or hit["product_key"] == product_key
@@ -214,18 +122,30 @@ def _lookup_lasoo(store, sku: str) -> dict:
             or hit["sku"] == sku
         ):
             matched.append(hit)
-    hits = matched or [_normalize_lasoo_hit(r) for r in rows]
+    if matched:
+        hits = matched
+    elif len(rows) == 1:
+        hits = [normalize_variant_hit(rows[0])]
+        if envelope_errors and not hits[0].get("mapping_errors"):
+            hits[0]["mapping_errors"] = envelope_errors
+            if hits[0].get("advertised") is None:
+                hits[0]["advertised"] = False
+    else:
+        hits = []
     found = bool(hits)
+    top = hits[0] if hits else {}
+    advertised = top.get("advertised")
+    mapping_errors = list(top.get("mapping_errors") or envelope_errors or [])
     return {
         "ok": True,
         "found": found,
+        "advertised": advertised,
+        "mapping_errors": mapping_errors,
         "marketplace": "lasoo",
         "environment": client.environment,
         "query": {"sku": sku, "product_key": product_key, "variant_key": variant_key},
-        "message": (
-            "Found on Lasoo."
-            if found
-            else "Not found on Lasoo for this product/variant key."
+        "message": lookup_message(
+            found=found, advertised=advertised, mapping_errors=mapping_errors,
         ),
         "results": hits[:10],
         "local_listing": _local_listing_summary(store, sku),
@@ -367,10 +287,28 @@ def _row_from_lookup(sku: str, result: dict | None, error: str = "") -> dict:
         hit = result["results"][0]
     local = (result or {}).get("local_listing") if result else None
     found = bool(result and result.get("found"))
+    advertised = None
+    if hit and "advertised" in hit:
+        advertised = hit.get("advertised")
+    elif result:
+        advertised = result.get("advertised")
+    if advertised is True:
+        advertised_label = "Yes"
+    elif advertised is False:
+        advertised_label = "No"
+    else:
+        advertised_label = ""
+    mapping_errors = []
+    if hit and hit.get("mapping_errors"):
+        mapping_errors = hit.get("mapping_errors") or []
+    elif result:
+        mapping_errors = result.get("mapping_errors") or []
     return {
         "sku": sku,
         "found": "Yes" if found else "No",
+        "advertised": advertised_label,
         "marketplace_status": (hit or {}).get("status") or "",
+        "mapping_errors": "; ".join(mapping_errors) if mapping_errors else "",
         "created_at": (hit or {}).get("created_at") or (hit or {}).get("published_at") or "",
         "published_at": (hit or {}).get("published_at") or "",
         "title": (hit or {}).get("title") or "",
@@ -446,7 +384,9 @@ def lookup_skus_bulk(store, skus: list[str]) -> dict:
 CSV_COLUMNS = [
     ("sku", "SKU"),
     ("found", "Found"),
+    ("advertised", "Advertised / Live"),
     ("marketplace_status", "Marketplace Status"),
+    ("mapping_errors", "Mapping Errors"),
     ("created_at", "Created At"),
     ("published_at", "Published At"),
     ("title", "Title"),

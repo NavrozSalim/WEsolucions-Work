@@ -168,9 +168,9 @@ class Command(BaseCommand):
                 "externalVariantKey": variant_key,
                 "take": 25,
                 "page": 1,
-                "returnDataObject": False,
-                "dataMappingErrors": False,
-                "returnMappingInfo": False,
+                "returnDataObject": True,
+                "dataMappingErrors": True,
+                "returnMappingInfo": True,
             },
             auth=client.auth_key,
         )
@@ -223,7 +223,11 @@ class Command(BaseCommand):
 
         if found:
             self.stdout.write(self.style.SUCCESS("Result: FOUND on Lasoo"))
-            self.stdout.write("This product is on the marketplace.")
+            self.stdout.write(
+                "This SKU is in Lasoo seller inventory. "
+                "That does not always mean it is visible on lasoo.com.au — "
+                "check mapping / advertised status in Lasoo Connect if the public site is empty."
+            )
             if verbose:
                 for row in (matched or rows)[:5]:
                     if isinstance(row, dict):

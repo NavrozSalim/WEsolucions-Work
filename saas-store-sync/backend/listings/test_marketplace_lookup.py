@@ -85,10 +85,12 @@ class MarketplaceLookupTests(TestCase):
         result = marketplace_lookup.lookup_sku(store, "SKU-1")
         self.assertTrue(result["ok"])
         self.assertTrue(result["found"])
+        self.assertTrue(result["advertised"])
         self.assertEqual(result["marketplace"], "lasoo")
         self.assertEqual(result["results"][0]["status"], "Active")
         self.assertEqual(result["results"][0]["created_at"], "2026-01-15T10:00:00Z")
         self.assertIsNotNone(result["local_listing"])
+        self.assertIn("advertised", result["message"].lower())
 
     @patch("listings.marketplace_lookup.LasooClient")
     def test_lasoo_lookup_not_found(self, mock_client_cls):
@@ -108,6 +110,40 @@ class MarketplaceLookupTests(TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["found"])
         self.assertEqual(result["results"], [])
+
+    @patch("listings.marketplace_lookup.LasooClient")
+    def test_lasoo_lookup_found_but_not_advertised(self, mock_client_cls):
+        store = self._lasoo_store()
+        mock_client = MagicMock()
+        mock_client.auth_key = "test-key"
+        mock_client.environment = "production"
+        mock_client.send.return_value = LasooResult(
+            ok=True,
+            data={
+                "results": {
+                    "variants": [
+                        {
+                            "externalProductKey": "LJR-1",
+                            "externalVariantKey": "LJR-1",
+                            "createdAt": "2026-08-28T18:02:00Z",
+                        }
+                    ]
+                }
+            },
+            message="ok",
+            status=200,
+        )
+        mock_client_cls.return_value = mock_client
+
+        result = marketplace_lookup.lookup_sku(store, "LJR-1")
+        self.assertTrue(result["found"])
+        self.assertIsNone(result["advertised"])
+        self.assertEqual(result["results"][0]["status"], "in seller catalog")
+        self.assertIn("seller inventory", result["message"].lower())
+        payload = mock_client.send.call_args[0][1]
+        data = payload.get("data") or {}
+        self.assertTrue(data.get("dataMappingErrors"))
+        self.assertTrue(data.get("returnMappingInfo"))
 
     @patch("listings.marketplace_lookup.get_adapter")
     def test_reverb_lookup_found(self, mock_get_adapter):
@@ -168,6 +204,7 @@ class MarketplaceLookupTests(TestCase):
                         {
                             "sku": "FOUND",
                             "status": "Active",
+                            "advertised": True,
                             "created_at": "2026-01-01T00:00:00Z",
                             "title": "Yes",
                             "marketplace_id": "1",
@@ -200,8 +237,8 @@ class MarketplaceLookupTests(TestCase):
 
         csv_bytes = marketplace_lookup.build_lookup_csv(result)
         text = csv_bytes.decode("utf-8-sig")
-        self.assertIn("SKU,Found,Marketplace Status", text)
-        self.assertIn("FOUND,Yes,Active", text)
+        self.assertIn("SKU,Found,Advertised / Live,Marketplace Status", text)
+        self.assertIn("FOUND,Yes,Yes,Active", text)
         self.assertIn("MISS,No,", text)
         self.assertIn("ERR,Error,", text)
 
@@ -230,7 +267,7 @@ class MarketplaceLookupTests(TestCase):
                 "environment": "staging",
                 "message": "ok",
                 "results": (
-                    [{"sku": "A", "status": "Active", "created_at": "2026-01-01T00:00:00Z", "title": "A"}]
+                    [{"sku": "A", "status": "Active", "advertised": True, "created_at": "2026-01-01T00:00:00Z", "title": "A"}]
                     if sku == "A"
                     else []
                 ),
@@ -247,7 +284,7 @@ class MarketplaceLookupTests(TestCase):
         self.assertEqual(data["not_found"], 1)
         self.assertTrue(prog.public_lookup_progress(store.id)["has_results"])
         csv_bytes = marketplace_lookup.build_lookup_csv({"rows": data["rows"]})
-        self.assertIn(b"A,Yes,Active", csv_bytes)
+        self.assertIn(b"A,Yes,Yes,Active", csv_bytes)
 
     @patch("listings.marketplace_lookup.lookup_sku")
     def test_async_job_respects_cancel(self, mock_lookup):

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
 
 from marketplace.models import Marketplace
 from stores.models import Store
@@ -290,6 +291,78 @@ class ListingServiceTests(TestCase):
         listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
         listing = listing_service.update(listing, {**VALID_DATA, "sale_price": "99.99"})
         self.assertEqual(listing.status, ListingStatus.VALIDATION_FAILED)
+
+    def test_update_keeps_uploaded_status(self):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        listing.status = ListingStatus.UPLOADED_STAGING
+        listing.last_uploaded_at = timezone.now()
+        listing.save(update_fields=["status", "last_uploaded_at"])
+        with patch("listings.listing_service.LasooClient") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.auth_key = "key"
+            mock_client.send.return_value = LasooResult(ok=True, message="ok", data={"success": True})
+            listing = listing_service.update(listing, {**VALID_DATA, "title": "Updated tee"})
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.UPLOADED_STAGING)
+        self.assertEqual(listing.title, "Updated tee")
+
+    @patch("listings.listing_service.LasooClient")
+    def test_update_pushes_uploaded_listing_to_lasoo(self, mock_client_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        listing.status = ListingStatus.UPLOADED_STAGING
+        listing.last_uploaded_at = timezone.now()
+        listing.save(update_fields=["status", "last_uploaded_at"])
+
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.return_value = LasooResult(ok=True, message="ok", data={"success": True})
+
+        listing_service.update(listing, {**VALID_DATA, "title": "Pushed title"})
+        mock_client.send.assert_called_once()
+        self.assertEqual(mock_client.send.call_args[0][0], "bulk_upsert")
+        payload = mock_client.send.call_args[0][1]
+        variants = (payload.get("data") or payload).get("variants") or []
+        self.assertEqual(len(variants), 1)
+        body = json.loads(variants[0]["externalDataObject"])
+        self.assertEqual(body.get("productName"), "Pushed title")
+
+    @patch("listings.listing_service.LasooClient")
+    def test_update_raises_when_lasoo_mapping_fails(self, mock_client_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        listing.status = ListingStatus.UPLOADED_STAGING
+        listing.last_uploaded_at = timezone.now()
+        listing.save(update_fields=["status", "last_uploaded_at"])
+
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.return_value = LasooResult(
+            ok=True,
+            message="ok",
+            data={
+                "success": True,
+                "results": {
+                    "dataMappingErrors": [
+                        {"externalVariantKey": listing.sku, "errors": ["Category could not be mapped"]},
+                    ],
+                },
+            },
+        )
+        with self.assertRaises(MarketplaceError) as ctx:
+            listing_service.update(listing, {**VALID_DATA, "title": "Broken map"})
+        self.assertIn("mapping", str(ctx.exception).lower())
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.FAILED)
+        self.assertEqual(listing.title, "Broken map")
+
+    def test_update_ready_listing_does_not_push(self):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        self.assertEqual(listing.status, ListingStatus.READY)
+        with patch("listings.listing_service.LasooClient") as mock_client_cls:
+            listing_service.update(listing, {**VALID_DATA, "title": "Still local"})
+            mock_client_cls.assert_not_called()
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.READY)
+        self.assertEqual(listing.title, "Still local")
 
     def test_bulk_import_create_action(self):
         content = csv_import.build_template_csv("create").encode()
@@ -710,6 +783,35 @@ class ListingServiceTests(TestCase):
         self.assertEqual(uploaded.status, ListingStatus.UPLOADED_STAGING)
         self.assertIsNotNone(ready.last_uploaded_at)
         self.assertIsNone(uploaded.last_uploaded_at)
+
+    @patch("listings.listing_service.LasooClient")
+    def test_publish_fails_when_lasoo_reports_mapping_errors(self, mock_client_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.return_value = LasooResult(
+            ok=True,
+            message="ok",
+            data={
+                "success": True,
+                "results": {
+                    "success": True,
+                    "dataMappingErrors": [
+                        {
+                            "externalVariantKey": listing.sku,
+                            "errors": ["Category could not be mapped"],
+                        }
+                    ],
+                },
+            },
+        )
+        result = listing_service.publish(self.user, self.store)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["published"], 0)
+        self.assertIn("mapping", result["message"].lower())
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.FAILED)
+        self.assertTrue(listing.validation_errors_json)
 
     def test_reverb_template_headers(self):
         reverb, _ = Marketplace.objects.get_or_create(code="reverb", defaults={"name": "Reverb"})
