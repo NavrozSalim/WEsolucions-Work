@@ -70,10 +70,15 @@ def build_external_data_object(data: dict) -> str:
     Includes structured Option N Name/Value (up to 4), Variation Img URL,
     and a combined Options summary for Lasoo mapping.
     """
+    image_urls = normalize_image_urls(data.get("image_urls"))
+    # Lasoo Connect mapping has used several image field names ("No image URLs"
+    # while data lived under ``images``). Send the aliases the mapper may bind.
     obj = {
         "productName": (data.get("title") or "").strip(),
         "description": (data.get("description") or "").strip(),
-        "Image URLS": normalize_image_urls(data.get("image_urls")),
+        "Image URLS": image_urls,
+        "Image URLs": image_urls,
+        "images": image_urls,
         "Brand": (data.get("brand") or "").strip(),
         "Category": (data.get("category") or "").strip(),
         "SKU": (data.get("sku") or "").strip(),

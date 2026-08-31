@@ -11,14 +11,8 @@ from stores.credentials import marketplace_kind
 
 from .errors import MarketplaceError
 from .lasoo.client import LasooClient
-from .lasoo.queries import build_payload
-from .lasoo.response import (
-    SEARCH_DATA_FLAGS,
-    collect_mapping_errors,
-    collect_variant_rows,
-    lookup_message,
-    normalize_variant_hit,
-)
+from .lasoo.connect_search import search_variant
+from .lasoo.response import lookup_message
 from .models import StoreListing
 
 logger = logging.getLogger("listings")
@@ -90,62 +84,34 @@ def _lookup_lasoo(store, sku: str) -> dict:
     ).strip()
 
     client = LasooClient(store)
-    payload = build_payload(
-        "variants_search",
-        data={
-            "externalProductKey": product_key,
-            "externalVariantKey": variant_key,
-            **SEARCH_DATA_FLAGS,
-        },
-        auth=client.auth_key,
+    searched = search_variant(
+        client,
+        product_key=product_key,
+        variant_key=variant_key,
+        sku=sku,
     )
-    result = client.send("variants_search", payload)
-    if not result.ok:
+    if not searched.get("ok"):
         raise MarketplaceError(
-            result.message or "Could not search Lasoo for this SKU."
+            searched.get("message") or "Could not search Lasoo for this SKU."
         )
 
-    rows = collect_variant_rows(result.data)
-    envelope_errors = collect_mapping_errors(result.data)
-    matched = []
-    for row in rows:
-        hit = normalize_variant_hit(row)
-        if envelope_errors and not hit.get("mapping_errors"):
-            hit["mapping_errors"] = envelope_errors
-            if hit.get("advertised") is None:
-                hit["advertised"] = False
-        if (
-            hit["variant_key"] == variant_key
-            or hit["product_key"] == product_key
-            or hit["variant_key"] == sku
-            or hit["product_key"] == sku
-            or hit["sku"] == sku
-        ):
-            matched.append(hit)
-    if matched:
-        hits = matched
-    elif len(rows) == 1:
-        hits = [normalize_variant_hit(rows[0])]
-        if envelope_errors and not hits[0].get("mapping_errors"):
-            hits[0]["mapping_errors"] = envelope_errors
-            if hits[0].get("advertised") is None:
-                hits[0]["advertised"] = False
-    else:
-        hits = []
-    found = bool(hits)
-    top = hits[0] if hits else {}
-    advertised = top.get("advertised")
-    mapping_errors = list(top.get("mapping_errors") or envelope_errors or [])
+    hits = [searched["hit"]] if searched.get("found") and searched.get("hit") else []
+    advertised = searched.get("advertised")
+    mapping_errors = list(searched.get("mapping_errors") or [])
     return {
         "ok": True,
-        "found": found,
+        "found": bool(searched.get("found")),
         "advertised": advertised,
         "mapping_errors": mapping_errors,
         "marketplace": "lasoo",
         "environment": client.environment,
-        "query": {"sku": sku, "product_key": product_key, "variant_key": variant_key},
-        "message": lookup_message(
-            found=found, advertised=advertised, mapping_errors=mapping_errors,
+        "query": searched.get("query") or {
+            "sku": sku, "product_key": product_key, "variant_key": variant_key,
+        },
+        "message": searched.get("message") or lookup_message(
+            found=bool(searched.get("found")),
+            advertised=advertised,
+            mapping_errors=mapping_errors,
         ),
         "results": hits[:10],
         "local_listing": _local_listing_summary(store, sku),
@@ -226,6 +192,14 @@ def parse_sku_list(raw) -> list[str]:
         seen.add(key)
         out.append(sku)
     return out
+
+
+def store_listing_skus(store) -> list[str]:
+    """SKUs for every managed listing on this store (for reconcile-all)."""
+    pairs = StoreListing.objects.filter(store=store).order_by("sku").values_list(
+        "sku", "external_variant_key",
+    )
+    return parse_sku_list([sku or variant for sku, variant in pairs])
 
 
 def parse_skus_from_file(content: bytes, filename: str = "") -> list[str]:
@@ -315,6 +289,8 @@ def _row_from_lookup(sku: str, result: dict | None, error: str = "") -> dict:
         "marketplace_id": (hit or {}).get("marketplace_id") or "",
         "url": (hit or {}).get("url") or "",
         "local_status": (local or {}).get("status") or "",
+        "local_action": (local or {}).get("action") or "",
+        "local_title": (local or {}).get("title") or "",
         "local_created_at": (local or {}).get("created_at") or "",
         "message": error or ((result or {}).get("message") or ""),
     }
@@ -392,8 +368,10 @@ CSV_COLUMNS = [
     ("title", "Title"),
     ("marketplace_id", "Marketplace ID"),
     ("url", "URL"),
-    ("local_status", "Local Status"),
-    ("local_created_at", "Local Created At"),
+    ("local_status", "Hub Status"),
+    ("local_action", "Hub Action"),
+    ("local_title", "Hub Title"),
+    ("local_created_at", "Hub Created At"),
     ("message", "Message"),
 ]
 

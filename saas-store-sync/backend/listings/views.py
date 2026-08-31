@@ -598,9 +598,27 @@ class StoreListingMarketplaceLookupView(APIView):
 
     def post(self, request, store_pk):
         store = _get_store(request, store_pk)
+        data = request.data if isinstance(request.data, dict) else {}
+        source = str(
+            data.get('source') or request.query_params.get('source') or ''
+        ).strip().lower()
+        all_listings = (
+            source in ('store', 'listings', 'all')
+            or data.get('all_listings') in (True, '1', 'true', 'yes', 1)
+            or str(request.query_params.get('all_listings') or '').lower() in (
+                '1', 'true', 'yes',
+            )
+        )
         skus = []
         upload = request.FILES.get('file') or request.FILES.get('skus')
-        if upload is not None:
+        if all_listings:
+            skus = marketplace_lookup.store_listing_skus(store)
+            if not skus:
+                return Response(
+                    {'detail': 'This store has no listings to check.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif upload is not None:
             try:
                 skus = marketplace_lookup.parse_skus_from_file(
                     upload.read(),

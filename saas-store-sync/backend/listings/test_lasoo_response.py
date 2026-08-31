@@ -110,6 +110,20 @@ class LasooResponseTests(SimpleTestCase):
         self.assertFalse(advertised_from_row({"advertised": False}))
         self.assertTrue(advertised_from_row({"published": True}))
 
+    def test_data_published_at_controls_advertised(self):
+        self.assertFalse(advertised_from_row({"dataPublishedAt": None}))
+        self.assertTrue(advertised_from_row({"dataPublishedAt": "2026-07-21T02:41:16.000Z"}))
+
+    def test_normalize_reads_published_at(self):
+        hit = normalize_variant_hit({
+            "externalVariantKey": "SKU-1",
+            "dataPublishedAt": "2026-07-21T02:41:16.000Z",
+            "dataMappingErrors": "No image URLs",
+        })
+        self.assertFalse(hit["advertised"])
+        self.assertIn("No image URLs", " ".join(hit["mapping_errors"]))
+        self.assertEqual(hit["published_at"], "2026-07-21T02:41:16.000Z")
+
     def test_lookup_message_explains_seller_catalog(self):
         msg = lookup_message(found=True, advertised=None, mapping_errors=[])
         self.assertIn("seller inventory", msg.lower())

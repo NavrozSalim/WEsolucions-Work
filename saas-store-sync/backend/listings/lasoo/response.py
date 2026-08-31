@@ -244,6 +244,11 @@ def advertised_from_row(row: dict, mapping_errors: list[str] | None = None) -> b
     """True = live/advertised, False = explicitly not live, None = unknown."""
     if mapping_errors:
         return False
+    if isinstance(row, dict) and "dataPublishedAt" in row:
+        published = row.get("dataPublishedAt")
+        if published in (None, "", "null"):
+            return False
+        return True
     flag = _truthy_flag(
         row,
         "advertised",
@@ -341,7 +346,12 @@ def normalize_variant_hit(row: dict) -> dict:
             "dateUpdated",
             "modifiedAt",
         ) or None,
-        "marketplace_id": _first_str(row, "id", "Id", "variantId", "VariantId") or None,
+        "marketplace_id": _first_str(
+            row, "id", "Id", "variantId", "VariantId", "advertId", "AdvertId",
+        ) or None,
+        "published_at": _first_str(
+            row, "dataPublishedAt", "publishedAt", "published_at", "PublishedAt",
+        ) or None,
         "url": _first_str(row, "url", "Url", "webUrl", "permalink", "publicUrl") or None,
     }
 

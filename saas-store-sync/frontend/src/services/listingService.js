@@ -136,7 +136,7 @@ function marketplaceLookupFormData(file) {
 }
 
 /** Start background bulk marketplace SKU check (survives leaving the page). */
-export const startMarketplaceLookupJob = (storeId, { skus, text, file } = {}) => {
+export const startMarketplaceLookupJob = (storeId, { skus, text, file, allListings } = {}) => {
     if (file) {
         return api.post(
             `/stores/${storeId}/listings/marketplace-lookup/`,
@@ -146,6 +146,8 @@ export const startMarketplaceLookupJob = (storeId, { skus, text, file } = {}) =>
     return api.post(`/stores/${storeId}/listings/marketplace-lookup/`, {
         skus: skus || undefined,
         text: text || undefined,
+        all_listings: allListings ? true : undefined,
+        source: allListings ? 'store' : undefined,
     });
 };
 

@@ -585,7 +585,7 @@ export default function ListingFormModal({
                         <p className="mb-4 text-xs text-slate-500 dark:text-slate-400">
                             Fields match the bulk listing template. Marketplace Name / Store Name can route to another of your stores (same as CSV).
                             {willPushLasoo
-                                ? ' Saving will push this listing to Lasoo so the marketplace stays in sync with what you edit here.'
+                                ? ' Saving pushes to Lasoo Connect only if this SKU already exists in seller inventory. A live lasoo.com.au page with a different SKU will not change.'
                                 : ''}
                         </p>
                         {isEdit && Array.isArray(listing?.validation_errors_json) && listing.validation_errors_json.length > 0 && (

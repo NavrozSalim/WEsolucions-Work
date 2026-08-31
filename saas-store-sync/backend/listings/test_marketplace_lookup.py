@@ -112,6 +112,30 @@ class MarketplaceLookupTests(TestCase):
         self.assertEqual(result["results"], [])
 
     @patch("listings.marketplace_lookup.LasooClient")
+    def test_lasoo_lookup_ignores_unrelated_variant(self, mock_client_cls):
+        store = self._lasoo_store()
+        mock_client = MagicMock()
+        mock_client.auth_key = "test-key"
+        mock_client.environment = "staging"
+        mock_client.send.return_value = LasooResult(
+            ok=True,
+            data={
+                "results": {
+                    "variants": [
+                        {"externalProductKey": "OTHER", "externalVariantKey": "OTHER"},
+                    ]
+                }
+            },
+            message="ok",
+            status=200,
+        )
+        mock_client_cls.return_value = mock_client
+        result = marketplace_lookup.lookup_sku(store, "U-Z1618")
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["found"])
+        self.assertEqual(result["results"], [])
+
+    @patch("listings.marketplace_lookup.LasooClient")
     def test_lasoo_lookup_found_but_not_advertised(self, mock_client_cls):
         store = self._lasoo_store()
         mock_client = MagicMock()
@@ -168,6 +192,36 @@ class MarketplaceLookupTests(TestCase):
         self.assertEqual(result["results"][0]["status"], "live")
         self.assertEqual(result["results"][0]["created_at"], "2026-02-01T12:00:00Z")
         self.assertEqual(result["results"][0]["published_at"], "2026-02-01T13:00:00Z")
+
+    def test_store_listing_skus_uses_hub_rows(self):
+        store = self._lasoo_store()
+        StoreListing.objects.create(
+            user=self.user,
+            store=store,
+            external_product_key="A-1",
+            external_variant_key="A-1",
+            sku="A-1",
+            title="A",
+            description="d",
+            brand="b",
+            image_urls="https://img.example.com/a.jpg",
+            original_price="10",
+            sale_price="9",
+        )
+        StoreListing.objects.create(
+            user=self.user,
+            store=store,
+            external_product_key="B-1",
+            external_variant_key="B-1",
+            sku="B-1",
+            title="B",
+            description="d",
+            brand="b",
+            image_urls="https://img.example.com/a.jpg",
+            original_price="10",
+            sale_price="9",
+        )
+        self.assertEqual(marketplace_lookup.store_listing_skus(store), ["A-1", "B-1"])
 
     def test_rejects_blank_sku(self):
         store = self._lasoo_store()

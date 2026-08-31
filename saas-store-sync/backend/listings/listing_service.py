@@ -21,6 +21,11 @@ from .errors import MarketplaceError
 from .etsy import listings as etsy_listings
 from .lasoo import mapper, validator
 from .lasoo.client import LasooClient
+from .lasoo.connect_search import (
+    NOT_IN_CONNECT_MAPPED,
+    NOT_IN_CONNECT_PUSH,
+    search_variant,
+)
 from .lasoo.response import interpret_bulk_upsert
 from .models import (
     Environment,
@@ -157,6 +162,21 @@ def _vendor_id_from_url(url: str, price_by_vendor_id: dict, inv_by_vendor_id: di
 
 def _store_kind(store) -> str:
     return marketplace_kind(getattr(store, "marketplace", None))
+
+
+def _search_lasoo_listing(store, listing: StoreListing) -> dict:
+    """Variants_Search for this listing's product/variant keys. No BulkUpsert."""
+    sku = (listing.sku or listing.external_variant_key or "").strip()
+    product_key = (listing.external_product_key or sku).strip()
+    variant_key = (listing.external_variant_key or sku).strip()
+    environment = listing.environment or None
+    client = LasooClient(store, environment)
+    return search_variant(
+        client,
+        product_key=product_key,
+        variant_key=variant_key,
+        sku=sku,
+    )
 
 
 def _listing_env(store) -> str:
@@ -366,11 +386,28 @@ def update(listing: StoreListing, data: dict) -> StoreListing:
         listing.validation_errors_json = merged
         listing.status = ListingStatus.VALIDATION_FAILED
     listing.save()
+    if link_errors and _store_kind(listing.store) == "lasoo":
+        raise MarketplaceError(link_errors[0])
     if (
         was_on_marketplace
         and listing.status != ListingStatus.VALIDATION_FAILED
         and _store_kind(listing.store) == "lasoo"
     ):
+        sku = (listing.sku or listing.external_variant_key or "").strip()
+        # Mapped rows were already confirmed in _attach_mapped_listing.
+        if listing.action != ListingAction.MAPPED:
+            searched = _search_lasoo_listing(listing.store, listing)
+            if not searched.get("ok"):
+                raise MarketplaceError(
+                    searched.get("message")
+                    or f'Could not verify SKU "{sku}" on Lasoo Connect. Saved here but not pushed.'
+                )
+            if not searched.get("found"):
+                msg = NOT_IN_CONNECT_PUSH.format(sku=sku)
+                listing.status = ListingStatus.FAILED
+                listing.validation_errors_json = [msg]
+                listing.save(update_fields=["status", "validation_errors_json", "updated_at"])
+                raise MarketplaceError(msg)
         pub = _publish_lasoo(listing.user, listing.store, [listing])
         listing.refresh_from_db()
         if not pub.get("ok"):
@@ -402,12 +439,34 @@ def _resolve_reverb_listing_id(adapter, listing: StoreListing) -> str:
 
 
 def _attach_mapped_listing(listing: StoreListing) -> list[str]:
-    """Resolve marketplace listing id for Mapped rows (Reverb / Etsy)."""
+    """Confirm Mapped rows exist on the marketplace before marking uploaded.
+
+    Reverb / Etsy: look up listing id by SKU.
+    Lasoo: Variants_Search must return this product/variant key. HTTP 200 with
+    an empty catalog is not a match — those rows stay validation_failed.
+    """
     store = listing.store
     kind = _store_kind(store)
-    if listing.action != ListingAction.MAPPED or kind not in ("reverb", "etsy"):
+    if listing.action != ListingAction.MAPPED:
         return []
     sku = (listing.sku or listing.external_variant_key or "").strip()
+    if kind == "lasoo":
+        if not sku:
+            return ["SKU is required to map a Lasoo listing."]
+        searched = _search_lasoo_listing(store, listing)
+        if not searched.get("ok"):
+            return [
+                searched.get("message")
+                or f'Could not verify SKU "{sku}" on Lasoo Connect.'
+            ]
+        if not searched.get("found"):
+            return [NOT_IN_CONNECT_MAPPED.format(sku=sku)]
+        warnings = searched.get("mapping_errors") or []
+        if warnings:
+            listing.validation_errors_json = warnings
+        return []
+    if kind not in ("reverb", "etsy"):
+        return []
     if not sku:
         return [f"SKU is required to map a {kind.title()} listing."]
     label = "Reverb" if kind == "reverb" else "Etsy"
@@ -1745,16 +1804,44 @@ def push_inventory(user, store, listing_ids=None) -> dict:
             raise MarketplaceError(
                 "No marketplace listings to push. Publish from Created products first."
             )
-        pub = _publish_lasoo(user, store, listings)
+        confirmed = []
+        skipped = []
+        for listing in listings:
+            sku = (listing.sku or listing.external_variant_key or "").strip()
+            searched = _search_lasoo_listing(store, listing)
+            if searched.get("ok") and searched.get("found"):
+                confirmed.append(listing)
+            else:
+                skipped.append(sku or str(listing.id))
+        if not confirmed:
+            sample = ", ".join(skipped[:8])
+            raise MarketplaceError(
+                "None of these listings exist in Lasoo Connect seller inventory. "
+                "Inventory sync will not create new SKUs. Use Create + Publish for new "
+                "products, or fix Hub SKUs to match Connect."
+                + (f" Skipped: {sample}." if sample else "")
+            )
+        pub = _publish_lasoo(user, store, confirmed)
         if pub.get("ok"):
-            StoreListing.objects.filter(id__in=[l.id for l in listings]).update(
+            StoreListing.objects.filter(id__in=[l.id for l in confirmed]).update(
                 inventory_sync_status=InventorySyncStatus.SYNCED,
+            )
+        extra = ""
+        if skipped:
+            extra = (
+                f" Skipped {len(skipped)} SKU(s) not in Connect"
+                f" ({', '.join(skipped[:8])}"
+                f"{'…' if len(skipped) > 8 else ''})."
             )
         return {
             "ok": bool(pub.get("ok")),
-            "message": pub.get("message") or f"Pushed {len(listings)} listing(s) to Lasoo.",
-            "pushed": pub.get("published") or (len(listings) if pub.get("ok") else 0),
-            "failed": 0 if pub.get("ok") else len(listings),
+            "message": (
+                (pub.get("message") or f"Pushed {len(confirmed)} listing(s) to Lasoo.")
+                + extra
+            ),
+            "pushed": pub.get("published") or (len(confirmed) if pub.get("ok") else 0),
+            "failed": 0 if pub.get("ok") else len(confirmed),
+            "skipped": len(skipped),
             "rows": [],
         }
     if kind == "mydeal":

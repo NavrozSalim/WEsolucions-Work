@@ -18,7 +18,7 @@ from . import csv_import, listing_service, order_service
 from .errors import MarketplaceError
 from .lasoo import mapper, validator
 from .lasoo.client import LasooResult
-from .models import ListingStatus, ListingUpload, MarketplaceOrder, OrderStatus, StoreListing
+from .models import ListingAction, ListingStatus, ListingUpload, MarketplaceOrder, OrderStatus, StoreListing
 from .views import _listing_upload_csv_response
 
 VALID_DATA = {
@@ -91,6 +91,9 @@ class MapperTests(TestCase):
         self.assertEqual(payload.get("Options"), "Colour=Black; Size=M")
         self.assertEqual(payload.get("Variation Img URL"), "https://img.example.com/tshirt-black-m.jpg")
         self.assertEqual(payload.get("SKU"), "TSHIRT-001-BLACK-M")
+        self.assertEqual(payload.get("Image URLS"), VALID_DATA["image_urls"])
+        self.assertEqual(payload.get("Image URLs"), VALID_DATA["image_urls"])
+        self.assertEqual(payload.get("images"), VALID_DATA["image_urls"])
 
     def test_options_required_when_product_and_variant_differ(self):
         data = {
@@ -300,7 +303,24 @@ class ListingServiceTests(TestCase):
         with patch("listings.listing_service.LasooClient") as mock_client_cls:
             mock_client = mock_client_cls.return_value
             mock_client.auth_key = "key"
-            mock_client.send.return_value = LasooResult(ok=True, message="ok", data={"success": True})
+
+            def send(endpoint, payload=None, *args, **kwargs):
+                if endpoint == "variants_search":
+                    return LasooResult(
+                        ok=True,
+                        message="ok",
+                        data={
+                            "results": {
+                                "variants": [{
+                                    "externalProductKey": listing.external_product_key,
+                                    "externalVariantKey": listing.external_variant_key,
+                                }],
+                            },
+                        },
+                    )
+                return LasooResult(ok=True, message="ok", data={"success": True})
+
+            mock_client.send.side_effect = send
             listing = listing_service.update(listing, {**VALID_DATA, "title": "Updated tee"})
         listing.refresh_from_db()
         self.assertEqual(listing.status, ListingStatus.UPLOADED_STAGING)
@@ -315,12 +335,31 @@ class ListingServiceTests(TestCase):
 
         mock_client = mock_client_cls.return_value
         mock_client.auth_key = "key"
-        mock_client.send.return_value = LasooResult(ok=True, message="ok", data={"success": True})
+
+        def send(endpoint, payload=None, *args, **kwargs):
+            if endpoint == "variants_search":
+                return LasooResult(
+                    ok=True,
+                    message="ok",
+                    data={
+                        "results": {
+                            "variants": [{
+                                "externalProductKey": listing.external_product_key,
+                                "externalVariantKey": listing.external_variant_key,
+                            }],
+                        },
+                    },
+                )
+            return LasooResult(ok=True, message="ok", data={"success": True})
+
+        mock_client.send.side_effect = send
 
         listing_service.update(listing, {**VALID_DATA, "title": "Pushed title"})
-        mock_client.send.assert_called_once()
-        self.assertEqual(mock_client.send.call_args[0][0], "bulk_upsert")
-        payload = mock_client.send.call_args[0][1]
+        endpoints = [c[0][0] for c in mock_client.send.call_args_list]
+        self.assertIn("variants_search", endpoints)
+        self.assertIn("bulk_upsert", endpoints)
+        upsert = next(c for c in mock_client.send.call_args_list if c[0][0] == "bulk_upsert")
+        payload = upsert[0][1]
         variants = (payload.get("data") or payload).get("variants") or []
         self.assertEqual(len(variants), 1)
         body = json.loads(variants[0]["externalDataObject"])
@@ -335,18 +374,35 @@ class ListingServiceTests(TestCase):
 
         mock_client = mock_client_cls.return_value
         mock_client.auth_key = "key"
-        mock_client.send.return_value = LasooResult(
-            ok=True,
-            message="ok",
-            data={
-                "success": True,
-                "results": {
-                    "dataMappingErrors": [
-                        {"externalVariantKey": listing.sku, "errors": ["Category could not be mapped"]},
-                    ],
+
+        def send(endpoint, payload=None, *args, **kwargs):
+            if endpoint == "variants_search":
+                return LasooResult(
+                    ok=True,
+                    message="ok",
+                    data={
+                        "results": {
+                            "variants": [{
+                                "externalProductKey": listing.external_product_key,
+                                "externalVariantKey": listing.external_variant_key,
+                            }],
+                        },
+                    },
+                )
+            return LasooResult(
+                ok=True,
+                message="ok",
+                data={
+                    "success": True,
+                    "results": {
+                        "dataMappingErrors": [
+                            {"externalVariantKey": listing.sku, "errors": ["Category could not be mapped"]},
+                        ],
+                    },
                 },
-            },
-        )
+            )
+
+        mock_client.send.side_effect = send
         with self.assertRaises(MarketplaceError) as ctx:
             listing_service.update(listing, {**VALID_DATA, "title": "Broken map"})
         self.assertIn("mapping", str(ctx.exception).lower())
@@ -363,6 +419,30 @@ class ListingServiceTests(TestCase):
         listing.refresh_from_db()
         self.assertEqual(listing.status, ListingStatus.READY)
         self.assertEqual(listing.title, "Still local")
+
+    @patch("listings.listing_service.LasooClient")
+    def test_update_does_not_upsert_when_sku_missing_on_lasoo(self, mock_client_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        listing.action = ListingAction.MAPPED
+        listing.status = ListingStatus.UPLOADED_STAGING
+        listing.last_uploaded_at = timezone.now()
+        listing.save(update_fields=["action", "status", "last_uploaded_at"])
+
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.return_value = LasooResult(
+            ok=True,
+            message="ok",
+            data={"results": {"success": True, "variants": [], "count": 0, "total": 0}},
+        )
+        with self.assertRaises(MarketplaceError) as ctx:
+            listing_service.update(listing, {**VALID_DATA, "title": "No FIN"})
+        self.assertIn("not found", str(ctx.exception).lower())
+        endpoints = [c[0][0] for c in mock_client.send.call_args_list]
+        self.assertEqual(endpoints, ["variants_search"])
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.VALIDATION_FAILED)
+        self.assertEqual(listing.title, "No FIN")
 
     def test_bulk_import_create_action(self):
         content = csv_import.build_template_csv("create").encode()
@@ -663,7 +743,27 @@ class ListingServiceTests(TestCase):
         self.assertEqual(mock_client.send.call_args[0][0], "bulk_delete")
         self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 0)
 
-    def test_bulk_import_mapped_sets_uploaded_status(self):
+    @patch("listings.listing_service.LasooClient")
+    def test_bulk_import_mapped_sets_uploaded_status(self, mock_client_cls):
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+
+        def send(endpoint, payload=None, *args, **kwargs):
+            data = (payload or {}).get("data") or {}
+            key = data.get("externalVariantKey") or data.get("externalProductKey") or "x"
+            return LasooResult(
+                ok=True,
+                message="ok",
+                data={
+                    "results": {
+                        "variants": [
+                            {"externalProductKey": key, "externalVariantKey": key},
+                        ],
+                    },
+                },
+            )
+
+        mock_client.send.side_effect = send
         content = csv_import.build_template_csv("mapped").encode()
         result = listing_service.bulk_import(self.user, self.store, "m.csv", content, action="mapped")
         self.assertEqual(result["imported"], 2)
@@ -671,6 +771,77 @@ class ListingServiceTests(TestCase):
         self.assertEqual(listing.action, "mapped")
         self.assertEqual(listing.status, ListingStatus.UPLOADED_STAGING)
         self.assertEqual(listing.source_vendor_code, "noraau")
+        self.assertTrue(all(c[0][0] == "variants_search" for c in mock_client.send.call_args_list))
+
+    @patch("listings.listing_service.LasooClient")
+    def test_bulk_import_mapped_rejects_missing_lasoo_sku(self, mock_client_cls):
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.return_value = LasooResult(
+            ok=True,
+            message="ok",
+            data={"results": {"success": True, "variants": [], "count": 0, "total": 0}},
+        )
+        content = csv_import.build_template_csv("mapped").encode()
+        result = listing_service.bulk_import(self.user, self.store, "m.csv", content, action="mapped")
+        self.assertEqual(result["imported"], 0)
+        listing = StoreListing.objects.get(store=self.store, sku="JDXTY-XL-B")
+        self.assertEqual(listing.action, "mapped")
+        self.assertEqual(listing.status, ListingStatus.VALIDATION_FAILED)
+        self.assertTrue(any("not found" in e.lower() for e in (listing.validation_errors_json or [])))
+
+    @patch("listings.listing_service.LasooClient")
+    def test_push_inventory_skips_skus_missing_on_lasoo(self, mock_client_cls):
+        present = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        present.status = ListingStatus.UPLOADED_STAGING
+        present.save(update_fields=["status"])
+        missing_data = dict(VALID_DATA)
+        missing_data.update({
+            "sku": "U-Z1618",
+            "variant_key": "U-Z1618",
+            "product_key": "U-Z1618",
+        })
+        missing = listing_service.create(self.user, self.store, missing_data)
+        missing.status = ListingStatus.UPLOADED_STAGING
+        missing.save(update_fields=["status"])
+
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+
+        def send(endpoint, payload=None, *args, **kwargs):
+            data = (payload or {}).get("data") or {}
+            key = data.get("externalVariantKey") or data.get("externalProductKey") or ""
+            if endpoint == "variants_search":
+                if key == "U-Z1618":
+                    return LasooResult(
+                        ok=True,
+                        message="ok",
+                        data={"results": {"variants": [], "count": 0}},
+                    )
+                return LasooResult(
+                    ok=True,
+                    message="ok",
+                    data={
+                        "results": {
+                            "variants": [
+                                {"externalProductKey": key, "externalVariantKey": key},
+                            ],
+                        },
+                    },
+                )
+            return LasooResult(ok=True, message="ok", data={"success": True})
+
+        mock_client.send.side_effect = send
+        result = listing_service.push_inventory(self.user, self.store)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["skipped"], 1)
+        self.assertIn("U-Z1618", result["message"])
+        upserts = [c for c in mock_client.send.call_args_list if c[0][0] == "bulk_upsert"]
+        self.assertEqual(len(upserts), 1)
+        variants = (upserts[0][0][1].get("data") or {}).get("variants") or []
+        keys = {v.get("externalVariantKey") for v in variants}
+        self.assertIn(present.sku, keys)
+        self.assertNotIn("U-Z1618", keys)
 
     def test_bulk_import_rejects_wrong_marketplace_name(self):
         content = (

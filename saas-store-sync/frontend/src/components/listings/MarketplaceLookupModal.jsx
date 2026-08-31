@@ -110,6 +110,20 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
             .finally(() => setLoading(false));
     };
 
+    const handleReconcileAll = () => {
+        if (!storeId) return;
+        setLoading(true);
+        setError('');
+        setResult(null);
+        startMarketplaceLookupJob(storeId, { allListings: true })
+            .then((res) => {
+                setJob(res.data || null);
+                setMode('bulk');
+            })
+            .catch((err) => setError(apiError(err, 'Could not start marketplace check.')))
+            .finally(() => setLoading(false));
+    };
+
     const handleBulkSearch = (e) => {
         e.preventDefault();
         if (!storeId) return;
@@ -178,7 +192,8 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
         <Modal open={open} onClose={onClose} title="Check on marketplace">
             <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
                 Search {storeName || 'this store'} live on the marketplace by SKU / variant key.
-                For Lasoo, &quot;found&quot; means the SKU is in seller inventory — it may still be hidden on the public website until data mapping succeeds.
+                For Lasoo, Found means the SKU is in Connect seller inventory — not that it is live on lasoo.com.au.
+                Use <span className="font-medium">Check all listings</span> to reconcile Hub against Connect.
             </p>
 
             <div className="mb-4 inline-flex rounded-md border border-slate-200 dark:border-slate-600 p-0.5 bg-slate-50 dark:bg-slate-800">
@@ -315,6 +330,16 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
                         >
                             <FileDown className="h-4 w-4 mr-1.5" />
                             {downloading ? 'Downloading…' : 'Download CSV'}
+                        </Button>
+                        <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            disabled={loading || jobActive}
+                            onClick={handleReconcileAll}
+                        >
+                            <Search className="h-4 w-4 mr-1.5" />
+                            Check all listings
                         </Button>
                         <Button type="submit" variant="primary" size="sm" disabled={loading || jobActive}>
                             <Search className="h-4 w-4 mr-1.5" />
