@@ -66,6 +66,25 @@ class ManagedListingScrapeCancelTests(TestCase):
         self.assertTrue(result["server_scrape_stopped"])
         self.assertTrue(scrape_prog.is_scrape_cancel_requested(self.store.id))
 
+    def test_progress_write_does_not_clear_cancel(self):
+        row = self._listing("RACE-1")
+        scrape_prog.begin_scrape_progress(
+            self.store.id,
+            total=1,
+            listing_ids=[row.id],
+        )
+        scrape_prog.request_scrape_cancel(self.store.id)
+        scrape_prog.set_scrape_progress(
+            self.store.id,
+            processed=1,
+            phase="running",
+            current_sku="RACE-1",
+            message="Scraping 1 of 1…",
+        )
+        self.assertTrue(scrape_prog.is_scrape_cancel_requested(self.store.id))
+        self.assertTrue(scrape_prog.is_scrape_cancel_requested(str(self.store.id)))
+        self.assertTrue(scrape_prog.get_scrape_progress(self.store.id)["cancel_requested"])
+
     @patch("stores.nora.load_store_nora_stock_map", return_value=None)
     @patch("scrapers.close_amazon_session")
     @patch("scrapers.get_price_and_stock")

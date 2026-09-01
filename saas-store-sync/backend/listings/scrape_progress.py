@@ -2,6 +2,9 @@
 
 Progress is cached for the banner, but live counts are derived from StoreListing
 rows (pending → scraped/failed), same idea as catalog Inventory management.
+
+Cancel lives on a separate cache key so per-SKU progress writes cannot overwrite
+the Stop flag (Gunicorn workers race on the progress blob).
 """
 from __future__ import annotations
 
@@ -10,16 +13,25 @@ from django.utils import timezone
 
 _TTL = 60 * 60  # 1 hour
 _KEY = "listings:scrape_progress:{store_id}"
+_CANCEL_KEY = "listings:scrape_cancel:{store_id}"
+
+
+def _sid(store_id) -> str:
+    return str(store_id)
 
 
 def _key(store_id) -> str:
-    return _KEY.format(store_id=store_id)
+    return _KEY.format(store_id=_sid(store_id))
+
+
+def _cancel_key(store_id) -> str:
+    return _CANCEL_KEY.format(store_id=_sid(store_id))
 
 
 def get_scrape_progress(store_id) -> dict:
     data = cache.get(_key(store_id))
     if not isinstance(data, dict):
-        return {
+        data = {
             "active": False,
             "total": 0,
             "processed": 0,
@@ -31,6 +43,9 @@ def get_scrape_progress(store_id) -> dict:
             "cancel_requested": False,
             "cancelled": False,
         }
+    else:
+        data = dict(data)
+    data["cancel_requested"] = bool(data.get("cancel_requested")) or is_scrape_cancel_requested(store_id)
     return data
 
 
@@ -49,12 +64,15 @@ def set_scrape_progress(store_id, **fields) -> dict:
         cur["pct"] = max(0, min(100, round(100.0 * processed / total)))
     else:
         cur["pct"] = 0
+    # Dedicated cancel key is source of truth; never let a progress write clear it.
+    cur["cancel_requested"] = is_scrape_cancel_requested(store_id)
     cache.set(_key(store_id), cur, _TTL)
     return cur
 
 
 def clear_scrape_progress(store_id) -> None:
     cache.delete(_key(store_id))
+    cache.delete(_cancel_key(store_id))
 
 
 def begin_scrape_progress(
@@ -65,6 +83,7 @@ def begin_scrape_progress(
     listing_ids=None,
     phase: str = "running",
 ) -> dict:
+    cache.delete(_cancel_key(store_id))
     ids = [str(x) for x in (listing_ids or [])]
     return set_scrape_progress(
         store_id,
@@ -79,7 +98,6 @@ def begin_scrape_progress(
         phase=phase or "running",
         listing_ids=ids,
         started_at=timezone.now().isoformat(),
-        cancel_requested=False,
         cancelled=False,
     )
 
@@ -89,15 +107,15 @@ def request_scrape_cancel(store_id) -> dict:
     cur = get_scrape_progress(store_id)
     if not cur.get("active"):
         return cur
+    cache.set(_cancel_key(store_id), True, _TTL)
     return set_scrape_progress(
         store_id,
-        cancel_requested=True,
         message="Stopping… finishing the current listing, then remaining stay Pending.",
     )
 
 
 def is_scrape_cancel_requested(store_id) -> bool:
-    return bool(get_scrape_progress(store_id).get("cancel_requested"))
+    return bool(cache.get(_cancel_key(store_id)))
 
 
 def finish_scrape_progress(
@@ -115,6 +133,7 @@ def finish_scrape_progress(
         processed = min(total, max(processed, scraped + failed))
     else:
         processed = total
+    cache.delete(_cancel_key(store_id))
     return set_scrape_progress(
         store_id,
         active=False,
@@ -128,7 +147,6 @@ def finish_scrape_progress(
         current_sku="",
         message=message or ("Scrape stopped." if cancelled else "Scrape finished."),
         phase="cancelled" if cancelled else "done",
-        cancel_requested=False,
         cancelled=bool(cancelled),
     )
 
@@ -168,22 +186,31 @@ def enrich_progress_from_listings(store_id) -> dict:
 
     # Still waiting on worker, but rows already moved — treat as running/done.
     phase = data.get("phase") or "running"
+    stopping = is_scrape_cancel_requested(store_id)
     if pending == 0 and total > 0:
         return finish_scrape_progress(
             store_id,
             scraped=scraped + synced,
             failed=failed,
+            cancelled=stopping,
             message=(
-                f"Scraped {scraped + synced} listing(s)"
-                + (f"; {failed} failed" if failed else "")
-                + ". Use Manual sync or your schedule to push price/stock to the marketplace."
+                (
+                    f"Scrape stopped. {scraped + synced} listing(s) done"
+                    + (f"; {failed} failed" if failed else "")
+                    + ". Use Start Scraping to continue."
+                )
+                if stopping
+                else (
+                    f"Scraped {scraped + synced} listing(s)"
+                    + (f"; {failed} failed" if failed else "")
+                    + ". Use Manual sync or your schedule to push price/stock to the marketplace."
+                )
             ),
         )
 
     if phase == "queued" and processed > 0:
         phase = "running"
 
-    stopping = bool(data.get("cancel_requested"))
     msg = f"Scraping {min(processed + (1 if pending else 0), total)} of {total}…"
     if stopping:
         msg = "Stopping… finishing the current listing, then remaining stay Pending."
@@ -198,5 +225,4 @@ def enrich_progress_from_listings(store_id) -> dict:
         phase=phase,
         message=msg,
         active=True,
-        cancel_requested=stopping,
     )
