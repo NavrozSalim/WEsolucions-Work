@@ -21,6 +21,7 @@ import Toast from '../../components/ui/Toast';
 import EmptyState from '../../components/design/EmptyState';
 import CreateStoreModal from '../../components/stores/CreateStoreModal';
 import StoreSettingsModal from '../../components/stores/StoreSettingsModal';
+import { placeFixedMenu } from '../../utils/fixedMenuPosition';
 
 function ActionsDropdown({ store, conn, validatingId, updatingId, stoppingId, onValidate, onUpdate, onStopScrape, onEdit, onDuplicate, onDelete }) {
     const [open, setOpen] = useState(false);
@@ -29,19 +30,18 @@ function ActionsDropdown({ store, conn, validatingId, updatingId, stoppingId, on
     const menuRef = useRef(null);
 
     const updatePosition = useCallback(() => {
-        const el = triggerRef.current;
-        if (!el) return;
-        const r = el.getBoundingClientRect();
-        setMenuPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+        setMenuPos(placeFixedMenu(triggerRef.current, menuRef.current, { align: 'right' }));
     }, []);
 
     useLayoutEffect(() => {
         if (!open) return;
         updatePosition();
+        const id = requestAnimationFrame(() => updatePosition());
         const onScroll = () => updatePosition();
         window.addEventListener('scroll', onScroll, true);
         window.addEventListener('resize', onScroll);
         return () => {
+            cancelAnimationFrame(id);
             window.removeEventListener('scroll', onScroll, true);
             window.removeEventListener('resize', onScroll);
         };
@@ -148,10 +148,7 @@ function ActionsDropdown({ store, conn, validatingId, updatingId, stoppingId, on
                 aria-expanded={open}
                 onClick={() => {
                     setOpen((o) => {
-                        if (!o && triggerRef.current) {
-                            const r = triggerRef.current.getBoundingClientRect();
-                            setMenuPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
-                        }
+                        if (!o) setMenuPos(placeFixedMenu(triggerRef.current, null, { align: 'right' }));
                         return !o;
                     });
                 }}
@@ -400,16 +397,16 @@ export default function StoreSettings() {
                     />
                 ) : (
                     <div className="overflow-x-auto">
-                        <table className="table-base table-fixed min-w-[44rem]">
+                        <table className="table-base">
                             <thead>
                                 <tr>
-                                    <th className="w-[28%]">Store Name</th>
-                                    <th className="w-[14%]">Marketplace</th>
-                                    <th className="w-[8%]">Region</th>
-                                    <th className="w-[14%]">Connection</th>
-                                    <th className="w-[14%]">Schedule</th>
-                                    <th className="w-[10%] text-center">Active</th>
-                                    <th className="w-[12%] text-right">Actions</th>
+                                    <th>Store Name</th>
+                                    <th className="w-[140px]">Marketplace</th>
+                                    <th className="w-[80px]">Region</th>
+                                    <th className="w-[110px]">Connection</th>
+                                    <th className="w-[120px]">Schedule</th>
+                                    <th className="w-[70px] text-center">Active</th>
+                                    <th className="w-[80px] text-right">Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -422,11 +419,11 @@ export default function StoreSettings() {
                                     return (
                                         <tr key={store.id}>
                                             <td className="align-middle">
-                                                <div className="flex min-w-0 items-center gap-3">
+                                                <div className="flex items-center gap-3">
                                                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-slate-100 dark:bg-slate-800">
                                                         <Store className="h-4 w-4 text-slate-500 dark:text-slate-400" />
                                                     </div>
-                                                    <span className="font-medium text-slate-900 dark:text-slate-100 truncate" title={store.name}>{store.name}</span>
+                                                    <span className="font-medium text-slate-900 dark:text-slate-100">{store.name}</span>
                                                 </div>
                                             </td>
                                             <td className="text-slate-600 dark:text-slate-400 text-sm">

@@ -65,6 +65,7 @@ import Badge from '../../components/design/Badge';
 import UpdateWithFileModal from '../../components/catalog/UpdateWithFileModal';
 import { getListingUploads, downloadListingUploadErrors, exportListingUpload, deleteListingUpload } from '../../services/listingService';
 import { useSidebarActivity } from '../../context/SidebarActivityContext';
+import { placeFixedMenu } from '../../utils/fixedMenuPosition';
 
 const syncStatusVariant = {
     synced: 'success',
@@ -217,19 +218,18 @@ function CriticalActionDropdown({ disabled, loading, onSelectAction }) {
     const menuRef = useRef(null);
 
     const updatePosition = useCallback(() => {
-        const el = triggerRef.current;
-        if (!el) return;
-        const r = el.getBoundingClientRect();
-        setMenuPos({ top: r.bottom + 6, left: r.left });
+        setMenuPos(placeFixedMenu(triggerRef.current, menuRef.current, { align: 'left' }));
     }, []);
 
     useLayoutEffect(() => {
         if (!open) return;
         updatePosition();
+        const id = requestAnimationFrame(() => updatePosition());
         const onScroll = () => updatePosition();
         window.addEventListener('scroll', onScroll, true);
         window.addEventListener('resize', onScroll);
         return () => {
+            cancelAnimationFrame(id);
             window.removeEventListener('scroll', onScroll, true);
             window.removeEventListener('resize', onScroll);
         };
@@ -283,10 +283,7 @@ function CriticalActionDropdown({ disabled, loading, onSelectAction }) {
                 onClick={() => {
                     if (disabled) return;
                     setOpen((o) => {
-                        if (!o && triggerRef.current) {
-                            const r = triggerRef.current.getBoundingClientRect();
-                            setMenuPos({ top: r.bottom + 6, left: r.left });
-                        }
+                        if (!o) setMenuPos(placeFixedMenu(triggerRef.current, null, { align: 'left' }));
                         return !o;
                     });
                 }}
@@ -308,19 +305,18 @@ function ResetPendingDropdown({ disabled, loading, onSelectScope }) {
     const menuRef = useRef(null);
 
     const updatePosition = useCallback(() => {
-        const el = triggerRef.current;
-        if (!el) return;
-        const r = el.getBoundingClientRect();
-        setMenuPos({ top: r.bottom + 6, left: r.left });
+        setMenuPos(placeFixedMenu(triggerRef.current, menuRef.current, { align: 'left' }));
     }, []);
 
     useLayoutEffect(() => {
         if (!open) return;
         updatePosition();
+        const id = requestAnimationFrame(() => updatePosition());
         const onScroll = () => updatePosition();
         window.addEventListener('scroll', onScroll, true);
         window.addEventListener('resize', onScroll);
         return () => {
+            cancelAnimationFrame(id);
             window.removeEventListener('scroll', onScroll, true);
             window.removeEventListener('resize', onScroll);
         };
@@ -374,10 +370,7 @@ function ResetPendingDropdown({ disabled, loading, onSelectScope }) {
                 onClick={() => {
                     if (disabled) return;
                     setOpen((o) => {
-                        if (!o && triggerRef.current) {
-                            const r = triggerRef.current.getBoundingClientRect();
-                            setMenuPos({ top: r.bottom + 6, left: r.left });
-                        }
+                        if (!o) setMenuPos(placeFixedMenu(triggerRef.current, null, { align: 'left' }));
                         return !o;
                     });
                 }}
@@ -399,19 +392,18 @@ function UploadActionsDropdown({ upload, storeId, syncing, scraping, syncingUplo
     const menuRef = useRef(null);
 
     const updatePosition = useCallback(() => {
-        const el = triggerRef.current;
-        if (!el) return;
-        const r = el.getBoundingClientRect();
-        setMenuPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+        setMenuPos(placeFixedMenu(triggerRef.current, menuRef.current, { align: 'right' }));
     }, []);
 
     useLayoutEffect(() => {
         if (!open) return;
         updatePosition();
+        const id = requestAnimationFrame(() => updatePosition());
         const onScroll = () => updatePosition();
         window.addEventListener('scroll', onScroll, true);
         window.addEventListener('resize', onScroll);
         return () => {
+            cancelAnimationFrame(id);
             window.removeEventListener('scroll', onScroll, true);
             window.removeEventListener('resize', onScroll);
         };
@@ -508,10 +500,7 @@ function UploadActionsDropdown({ upload, storeId, syncing, scraping, syncingUplo
                 aria-expanded={open}
                 onClick={() => {
                     setOpen((o) => {
-                        if (!o && triggerRef.current) {
-                            const r = triggerRef.current.getBoundingClientRect();
-                            setMenuPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
-                        }
+                        if (!o) setMenuPos(placeFixedMenu(triggerRef.current, null, { align: 'right' }));
                         return !o;
                     });
                 }}
@@ -539,19 +528,18 @@ function ManagedUploadActionsDropdown({
     const menuRef = useRef(null);
 
     const updatePosition = useCallback(() => {
-        const el = triggerRef.current;
-        if (!el) return;
-        const r = el.getBoundingClientRect();
-        setMenuPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+        setMenuPos(placeFixedMenu(triggerRef.current, menuRef.current, { align: 'right' }));
     }, []);
 
     useLayoutEffect(() => {
         if (!open) return;
         updatePosition();
+        const id = requestAnimationFrame(() => updatePosition());
         const onScroll = () => updatePosition();
         window.addEventListener('scroll', onScroll, true);
         window.addEventListener('resize', onScroll);
         return () => {
+            cancelAnimationFrame(id);
             window.removeEventListener('scroll', onScroll, true);
             window.removeEventListener('resize', onScroll);
         };
@@ -632,10 +620,7 @@ function ManagedUploadActionsDropdown({
                 aria-expanded={open}
                 onClick={() => {
                     setOpen((o) => {
-                        if (!o && triggerRef.current) {
-                            const r = triggerRef.current.getBoundingClientRect();
-                            setMenuPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
-                        }
+                        if (!o) setMenuPos(placeFixedMenu(triggerRef.current, null, { align: 'right' }));
                         return !o;
                     });
                 }}
@@ -2947,7 +2932,7 @@ export default function Catalog() {
                                 }
                             />
                         ) : isManagedStore ? (
-                            <table className="table-base table-fixed">
+                            <table className="table-base">
                                 <thead>
                                     <tr>
                                         <th className="whitespace-nowrap">Date</th>
@@ -2999,7 +2984,7 @@ export default function Catalog() {
                                 </tbody>
                             </table>
                         ) : (
-                            <table className="table-base table-fixed">
+                            <table className="table-base">
                                 <thead>
                                     <tr>
                                         <th className="whitespace-nowrap">Date</th>
@@ -3303,7 +3288,7 @@ export default function Catalog() {
                             />
                         ) : (
                             <div className="relative">
-                                <table className="table-base table-fixed min-w-[56rem]">
+                                <table className="table-base">
                                 <thead>
                                     <tr>
                                         <th className="whitespace-nowrap">SKU</th>

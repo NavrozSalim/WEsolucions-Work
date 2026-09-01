@@ -619,29 +619,29 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         No listings on the marketplace yet. Create listings, publish from Created products, then manage inventory here.
                     </p>
                 ) : (
-                    <table className="w-full table-fixed text-left text-sm min-w-[56rem]">
+                    <table className="w-full text-left text-sm">
                         <thead className="bg-slate-50 dark:bg-slate-800 text-xs uppercase text-slate-500 dark:text-slate-400">
                             <tr>
-                                <th className="w-[9rem] px-3 py-2.5">SKU</th>
+                                <th className="px-3 py-2.5">SKU</th>
                                 <th className="px-3 py-2.5">Title</th>
-                                <th className="w-[6rem] px-3 py-2.5">Vendor URL</th>
-                                <th className="w-[8rem] px-3 py-2.5">Vendor ID</th>
-                                <th className="w-[7rem] px-3 py-2.5">Vendor price</th>
-                                <th className="w-[6rem] px-3 py-2.5">Price</th>
-                                <th className="w-[4.5rem] px-3 py-2.5">Stock</th>
-                                <th className="w-[6rem] px-3 py-2.5">Status</th>
-                                <th className="w-[5rem] px-3 py-2.5">Margin</th>
-                                <th className="w-[8rem] px-3 py-2.5">Last scrape</th>
-                                <th className="w-[8rem] px-3 py-2.5 text-right">Actions</th>
+                                <th className="px-3 py-2.5">Vendor URL</th>
+                                <th className="px-3 py-2.5">Vendor ID</th>
+                                <th className="px-3 py-2.5">Vendor price</th>
+                                <th className="px-3 py-2.5">Price</th>
+                                <th className="px-3 py-2.5">Stock</th>
+                                <th className="px-3 py-2.5">Status</th>
+                                <th className="px-3 py-2.5">Margin</th>
+                                <th className="px-3 py-2.5">Last scrape</th>
+                                <th className="px-3 py-2.5 text-right">Actions</th>
                             </tr>
                         </thead>
                         <tbody>
                             {listings.map((l) => (
                                 <tr key={l.id} className="border-t border-slate-100 dark:border-slate-800">
-                                    <td className="px-3 py-2.5 font-medium text-slate-900 dark:text-slate-100 truncate" title={l.sku || l.external_variant_key}>
+                                    <td className="px-3 py-2.5 font-medium text-slate-900 dark:text-slate-100 whitespace-nowrap">
                                         {l.sku || l.external_variant_key}
                                     </td>
-                                    <td className="truncate px-3 py-2.5 text-slate-700 dark:text-slate-300" title={l.title}>
+                                    <td className="max-w-[180px] truncate px-3 py-2.5 text-slate-700 dark:text-slate-300" title={l.title}>
                                         {l.title || '—'}
                                     </td>
                                     <td className="px-3 py-2.5 text-xs">
