@@ -213,6 +213,8 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     const [jobCount, setJobCount] = useState(0);
     const [scrapeProgress, setScrapeProgress] = useState(null);
     const scrapeWasActiveRef = useRef(false);
+    const ignoreServerActiveRef = useRef(false);
+    const scrapeStartingRef = useRef(false);
     const onMessageRef = useRef(onMessage);
     const loadGenRef = useRef(0);
     const scrapeListRefreshTickRef = useRef(0);
@@ -295,7 +297,28 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                 .then((res) => {
                     if (cancelled) return;
                     const data = res.data || null;
-                    const active = Boolean(data?.active);
+                    let active = Boolean(data?.active) && (data?.phase || '') !== 'cancelled';
+                    if (scrapeStartingRef.current && !active) {
+                        return;
+                    }
+                    if (scrapeStartingRef.current && active) {
+                        scrapeStartingRef.current = false;
+                    }
+                    if (ignoreServerActiveRef.current) {
+                        if (active) {
+                            setStoppingScrape(false);
+                            setScraping(false);
+                            setScrapeProgress({
+                                ...(data || {}),
+                                active: false,
+                                cancelled: true,
+                                phase: 'cancelled',
+                                cancel_requested: false,
+                            });
+                            return;
+                        }
+                        ignoreServerActiveRef.current = false;
+                    }
                     const wasActive = scrapeWasActiveRef.current;
                     if (wasActive && !active) {
                         const stopped = Boolean(data?.cancelled) || (data?.phase || '') === 'cancelled';
@@ -312,7 +335,10 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                     }
                     scrapeWasActiveRef.current = active;
                     setScrapeProgress(data);
-                    if (active) {
+                    if (!active || (data?.phase || '') === 'cancelled') {
+                        setStoppingScrape(false);
+                    }
+                    if (active && (data?.phase || '') !== 'cancelled') {
                         setScraping(true);
                         setJobCount(Number(data?.total || 0));
                         // Refresh rows less often than progress (~every 4.5s) to avoid throttle spam.
@@ -344,8 +370,8 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
 
     const withVendor = scrapeableCount;
 
-    const serverScraping = Boolean(scrapeProgress?.active);
-    const scrapeBusy = scraping || serverScraping;
+    const serverScraping = Boolean(scrapeProgress?.active) && scrapeProgress?.phase !== 'cancelled';
+    const scrapeBusy = (scraping || serverScraping) && scrapeProgress?.phase !== 'cancelled';
 
     const handleScrape = (ids = null) => {
         const targetCount = ids?.length ? ids.length : withVendor;
@@ -361,6 +387,8 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
             message: 'Starting scrape…',
         });
         scrapeWasActiveRef.current = true;
+        ignoreServerActiveRef.current = false;
+        scrapeStartingRef.current = true;
         setScraping(true);
         scrapeListings(storeId, ids)
             .then((res) => {
@@ -384,6 +412,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
             })
             .catch((err) => {
                 scrapeWasActiveRef.current = false;
+                scrapeStartingRef.current = false;
                 setScraping(false);
                 setScrapeProgress(null);
                 onMessage?.(err.response?.data?.detail || 'Scrape failed.', 'error');
@@ -401,11 +430,24 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                 onMessage?.(
                     res.data?.message
                         || (stopped
-                            ? 'Stop was sent. Running price checks should wind down in a few seconds.'
+                            ? 'Scrape stopped. Remaining listings stay Pending. Use Start Scraping to continue.'
                             : 'Nothing was running to stop.'),
                     'success',
                 );
-                if (!stopped) setStoppingScrape(false);
+                scrapeWasActiveRef.current = false;
+                ignoreServerActiveRef.current = true;
+                setStoppingScrape(false);
+                setScraping(false);
+                setJobCount(0);
+                setScrapeProgress((prev) => ({
+                    ...(prev || {}),
+                    ...(res.data || {}),
+                    active: false,
+                    cancelled: Boolean(stopped),
+                    cancel_requested: false,
+                    phase: stopped ? 'cancelled' : (res.data?.phase || prev?.phase || 'done'),
+                }));
+                load();
             })
             .catch((err) => {
                 onMessage?.(err.response?.data?.detail || err.response?.data?.message || 'Could not stop the scrape.', 'error');

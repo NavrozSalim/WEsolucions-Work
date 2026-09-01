@@ -64,7 +64,12 @@ class ManagedListingScrapeCancelTests(TestCase):
         result = listing_service.cancel_scrape(self.user, self.store)
         self.assertTrue(result["cancelled"])
         self.assertTrue(result["server_scrape_stopped"])
+        self.assertFalse(result.get("active", True))
         self.assertTrue(scrape_prog.is_scrape_cancel_requested(self.store.id))
+        prog = scrape_prog.get_scrape_progress(self.store.id)
+        self.assertFalse(prog["active"])
+        self.assertTrue(prog.get("cancelled"))
+        self.assertEqual(prog.get("phase"), "cancelled")
 
     def test_progress_write_does_not_clear_cancel(self):
         row = self._listing("RACE-1")
@@ -119,6 +124,74 @@ class ManagedListingScrapeCancelTests(TestCase):
         self.assertTrue(prog.get("cancelled"))
         self.assertEqual(prog.get("phase"), "cancelled")
 
+    def test_enrich_closes_banner_when_stop_requested(self):
+        rows = [self._listing("PEND-1"), self._listing("PEND-2")]
+        scrape_prog.begin_scrape_progress(
+            self.store.id,
+            total=2,
+            listing_ids=[row.id for row in rows],
+        )
+        scrape_prog.request_scrape_cancel(self.store.id)
+        live = scrape_prog.enrich_progress_from_listings(self.store.id)
+        self.assertFalse(live["active"])
+        self.assertTrue(live.get("cancelled"))
+        self.assertEqual(live.get("phase"), "cancelled")
+        self.assertTrue(scrape_prog.is_scrape_cancel_requested(self.store.id))
+
+    def test_stale_finish_does_not_clobber_new_generation(self):
+        row = self._listing("GEN-1")
+        first = scrape_prog.begin_scrape_progress(
+            self.store.id,
+            total=1,
+            listing_ids=[row.id],
+        )
+        old_gen = first["generation"]
+        self.assertTrue(old_gen)
+        scrape_prog.finish_scrape_progress(
+            self.store.id,
+            cancelled=True,
+            job_generation=old_gen,
+        )
+        second = scrape_prog.begin_scrape_progress(
+            self.store.id,
+            total=1,
+            listing_ids=[row.id],
+        )
+        new_gen = second["generation"]
+        self.assertNotEqual(old_gen, new_gen)
+        self.assertTrue(second["active"])
+        scrape_prog.set_scrape_progress(
+            self.store.id,
+            job_generation=old_gen,
+            processed=1,
+            current_sku="STALE",
+            message="leftover thread",
+        )
+        scrape_prog.finish_scrape_progress(
+            self.store.id,
+            scraped=1,
+            job_generation=old_gen,
+        )
+        live = scrape_prog.get_scrape_progress(self.store.id)
+        self.assertTrue(live["active"])
+        self.assertEqual(live["generation"], new_gen)
+        self.assertNotEqual(live.get("current_sku"), "STALE")
+
+    @patch("threading.Thread")
+    @patch("stores.nora.load_store_nora_stock_map", return_value=None)
+    def test_start_scrape_allowed_after_cancel(self, _nora, mock_thread):
+        mock_thread.return_value.start = lambda: None
+        row = self._listing("START-1")
+        scrape_prog.begin_scrape_progress(
+            self.store.id,
+            total=1,
+            listing_ids=[row.id],
+        )
+        listing_service.cancel_scrape(self.user, self.store)
+        result = listing_service.start_scrape_async(self.user, self.store)
+        self.assertTrue(result.get("started"))
+        self.assertFalse(result.get("already_running"))
+
 
 @override_settings(DEBUG=True)
 class ManagedListingScrapeCancelViewTests(TestCase):
@@ -172,3 +245,6 @@ class ManagedListingScrapeCancelViewTests(TestCase):
         self.assertTrue(res.data["cancelled"])
         self.assertTrue(res.data["server_scrape_stopped"])
         self.assertTrue(scrape_prog.is_scrape_cancel_requested(self.store.id))
+        prog = scrape_prog.get_scrape_progress(self.store.id)
+        self.assertFalse(prog["active"])
+        self.assertEqual(prog.get("phase"), "cancelled")

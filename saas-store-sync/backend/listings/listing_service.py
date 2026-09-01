@@ -1388,9 +1388,8 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
 
     from . import scrape_progress as scrape_prog
 
-    existing = scrape_prog.get_scrape_progress(store.id)
-    if existing.get("active"):
-        live = scrape_prog.enrich_progress_from_listings(store.id)
+    live = scrape_prog.enrich_progress_from_listings(store.id)
+    if live.get("active"):
         return {
             "started": False,
             "already_running": True,
@@ -1429,13 +1428,14 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
         inventory_sync_status=InventorySyncStatus.PENDING,
         last_scrape_error="",
     )
-    scrape_prog.begin_scrape_progress(
+    begun = scrape_prog.begin_scrape_progress(
         store.id,
         total=total,
         listing_ids=batch_ids,
         phase="running",
         message=f"Scraping 0 of {total}…",
     )
+    job_generation = begun.get("generation")
 
     user_id = user.id
     store_id = str(store.id)
@@ -1449,17 +1449,25 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
         try:
             u = User.objects.get(pk=user_id)
             s = Store.objects.select_related("marketplace", "user").get(pk=store_id)
-            scrape_listings(u, s, id_strs)
+            scrape_listings(u, s, id_strs, job_generation=job_generation)
         except MarketplaceError as err:
-            scrape_prog.finish_scrape_progress(store_id, message=str(err)[:200])
+            scrape_prog.finish_scrape_progress(
+                store_id,
+                message=str(err)[:200],
+                job_generation=job_generation,
+            )
         except Exception as err:  # noqa: BLE001
             logger.exception("Managed scrape failed store=%s", store_id)
             scrape_prog.finish_scrape_progress(
                 store_id,
                 message=(str(err) or "Scrape failed.")[:200],
+                job_generation=job_generation,
             )
         finally:
-            scrape_prog.enrich_progress_from_listings(store_id)
+            scrape_prog.enrich_progress_from_listings(
+                store_id,
+                job_generation=job_generation,
+            )
 
     threading.Thread(target=_run, daemon=True, name=f"listing-scrape-{store_id}").start()
 
@@ -1475,7 +1483,7 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
 
 
 def cancel_scrape(user, store) -> dict:
-    """Request stop of an in-flight managed listing scrape (cooperative)."""
+    """Stop an in-flight managed listing scrape and close the inventory banner."""
     from . import scrape_progress as scrape_prog
 
     live = scrape_prog.enrich_progress_from_listings(store.id)
@@ -1484,6 +1492,7 @@ def cancel_scrape(user, store) -> dict:
             "ok": True,
             "cancelled": False,
             "server_scrape_stopped": False,
+            "active": False,
             "message": "Nothing was running, so there was nothing to stop.",
             "total": live.get("total") or 0,
             "processed": live.get("processed") or 0,
@@ -1493,26 +1502,40 @@ def cancel_scrape(user, store) -> dict:
             "phase": live.get("phase") or "done",
         }
     scrape_prog.request_scrape_cancel(store.id)
-    live = scrape_prog.get_scrape_progress(store.id)
+    scraped = int(live.get("scraped") or 0)
+    failed = int(live.get("failed") or 0)
+    total = int(live.get("total") or 0)
+    remaining = max(0, total - int(live.get("processed") or 0))
+    msg = (
+        f"Scrape stopped. {scraped} listing(s) done"
+        + (f"; {failed} failed" if failed else "")
+        + (f"; {remaining} left Pending" if remaining else "")
+        + ". Use Start Scraping to continue."
+    )
+    live = scrape_prog.finish_scrape_progress(
+        store.id,
+        scraped=scraped,
+        failed=failed,
+        message=msg,
+        cancelled=True,
+    )
     return {
         "ok": True,
         "cancelled": True,
         "server_scrape_stopped": True,
-        "message": (
-            "Stop was sent. The current listing can finish; remaining stay Pending. "
-            "Use Start Scraping to continue."
-        ),
-        "total": live.get("total") or 0,
+        "active": False,
+        "message": msg,
+        "total": live.get("total") or total,
         "processed": live.get("processed") or 0,
-        "scraped": live.get("scraped") or 0,
-        "failed": live.get("failed") or 0,
+        "scraped": live.get("scraped") or scraped,
+        "failed": live.get("failed") or failed,
         "pct": live.get("pct") or 0,
-        "phase": live.get("phase") or "running",
+        "phase": live.get("phase") or "cancelled",
         "cancel_requested": True,
     }
 
 
-def scrape_listings(user, store, listing_ids=None) -> dict:
+def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
     """Scrape vendor URLs on managed listings; Nora stock overrides when configured.
 
     Price comes from Vendor URL scrape (e.g. eBay AU). Inventory comes from the
@@ -1561,6 +1584,30 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
 
     from . import scrape_progress as scrape_prog
 
+    if job_generation:
+        early_state = scrape_prog.scrape_job_state(store.id, job_generation)
+        if early_state == "superseded":
+            return {
+                "ok": True,
+                "cancelled": True,
+                "superseded": True,
+                "message": "A newer scrape started; this worker stopped.",
+                "scraped": 0,
+                "failed": 0,
+                "pushed": 0,
+                "rows": [],
+            }
+        if early_state == "cancel":
+            return {
+                "ok": True,
+                "cancelled": True,
+                "message": "Scrape stopped. Remaining listings stay Pending. Use Start Scraping to continue.",
+                "scraped": 0,
+                "failed": 0,
+                "pushed": 0,
+                "rows": [],
+            }
+
     total = len(listings)
     listing_ids_batch = [l.id for l in listings]
     # Mark batch pending so the inventory table / progress bar move with each row.
@@ -1573,18 +1620,52 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
         # start_scrape_async already opened the banner; keep cancel_requested.
         scrape_prog.set_scrape_progress(
             store.id,
+            job_generation=job_generation,
             total=total,
             listing_ids=[str(x) for x in listing_ids_batch],
             phase="running",
         )
     else:
-        scrape_prog.begin_scrape_progress(
+        begun = scrape_prog.begin_scrape_progress(
             store.id,
             total=total,
             listing_ids=listing_ids_batch,
             phase="running",
             message=f"Scraping 0 of {total}…",
         )
+        job_generation = job_generation or begun.get("generation")
+
+    my_gen = job_generation or scrape_prog.get_scrape_progress(store.id).get("generation")
+
+    def _set_progress(**fields):
+        return scrape_prog.set_scrape_progress(store.id, job_generation=my_gen, **fields)
+
+    def _finish_progress(**kwargs):
+        return scrape_prog.finish_scrape_progress(store.id, job_generation=my_gen, **kwargs)
+
+    def _cancel_result(scraped_n, failed_n, rows_n):
+        remaining = max(0, total - scraped_n - failed_n)
+        msg = (
+            f"Scrape stopped. {scraped_n} listing(s) done"
+            + (f"; {failed_n} failed" if failed_n else "")
+            + (f"; {remaining} left Pending" if remaining else "")
+            + ". Use Start Scraping to continue."
+        )
+        _finish_progress(
+            scraped=scraped_n,
+            failed=failed_n,
+            message=msg,
+            cancelled=True,
+        )
+        return {
+            "ok": True,
+            "cancelled": True,
+            "message": msg,
+            "scraped": scraped_n,
+            "failed": failed_n,
+            "pushed": 0,
+            "rows": rows_n,
+        }
 
     region = (getattr(store, "region", None) or "USA").strip() or "USA"
     price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
@@ -1596,32 +1677,21 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
     try:
         try:
             for idx, listing in enumerate(listings):
-                if scrape_prog.is_scrape_cancel_requested(store.id):
-                    remaining = max(0, total - scraped - failed)
-                    msg = (
-                        f"Scrape stopped. {scraped} listing(s) done"
-                        + (f"; {failed} failed" if failed else "")
-                        + (f"; {remaining} left Pending" if remaining else "")
-                        + ". Use Start Scraping to continue."
-                    )
-                    scrape_prog.finish_scrape_progress(
-                        store.id,
-                        scraped=scraped,
-                        failed=failed,
-                        message=msg,
-                        cancelled=True,
-                    )
+                loop_state = scrape_prog.scrape_job_state(store.id, my_gen)
+                if loop_state == "superseded":
                     return {
                         "ok": True,
                         "cancelled": True,
-                        "message": msg,
+                        "superseded": True,
+                        "message": "A newer scrape started; this worker stopped.",
                         "scraped": scraped,
                         "failed": failed,
                         "pushed": 0,
                         "rows": rows,
                     }
-                scrape_prog.set_scrape_progress(
-                    store.id,
+                if loop_state == "cancel":
+                    return _cancel_result(scraped, failed, rows)
+                _set_progress(
                     total=total,
                     processed=idx,
                     scraped=scraped,
@@ -1676,8 +1746,7 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
                             row["error"] = listing.last_scrape_error
                             failed += 1
                             rows.append(row)
-                            scrape_prog.set_scrape_progress(
-                                store.id,
+                            _set_progress(
                                 processed=idx + 1,
                                 scraped=scraped,
                                 failed=failed,
@@ -1709,8 +1778,7 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
                         row["error"] = listing.last_scrape_error
                         failed += 1
                         rows.append(row)
-                        scrape_prog.set_scrape_progress(
-                            store.id,
+                        _set_progress(
                             processed=idx + 1,
                             scraped=scraped,
                             failed=failed,
@@ -1742,8 +1810,7 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
                     row["error"] = listing.last_scrape_error
                     failed += 1
                     rows.append(row)
-                    scrape_prog.set_scrape_progress(
-                        store.id,
+                    _set_progress(
                         processed=idx + 1,
                         scraped=scraped,
                         failed=failed,
@@ -1811,8 +1878,7 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
                 row["ok"] = True
                 scraped += 1
                 rows.append(row)
-                scrape_prog.set_scrape_progress(
-                    store.id,
+                _set_progress(
                     processed=idx + 1,
                     scraped=scraped,
                     failed=failed,
@@ -1820,8 +1886,7 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
                     message=f"Scraped {scraped} of {total}…",
                 )
         except Exception as scrape_exc:  # noqa: BLE001
-            scrape_prog.finish_scrape_progress(
-                store.id,
+            _finish_progress(
                 scraped=scraped,
                 failed=failed + max(0, total - scraped - failed),
                 message=(str(scrape_exc) or "Scrape failed.")[:200],
@@ -1840,8 +1905,7 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
         + (f"; {failed} failed" if failed else "")
         + ". Use Manual sync or your schedule to push price/stock to the marketplace."
     )
-    scrape_prog.finish_scrape_progress(
-        store.id,
+    _finish_progress(
         scraped=scraped,
         failed=failed,
         message=msg,
