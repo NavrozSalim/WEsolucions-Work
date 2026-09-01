@@ -2947,7 +2947,7 @@ export default function Catalog() {
                                 }
                             />
                         ) : isManagedStore ? (
-                            <table className="table-base">
+                            <table className="table-base table-fixed">
                                 <thead>
                                     <tr>
                                         <th className="whitespace-nowrap">Date</th>
@@ -2999,7 +2999,7 @@ export default function Catalog() {
                                 </tbody>
                             </table>
                         ) : (
-                            <table className="table-base">
+                            <table className="table-base table-fixed">
                                 <thead>
                                     <tr>
                                         <th className="whitespace-nowrap">Date</th>
@@ -3303,7 +3303,7 @@ export default function Catalog() {
                             />
                         ) : (
                             <div className="relative">
-                                <table className="table-base">
+                                <table className="table-base table-fixed min-w-[56rem]">
                                 <thead>
                                     <tr>
                                         <th className="whitespace-nowrap">SKU</th>

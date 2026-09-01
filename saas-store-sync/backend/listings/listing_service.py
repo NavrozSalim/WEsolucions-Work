@@ -1474,6 +1474,44 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
     }
 
 
+def cancel_scrape(user, store) -> dict:
+    """Request stop of an in-flight managed listing scrape (cooperative)."""
+    from . import scrape_progress as scrape_prog
+
+    live = scrape_prog.enrich_progress_from_listings(store.id)
+    if not live.get("active"):
+        return {
+            "ok": True,
+            "cancelled": False,
+            "server_scrape_stopped": False,
+            "message": "Nothing was running, so there was nothing to stop.",
+            "total": live.get("total") or 0,
+            "processed": live.get("processed") or 0,
+            "scraped": live.get("scraped") or 0,
+            "failed": live.get("failed") or 0,
+            "pct": live.get("pct") or 0,
+            "phase": live.get("phase") or "done",
+        }
+    scrape_prog.request_scrape_cancel(store.id)
+    live = scrape_prog.get_scrape_progress(store.id)
+    return {
+        "ok": True,
+        "cancelled": True,
+        "server_scrape_stopped": True,
+        "message": (
+            "Stop was sent. The current listing can finish; remaining stay Pending. "
+            "Use Start Scraping to continue."
+        ),
+        "total": live.get("total") or 0,
+        "processed": live.get("processed") or 0,
+        "scraped": live.get("scraped") or 0,
+        "failed": live.get("failed") or 0,
+        "pct": live.get("pct") or 0,
+        "phase": live.get("phase") or "running",
+        "cancel_requested": True,
+    }
+
+
 def scrape_listings(user, store, listing_ids=None) -> dict:
     """Scrape vendor URLs on managed listings; Nora stock overrides when configured.
 
@@ -1530,13 +1568,23 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
         inventory_sync_status=InventorySyncStatus.PENDING,
         last_scrape_error="",
     )
-    scrape_prog.begin_scrape_progress(
-        store.id,
-        total=total,
-        listing_ids=listing_ids_batch,
-        phase="running",
-        message=f"Scraping 0 of {total}…",
-    )
+    existing_prog = scrape_prog.get_scrape_progress(store.id)
+    if existing_prog.get("active") and existing_prog.get("listing_ids"):
+        # start_scrape_async already opened the banner; keep cancel_requested.
+        scrape_prog.set_scrape_progress(
+            store.id,
+            total=total,
+            listing_ids=[str(x) for x in listing_ids_batch],
+            phase="running",
+        )
+    else:
+        scrape_prog.begin_scrape_progress(
+            store.id,
+            total=total,
+            listing_ids=listing_ids_batch,
+            phase="running",
+            message=f"Scraping 0 of {total}…",
+        )
 
     region = (getattr(store, "region", None) or "USA").strip() or "USA"
     price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
@@ -1548,6 +1596,30 @@ def scrape_listings(user, store, listing_ids=None) -> dict:
     try:
         try:
             for idx, listing in enumerate(listings):
+                if scrape_prog.is_scrape_cancel_requested(store.id):
+                    remaining = max(0, total - scraped - failed)
+                    msg = (
+                        f"Scrape stopped. {scraped} listing(s) done"
+                        + (f"; {failed} failed" if failed else "")
+                        + (f"; {remaining} left Pending" if remaining else "")
+                        + ". Use Start Scraping to continue."
+                    )
+                    scrape_prog.finish_scrape_progress(
+                        store.id,
+                        scraped=scraped,
+                        failed=failed,
+                        message=msg,
+                        cancelled=True,
+                    )
+                    return {
+                        "ok": True,
+                        "cancelled": True,
+                        "message": msg,
+                        "scraped": scraped,
+                        "failed": failed,
+                        "pushed": 0,
+                        "rows": rows,
+                    }
                 scrape_prog.set_scrape_progress(
                     store.id,
                     total=total,

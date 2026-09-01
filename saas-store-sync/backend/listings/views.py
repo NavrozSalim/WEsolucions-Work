@@ -793,6 +793,16 @@ class StoreListingScrapeView(APIView):
         return Response(result, status=status.HTTP_200_OK)
 
 
+class StoreListingScrapeCancelView(APIView):
+    """Stop an in-flight managed listing scrape (Lasoo / Reverb / Etsy inventory)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        result = listing_service.cancel_scrape(request.user, store)
+        return Response(result, status=status.HTTP_200_OK)
+
+
 class StoreListingScrapeProgressView(APIView):
     """Live scrape progress for managed Inventory management (processed/total).
 

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, FileDown, Pencil, Play, RefreshCw, Send, Trash2 } from 'lucide-react';
+import { AlertTriangle, FileDown, Pencil, Play, RefreshCw, Send, Square, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
 import {
+    cancelListingScrape,
     criticalZeroListingInventory,
     deleteListing,
     exportListingInventory,
@@ -51,9 +52,16 @@ function formatListingMargin(listing) {
 
 /**
  * Progress strip matching catalog Manual sync / scrape UX:
- * always show processed/total counts while scraping.
+ * always show processed/total counts while scraping, plus Stop Scraping.
  */
-function JobProgressStrip({ mode, count, progress, marketplaceLabel = 'marketplace' }) {
+function JobProgressStrip({
+    mode,
+    count,
+    progress,
+    marketplaceLabel = 'marketplace',
+    onStop = null,
+    stopping = false,
+}) {
     if (!mode) return null;
     const isScrape = mode === 'scrape';
     const processed = Number(progress?.processed ?? 0);
@@ -68,6 +76,7 @@ function JobProgressStrip({ mode, count, progress, marketplaceLabel = 'marketpla
         : 0;
     const hasCounts = isScrape && total > 0;
     const phase = progress?.phase || '';
+    const isStopping = Boolean(stopping || progress?.cancel_requested);
     const title = isScrape
         ? (phase === 'pushing' ? 'Pushing scraped prices…' : 'Fetching vendor prices…')
         : `Pushing price/stock to ${marketplaceLabel}…`;
@@ -86,53 +95,73 @@ function JobProgressStrip({ mode, count, progress, marketplaceLabel = 'marketpla
         ? 'border-sky-200 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/30'
         : 'border-emerald-200 dark:border-emerald-800 bg-emerald-50/80 dark:bg-emerald-950/30';
     const bar = isScrape ? 'bg-sky-500' : 'bg-emerald-500';
-    const pill = isScrape
-        ? 'bg-sky-200 text-sky-900 dark:bg-sky-800 dark:text-sky-200'
-        : 'bg-emerald-200 text-emerald-900 dark:bg-emerald-800 dark:text-emerald-200';
+    const pill = isStopping
+        ? 'bg-rose-200 text-rose-900 dark:bg-rose-900/40 dark:text-rose-200'
+        : isScrape
+            ? 'bg-sky-200 text-sky-900 dark:bg-sky-800 dark:text-sky-200'
+            : 'bg-emerald-200 text-emerald-900 dark:bg-emerald-800 dark:text-emerald-200';
     const sku = (progress?.current_sku || '').trim();
+    const stopLabel = isScrape ? 'Stop Scraping' : 'Stop Syncing';
 
     return (
         <div className={`rounded-lg border ${border} p-4 mb-0 shadow-sm`}>
-            <div className="flex items-start gap-3">
-                <span className={`mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full ${bar} animate-pulse`} />
-                <div className="min-w-0 flex-1">
-                    <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                        {title}
-                        <span className={`ml-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${pill}`}>
-                            running
-                        </span>
-                        {hasCounts ? (
-                            <span className="ml-2 text-xs font-semibold tabular-nums text-slate-600 dark:text-slate-300">
-                                {processed}/{total}
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="flex items-start gap-3 min-w-0 flex-1">
+                    <span className={`mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full ${isStopping ? 'bg-rose-500' : bar} animate-pulse`} />
+                    <div className="min-w-0 flex-1">
+                        <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                            {title}
+                            <span className={`ml-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${pill}`}>
+                                {isStopping ? 'stopping' : 'running'}
                             </span>
+                            {hasCounts ? (
+                                <span className="ml-2 text-xs font-semibold tabular-nums text-slate-600 dark:text-slate-300">
+                                    {processed}/{total}
+                                </span>
+                            ) : null}
+                        </h3>
+                        <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-300">{detail}</p>
+                        {isScrape ? (
+                            <p className="mt-0.5 text-xs text-sky-700 dark:text-sky-300">
+                                You can leave this page; listing rows update as each item finishes. Use Stop Scraping to cancel.
+                            </p>
                         ) : null}
-                    </h3>
-                    <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-300">{detail}</p>
-                    {sku ? (
-                        <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400 truncate" title={sku}>
-                            Current: {sku}
-                        </p>
-                    ) : null}
-                    <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
-                        {hasCounts ? (
-                            <div
-                                className={`h-full rounded-full transition-all duration-500 ${bar}`}
-                                style={{ width: `${Math.max(pct, total > 0 ? 2 : 0)}%` }}
-                            />
-                        ) : (
-                            <div
-                                className={`h-full w-1/3 rounded-full ${bar}`}
-                                style={{ animation: 'managedInvProgress 1.2s ease-in-out infinite' }}
-                            />
-                        )}
+                        {sku ? (
+                            <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400 truncate" title={sku}>
+                                Current: {sku}
+                            </p>
+                        ) : null}
                     </div>
-                    {hasCounts ? (
-                        <p className="mt-1 text-xs tabular-nums text-slate-500 dark:text-slate-400">
-                            {pct}% complete ({processed} of {total})
-                        </p>
-                    ) : null}
                 </div>
+                {onStop ? (
+                    <button
+                        type="button"
+                        onClick={onStop}
+                        disabled={stopping}
+                        className="self-start shrink-0 rounded-md border border-rose-200 px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-60 dark:border-rose-800 dark:text-rose-300 dark:hover:bg-rose-900/30"
+                    >
+                        {stopping ? 'Stopping…' : stopLabel}
+                    </button>
+                ) : null}
             </div>
+            <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                {hasCounts ? (
+                    <div
+                        className={`h-full rounded-full transition-all duration-500 ${isStopping ? 'bg-rose-500' : bar}`}
+                        style={{ width: `${Math.max(pct, total > 0 ? 2 : 0)}%` }}
+                    />
+                ) : (
+                    <div
+                        className={`h-full w-1/3 rounded-full ${isStopping ? 'bg-rose-500' : bar}`}
+                        style={{ animation: 'managedInvProgress 1.2s ease-in-out infinite' }}
+                    />
+                )}
+            </div>
+            {hasCounts ? (
+                <p className="mt-1 text-xs tabular-nums text-slate-500 dark:text-slate-400">
+                    {pct}% complete ({processed} of {total})
+                </p>
+            ) : null}
             <style>{`
                 @keyframes managedInvProgress {
                     0% { transform: translateX(-100%); }
@@ -171,6 +200,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     const [page, setPage] = useState(1);
     const [loading, setLoading] = useState(false);
     const [scraping, setScraping] = useState(false);
+    const [stoppingScrape, setStoppingScrape] = useState(false);
     const [pushing, setPushing] = useState(false);
     const [resetting, setResetting] = useState(false);
     const [criticalLoading, setCriticalLoading] = useState(false);
@@ -268,10 +298,15 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                     const active = Boolean(data?.active);
                     const wasActive = scrapeWasActiveRef.current;
                     if (wasActive && !active) {
-                        const msg = data?.message || 'Scrape finished. Use Manual sync to push to the marketplace.';
-                        const ok = (data?.scraped || 0) > 0 || data?.phase === 'done';
+                        const stopped = Boolean(data?.cancelled) || (data?.phase || '') === 'cancelled';
+                        const msg = data?.message
+                            || (stopped
+                                ? 'Scrape stopped. Remaining listings stay Pending.'
+                                : 'Scrape finished. Use Manual sync to push to the marketplace.');
+                        const ok = stopped || (data?.scraped || 0) > 0 || data?.phase === 'done';
                         onMessageRef.current?.(msg, ok ? 'success' : 'error');
                         setScraping(false);
+                        setStoppingScrape(false);
                         setJobCount(0);
                         load();
                     }
@@ -356,6 +391,28 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
             });
     };
 
+    const handleStopScrape = () => {
+        if (!storeId || stoppingScrape) return;
+        setStoppingScrape(true);
+        onMessage?.('Stopping scrape… the current listing can finish.', 'success');
+        cancelListingScrape(storeId)
+            .then((res) => {
+                const stopped = Boolean(res.data?.cancelled) || Boolean(res.data?.server_scrape_stopped);
+                onMessage?.(
+                    res.data?.message
+                        || (stopped
+                            ? 'Stop was sent. Running price checks should wind down in a few seconds.'
+                            : 'Nothing was running to stop.'),
+                    'success',
+                );
+                if (!stopped) setStoppingScrape(false);
+            })
+            .catch((err) => {
+                onMessage?.(err.response?.data?.detail || err.response?.data?.message || 'Could not stop the scrape.', 'error');
+                setStoppingScrape(false);
+            });
+    };
+
     const handlePush = (ids = null) => {
         const targetCount = ids?.length || totalCount;
         setJobCount(targetCount);
@@ -433,6 +490,8 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         count={jobCount}
                         progress={scrapeBusy ? scrapeProgress : null}
                         marketplaceLabel={marketplaceLabel}
+                        onStop={scrapeBusy ? handleStopScrape : null}
+                        stopping={stoppingScrape}
                     />
                 </div>
             )}
@@ -502,7 +561,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         {exporting ? 'Exporting…' : 'Export'}
                     </Button>
 
-                    {canScrape && (
+                    {canScrape && !scrapeBusy && (
                         <Button
                             variant="secondary"
                             size="sm"
@@ -510,8 +569,21 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                             disabled={busy || withVendor === 0}
                             title={withVendor === 0 ? 'Add Vendor URL / Vendor ID on each listing first' : 'Refresh vendor price and stock locally (then Manual sync)'}
                         >
-                            <Play className={`mr-1.5 h-4 w-4 ${scraping ? 'animate-spin' : ''}`} />
-                            {scraping || serverScraping ? 'Scraping…' : `Start Scraping (${withVendor})`}
+                            <Play className="mr-1.5 h-4 w-4" />
+                            {`Start Scraping (${withVendor})`}
+                        </Button>
+                    )}
+                    {canScrape && scrapeBusy && (
+                        <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={handleStopScrape}
+                            disabled={stoppingScrape}
+                            className="border-rose-200 text-rose-700 hover:bg-rose-50 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/40"
+                            title="Stop the price check. The current listing can finish; remaining stay Pending."
+                        >
+                            <Square className={`mr-1.5 h-3.5 w-3.5 ${stoppingScrape ? 'animate-pulse' : ''}`} />
+                            {stoppingScrape ? 'Stopping…' : 'Stop Scraping'}
                         </Button>
                     )}
 
@@ -547,29 +619,29 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         No listings on the marketplace yet. Create listings, publish from Created products, then manage inventory here.
                     </p>
                 ) : (
-                    <table className="w-full text-left text-sm">
+                    <table className="w-full table-fixed text-left text-sm min-w-[56rem]">
                         <thead className="bg-slate-50 dark:bg-slate-800 text-xs uppercase text-slate-500 dark:text-slate-400">
                             <tr>
-                                <th className="px-3 py-2.5">SKU</th>
+                                <th className="w-[9rem] px-3 py-2.5">SKU</th>
                                 <th className="px-3 py-2.5">Title</th>
-                                <th className="px-3 py-2.5">Vendor URL</th>
-                                <th className="px-3 py-2.5">Vendor ID</th>
-                                <th className="px-3 py-2.5">Vendor price</th>
-                                <th className="px-3 py-2.5">Price</th>
-                                <th className="px-3 py-2.5">Stock</th>
-                                <th className="px-3 py-2.5">Status</th>
-                                <th className="px-3 py-2.5">Margin</th>
-                                <th className="px-3 py-2.5">Last scrape</th>
-                                <th className="px-3 py-2.5 text-right">Actions</th>
+                                <th className="w-[6rem] px-3 py-2.5">Vendor URL</th>
+                                <th className="w-[8rem] px-3 py-2.5">Vendor ID</th>
+                                <th className="w-[7rem] px-3 py-2.5">Vendor price</th>
+                                <th className="w-[6rem] px-3 py-2.5">Price</th>
+                                <th className="w-[4.5rem] px-3 py-2.5">Stock</th>
+                                <th className="w-[6rem] px-3 py-2.5">Status</th>
+                                <th className="w-[5rem] px-3 py-2.5">Margin</th>
+                                <th className="w-[8rem] px-3 py-2.5">Last scrape</th>
+                                <th className="w-[8rem] px-3 py-2.5 text-right">Actions</th>
                             </tr>
                         </thead>
                         <tbody>
                             {listings.map((l) => (
                                 <tr key={l.id} className="border-t border-slate-100 dark:border-slate-800">
-                                    <td className="px-3 py-2.5 font-medium text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                                    <td className="px-3 py-2.5 font-medium text-slate-900 dark:text-slate-100 truncate" title={l.sku || l.external_variant_key}>
                                         {l.sku || l.external_variant_key}
                                     </td>
-                                    <td className="max-w-[180px] truncate px-3 py-2.5 text-slate-700 dark:text-slate-300" title={l.title}>
+                                    <td className="truncate px-3 py-2.5 text-slate-700 dark:text-slate-300" title={l.title}>
                                         {l.title || '—'}
                                     </td>
                                     <td className="px-3 py-2.5 text-xs">

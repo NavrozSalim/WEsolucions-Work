@@ -28,6 +28,8 @@ def get_scrape_progress(store_id) -> dict:
             "pct": 0,
             "phase": "done",
             "listing_ids": [],
+            "cancel_requested": False,
+            "cancelled": False,
         }
     return data
 
@@ -77,23 +79,57 @@ def begin_scrape_progress(
         phase=phase or "running",
         listing_ids=ids,
         started_at=timezone.now().isoformat(),
+        cancel_requested=False,
+        cancelled=False,
     )
 
 
-def finish_scrape_progress(store_id, *, scraped: int = 0, failed: int = 0, message: str = "") -> dict:
+def request_scrape_cancel(store_id) -> dict:
+    """Ask the in-flight managed scrape to stop after the current listing."""
+    cur = get_scrape_progress(store_id)
+    if not cur.get("active"):
+        return cur
+    return set_scrape_progress(
+        store_id,
+        cancel_requested=True,
+        message="Stopping… finishing the current listing, then remaining stay Pending.",
+    )
+
+
+def is_scrape_cancel_requested(store_id) -> bool:
+    return bool(get_scrape_progress(store_id).get("cancel_requested"))
+
+
+def finish_scrape_progress(
+    store_id,
+    *,
+    scraped: int = 0,
+    failed: int = 0,
+    message: str = "",
+    cancelled: bool = False,
+) -> dict:
     cur = get_scrape_progress(store_id)
     total = int(cur.get("total") or (scraped + failed) or 0)
+    processed = int(cur.get("processed") or 0)
+    if cancelled:
+        processed = min(total, max(processed, scraped + failed))
+    else:
+        processed = total
     return set_scrape_progress(
         store_id,
         active=False,
         total=total,
-        processed=total,
+        processed=processed,
         scraped=scraped,
         failed=failed,
-        pct=100 if total else 0,
+        pct=100 if total and not cancelled else (
+            max(0, min(100, round(100.0 * processed / total))) if total else 0
+        ),
         current_sku="",
-        message=message or "Scrape finished.",
-        phase="done",
+        message=message or ("Scrape stopped." if cancelled else "Scrape finished."),
+        phase="cancelled" if cancelled else "done",
+        cancel_requested=False,
+        cancelled=bool(cancelled),
     )
 
 
@@ -147,6 +183,11 @@ def enrich_progress_from_listings(store_id) -> dict:
     if phase == "queued" and processed > 0:
         phase = "running"
 
+    stopping = bool(data.get("cancel_requested"))
+    msg = f"Scraping {min(processed + (1 if pending else 0), total)} of {total}…"
+    if stopping:
+        msg = "Stopping… finishing the current listing, then remaining stay Pending."
+
     return set_scrape_progress(
         store_id,
         total=total,
@@ -155,6 +196,7 @@ def enrich_progress_from_listings(store_id) -> dict:
         failed=failed,
         pct=pct,
         phase=phase,
-        message=f"Scraping {min(processed + (1 if pending else 0), total)} of {total}…",
+        message=msg,
         active=True,
+        cancel_requested=stopping,
     )

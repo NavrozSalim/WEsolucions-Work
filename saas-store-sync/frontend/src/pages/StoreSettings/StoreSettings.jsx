@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence } from 'framer-motion';
-import { Search, Plus, Pencil, Trash2, Copy, Store, Wifi, WifiOff, Clock, RefreshCw, MoreVertical } from 'lucide-react';
+import { Search, Plus, Pencil, Trash2, Copy, Store, Wifi, WifiOff, Clock, RefreshCw, MoreVertical, Square } from 'lucide-react';
 import {
     getStores,
     getStore,
@@ -13,6 +13,7 @@ import {
     pollStoreUpdateJob,
     formatStoreUpdateResult,
 } from '../../services/storeService';
+import { cancelListingScrape } from '../../services/listingService';
 import Button from '../../components/ui/Button';
 import ConfirmModal from '../../components/ui/ConfirmModal';
 import Toggle from '../../components/ui/Toggle';
@@ -21,7 +22,7 @@ import EmptyState from '../../components/design/EmptyState';
 import CreateStoreModal from '../../components/stores/CreateStoreModal';
 import StoreSettingsModal from '../../components/stores/StoreSettingsModal';
 
-function ActionsDropdown({ store, conn, validatingId, updatingId, onValidate, onUpdate, onEdit, onDuplicate, onDelete }) {
+function ActionsDropdown({ store, conn, validatingId, updatingId, stoppingId, onValidate, onUpdate, onStopScrape, onEdit, onDuplicate, onDelete }) {
     const [open, setOpen] = useState(false);
     const [menuPos, setMenuPos] = useState({ top: 0, right: 0 });
     const triggerRef = useRef(null);
@@ -77,6 +78,13 @@ function ActionsDropdown({ store, conn, validatingId, updatingId, onValidate, on
             disabled: updatingId === store.id || conn !== 'connected' || store.management_mode === 'full_store',
             className: 'text-slate-700 dark:text-slate-300',
         },
+        ...(store.management_mode === 'full_store' ? [{
+            label: 'Stop scraping',
+            icon: <Square className={`h-4 w-4 shrink-0 ${stoppingId === store.id ? 'animate-pulse' : ''}`} />,
+            onClick: () => onStopScrape(store),
+            disabled: stoppingId === store.id,
+            className: 'text-rose-600 dark:text-rose-400',
+        }] : []),
         {
             label: 'Edit',
             icon: <Pencil className="h-4 w-4 shrink-0" />,
@@ -170,6 +178,7 @@ export default function StoreSettings() {
     const [deletingId, setDeletingId] = useState(null);
     const [validatingId, setValidatingId] = useState(null);
     const [updatingId, setUpdatingId] = useState(null);
+    const [stoppingId, setStoppingId] = useState(null);
 
     const showToast = useCallback((msg, variant = 'info', duration = 4000) => {
         setToast({ msg, variant, duration });
@@ -285,6 +294,26 @@ export default function StoreSettings() {
             .finally(() => setUpdatingId(null));
     };
 
+    const handleStopScrape = (store) => {
+        if (!store?.id || stoppingId === store.id) return;
+        setStoppingId(store.id);
+        cancelListingScrape(store.id)
+            .then((res) => {
+                const stopped = Boolean(res.data?.cancelled) || Boolean(res.data?.server_scrape_stopped);
+                showToast(
+                    res.data?.message
+                        || (stopped
+                            ? 'Stop was sent. The scrape should wind down in a few seconds.'
+                            : 'Nothing was running to stop.'),
+                    stopped ? 'success' : 'info',
+                );
+            })
+            .catch((err) => {
+                showToast(err.response?.data?.detail || err.response?.data?.message || 'Could not stop the scrape.', 'error');
+            })
+            .finally(() => setStoppingId(null));
+    };
+
     const handleToggleActive = (store, nextActive) => {
         if (!store) return;
         const prevActive = store.is_active !== false;
@@ -371,16 +400,16 @@ export default function StoreSettings() {
                     />
                 ) : (
                     <div className="overflow-x-auto">
-                        <table className="table-base">
+                        <table className="table-base table-fixed min-w-[44rem]">
                             <thead>
                                 <tr>
-                                    <th>Store Name</th>
-                                    <th className="w-[140px]">Marketplace</th>
-                                    <th className="w-[80px]">Region</th>
-                                    <th className="w-[110px]">Connection</th>
-                                    <th className="w-[120px]">Schedule</th>
-                                    <th className="w-[70px] text-center">Active</th>
-                                    <th className="w-[80px] text-right">Actions</th>
+                                    <th className="w-[28%]">Store Name</th>
+                                    <th className="w-[14%]">Marketplace</th>
+                                    <th className="w-[8%]">Region</th>
+                                    <th className="w-[14%]">Connection</th>
+                                    <th className="w-[14%]">Schedule</th>
+                                    <th className="w-[10%] text-center">Active</th>
+                                    <th className="w-[12%] text-right">Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -393,11 +422,11 @@ export default function StoreSettings() {
                                     return (
                                         <tr key={store.id}>
                                             <td className="align-middle">
-                                                <div className="flex items-center gap-3">
+                                                <div className="flex min-w-0 items-center gap-3">
                                                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-slate-100 dark:bg-slate-800">
                                                         <Store className="h-4 w-4 text-slate-500 dark:text-slate-400" />
                                                     </div>
-                                                    <span className="font-medium text-slate-900 dark:text-slate-100">{store.name}</span>
+                                                    <span className="font-medium text-slate-900 dark:text-slate-100 truncate" title={store.name}>{store.name}</span>
                                                 </div>
                                             </td>
                                             <td className="text-slate-600 dark:text-slate-400 text-sm">
@@ -440,8 +469,10 @@ export default function StoreSettings() {
                                                     conn={conn}
                                                     validatingId={validatingId}
                                                     updatingId={updatingId}
+                                                    stoppingId={stoppingId}
                                                     onValidate={handleValidate}
                                                     onUpdate={handleTriggerUpdate}
+                                                    onStopScrape={handleStopScrape}
                                                     onEdit={handleOpenSettings}
                                                     onDuplicate={handleDuplicate}
                                                     onDelete={(s) => setDeleteConfirm(s)}

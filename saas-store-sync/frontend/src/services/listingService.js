@@ -85,6 +85,10 @@ export const scrapeListings = (storeId, listingIds = null) =>
 export const getListingScrapeProgress = (storeId) =>
     api.get(`/stores/${storeId}/listings/scrape/progress/`);
 
+/** Stop a running managed-listing scrape. Safe to call when nothing is running. */
+export const cancelListingScrape = (storeId) =>
+    api.post(`/stores/${storeId}/listings/scrape/cancel/`, {});
+
 /** Push local price/stock to marketplace for already-uploaded listings. */
 export const pushListingInventory = (storeId, listingIds = null) =>
     api.post(`/stores/${storeId}/listings/push-inventory/`, listingIds ? { listing_ids: listingIds } : {});
