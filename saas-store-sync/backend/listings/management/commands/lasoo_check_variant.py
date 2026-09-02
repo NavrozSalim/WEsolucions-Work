@@ -22,6 +22,7 @@ from django.db.models import Q
 from listings.errors import MarketplaceError
 from listings.lasoo.client import LasooClient
 from listings.lasoo.queries import build_payload
+from listings.lasoo.response import SEARCH_DATA_FLAGS
 from listings.models import StoreListing
 from stores.models import Store
 
@@ -166,11 +167,7 @@ class Command(BaseCommand):
             data={
                 "externalProductKey": product_key,
                 "externalVariantKey": variant_key,
-                "take": 25,
-                "page": 1,
-                "returnDataObject": True,
-                "dataMappingErrors": True,
-                "returnMappingInfo": True,
+                **SEARCH_DATA_FLAGS,
             },
             auth=client.auth_key,
         )

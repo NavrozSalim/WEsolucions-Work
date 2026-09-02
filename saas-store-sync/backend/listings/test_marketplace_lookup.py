@@ -166,7 +166,7 @@ class MarketplaceLookupTests(TestCase):
         self.assertIn("seller inventory", result["message"].lower())
         payload = mock_client.send.call_args[0][1]
         data = payload.get("data") or {}
-        self.assertTrue(data.get("dataMappingErrors"))
+        self.assertNotIn("dataMappingErrors", data)
         self.assertTrue(data.get("returnMappingInfo"))
 
     @patch("listings.marketplace_lookup.get_adapter")

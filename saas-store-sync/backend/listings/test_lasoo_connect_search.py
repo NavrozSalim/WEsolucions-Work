@@ -5,6 +5,7 @@ from django.test import SimpleTestCase
 
 from listings.lasoo.client import LasooResult
 from listings.lasoo.connect_search import keys_match, search_variant
+from listings.lasoo.response import SEARCH_DATA_FLAGS
 
 
 class ConnectSearchTests(SimpleTestCase):
@@ -71,6 +72,19 @@ class ConnectSearchTests(SimpleTestCase):
         self.assertTrue(result["found"])
         self.assertFalse(result["advertised"])
         self.assertTrue(any("image" in e.lower() for e in result["mapping_errors"]))
+
+    def test_search_payload_omits_data_mapping_errors_flag(self):
+        """Lasoo Variants_Search returns empty rows when dataMappingErrors is true."""
+        self.assertNotIn("dataMappingErrors", SEARCH_DATA_FLAGS)
+        self.assertTrue(SEARCH_DATA_FLAGS.get("returnMappingInfo"))
+        client = MagicMock()
+        client.auth_key = "key"
+        client.send.return_value = LasooResult(ok=True, data={"results": {"variants": []}})
+        search_variant(client, product_key="HW-ZZ122-G2", variant_key="HW-ZZ122-G2", sku="HW-ZZ122-G2")
+        payload = client.send.call_args[0][1]
+        data = payload.get("data") or {}
+        self.assertNotIn("dataMappingErrors", data)
+        self.assertTrue(data.get("returnMappingInfo"))
 
     def test_api_failure_is_not_found(self):
         client = MagicMock()

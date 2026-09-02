@@ -10,7 +10,8 @@ SEARCH_DATA_FLAGS = {
     "take": 25,
     "page": 1,
     "returnDataObject": True,
-    "dataMappingErrors": True,
+    # Do not send dataMappingErrors on Variants_Search: Lasoo returns
+    # variants=[] for SKUs that exist. Proven on production (HW-ZZ122-G2).
     "returnMappingInfo": True,
 }
 
