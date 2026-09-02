@@ -160,6 +160,68 @@ def _vendor_id_from_url(url: str, price_by_vendor_id: dict, inv_by_vendor_id: di
     return None
 
 
+def _vendor_id_from_source_code(code: str, price_by_vendor_id: dict, inv_by_vendor_id: dict):
+    """Match a listing source_vendor_code to a store price/inventory vendor."""
+    code = (code or "").strip().lower()
+    if not code:
+        return None
+    vendor_ids = set(price_by_vendor_id) | set(inv_by_vendor_id)
+    if not vendor_ids:
+        return None
+    from vendor.models import Vendor
+
+    vendors = list(Vendor.objects.filter(id__in=vendor_ids).only("id", "code", "name"))
+    for v in vendors:
+        if (v.code or "").strip().lower() == code:
+            return v.id
+    for v in vendors:
+        vc = (v.code or "").strip().lower()
+        vn = (v.name or "").strip().lower()
+        compact_code = code.replace("-", "").replace("_", "").replace(" ", "")
+        compact_vc = vc.replace("-", "").replace("_", "").replace(" ", "")
+        if compact_code and compact_vc and (
+            compact_code in compact_vc or compact_vc in compact_code
+        ):
+            return v.id
+        if code in vn or vn in code:
+            return v.id
+    return None
+
+
+def _is_vevor_listing(listing) -> bool:
+    from scrapers.vevor_au_ingest import is_vevor_product_url, is_vevor_vendor_code
+
+    return is_vevor_vendor_code(getattr(listing, "source_vendor_code", None)) or is_vevor_product_url(
+        getattr(listing, "vendor_url", None)
+    )
+
+
+def _listing_is_scrapeable(listing, nora_map) -> bool:
+    """True when a managed listing can be scraped (URL, Nora ID, or Vevor SKU)."""
+    has_url = bool((listing.vendor_url or "").strip())
+    if has_url:
+        return True
+    if nora_map is not None and bool((listing.vendor_id or "").strip()):
+        return True
+    if _is_vevor_listing(listing):
+        return bool(
+            (listing.vendor_id or "").strip()
+            or (listing.sku or "").strip()
+            or (listing.external_variant_key or "").strip()
+        )
+    return False
+
+
+_SCRAPE_LISTING_ONLY = (
+    "id",
+    "vendor_url",
+    "vendor_id",
+    "source_vendor_code",
+    "sku",
+    "external_variant_key",
+)
+
+
 def _store_kind(store) -> str:
     return marketplace_kind(getattr(store, "marketplace", None))
 
@@ -1356,7 +1418,7 @@ def _scrapeable_listings_qs(user, store, listing_ids=None):
 
 
 def _estimate_scrape_total(user, store, listing_ids=None) -> int:
-    """Count rows that will be scraped (Vendor URL and/or Nora Vendor ID).
+    """Count rows that will be scraped (Vendor URL, Nora Vendor ID, or Vevor SKU).
 
     Used so the progress bar shows X/Y as soon as scrape is queued.
     """
@@ -1370,10 +1432,8 @@ def _estimate_scrape_total(user, store, listing_ids=None) -> int:
         nora_map = None
 
     total = 0
-    for listing in qs.only("id", "vendor_url", "vendor_id"):
-        has_url = bool((listing.vendor_url or "").strip())
-        has_nora_id = bool((listing.vendor_id or "").strip()) and nora_map is not None
-        if has_url or has_nora_id:
+    for listing in qs.only(*_SCRAPE_LISTING_ONLY):
+        if _listing_is_scrapeable(listing, nora_map):
             total += 1
     return total
 
@@ -1410,15 +1470,13 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
         nora_map = None
 
     batch = []
-    for listing in qs.only("id", "vendor_url", "vendor_id"):
-        has_url = bool((listing.vendor_url or "").strip())
-        has_nora_id = bool((listing.vendor_id or "").strip()) and nora_map is not None
-        if has_url or has_nora_id:
+    for listing in qs.only(*_SCRAPE_LISTING_ONLY):
+        if _listing_is_scrapeable(listing, nora_map):
             batch.append(listing)
 
     if not batch:
         raise MarketplaceError(
-            "No listings with a Vendor URL (or Nora Vendor ID) to scrape. "
+            "No listings with a Vendor URL, Nora Vendor ID, or Vevor product ID to scrape. "
             "Add a vendor link / Vendor ID on each listing first."
         )
 
@@ -1536,13 +1594,20 @@ def cancel_scrape(user, store) -> dict:
 
 
 def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
-    """Scrape vendor URLs on managed listings; Nora stock overrides when configured.
+    """Refresh vendor price/stock on managed listings.
 
-    Price comes from Vendor URL scrape (e.g. eBay AU). Inventory comes from the
-    Nora Excel map when the store has Nora Inventory uploaded and the listing
-    has a Vendor ID — unmatched Vendor IDs get stock 0.
+    Nora Inventory is the only hybrid vendor: price from Vendor URL (e.g. eBay),
+    inventory from the Nora Excel map. Other vendors follow catalog-store rules
+    (eBay/Amazon URL scrape; Vevor AU XLSX feed by product ID).
     """
     from scrapers import close_amazon_session, get_price_and_stock
+    from scrapers.nora_au_ingest import is_nora_vendor_code
+    from scrapers.vevor_au_ingest import (
+        is_vevor_product_url,
+        is_vevor_vendor_code,
+        load_vevor_feed_lookups,
+        lookup_vevor_price_stock,
+    )
     from stores.nora import (
         get_nora_inventory_settings,
         load_store_nora_stock_map,
@@ -1555,6 +1620,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
         _get_inventory_for_vendor_from_cache,
         _get_pricing_for_vendor_from_cache,
     )
+    from .template_routing import is_nora_like
 
     qs = _scrapeable_listings_qs(user, store, listing_ids)
 
@@ -1569,16 +1635,11 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
         logger.warning("Nora map unavailable for managed scrape store=%s: %s", store.id, nora_err)
         nora_map = None
 
-    listings = []
-    for listing in qs:
-        has_url = bool((listing.vendor_url or "").strip())
-        has_nora_id = bool((listing.vendor_id or "").strip()) and nora_map is not None
-        if has_url or has_nora_id:
-            listings.append(listing)
+    listings = [listing for listing in qs if _listing_is_scrapeable(listing, nora_map)]
 
     if not listings:
         raise MarketplaceError(
-            "No listings with a Vendor URL (or Nora Vendor ID) to scrape. "
+            "No listings with a Vendor URL, Nora Vendor ID, or Vevor product ID to scrape. "
             "Add a vendor link / Vendor ID on each listing first."
         )
 
@@ -1674,8 +1735,42 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
     failed = 0
     rows = []
     now = timezone.now()
+    vevor_lookups = None
+    vevor_feed_error = ""
     try:
         try:
+            if any(_is_vevor_listing(listing) for listing in listings):
+                early = scrape_prog.scrape_job_state(store.id, my_gen)
+                if early == "superseded":
+                    return {
+                        "ok": True,
+                        "cancelled": True,
+                        "superseded": True,
+                        "message": "A newer scrape started; this worker stopped.",
+                        "scraped": 0,
+                        "failed": 0,
+                        "pushed": 0,
+                        "rows": [],
+                    }
+                if early == "cancel":
+                    return _cancel_result(0, 0, [])
+                _set_progress(
+                    total=total,
+                    processed=0,
+                    scraped=0,
+                    failed=0,
+                    phase="running",
+                    message="Downloading Vevor AU feed…",
+                )
+                try:
+                    vevor_lookups = load_vevor_feed_lookups()
+                except Exception as feed_err:  # noqa: BLE001
+                    logger.exception(
+                        "Vevor AU feed unavailable for managed scrape store=%s", store.id,
+                    )
+                    vevor_feed_error = (
+                        str(feed_err) or "Vevor AU feed download failed."
+                    )[:500]
             for idx, listing in enumerate(listings):
                 loop_state = scrape_prog.scrape_job_state(store.id, my_gen)
                 if loop_state == "superseded":
@@ -1703,13 +1798,20 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                 url = (listing.vendor_url or "").strip()
                 nora_key = (listing.vendor_id or "").strip()
                 src_code = (listing.source_vendor_code or "").strip()
-                from scrapers.nora_au_ingest import is_nora_vendor_code
-                from .template_routing import is_nora_like
-
                 explicit_nora = is_nora_like(src_code) or is_nora_vendor_code(src_code)
-                # vendor_id alone still means Nora when no source vendor was set (legacy rows)
+                url_l = url.lower()
+                looks_like_other_vendor = (
+                    is_vevor_product_url(url)
+                    or "ebay." in url_l
+                    or "amazon." in url_l
+                    or "aliexpress." in url_l
+                    or "costco." in url_l
+                )
                 uses_nora = nora_map is not None and bool(nora_key) and (
-                    explicit_nora or not src_code
+                    explicit_nora or (not src_code and not looks_like_other_vendor)
+                )
+                uses_vevor = (not explicit_nora) and (
+                    is_vevor_vendor_code(src_code) or is_vevor_product_url(url)
                 )
                 row = {
                     "id": str(listing.id),
@@ -1722,83 +1824,12 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     "inventory": None,
                     "error": "",
                 }
-                result = {}
-                price = None
-                stock = None
-                if url:
-                    try:
-                        result = get_price_and_stock(
-                            url, region, session, vendor_code=src_code or None,
-                        ) or {}
-                    except Exception as exc:  # noqa: BLE001
-                        if not uses_nora:
-                            listing.inventory_sync_status = InventorySyncStatus.FAILED
-                            listing.last_scrape_at = now
-                            listing.last_scrape_error = (str(exc) or "Scrape failed.")[:500]
-                            listing.save(
-                                update_fields=[
-                                    "inventory_sync_status",
-                                    "last_scrape_at",
-                                    "last_scrape_error",
-                                    "updated_at",
-                                ]
-                            )
-                            row["error"] = listing.last_scrape_error
-                            failed += 1
-                            rows.append(row)
-                            _set_progress(
-                                processed=idx + 1,
-                                scraped=scraped,
-                                failed=failed,
-                                current_sku=row["sku"] or "",
-                            )
-                            logger.warning("Listing scrape failed SKU %s: %s", listing.sku, exc)
-                            continue
-                        logger.warning(
-                            "Listing scrape failed SKU %s (Nora stock still applied): %s",
-                            listing.sku,
-                            exc,
-                        )
-                        result = {}
 
-                    if result.get("ingest_only") and not uses_nora:
-                        listing.inventory_sync_status = InventorySyncStatus.FAILED
-                        listing.last_scrape_at = now
-                        listing.last_scrape_error = (
-                            "This vendor is ingest-only and cannot be scraped server-side."
-                        )
-                        listing.save(
-                            update_fields=[
-                                "inventory_sync_status",
-                                "last_scrape_at",
-                                "last_scrape_error",
-                                "updated_at",
-                            ]
-                        )
-                        row["error"] = listing.last_scrape_error
-                        failed += 1
-                        rows.append(row)
-                        _set_progress(
-                            processed=idx + 1,
-                            scraped=scraped,
-                            failed=failed,
-                            current_sku=row["sku"] or "",
-                        )
-                        continue
-
-                    price = result.get("price")
-                    stock = result.get("stock")
-                    if result.get("inventory") is not None and stock is None:
-                        stock = result.get("inventory")
-
-                if uses_nora:
-                    stock = lookup_nora_stock(nora_map, nora_key) or 0
-
-                err = result.get("error_message") or result.get("error") or ""
-                if price is None and stock is None and not uses_nora:
+                def _fail_row(message: str) -> None:
+                    nonlocal failed
                     listing.inventory_sync_status = InventorySyncStatus.FAILED
                     listing.last_scrape_at = now
-                    listing.last_scrape_error = (str(err) or "No price or stock returned.")[:500]
+                    listing.last_scrape_error = (message or "Scrape failed.")[:500]
                     listing.save(
                         update_fields=[
                             "inventory_sync_status",
@@ -1816,9 +1847,77 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                         failed=failed,
                         current_sku=row["sku"] or "",
                     )
+                    logger.warning("Listing scrape failed SKU %s: %s", listing.sku, message)
+
+                result = {}
+                price = None
+                stock = None
+                if uses_vevor:
+                    if vevor_feed_error:
+                        _fail_row(vevor_feed_error)
+                        continue
+                    lookups = vevor_lookups or {}
+                    entry = lookup_vevor_price_stock(
+                        lookups.get("lookup") or {},
+                        lookups.get("lookup_compact") or {},
+                        lookups.get("lookup_by_url") or {},
+                        vendor_id=listing.vendor_id or "",
+                        sku=listing.sku or "",
+                        variant_key=listing.external_variant_key or "",
+                        product_key=listing.external_product_key or "",
+                        vendor_url=url,
+                    )
+                    if not entry:
+                        _fail_row("SKU not in Vevor AU XLSX feed")
+                        continue
+                    try:
+                        price = float(entry.get("Posted Price") or 0)
+                    except (TypeError, ValueError):
+                        price = None
+                    try:
+                        stock = int(entry.get("Posted Inventory") or 0)
+                    except (TypeError, ValueError):
+                        stock = 0
+                    result = {"price": price, "inventory": stock}
+                elif url:
+                    try:
+                        result = get_price_and_stock(
+                            url, region, session, vendor_code=src_code or None,
+                        ) or {}
+                    except Exception as exc:  # noqa: BLE001
+                        if not uses_nora:
+                            _fail_row(str(exc) or "Scrape failed.")
+                            continue
+                        logger.warning(
+                            "Listing scrape failed SKU %s (Nora stock still applied): %s",
+                            listing.sku,
+                            exc,
+                        )
+                        result = {}
+
+                    if result.get("ingest_only") and not uses_nora:
+                        _fail_row(
+                            "This vendor is ingest-only and cannot be scraped server-side."
+                        )
+                        continue
+
+                    price = result.get("price")
+                    stock = result.get("stock")
+                    if result.get("inventory") is not None and stock is None:
+                        stock = result.get("inventory")
+
+                if uses_nora:
+                    stock = lookup_nora_stock(nora_map, nora_key) or 0
+
+                err = result.get("error_message") or result.get("error") or ""
+                if price is None and stock is None and not uses_nora:
+                    _fail_row(str(err) or "No price or stock returned.")
                     continue
 
-                vendor_id = _vendor_id_from_url(url, price_by_vid, inv_by_vid)
+                vendor_id = (
+                    _vendor_id_from_source_code(src_code, price_by_vid, inv_by_vid)
+                    or _vendor_id_from_url(url, price_by_vid, inv_by_vid)
+                )
                 pricing = _get_pricing_for_vendor_from_cache(vendor_id, price_by_vid, price_fb)
                 inventory_settings = (
                     _get_inventory_for_vendor_from_cache(nora_vendor_pk, inv_by_vid, inv_fb)

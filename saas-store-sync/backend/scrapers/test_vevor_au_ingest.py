@@ -13,9 +13,14 @@ from scrapers.vevor_au_ingest import (
     LEGACY_INVENTORY_COL,
     LEGACY_PRICE_COL,
     LEGACY_SKU_COL,
+    is_vevor_product_url,
+    is_vevor_vendor_code,
     load_veror_via_excel_positions,
     lookup_sku,
+    lookup_vevor_price_stock,
+    normalize_vevor_product_url,
     resolve_vevor_feed_columns,
+    vevor_identity_candidates,
 )
 
 # Exact header of the live vevor-563.xlsx feed as of July 2026.
@@ -46,11 +51,12 @@ def _write_xlsx(rows) -> str:
     return tmp.name
 
 
-def _current_feed_row(sku, availability, inventory, weight_kg, after_coupon_price, map_price=None):
+def _current_feed_row(sku, availability, inventory, weight_kg, after_coupon_price, map_price=None, product_link=''):
     """Build a full-width row matching CURRENT_FEED_HEADER."""
     row = [''] * len(CURRENT_FEED_HEADER)
     row[0] = sku            # SKU
     row[1] = 'AU'           # Country
+    row[4] = product_link   # Product link
     row[6] = availability   # Availability  (legacy code misread this as price)
     row[7] = inventory      # Inventory quantity
     row[8] = weight_kg      # Product weight(KG)  (legacy code misread this as stock)
@@ -190,6 +196,73 @@ class ShortRowTests(unittest.TestCase):
             os.unlink(path)
         self.assertEqual(scanned, 1)
         self.assertEqual(lookup['SHORTROWSKU0000001'], {'Posted Price': 0.0, 'Posted Inventory': 3})
+
+
+class IdentityAndUrlLookupTests(unittest.TestCase):
+    def test_vendor_code_detection(self):
+        self.assertTrue(is_vevor_vendor_code('vevorau'))
+        self.assertTrue(is_vevor_vendor_code('Vevor AU'))
+        self.assertTrue(is_vevor_vendor_code('vevor_au'))
+        self.assertFalse(is_vevor_vendor_code('ebayau'))
+        self.assertFalse(is_vevor_vendor_code('noraau'))
+
+    def test_product_url_detection(self):
+        self.assertTrue(is_vevor_product_url('https://www.vevor.com.au/winch-p_12345.html'))
+        self.assertFalse(is_vevor_product_url('https://www.ebay.com.au/itm/1'))
+
+    def test_identity_candidates_prefer_vendor_id_then_sku(self):
+        keys = vevor_identity_candidates(
+            vendor_id='FEED-SKU',
+            sku='LASOO-SKU',
+            vendor_url='https://www.vevor.com.au/item-p_99ABC.html?sku=QSKU',
+        )
+        self.assertEqual(keys[0], 'FEED-SKU')
+        self.assertIn('LASOO-SKU', keys)
+        self.assertIn('QSKU', keys)
+        self.assertIn('99ABC', keys)
+
+    def test_lookup_matches_product_link_before_listing_sku(self):
+        path = _write_xlsx([
+            CURRENT_FEED_HEADER,
+            _current_feed_row(
+                '00PSIX5NJR2YV2MH3V0',
+                'in stock',
+                '11',
+                '11.2',
+                178.90,
+                189.99,
+                product_link='https://www.vevor.com.au/winch.html',
+            ),
+        ])
+        try:
+            lookup, compact, _ = load_veror_via_excel_positions(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(
+            lookup['00PSIX5NJR2YV2MH3V0']['Product Link'],
+            'https://www.vevor.com.au/winch.html',
+        )
+        by_url = {
+            normalize_vevor_product_url('https://www.vevor.com.au/winch.html'):
+            lookup['00PSIX5NJR2YV2MH3V0'],
+        }
+        hit = lookup_vevor_price_stock(
+            lookup,
+            compact,
+            by_url,
+            sku='NOT-IN-FEED',
+            vendor_url='https://www.vevor.com.au/winch.html?utm=1',
+        )
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit['Posted Price'], 178.90)
+        miss = lookup_vevor_price_stock(
+            lookup, compact, {}, sku='NOT-IN-FEED', vendor_url='https://www.vevor.com.au/other.html',
+        )
+        self.assertIsNone(miss)
+        by_sku = lookup_vevor_price_stock(
+            lookup, compact, {}, sku='00PSIX5NJR2YV2MH3V0', vendor_url='',
+        )
+        self.assertEqual(by_sku['Posted Inventory'], 11)
 
 
 if __name__ == '__main__':

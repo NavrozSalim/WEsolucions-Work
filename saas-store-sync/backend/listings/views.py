@@ -133,9 +133,11 @@ class StoreListingListCreateView(APIView):
             # Store-wide scrapeable count (not limited to current page/search)
             # so Start Scraping (N) matches what the scrape job will process.
             inv_qs = StoreListing.objects.filter(store=store, status__in=INVENTORY_STATUSES)
+            empty_url = Q(vendor_url__isnull=True) | Q(vendor_url='')
+            empty_vid = Q(vendor_id__isnull=True) | Q(vendor_id='')
+            vevor_with_sku = Q(source_vendor_code__icontains='vevor') & ~Q(sku='')
             scrapeable_count = inv_qs.exclude(
-                (Q(vendor_url__isnull=True) | Q(vendor_url=''))
-                & (Q(vendor_id__isnull=True) | Q(vendor_id=''))
+                empty_url & empty_vid & ~vevor_with_sku
             ).count()
             response.data['scrapeable_count'] = scrapeable_count
         return response

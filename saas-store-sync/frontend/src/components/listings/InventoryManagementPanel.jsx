@@ -731,10 +731,10 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                                             {canScrape && (
                                                 <button
                                                     type="button"
-                                                    title="Scrape vendor URL / Nora stock"
+                                                    title="Scrape vendor URL, Nora stock, or Vevor feed"
                                                     className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
                                                     onClick={() => handleScrape([l.id])}
-                                                    disabled={busy || (!(l.vendor_url || '').trim() && !(l.vendor_id || '').trim())}
+                                                    disabled={busy || (!(l.vendor_url || '').trim() && !(l.vendor_id || '').trim() && !/vevor/i.test(l.source_vendor_code || ''))}
                                                 >
                                                     <Play className="h-4 w-4" />
                                                 </button>

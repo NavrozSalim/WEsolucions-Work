@@ -93,6 +93,10 @@ function isNoraCode(code) {
     return /nora/i.test(String(code || ''));
 }
 
+function isVevorCode(code) {
+    return /vevor/i.test(String(code || ''));
+}
+
 function vendorUrlPlaceholder(code) {
     const c = String(code || '').toLowerCase();
     if (c.includes('amazonau') || c.includes('amazon_au') || c.includes('amazon-au')) {
@@ -107,6 +111,55 @@ function vendorUrlPlaceholder(code) {
     if (c.includes('vevor')) return 'https://www.vevor.com.au/…';
     if (c.includes('heb')) return 'https://www.heb.com/…';
     return 'https://… (product page used for price & stock scrape)';
+}
+
+function VendorSourceFields({
+    noraSelected,
+    vevorSelected,
+    selectedVendor,
+    form,
+    set,
+    urlRequired = false,
+}) {
+    return (
+        <>
+            <div className="sm:col-span-2">
+                <Input
+                    label="Vendor URL (Optional)"
+                    placeholder={vendorUrlPlaceholder(selectedVendor)}
+                    value={form.vendor_url}
+                    onChange={set('vendor_url')}
+                    type="url"
+                    required={!!urlRequired && !noraSelected}
+                />
+                {noraSelected ? (
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                        Price is scraped from this link. Inventory comes from the Nora Excel file.
+                    </p>
+                ) : null}
+                {vevorSelected ? (
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                        Price and stock come from the Vevor feed by product ID (listing SKU or Vendor ID), not this page.
+                    </p>
+                ) : null}
+            </div>
+            {(noraSelected || vevorSelected) ? (
+                <div className="sm:col-span-2">
+                    <Input
+                        label="Vendor ID (Optional)"
+                        placeholder={
+                            noraSelected
+                                ? 'Nora BarCode after cleaning, e.g. 8FNZ100-DL-G1'
+                                : 'Vevor SKU from the feed, if different from listing SKU'
+                        }
+                        value={form.vendor_id}
+                        onChange={set('vendor_id')}
+                        required={noraSelected}
+                    />
+                </div>
+            ) : null}
+        </>
+    );
 }
 
 function Textarea({ label, rows = 3, ...props }) {
@@ -395,6 +448,7 @@ export default function ListingFormModal({
 
     const selectedVendor = form.source_vendor_code || '';
     const noraSelected = isNoraCode(selectedVendor);
+    const vevorSelected = isVevorCode(selectedVendor);
     const selectedVendorName =
         storeVendors.find((v) => v.code === selectedVendor)?.name || form.vendor_name || '';
 
@@ -408,13 +462,18 @@ export default function ListingFormModal({
     const setVendor = (e) => {
         const code = e.target.value;
         const name = storeVendors.find((v) => v.code === code)?.name || '';
+        const keepVendorId = isNoraCode(code) || isVevorCode(code);
         setForm((f) => ({
             ...f,
             source_vendor_code: code,
             vendor_name: name,
-            ...(isNoraCode(code)
+            ...(keepVendorId
                 ? { vendor_url: f.vendor_url }
-                : { vendor_id: isNoraCode(f.source_vendor_code) ? '' : f.vendor_id }),
+                : {
+                    vendor_id: (isNoraCode(f.source_vendor_code) || isVevorCode(f.source_vendor_code))
+                        ? ''
+                        : f.vendor_id,
+                }),
         }));
     };
 
@@ -610,28 +669,14 @@ export default function ListingFormModal({
                                         </p>
                                     )}
                                 </div>
-                                {noraSelected ? (
-                                    <div className="sm:col-span-2">
-                                        <Input
-                                            label="Vendor ID (Optional)"
-                                            placeholder="Nora BarCode after cleaning, e.g. 8FNZ100-DL-G1"
-                                            value={form.vendor_id}
-                                            onChange={set('vendor_id')}
-                                            required
-                                        />
-                                    </div>
-                                ) : (
-                                    <div className="sm:col-span-2">
-                                        <Input
-                                            label="Vendor URL (Optional)"
-                                            placeholder={vendorUrlPlaceholder(selectedVendor)}
-                                            value={form.vendor_url}
-                                            onChange={set('vendor_url')}
-                                            type="url"
-                                            required={!!selectedVendor}
-                                        />
-                                    </div>
-                                )}
+                                <VendorSourceFields
+                                    noraSelected={noraSelected}
+                                    vevorSelected={vevorSelected}
+                                    selectedVendor={selectedVendor}
+                                    form={form}
+                                    set={set}
+                                    urlRequired={!!selectedVendor}
+                                />
                                 <Input
                                     label="Marketplace Name (Optional)"
                                     value={form.marketplace_name}
@@ -770,22 +815,14 @@ export default function ListingFormModal({
                                         required={storeVendors.length > 0}
                                     />
                                 </div>
-                                {noraSelected ? (
-                                    <div className="sm:col-span-2">
-                                        <Input label="Vendor ID (Optional)" value={form.vendor_id} onChange={set('vendor_id')} required />
-                                    </div>
-                                ) : (
-                                    <div className="sm:col-span-2">
-                                        <Input
-                                            label="Vendor URL (Optional)"
-                                            placeholder={vendorUrlPlaceholder(selectedVendor)}
-                                            value={form.vendor_url}
-                                            onChange={set('vendor_url')}
-                                            type="url"
-                                            required={!!selectedVendor}
-                                        />
-                                    </div>
-                                )}
+                                <VendorSourceFields
+                                    noraSelected={noraSelected}
+                                    vevorSelected={vevorSelected}
+                                    selectedVendor={selectedVendor}
+                                    form={form}
+                                    set={set}
+                                    urlRequired={!!selectedVendor}
+                                />
                                 <Input label="SKU" value={form.sku} onChange={set('sku')} required />
                                 <Input label="Price" type="number" step="0.01" min="0" value={form.sale_price} onChange={set('sale_price')} required />
                                 <div className="sm:col-span-2">
@@ -839,15 +876,14 @@ export default function ListingFormModal({
                                         required={storeVendors.length > 0}
                                     />
                                 </div>
-                                {noraSelected ? (
-                                    <div className="sm:col-span-2">
-                                        <Input label="Vendor ID (Optional)" value={form.vendor_id} onChange={set('vendor_id')} />
-                                    </div>
-                                ) : (
-                                    <div className="sm:col-span-2">
-                                        <Input label="Vendor URL (Optional)" value={form.vendor_url} onChange={set('vendor_url')} type="url" />
-                                    </div>
-                                )}
+                                <VendorSourceFields
+                                    noraSelected={noraSelected}
+                                    vevorSelected={vevorSelected}
+                                    selectedVendor={selectedVendor}
+                                    form={form}
+                                    set={set}
+                                    urlRequired={false}
+                                />
                                 <Input label="Marketplace Name (Optional)" value={form.marketplace_name} onChange={set('marketplace_name')} placeholder="e.g. MyDeal" />
                                 <Input label="Store Name (Optional)" value={form.store_name} onChange={set('store_name')} />
                                 {!isEdit && (
@@ -942,28 +978,14 @@ export default function ListingFormModal({
                                         </p>
                                     )}
                                 </div>
-                                {noraSelected ? (
-                                    <div className="sm:col-span-2">
-                                        <Input
-                                            label="Vendor ID (Optional)"
-                                            placeholder="Nora BarCode after cleaning, e.g. 8FNZ100-DL-G1"
-                                            value={form.vendor_id}
-                                            onChange={set('vendor_id')}
-                                            required
-                                        />
-                                    </div>
-                                ) : (
-                                    <div className="sm:col-span-2">
-                                        <Input
-                                            label="Vendor URL (Optional)"
-                                            placeholder={vendorUrlPlaceholder(selectedVendor)}
-                                            value={form.vendor_url}
-                                            onChange={set('vendor_url')}
-                                            type="url"
-                                            required={!!selectedVendor}
-                                        />
-                                    </div>
-                                )}
+                                <VendorSourceFields
+                                    noraSelected={noraSelected}
+                                    vevorSelected={vevorSelected}
+                                    selectedVendor={selectedVendor}
+                                    form={form}
+                                    set={set}
+                                    urlRequired={!!selectedVendor}
+                                />
                                 <Input
                                     label="Marketplace Name (Optional)"
                                     value={form.marketplace_name}
