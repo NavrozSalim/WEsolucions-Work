@@ -1441,15 +1441,22 @@ def _estimate_scrape_total(user, store, listing_ids=None) -> int:
 def start_scrape_async(user, store, listing_ids=None) -> dict:
     """Start a managed-listing scrape in a background thread.
 
-    Progress is stored in cache and live counts are derived from StoreListing
-    statuses (pending → scraped/failed), matching catalog Inventory management.
+    Store-wide Start (no ``listing_ids``) always re-queues every scrapeable
+    listing (Pending, Scraped, Synced, Failed) — same as catalog Start Scraping
+    after a full pending reset. A leftover or in-flight job is superseded so
+    already-Scraped rows are not skipped.
+
+    A per-row scrape (explicit ``listing_ids``) does not kill a store-wide job.
     """
     import threading
 
     from . import scrape_progress as scrape_prog
 
+    ids = list(listing_ids) if listing_ids else None
+    store_wide = not ids
+
     live = scrape_prog.enrich_progress_from_listings(store.id)
-    if live.get("active"):
+    if live.get("active") and not store_wide:
         return {
             "started": False,
             "already_running": True,
@@ -1457,8 +1464,6 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
             "message": "Scrape already running. Progress continues on the server.",
             **{k: live.get(k) for k in ("total", "processed", "scraped", "failed", "pct", "phase", "message")},
         }
-
-    ids = list(listing_ids) if listing_ids else None
 
     from stores.nora import load_store_nora_stock_map
 
@@ -1568,7 +1573,7 @@ def cancel_scrape(user, store) -> dict:
         f"Scrape stopped. {scraped} listing(s) done"
         + (f"; {failed} failed" if failed else "")
         + (f"; {remaining} left Pending" if remaining else "")
-        + ". Use Start Scraping to continue."
+        + ". Start Scraping will refresh the whole store again."
     )
     live = scrape_prog.finish_scrape_progress(
         store.id,
@@ -1662,7 +1667,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
             return {
                 "ok": True,
                 "cancelled": True,
-                "message": "Scrape stopped. Remaining listings stay Pending. Use Start Scraping to continue.",
+                "message": "Scrape stopped. Remaining listings stay Pending. Start Scraping will refresh the whole store again.",
                 "scraped": 0,
                 "failed": 0,
                 "pushed": 0,
@@ -1710,7 +1715,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
             f"Scrape stopped. {scraped_n} listing(s) done"
             + (f"; {failed_n} failed" if failed_n else "")
             + (f"; {remaining} left Pending" if remaining else "")
-            + ". Use Start Scraping to continue."
+            + ". Start Scraping will refresh the whole store again."
         )
         _finish_progress(
             scraped=scraped_n,

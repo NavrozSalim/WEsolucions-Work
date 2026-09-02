@@ -430,7 +430,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                 onMessage?.(
                     res.data?.message
                         || (stopped
-                            ? 'Scrape stopped. Remaining listings stay Pending. Use Start Scraping to continue.'
+                            ? 'Scrape stopped. Remaining listings stay Pending. Start Scraping will refresh the whole store again.'
                             : 'Nothing was running to stop.'),
                     'success',
                 );
@@ -547,7 +547,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                                 : `${totalCount.toLocaleString()} listing${totalCount === 1 ? '' : 's'} on the marketplace`}
                             {canScrape ? (
                                 <span className="block mt-0.5">
-                                    Start Scraping updates vendor price/stock locally (Scraped). Manual sync or your store schedule pushes to {marketplaceLabel}.
+                                    Start Scraping refreshes every listing with a vendor URL/ID (including already Scraped). Manual sync or your store schedule pushes to {marketplaceLabel}.
                                 </span>
                             ) : null}
                         </p>
@@ -588,7 +588,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                             e.target.value = '';
                             if (v) handleReset(v);
                         }}
-                        title="Reset scrape status so you can Start Scraping again"
+                        title="Set badges to Pending without fetching prices. Start Scraping already re-queues every listing."
                     >
                         <option value="" disabled>
                             {resetting ? 'Resetting…' : 'Reset status'}
@@ -609,7 +609,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                             size="sm"
                             onClick={() => handleScrape()}
                             disabled={busy || withVendor === 0}
-                            title={withVendor === 0 ? 'Add Vendor URL / Vendor ID on each listing first' : 'Refresh vendor price and stock locally (then Manual sync)'}
+                            title={withVendor === 0 ? 'Add Vendor URL / Vendor ID on each listing first' : `Refresh vendor price and stock for all ${withVendor} listing(s), including already Scraped`}
                         >
                             <Play className="mr-1.5 h-4 w-4" />
                             {`Start Scraping (${withVendor})`}
