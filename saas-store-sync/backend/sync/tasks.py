@@ -829,6 +829,42 @@ def _run_browser_scrape_for_scheduled_update(store, source: str) -> dict:
     return {'error': 'browser_scrape_timeout', 'task_id': task_id}
 
 
+def _wait_managed_listing_scrape(store) -> dict:
+    """Wait until Lasoo/Reverb/Etsy Inventory scrape finishes on heavy-au/heavy-us."""
+    import time
+
+    from django.conf import settings
+
+    from listings import scrape_progress as scrape_prog
+
+    poll_interval = max(2, int(getattr(settings, 'SCHEDULED_UPDATE_BROWSER_SCRAPE_POLL_SEC', 5) or 5))
+    max_wait = max(60, int(getattr(settings, 'SCHEDULED_UPDATE_BROWSER_SCRAPE_MAX_WAIT_SEC', 7200) or 7200))
+    started = time.monotonic()
+    last = {}
+    while time.monotonic() - started < max_wait:
+        last = scrape_prog.enrich_progress_from_listings(store.id)
+        if not last.get('active'):
+            return {
+                'completed': True,
+                'cancelled': bool(last.get('cancelled')),
+                'scraped': int(last.get('scraped') or 0),
+                'failed': int(last.get('failed') or 0),
+            }
+        time.sleep(poll_interval)
+
+    logger.warning(
+        'Timed out waiting for managed listing scrape on store %s after %ss',
+        store.name,
+        max_wait,
+    )
+    return {
+        'error': 'listing_scrape_timeout',
+        'scraped': int(last.get('scraped') or 0),
+        'failed': int(last.get('failed') or 0),
+        'completed': False,
+    }
+
+
 def _run_managed_store_update(store, *, source='beat'):
     """Scheduled/manual update for managed (full_store) Reverb/Lasoo stores.
 
@@ -862,11 +898,14 @@ def _run_managed_store_update(store, *, source='beat'):
         logger.warning("Managed reset failed store=%s: %s", store.id, exc)
 
     try:
-        scrape = listing_service.scrape_listings(user, store)
+        started = listing_service.start_scrape_async(user, store)
+        scrape = _wait_managed_listing_scrape(store)
         scraped = int(scrape.get('scraped') or 0)
         failed = int(scrape.get('failed') or 0)
-        if not scrape.get('ok') and scrape.get('message'):
-            error_summary = error_summary or scrape.get('message')
+        if scrape.get('error'):
+            error_summary = error_summary or scrape.get('error')
+        elif started.get('message') and not scrape.get('completed'):
+            error_summary = error_summary or started.get('message')
     except MarketplaceError as exc:
         error_summary = str(exc)
         logger.warning("Managed scrape failed store=%s: %s", store.id, exc)

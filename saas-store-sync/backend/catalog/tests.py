@@ -106,6 +106,30 @@ class CatalogScrapeTaskRouterTests(SimpleTestCase):
             {'queue': QUEUE_HEAVY_US},
         )
 
+    @patch('stores.models.Store.objects')
+    def test_managed_listing_scrape_routes_by_store_region(self, mock_objects):
+        r = CatalogScrapeTaskRouter()
+        mock_objects.values_list.return_value.get.return_value = 'AU'
+        self.assertEqual(
+            r.route_for_task(
+                'listings.scrape_store_listings',
+                (1, 'store-au', ['1'], 'gen'),
+                {},
+                {},
+            ),
+            {'queue': QUEUE_HEAVY_AU},
+        )
+        mock_objects.values_list.return_value.get.return_value = 'USA'
+        self.assertEqual(
+            r.route_for_task(
+                'listings.scrape_store_listings',
+                (),
+                {'user_id': 1, 'store_id': 'store-us'},
+                {},
+            ),
+            {'queue': QUEUE_HEAVY_US},
+        )
+
 
 class CeleryStaticTaskRoutesTests(SimpleTestCase):
     """``CELERY_TASK_ROUTES`` dict keys must match ``Task.name`` (see core/settings.py)."""
@@ -116,7 +140,7 @@ class CeleryStaticTaskRoutesTests(SimpleTestCase):
         from catalog import tasks as catalog_tasks
         from sync import tasks as sync_tasks
 
-        static = settings.CELERY_TASK_ROUTES[1]
+        static = next(r for r in settings.CELERY_TASK_ROUTES if isinstance(r, dict))
         bindings = [
             (catalog_tasks.catalog_ingest_upload_file_task, 'ingest'),
             (catalog_tasks.catalog_sync_task, 'ingest'),
@@ -132,6 +156,7 @@ class CeleryStaticTaskRoutesTests(SimpleTestCase):
         ]
         from vendor import tasks as vendor_tasks
 
+        self.assertIsNone(static.get('listings.scrape_store_listings'))
         self.assertEqual(
             static.get(vendor_tasks.prune_old_vendor_prices_task.name),
             {'queue': 'celery'},

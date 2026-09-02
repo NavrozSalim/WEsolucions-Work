@@ -1439,18 +1439,19 @@ def _estimate_scrape_total(user, store, listing_ids=None) -> int:
 
 
 def start_scrape_async(user, store, listing_ids=None) -> dict:
-    """Start a managed-listing scrape in a background thread.
+    """Start a managed-listing scrape on the regional Celery worker.
 
-    Store-wide Start (no ``listing_ids``) always re-queues every scrapeable
-    listing (Pending, Scraped, Synced, Failed) — same as catalog Start Scraping
-    after a full pending reset. A leftover or in-flight job is superseded so
-    already-Scraped rows are not skipped.
+    Store-wide Start (no ``listing_ids``) scrapes only rows that are already
+    Pending. Scraped / Synced / Failed are left alone until Reset status.
 
-    A per-row scrape (explicit ``listing_ids``) does not kill a store-wide job.
+    AU stores enqueue ``heavy-au`` (eBay AU / Amazon AU VPS). USA stores use
+    ``heavy-us``. A per-row scrape (explicit ``listing_ids``) does not kill a
+    store-wide job.
     """
-    import threading
+    from catalog.celery_routing import heavy_queue_for_region
 
     from . import scrape_progress as scrape_prog
+    from .tasks import scrape_store_listings
 
     ids = list(listing_ids) if listing_ids else None
     store_wide = not ids
@@ -1468,6 +1469,8 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
     from stores.nora import load_store_nora_stock_map
 
     qs = _scrapeable_listings_qs(user, store, ids)
+    if store_wide:
+        qs = qs.filter(inventory_sync_status=InventorySyncStatus.PENDING)
     nora_map = None
     try:
         nora_map = load_store_nora_stock_map(store)
@@ -1480,6 +1483,11 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
             batch.append(listing)
 
     if not batch:
+        if store_wide:
+            raise MarketplaceError(
+                "No Pending listings with a Vendor URL, Nora Vendor ID, or Vevor product ID to scrape. "
+                "Use Reset status to move Scraped or Failed rows back to Pending first."
+            )
         raise MarketplaceError(
             "No listings with a Vendor URL, Nora Vendor ID, or Vevor product ID to scrape. "
             "Add a vendor link / Vendor ID on each listing first."
@@ -1487,15 +1495,18 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
 
     batch_ids = [l.id for l in batch]
     total = len(batch_ids)
-    StoreListing.objects.filter(id__in=batch_ids).update(
-        inventory_sync_status=InventorySyncStatus.PENDING,
-        last_scrape_error="",
-    )
+    if store_wide:
+        StoreListing.objects.filter(id__in=batch_ids).update(last_scrape_error="")
+    else:
+        StoreListing.objects.filter(id__in=batch_ids).update(
+            inventory_sync_status=InventorySyncStatus.PENDING,
+            last_scrape_error="",
+        )
     begun = scrape_prog.begin_scrape_progress(
         store.id,
         total=total,
         listing_ids=batch_ids,
-        phase="running",
+        phase="queued",
         message=f"Scraping 0 of {total}…",
     )
     job_generation = begun.get("generation")
@@ -1503,41 +1514,37 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
     user_id = user.id
     store_id = str(store.id)
     id_strs = [str(x) for x in batch_ids]
+    queue = heavy_queue_for_region(getattr(store, "region", None))
 
-    def _run():
-        from django.contrib.auth import get_user_model
-        from stores.models import Store
+    try:
+        async_res = scrape_store_listings.apply_async(
+            args=[user_id, store_id, id_strs, job_generation],
+            queue=queue,
+        )
+    except Exception as exc:
+        logger.exception("Failed to enqueue managed listing scrape store=%s", store_id)
+        scrape_prog.finish_scrape_progress(
+            store_id,
+            message=(f"Could not start scrape worker: {exc}")[:200],
+            job_generation=job_generation,
+        )
+        raise MarketplaceError(
+            "Could not start the regional scrape worker. Try again in a moment."
+        ) from exc
 
-        User = get_user_model()
-        try:
-            u = User.objects.get(pk=user_id)
-            s = Store.objects.select_related("marketplace", "user").get(pk=store_id)
-            scrape_listings(u, s, id_strs, job_generation=job_generation)
-        except MarketplaceError as err:
-            scrape_prog.finish_scrape_progress(
-                store_id,
-                message=str(err)[:200],
-                job_generation=job_generation,
-            )
-        except Exception as err:  # noqa: BLE001
-            logger.exception("Managed scrape failed store=%s", store_id)
-            scrape_prog.finish_scrape_progress(
-                store_id,
-                message=(str(err) or "Scrape failed.")[:200],
-                job_generation=job_generation,
-            )
-        finally:
-            scrape_prog.enrich_progress_from_listings(
-                store_id,
-                job_generation=job_generation,
-            )
-
-    threading.Thread(target=_run, daemon=True, name=f"listing-scrape-{store_id}").start()
+    scrape_prog.set_scrape_progress(
+        store.id,
+        job_generation=job_generation,
+        task_id=str(getattr(async_res, "id", "") or ""),
+        phase="queued",
+        message=f"Queued on {queue}…",
+    )
 
     return {
         "started": True,
         "async": True,
-        "via": "thread",
+        "via": "celery",
+        "queue": queue,
         "ok": True,
         "total": total,
         "processed": 0,
@@ -1565,6 +1572,14 @@ def cancel_scrape(user, store) -> dict:
             "phase": live.get("phase") or "done",
         }
     scrape_prog.request_scrape_cancel(store.id)
+    task_id = (live.get("task_id") or "").strip()
+    if task_id:
+        try:
+            from core.celery import app
+
+            app.control.revoke(task_id, terminate=True, signal="SIGTERM")
+        except Exception:
+            logger.warning("Revoke managed scrape task %s failed", task_id, exc_info=True)
     scraped = int(live.get("scraped") or 0)
     failed = int(live.get("failed") or 0)
     total = int(live.get("total") or 0)
@@ -1573,7 +1588,7 @@ def cancel_scrape(user, store) -> dict:
         f"Scrape stopped. {scraped} listing(s) done"
         + (f"; {failed} failed" if failed else "")
         + (f"; {remaining} left Pending" if remaining else "")
-        + ". Start Scraping will refresh the whole store again."
+        + ". Start Scraping will continue with remaining Pending listings."
     )
     live = scrape_prog.finish_scrape_progress(
         store.id,
@@ -1628,6 +1643,8 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
     from .template_routing import is_nora_like
 
     qs = _scrapeable_listings_qs(user, store, listing_ids)
+    if not listing_ids:
+        qs = qs.filter(inventory_sync_status=InventorySyncStatus.PENDING)
 
     nora_map = None
     nora_vendor_pk = None
@@ -1667,7 +1684,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
             return {
                 "ok": True,
                 "cancelled": True,
-                "message": "Scrape stopped. Remaining listings stay Pending. Start Scraping will refresh the whole store again.",
+                "message": "Scrape stopped. Remaining listings stay Pending. Start Scraping will continue with remaining Pending listings.",
                 "scraped": 0,
                 "failed": 0,
                 "pushed": 0,
@@ -1715,7 +1732,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
             f"Scrape stopped. {scraped_n} listing(s) done"
             + (f"; {failed_n} failed" if failed_n else "")
             + (f"; {remaining} left Pending" if remaining else "")
-            + ". Start Scraping will refresh the whole store again."
+            + ". Start Scraping will continue with remaining Pending listings."
         )
         _finish_progress(
             scraped=scraped_n,

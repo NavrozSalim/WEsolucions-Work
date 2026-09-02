@@ -383,6 +383,7 @@ if sys.platform == 'win32':
 # - ``light``: scrape chord finalizers, resume-after-stop, Beat ``check_scheduled_updates``.
 # - ``celery``: default (analytics, vendor price prune).
 # US VPS: -Q heavy-us. AU VPS: -Q heavy-au. Vevor AU feed → ``light`` (no browser).
+# Managed listing Start Scraping (Lasoo / Reverb / Etsy) also uses heavy-us / heavy-au.
 # Orders/tickets VPS: -Q orders-us (USA stores) / -Q orders-au (AU stores).
 from kombu import Queue  # noqa: E402
 
@@ -425,7 +426,6 @@ CELERY_TASK_ROUTES = (
         # Legacy all-region tasks (local/dev fallback) stay on ``light``.
         'listings.fetch_all_store_tickets': {'queue': 'light'},
         'listings.fetch_all_reverb_orders': {'queue': 'light'},
-        'listings.scrape_store_listings': {'queue': 'sync'},
         'listings.lookup_marketplace_skus': {'queue': 'sync'},
         'vendor.prune_old_vendor_prices': {'queue': 'celery'},
     },

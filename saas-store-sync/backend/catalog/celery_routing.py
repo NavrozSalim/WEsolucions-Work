@@ -13,6 +13,10 @@ the US worker to subscribe to non-scrape queues.
 
 ``catalog.run_vevor_au_ingest`` also runs on ``light`` (XLSX feed, no browser).
 
+Managed Inventory Start Scraping (``listings.scrape_store_listings``) uses the
+same ``heavy-us`` / ``heavy-au`` split so Lasoo eBay AU links run on the AU
+scraper VPS, not a Gunicorn thread on the main app.
+
 Deploy:
 
 - Main server workers: ``-Q celery`` | ``-Q ingest`` | ``-Q sync`` | ``-Q light`` — ingest for file/sync; sync for ``run_store_*``; light for scrape finalizers + Beat tick.
@@ -46,6 +50,7 @@ _FINALIZE = frozenset(
         "catalog.tasks.catalog_scrape_store_finalize",
     }
 )
+_LISTING_SCRAPE = "listings.scrape_store_listings"
 
 
 def heavy_queue_for_region(region: str | None) -> str:
@@ -56,7 +61,10 @@ def heavy_queue_for_region(region: str | None) -> str:
 
 
 class CatalogScrapeTaskRouter:
-    """Routes catalog scrape tasks from ``Store.region``; finalizers → ``light``."""
+    """Routes catalog + managed-listing browser scrapes from ``Store.region``.
+
+    Finalizers → ``light``. ``listings.scrape_store_listings`` → ``heavy-au`` / ``heavy-us``.
+    """
 
     def route_for_task(
         self,
@@ -72,6 +80,29 @@ class CatalogScrapeTaskRouter:
         kwargs = kwargs or {}
         if name in _FINALIZE:
             return {"queue": QUEUE_SCRAPE_FINALIZE}
+
+        if name == _LISTING_SCRAPE:
+            store_id = None
+            if len(args) > 1:
+                store_id = args[1]
+            else:
+                store_id = kwargs.get("store_id")
+            if not store_id:
+                logger.warning("listing scrape route: missing store_id for %s", name)
+                return {"queue": QUEUE_HEAVY_US}
+            try:
+                from stores.models import Store
+
+                region = Store.objects.values_list("region", flat=True).get(id=store_id)
+            except Exception as exc:
+                logger.exception(
+                    "listing scrape route: could not resolve region for %s; defaulting to %s: %s",
+                    name,
+                    QUEUE_HEAVY_US,
+                    exc,
+                )
+                return {"queue": QUEUE_HEAVY_US}
+            return {"queue": heavy_queue_for_region(region)}
 
         if name not in _SCRAPE_HEAD_OR_CHUNK:
             return None

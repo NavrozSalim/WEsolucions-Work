@@ -89,8 +89,11 @@ def sync_store_orders(*, region: str | None = None, marketplace_codes=None) -> d
 
 
 @shared_task(name="listings.scrape_store_listings", bind=True, ignore_result=True)
-def scrape_store_listings(self, user_id, store_id, listing_ids=None):
-    """Background vendor scrape for managed Inventory management (survives page reload)."""
+def scrape_store_listings(self, user_id, store_id, listing_ids=None, job_generation=None):
+    """Background vendor scrape for managed Inventory management.
+
+    Runs on ``heavy-au`` / ``heavy-us`` (same regional workers as catalog Amazon/eBay).
+    """
     from . import listing_service
     from . import scrape_progress as scrape_prog
 
@@ -102,22 +105,27 @@ def scrape_store_listings(self, user_id, store_id, listing_ids=None):
         scrape_prog.finish_scrape_progress(
             store_id,
             message="Scrape cancelled: store or user not found.",
+            job_generation=job_generation,
         )
         return {"ok": False, "error": "not_found"}
 
     scrape_prog.set_scrape_progress(
         store.id,
+        job_generation=job_generation,
         active=True,
         phase="running",
         task_id=getattr(self.request, "id", None) or "",
         message="Worker started…",
     )
     try:
-        return listing_service.scrape_listings(user, store, listing_ids)
+        return listing_service.scrape_listings(
+            user, store, listing_ids, job_generation=job_generation,
+        )
     except MarketplaceError as exc:
         scrape_prog.finish_scrape_progress(
             store.id,
             message=str(exc)[:200],
+            job_generation=job_generation,
         )
         return {"ok": False, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
@@ -125,8 +133,14 @@ def scrape_store_listings(self, user_id, store_id, listing_ids=None):
         scrape_prog.finish_scrape_progress(
             store.id,
             message=(str(exc) or "Scrape failed.")[:200],
+            job_generation=job_generation,
         )
         return {"ok": False, "error": str(exc)}
+    finally:
+        scrape_prog.enrich_progress_from_listings(
+            store_id,
+            job_generation=job_generation,
+        )
 
 
 @shared_task(name="listings.lookup_marketplace_skus", bind=True, ignore_result=True)

@@ -28,7 +28,7 @@ from . import (
     ticket_service,
 )
 from .errors import MarketplaceError
-from .models import ListingAction, ListingStatus, ListingUpload, MarketplaceOrder, StoreListing, SupportTicket
+from .models import InventorySyncStatus, ListingAction, ListingStatus, ListingUpload, MarketplaceOrder, StoreListing, SupportTicket
 from .pagination import ListingPagination
 from .photo_upload import PhotoUploadError
 from .reverb import listings as reverb_listings
@@ -130,9 +130,13 @@ class StoreListingListCreateView(APIView):
 
         view = (request.query_params.get('view') or '').strip().lower()
         if view == 'inventory':
-            # Store-wide scrapeable count (not limited to current page/search)
+            # Pending scrapeable count (not limited to current page/search)
             # so Start Scraping (N) matches what the scrape job will process.
-            inv_qs = StoreListing.objects.filter(store=store, status__in=INVENTORY_STATUSES)
+            inv_qs = StoreListing.objects.filter(
+                store=store,
+                status__in=INVENTORY_STATUSES,
+                inventory_sync_status=InventorySyncStatus.PENDING,
+            )
             empty_url = Q(vendor_url__isnull=True) | Q(vendor_url='')
             empty_vid = Q(vendor_id__isnull=True) | Q(vendor_id='')
             vevor_with_sku = Q(source_vendor_code__icontains='vevor') & ~Q(sku='')

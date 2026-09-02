@@ -10,6 +10,7 @@ from stores.models import Store
 
 from . import listing_service
 from . import scrape_progress as scrape_prog
+from .errors import MarketplaceError
 from .models import InventorySyncStatus, ListingStatus, StoreListing
 
 
@@ -177,10 +178,10 @@ class ManagedListingScrapeCancelTests(TestCase):
         self.assertEqual(live["generation"], new_gen)
         self.assertNotEqual(live.get("current_sku"), "STALE")
 
-    @patch("threading.Thread")
+    @patch("listings.tasks.scrape_store_listings.apply_async")
     @patch("stores.nora.load_store_nora_stock_map", return_value=None)
-    def test_start_scrape_allowed_after_cancel(self, _nora, mock_thread):
-        mock_thread.return_value.start = lambda: None
+    def test_start_scrape_allowed_after_cancel(self, _nora, mock_apply):
+        mock_apply.return_value.id = "task-1"
         row = self._listing("START-1")
         scrape_prog.begin_scrape_progress(
             self.store.id,
@@ -192,10 +193,10 @@ class ManagedListingScrapeCancelTests(TestCase):
         self.assertTrue(result.get("started"))
         self.assertFalse(result.get("already_running"))
 
-    @patch("threading.Thread")
+    @patch("listings.tasks.scrape_store_listings.apply_async")
     @patch("stores.nora.load_store_nora_stock_map", return_value=None)
-    def test_store_wide_start_requeues_scraped_and_synced(self, _nora, mock_thread):
-        mock_thread.return_value.start = lambda: None
+    def test_store_wide_start_only_queues_pending(self, _nora, mock_apply):
+        mock_apply.return_value.id = "task-1"
         pending = self._listing("P")
         scraped = self._listing("S")
         scraped.inventory_sync_status = InventorySyncStatus.SCRAPED
@@ -210,16 +211,38 @@ class ManagedListingScrapeCancelTests(TestCase):
         result = listing_service.start_scrape_async(self.user, self.store)
 
         self.assertTrue(result.get("started"))
-        self.assertEqual(result["total"], 4)
-        mock_thread.assert_called()
-        for row in (pending, scraped, synced, failed):
-            row.refresh_from_db()
-            self.assertEqual(row.inventory_sync_status, InventorySyncStatus.PENDING)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result.get("via"), "celery")
+        self.assertEqual(result.get("queue"), "heavy-au")
+        mock_apply.assert_called_once()
+        queued_ids = mock_apply.call_args.kwargs["args"][2]
+        self.assertEqual(queued_ids, [str(pending.id)])
+        pending.refresh_from_db()
+        scraped.refresh_from_db()
+        synced.refresh_from_db()
+        failed.refresh_from_db()
+        self.assertEqual(pending.inventory_sync_status, InventorySyncStatus.PENDING)
+        self.assertEqual(scraped.inventory_sync_status, InventorySyncStatus.SCRAPED)
+        self.assertEqual(synced.inventory_sync_status, InventorySyncStatus.SYNCED)
+        self.assertEqual(failed.inventory_sync_status, InventorySyncStatus.FAILED)
 
-    @patch("threading.Thread")
+    @patch("listings.tasks.scrape_store_listings.apply_async")
     @patch("stores.nora.load_store_nora_stock_map", return_value=None)
-    def test_store_wide_start_supersedes_leftover_active_job(self, _nora, mock_thread):
-        mock_thread.return_value.start = lambda: None
+    def test_store_wide_start_errors_when_nothing_pending(self, _nora, mock_apply):
+        row = self._listing("S")
+        row.inventory_sync_status = InventorySyncStatus.SCRAPED
+        row.save(update_fields=["inventory_sync_status"])
+        with self.assertRaises(MarketplaceError) as ctx:
+            listing_service.start_scrape_async(self.user, self.store)
+        self.assertIn("Pending", str(ctx.exception))
+        mock_apply.assert_not_called()
+        row.refresh_from_db()
+        self.assertEqual(row.inventory_sync_status, InventorySyncStatus.SCRAPED)
+
+    @patch("listings.tasks.scrape_store_listings.apply_async")
+    @patch("stores.nora.load_store_nora_stock_map", return_value=None)
+    def test_store_wide_start_supersedes_leftover_active_job(self, _nora, mock_apply):
+        mock_apply.return_value.id = "task-2"
         leftover = self._listing("LEFT")
         scraped = self._listing("DONE")
         scraped.inventory_sync_status = InventorySyncStatus.SCRAPED
@@ -235,19 +258,19 @@ class ManagedListingScrapeCancelTests(TestCase):
 
         self.assertTrue(result.get("started"))
         self.assertFalse(result.get("already_running"))
-        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["total"], 1)
         live = scrape_prog.get_scrape_progress(self.store.id)
         self.assertTrue(live["active"])
         self.assertNotEqual(live["generation"], old_gen)
         scraped.refresh_from_db()
         leftover.refresh_from_db()
-        self.assertEqual(scraped.inventory_sync_status, InventorySyncStatus.PENDING)
+        self.assertEqual(scraped.inventory_sync_status, InventorySyncStatus.SCRAPED)
         self.assertEqual(leftover.inventory_sync_status, InventorySyncStatus.PENDING)
 
-    @patch("threading.Thread")
+    @patch("listings.tasks.scrape_store_listings.apply_async")
     @patch("stores.nora.load_store_nora_stock_map", return_value=None)
-    def test_row_scrape_does_not_kill_active_store_scrape(self, _nora, mock_thread):
-        mock_thread.return_value.start = lambda: None
+    def test_row_scrape_does_not_kill_active_store_scrape(self, _nora, mock_apply):
+        mock_apply.return_value.id = "task-row"
         a = self._listing("A")
         b = self._listing("B")
         scrape_prog.begin_scrape_progress(
@@ -262,14 +285,14 @@ class ManagedListingScrapeCancelTests(TestCase):
 
         self.assertTrue(result.get("already_running"))
         self.assertFalse(result.get("started"))
-        mock_thread.assert_not_called()
+        mock_apply.assert_not_called()
         b.refresh_from_db()
         self.assertEqual(b.inventory_sync_status, InventorySyncStatus.PENDING)
 
-    @patch("threading.Thread")
+    @patch("listings.tasks.scrape_store_listings.apply_async")
     @patch("stores.nora.load_store_nora_stock_map", return_value=None)
-    def test_row_scrape_when_idle_only_resets_that_listing(self, _nora, mock_thread):
-        mock_thread.return_value.start = lambda: None
+    def test_row_scrape_when_idle_only_resets_that_listing(self, _nora, mock_apply):
+        mock_apply.return_value.id = "task-one"
         a = self._listing("ONLY")
         a.inventory_sync_status = InventorySyncStatus.SCRAPED
         a.save(update_fields=["inventory_sync_status"])
@@ -287,6 +310,18 @@ class ManagedListingScrapeCancelTests(TestCase):
         b.refresh_from_db()
         self.assertEqual(a.inventory_sync_status, InventorySyncStatus.PENDING)
         self.assertEqual(b.inventory_sync_status, InventorySyncStatus.SCRAPED)
+
+    @patch("listings.tasks.scrape_store_listings.apply_async")
+    @patch("stores.nora.load_store_nora_stock_map", return_value=None)
+    def test_usa_store_enqueues_heavy_us(self, _nora, mock_apply):
+        mock_apply.return_value.id = "task-us"
+        self.store.region = "USA"
+        self.store.save(update_fields=["region"])
+        self._listing("US-1")
+        result = listing_service.start_scrape_async(self.user, self.store)
+        self.assertTrue(result.get("started"))
+        self.assertEqual(result.get("queue"), "heavy-us")
+        self.assertEqual(mock_apply.call_args.kwargs.get("queue"), "heavy-us")
 
 
 @override_settings(DEBUG=True)

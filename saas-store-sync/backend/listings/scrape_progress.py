@@ -237,7 +237,7 @@ def enrich_progress_from_listings(store_id, job_generation=None) -> dict:
                 f"Scrape stopped. {scraped + synced} listing(s) done"
                 + (f"; {failed} failed" if failed else "")
                 + (f"; {remaining} left Pending" if remaining else "")
-                + ". Start Scraping will refresh the whole store again."
+                + ". Start Scraping will continue with remaining Pending listings."
             ),
             job_generation=job_generation,
         )
