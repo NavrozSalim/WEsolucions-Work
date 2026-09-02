@@ -5,6 +5,7 @@ listing service validation flow (no network calls).
 """
 import io
 import json
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
@@ -128,6 +129,18 @@ class MapperTests(TestCase):
         self.assertEqual(payload["query"], "Variants_BulkUpsert")
         self.assertEqual(payload["auth"], "secret")
         self.assertEqual(len(payload["data"]["variants"]), 1)
+
+    def test_bulk_delete_payload_includes_product_and_variant_keys(self):
+        payload = mapper.build_bulk_delete_payload(
+            ["HW-ZZ122-G2"],
+            auth_key="secret",
+            product_keys=["HW-ZZ122-G2"],
+        )
+        self.assertEqual(payload["query"], "Variants_BulkDelete")
+        row = payload["data"]["variants"][0]
+        self.assertEqual(row["externalProductKey"], "HW-ZZ122-G2")
+        self.assertEqual(row["externalVariantKey"], "HW-ZZ122-G2")
+        self.assertEqual(payload["results"]["variants"], payload["data"]["variants"])
 
 
 class ValidatorTests(TestCase):
@@ -409,6 +422,86 @@ class ListingServiceTests(TestCase):
         listing.refresh_from_db()
         self.assertEqual(listing.status, ListingStatus.FAILED)
         self.assertEqual(listing.title, "Broken map")
+
+    def test_update_uploaded_sale_above_original_still_pushes(self):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        listing.status = ListingStatus.UPLOADED_STAGING
+        listing.last_uploaded_at = timezone.now()
+        listing.save(update_fields=["status", "last_uploaded_at"])
+        with patch("listings.listing_service.LasooClient") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.auth_key = "key"
+
+            def send(endpoint, payload=None, *args, **kwargs):
+                if endpoint == "variants_search":
+                    return LasooResult(
+                        ok=True,
+                        message="ok",
+                        data={
+                            "results": {
+                                "variants": [{
+                                    "externalProductKey": listing.external_product_key,
+                                    "externalVariantKey": listing.external_variant_key,
+                                }],
+                            },
+                        },
+                    )
+                return LasooResult(ok=True, message="ok", data={"success": True})
+
+            mock_client.send.side_effect = send
+            listing = listing_service.update(
+                listing, {**VALID_DATA, "original_price": "10.00", "sale_price": "125.18"},
+            )
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.UPLOADED_STAGING)
+        self.assertEqual(listing.sale_price, Decimal("125.18"))
+        self.assertEqual(listing.original_price, Decimal("125.18"))
+
+    def test_update_uploaded_validation_error_does_not_drop_status(self):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        listing.status = ListingStatus.UPLOADED_STAGING
+        listing.last_uploaded_at = timezone.now()
+        listing.save(update_fields=["status", "last_uploaded_at"])
+        with self.assertRaises(MarketplaceError) as ctx:
+            listing_service.update(listing, {**VALID_DATA, "title": ""})
+        self.assertIn("Title is required", str(ctx.exception))
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.UPLOADED_STAGING)
+        self.assertEqual(listing.title, VALID_DATA["title"])
+
+    @patch("listings.listing_service.LasooClient")
+    def test_delete_listing_sends_both_keys(self, mock_client_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        listing.status = ListingStatus.UPLOADED_STAGING
+        listing.save(update_fields=["status"])
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.return_value = LasooResult(ok=True, message="ok", data={"success": True})
+        vk = listing.external_variant_key
+        pk = listing.external_product_key
+        listing_service.delete(self.user, self.store, listing)
+        self.assertEqual(StoreListing.objects.filter(id=listing.id).count(), 0)
+        payload = mock_client.send.call_args[0][1]
+        self.assertEqual(payload["query"], "Variants_BulkDelete")
+        row = payload["data"]["variants"][0]
+        self.assertEqual(row["externalVariantKey"], vk)
+        self.assertEqual(row["externalProductKey"], pk)
+        self.assertEqual(payload["results"]["variants"], payload["data"]["variants"])
+
+    @patch("listings.listing_service.LasooClient")
+    def test_delete_listing_continues_locally_on_lasoo_map_crash(self, mock_client_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        listing.status = ListingStatus.UPLOADED_STAGING
+        listing.save(update_fields=["status"])
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.return_value = LasooResult(
+            ok=False,
+            message="Cannot read properties of undefined (reading 'map')",
+            data={},
+        )
+        listing_service.delete(self.user, self.store, listing)
+        self.assertEqual(StoreListing.objects.filter(id=listing.id).count(), 0)
 
     def test_update_ready_listing_does_not_push(self):
         listing = listing_service.create(self.user, self.store, dict(VALID_DATA))

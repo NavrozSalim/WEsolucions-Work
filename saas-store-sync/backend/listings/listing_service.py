@@ -4,7 +4,7 @@ Lasoo, Reverb, MyDeal, and Etsy managed stores are supported. Dispatch happens i
 ``publish()`` / validation helpers by marketplace kind.
 """
 import logging
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 from django.db.models import Q
@@ -432,6 +432,49 @@ def create(user, store, data: dict, action: str = ListingAction.CREATE) -> Store
     return listing
 
 
+def _align_sale_original_prices(data: dict) -> None:
+    """If scraped sale is above original, raise original so edit can save.
+
+    Inventory sync pushes those prices without re-validating. Pencil save
+    used to fail 'Sale Price must be lower than or equal to Original Price'
+    and drop the row out of Inventory.
+    """
+    orig = data.get("original_price")
+    sale = data.get("sale_price")
+    try:
+        orig_d = Decimal(str(orig)) if orig not in (None, "") else None
+        sale_d = Decimal(str(sale)) if sale not in (None, "") else None
+    except (InvalidOperation, TypeError, ValueError):
+        return
+    if orig_d is not None and sale_d is not None and sale_d > orig_d:
+        data["original_price"] = sale_d
+
+
+def _humanize_lasoo_error(message: str) -> str:
+    text = (message or "").strip()
+    low = text.lower()
+    if "reading 'map'" in low or "cannot read properties of undefined" in low:
+        return (
+            "Lasoo could not process this listing (Connect API error). "
+            "The listing was not changed on Lasoo."
+        )
+    return text or "Lasoo request failed."
+
+
+def _lasoo_delete_allows_local(message: str) -> bool:
+    """True when Hub delete should continue even if Connect delete failed."""
+    msg = (message or "").lower()
+    return any(
+        token in msg
+        for token in (
+            "not found",
+            "no variant",
+            "reading 'map'",
+            "cannot read properties of undefined",
+        )
+    )
+
+
 def update(listing: StoreListing, data: dict) -> StoreListing:
     """Save listing fields locally, then push to Lasoo when it was already uploaded.
 
@@ -440,7 +483,14 @@ def update(listing: StoreListing, data: dict) -> StoreListing:
     now kept on-marketplace and re-sent via Variants_BulkUpsert.
     """
     was_on_marketplace = _was_on_marketplace(listing)
+    data = dict(data or {})
+    if was_on_marketplace and _store_kind(listing.store) == "lasoo":
+        _align_sale_original_prices(data)
     _apply_fields(listing, data)
+    if was_on_marketplace:
+        errors = _validate_listing(listing.store, data)
+        if errors:
+            raise MarketplaceError(" ".join(errors))
     _finalize_validation(listing, data, keep_uploaded=was_on_marketplace)
     link_errors = _attach_mapped_listing(listing)
     if link_errors:
@@ -474,8 +524,10 @@ def update(listing: StoreListing, data: dict) -> StoreListing:
         listing.refresh_from_db()
         if not pub.get("ok"):
             raise MarketplaceError(
-                pub.get("message")
-                or "Lasoo did not accept the listing update. It was saved here but not on the marketplace."
+                _humanize_lasoo_error(
+                    pub.get("message")
+                    or "Lasoo did not accept the listing update. It was saved here but not on the marketplace."
+                )
             )
     return listing
 
@@ -561,17 +613,24 @@ def _end_listing_on_marketplace(store, listing: StoreListing) -> bool:
     if kind == "lasoo":
         environment = listing.environment or store.lasoo_environment or Environment.STAGING
         client = LasooClient(store, environment)
-        key = listing.external_variant_key or listing.sku
+        key = (listing.external_variant_key or listing.sku or "").strip()
+        product_key = (listing.external_product_key or key).strip()
         if not key:
             return False
-        payload = mapper.build_bulk_delete_payload([key], client.auth_key)
+        payload = mapper.build_bulk_delete_payload(
+            [key], client.auth_key, product_keys=[product_key],
+        )
         result = client.send("bulk_delete", payload)
         if not result.ok:
-            msg = (result.message or "").lower()
-            if "not found" in msg or "no variant" in msg:
+            msg = result.message or ""
+            if _lasoo_delete_allows_local(msg):
+                logger.warning(
+                    "Lasoo delete continued locally SKU %s: %s", key, msg,
+                )
                 return False
             raise MarketplaceError(
-                result.message or "Could not delete the listing on the marketplace."
+                _humanize_lasoo_error(msg)
+                or "Could not delete the listing on the marketplace."
             )
         return True
     if kind == "reverb":
@@ -690,12 +749,14 @@ def _delete_listings_marketplace(store, listings: list) -> int:
         return 0
     kind = marketplace_kind(store.marketplace)
     if kind == "lasoo":
-        keys = [
-            (listing.external_variant_key or listing.sku or "").strip()
-            for listing in listings
-        ]
-        keys = [k for k in keys if k]
-        if not keys:
+        pairs = []
+        for listing in listings:
+            variant_key = (listing.external_variant_key or listing.sku or "").strip()
+            if not variant_key:
+                continue
+            product_key = (listing.external_product_key or variant_key).strip()
+            pairs.append((product_key, variant_key))
+        if not pairs:
             return 0
         environment = (
             listings[0].environment
@@ -703,16 +764,22 @@ def _delete_listings_marketplace(store, listings: list) -> int:
             or Environment.STAGING
         )
         client = LasooClient(store, environment)
-        payload = mapper.build_bulk_delete_payload(keys, client.auth_key)
+        payload = mapper.build_bulk_delete_payload(
+            [vk for _, vk in pairs],
+            client.auth_key,
+            product_keys=[pk for pk, _ in pairs],
+        )
         result = client.send("bulk_delete", payload)
         if not result.ok:
-            msg = (result.message or "").lower()
-            if "not found" in msg or "no variant" in msg:
+            msg = result.message or ""
+            if _lasoo_delete_allows_local(msg):
+                logger.warning("Lasoo bulk delete continued locally: %s", msg)
                 return 0
             raise MarketplaceError(
-                result.message or "Could not delete the listings on the marketplace."
+                _humanize_lasoo_error(msg)
+                or "Could not delete the listings on the marketplace."
             )
-        return len(keys)
+        return len(pairs)
     if kind == "mydeal":
         method = (getattr(store, "mydeal_setup_method", None) or "upload").strip().lower()
         if method != "api":

@@ -600,6 +600,8 @@ export default function ListingFormModal({
             .catch((err) => {
                 const d = err.response?.data;
                 let msg = d?.detail;
+                if (Array.isArray(msg)) msg = msg.filter(Boolean).join(' ');
+                if (msg && typeof msg !== 'string') msg = String(msg);
                 if (!msg && d && typeof d === 'object') {
                     msg = Object.entries(d)
                         .flatMap(([k, v]) => (Array.isArray(v) ? v : [v]).map((x) => `${k}: ${x}`))

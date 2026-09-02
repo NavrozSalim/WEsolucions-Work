@@ -191,14 +191,35 @@ def build_bulk_upsert_payload(
     )
 
 
-def build_bulk_delete_payload(variant_keys: list[str], auth_key: str) -> dict:
-    """Assemble the Variants_BulkDelete payload (keys mirror BulkUpsert)."""
-    return build_payload(
+def build_bulk_delete_payload(
+    variant_keys: list[str],
+    auth_key: str,
+    *,
+    product_keys: list[str] | None = None,
+) -> dict:
+    """Assemble the Variants_BulkDelete payload (keys mirror BulkUpsert / Search).
+
+    Lasoo Connect has crashed with ``Cannot read properties of undefined
+    (reading 'map')`` when only ``externalVariantKey`` was sent, or when it
+    mapped ``results.variants`` instead of ``data.variants``. Send both keys
+    in both places.
+    """
+    variants = []
+    for i, raw in enumerate(variant_keys):
+        variant_key = str(raw or "").strip()
+        if not variant_key:
+            continue
+        product_key = ""
+        if product_keys and i < len(product_keys):
+            product_key = str(product_keys[i] or "").strip()
+        variants.append({
+            "externalProductKey": product_key or variant_key,
+            "externalVariantKey": variant_key,
+        })
+    payload = build_payload(
         "bulk_delete",
-        data={
-            "variants": [
-                {"externalVariantKey": key} for key in variant_keys if key
-            ],
-        },
+        data={"variants": variants},
         auth=auth_key,
     )
+    payload["results"] = {"name": "results", "variants": variants}
+    return payload

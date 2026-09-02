@@ -75,7 +75,13 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                 onMessage?.(`Deleted "${listing.external_variant_key}".`, 'success');
                 load();
             })
-            .catch((err) => onMessage?.(err.response?.data?.detail || 'Delete failed.', 'error'));
+            .catch((err) => {
+                const d = err.response?.data?.detail;
+                const msg = typeof d === 'string' && d.trim()
+                    ? d
+                    : (Array.isArray(d) ? d.filter(Boolean).join(' ') : '') || 'Delete failed.';
+                onMessage?.(msg, 'error');
+            });
     };
 
     const publishableIds = listings
