@@ -191,20 +191,12 @@ def build_bulk_upsert_payload(
     )
 
 
-def build_bulk_delete_payload(
+def _delete_variant_rows(
     variant_keys: list[str],
-    auth_key: str,
-    *,
     product_keys: list[str] | None = None,
-) -> dict:
-    """Assemble the Variants_BulkDelete payload (keys mirror BulkUpsert / Search).
-
-    Lasoo Connect has crashed with ``Cannot read properties of undefined
-    (reading 'map')`` when only ``externalVariantKey`` was sent, or when it
-    mapped ``results.variants`` instead of ``data.variants``. Send both keys
-    in both places.
-    """
-    variants = []
+) -> list[dict]:
+    """Build product/variant key rows for Variants_BulkDelete."""
+    rows = []
     for i, raw in enumerate(variant_keys):
         variant_key = str(raw or "").strip()
         if not variant_key:
@@ -212,14 +204,75 @@ def build_bulk_delete_payload(
         product_key = ""
         if product_keys and i < len(product_keys):
             product_key = str(product_keys[i] or "").strip()
-        variants.append({
-            "externalProductKey": product_key or variant_key,
+        product_key = product_key or variant_key
+        rows.append({
+            "externalProductKey": product_key,
             "externalVariantKey": variant_key,
+            "sku": variant_key,
         })
-    payload = build_payload(
+    return rows
+
+
+def build_bulk_delete_payload(
+    variant_keys: list[str],
+    auth_key: str,
+    *,
+    product_keys: list[str] | None = None,
+) -> dict:
+    """Default Variants_BulkDelete body: variant objects with both keys.
+
+    Connect has crashed with ``Cannot read properties of undefined (reading
+    'map')`` on thinner payloads. Callers that must actually remove the SKU
+    should use ``iter_bulk_delete_payloads`` and verify with Variants_Search.
+    """
+    rows = _delete_variant_rows(variant_keys, product_keys)
+    return build_payload(
         "bulk_delete",
-        data={"variants": variants},
+        data={"variants": rows},
         auth=auth_key,
     )
-    payload["results"] = {"name": "results", "variants": variants}
-    return payload
+
+
+def iter_bulk_delete_payloads(
+    variant_keys: list[str],
+    auth_key: str,
+    *,
+    product_keys: list[str] | None = None,
+) -> list[tuple[str, dict]]:
+    """Candidate BulkDelete bodies. Connect's handler is undocumented.
+
+    ``Cannot read properties of undefined (reading 'map')`` means their Node
+    code mapped a missing array. Try the shapes Search/Upsert already use,
+    then common key-list aliases, until Variants_Search shows the SKU is gone.
+    """
+    rows = _delete_variant_rows(variant_keys, product_keys)
+    if not rows:
+        return []
+    product_keys_clean = [row["externalProductKey"] for row in rows]
+    variant_keys_clean = [row["externalVariantKey"] for row in rows]
+    out: list[tuple[str, dict]] = []
+
+    def add(name: str, data: dict, *, results: dict | None = None) -> None:
+        payload = build_payload("bulk_delete", data=data, auth=auth_key)
+        if results is not None:
+            payload["results"] = results
+        out.append((name, payload))
+
+    if len(rows) == 1:
+        add("search_keys", {
+            "externalProductKey": product_keys_clean[0],
+            "externalVariantKey": variant_keys_clean[0],
+        })
+    add("variant_objects", {"variants": rows})
+    add("key_arrays", {
+        "externalProductKeys": product_keys_clean,
+        "externalVariantKeys": variant_keys_clean,
+    })
+    add("variant_strings", {"variants": variant_keys_clean})
+    add("keys", {"keys": rows})
+    add(
+        "results_variants",
+        {"variants": rows},
+        results={"name": "results", "variants": rows},
+    )
+    return out

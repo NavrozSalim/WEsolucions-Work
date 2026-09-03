@@ -140,7 +140,22 @@ class MapperTests(TestCase):
         row = payload["data"]["variants"][0]
         self.assertEqual(row["externalProductKey"], "HW-ZZ122-G2")
         self.assertEqual(row["externalVariantKey"], "HW-ZZ122-G2")
-        self.assertEqual(payload["results"]["variants"], payload["data"]["variants"])
+        self.assertEqual(row["sku"], "HW-ZZ122-G2")
+        self.assertEqual(payload["results"], {"name": "results"})
+
+    def test_bulk_delete_payload_shapes_start_with_search_keys(self):
+        shapes = mapper.iter_bulk_delete_payloads(
+            ["HW-ZZ122-G2"],
+            auth_key="secret",
+            product_keys=["HW-ZZ122-G2"],
+        )
+        names = [name for name, _payload in shapes]
+        self.assertEqual(names[0], "search_keys")
+        self.assertIn("variant_objects", names)
+        first = shapes[0][1]["data"]
+        self.assertEqual(first["externalProductKey"], "HW-ZZ122-G2")
+        self.assertEqual(first["externalVariantKey"], "HW-ZZ122-G2")
+        self.assertNotIn("variants", first)
 
 
 class ValidatorTests(TestCase):
@@ -476,32 +491,86 @@ class ListingServiceTests(TestCase):
         listing.save(update_fields=["status"])
         mock_client = mock_client_cls.return_value
         mock_client.auth_key = "key"
-        mock_client.send.return_value = LasooResult(ok=True, message="ok", data={"success": True})
+        catalog = {listing.external_variant_key}
+
+        def send(endpoint, payload=None, *args, **kwargs):
+            data = (payload or {}).get("data") or {}
+            if endpoint == "variants_search":
+                key = data.get("externalVariantKey")
+                found = key in catalog
+                variants = (
+                    [{"externalProductKey": key, "externalVariantKey": key}]
+                    if found else []
+                )
+                return LasooResult(
+                    ok=True, message="ok",
+                    data={"results": {"variants": variants, "success": True}},
+                )
+            if endpoint == "bulk_delete":
+                catalog.clear()
+                return LasooResult(ok=True, message="ok", data={"success": True})
+            return LasooResult(ok=True, message="ok", data={})
+
+        mock_client.send.side_effect = send
         vk = listing.external_variant_key
         pk = listing.external_product_key
         listing_service.delete(self.user, self.store, listing)
         self.assertEqual(StoreListing.objects.filter(id=listing.id).count(), 0)
-        payload = mock_client.send.call_args[0][1]
+        delete_calls = [
+            call for call in mock_client.send.call_args_list if call[0][0] == "bulk_delete"
+        ]
+        self.assertTrue(delete_calls)
+        payload = delete_calls[0][0][1]
         self.assertEqual(payload["query"], "Variants_BulkDelete")
-        row = payload["data"]["variants"][0]
-        self.assertEqual(row["externalVariantKey"], vk)
-        self.assertEqual(row["externalProductKey"], pk)
-        self.assertEqual(payload["results"]["variants"], payload["data"]["variants"])
+        data = payload["data"]
+        self.assertEqual(data.get("externalVariantKey") or data["variants"][0]["externalVariantKey"], vk)
+        self.assertEqual(data.get("externalProductKey") or data["variants"][0]["externalProductKey"], pk)
 
     @patch("listings.listing_service.LasooClient")
-    def test_delete_listing_continues_locally_on_lasoo_map_crash(self, mock_client_cls):
+    def test_delete_listing_keeps_row_when_connect_still_has_sku(self, mock_client_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        listing.status = ListingStatus.UPLOADED_STAGING
+        listing.save(update_fields=["status"])
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        key = listing.external_variant_key
+
+        def send(endpoint, payload=None, *args, **kwargs):
+            if endpoint == "variants_search":
+                return LasooResult(
+                    ok=True, message="ok",
+                    data={"results": {"variants": [{
+                        "externalProductKey": key,
+                        "externalVariantKey": key,
+                    }], "success": True}},
+                )
+            return LasooResult(
+                ok=False,
+                message="Cannot read properties of undefined (reading 'map')",
+                data={},
+            )
+
+        mock_client.send.side_effect = send
+        with self.assertRaises(MarketplaceError) as ctx:
+            listing_service.delete(self.user, self.store, listing)
+        self.assertIn("still has SKU", str(ctx.exception))
+        self.assertEqual(StoreListing.objects.filter(id=listing.id).count(), 1)
+
+    @patch("listings.listing_service.LasooClient")
+    def test_delete_listing_skips_bulk_delete_when_not_on_connect(self, mock_client_cls):
         listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
         listing.status = ListingStatus.UPLOADED_STAGING
         listing.save(update_fields=["status"])
         mock_client = mock_client_cls.return_value
         mock_client.auth_key = "key"
         mock_client.send.return_value = LasooResult(
-            ok=False,
-            message="Cannot read properties of undefined (reading 'map')",
-            data={},
+            ok=True, message="ok",
+            data={"results": {"variants": [], "success": True, "count": 0}},
         )
+        listing_id = listing.id
         listing_service.delete(self.user, self.store, listing)
-        self.assertEqual(StoreListing.objects.filter(id=listing.id).count(), 0)
+        self.assertEqual(StoreListing.objects.filter(id=listing_id).count(), 0)
+        self.assertTrue(all(call[0][0] == "variants_search" for call in mock_client.send.call_args_list))
 
     def test_update_ready_listing_does_not_push(self):
         listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
@@ -800,10 +869,17 @@ class ListingServiceTests(TestCase):
         self.assertFalse(ListingUpload.objects.filter(pk=upload.id).exists())
         self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 2)
 
-    def test_delete_upload_with_system(self):
+    @patch("listings.listing_service.LasooClient")
+    def test_delete_upload_with_system(self, mock_client_cls):
         content = csv_import.build_template_csv("create").encode()
         listing_service.bulk_import(self.user, self.store, "sys.csv", content, action="create")
         upload = ListingUpload.objects.get(store=self.store, filename="sys.csv")
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.return_value = LasooResult(
+            ok=True, message="ok",
+            data={"results": {"variants": [], "success": True, "count": 0}},
+        )
         result = listing_service.delete_upload(
             self.user, self.store, upload, delete_system=True,
         )
@@ -824,7 +900,27 @@ class ListingServiceTests(TestCase):
 
         mock_client = mock_client_cls.return_value
         mock_client.auth_key = "key"
-        mock_client.send.return_value = LasooResult(ok=True, message="ok", data={})
+        catalog = {"JDXTY-XL-B", "JDXTY-S-R"}
+
+        def send(endpoint, payload=None, *args, **kwargs):
+            data = (payload or {}).get("data") or {}
+            if endpoint == "variants_search":
+                key = data.get("externalVariantKey")
+                found = key in catalog
+                variants = (
+                    [{"externalProductKey": key, "externalVariantKey": key}]
+                    if found else []
+                )
+                return LasooResult(
+                    ok=True, message="ok",
+                    data={"results": {"variants": variants, "success": True}},
+                )
+            if endpoint == "bulk_delete":
+                catalog.clear()
+                return LasooResult(ok=True, message="ok", data={"success": True})
+            return LasooResult(ok=True, message="ok", data={})
+
+        mock_client.send.side_effect = send
 
         result = listing_service.delete_upload(
             self.user, self.store, upload,
@@ -832,8 +928,9 @@ class ListingServiceTests(TestCase):
         )
         self.assertEqual(result["listings_deleted"], 2)
         self.assertEqual(result["marketplace_deleted"], 2)
-        mock_client.send.assert_called_once()
-        self.assertEqual(mock_client.send.call_args[0][0], "bulk_delete")
+        self.assertTrue(
+            any(call[0][0] == "bulk_delete" for call in mock_client.send.call_args_list)
+        )
         self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 0)
 
     @patch("listings.listing_service.LasooClient")
