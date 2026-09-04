@@ -77,6 +77,16 @@ export const getReverbCategories = (storeId, q = '') =>
 export const getReverbConditions = (storeId) =>
     api.get(`/stores/${storeId}/listings/reverb/conditions/`);
 
+/** Bunnings Mirakl H11 category tree. Optional search `q`. */
+export const getBunningsCategories = (storeId, q = '') =>
+    api.get(`/stores/${storeId}/listings/bunnings/categories/`, {
+        params: q ? { q } : {},
+    });
+
+/** Bunnings logistic classes for offer shipping. */
+export const getBunningsLogistics = (storeId) =>
+    api.get(`/stores/${storeId}/listings/bunnings/logistics/`);
+
 /** Scrape vendor URLs on managed listings → update local price/stock. */
 export const scrapeListings = (storeId, listingIds = null) =>
     api.post(`/stores/${storeId}/listings/scrape/`, listingIds ? { listing_ids: listingIds } : {});

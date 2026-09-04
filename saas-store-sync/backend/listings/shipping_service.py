@@ -143,6 +143,73 @@ def _submit_mydeal(order: MarketplaceOrder, *, tracking_number: str, carrier: st
     }
 
 
+def _submit_bunnings(order: MarketplaceOrder, *, tracking_number: str, carrier: str,
+                     tracking_url: str = "") -> dict:
+    from .bunnings import orders as bunnings_orders
+    from .bunnings.client import BunningsClient
+
+    tracking = (tracking_number or "").strip()
+    if not tracking:
+        raise MarketplaceError("Tracking number is required for Bunnings shipments.")
+    order_id = (order.external_order_key or order.invoice_number or "").strip()
+    if not order_id:
+        raise MarketplaceError("Bunnings order id is missing on this order.")
+
+    shipment = OrderShipment.objects.create(
+        order=order,
+        tracking_number=tracking,
+        carrier=(carrier or "").strip(),
+        tracking_url=(tracking_url or "").strip(),
+        shipped_at=timezone.now(),
+        status="submitted",
+    )
+    try:
+        client = BunningsClient(order.store)
+    except MarketplaceError as exc:
+        shipment.status = "failed"
+        shipment.marketplace_response_json = {"error": str(exc)}
+        shipment.save(update_fields=["status", "marketplace_response_json"])
+        return {"ok": False, "message": str(exc), "shipment_id": str(shipment.id)}
+
+    payload = bunnings_orders.build_tracking_payload(
+        tracking_number=tracking,
+        carrier=carrier,
+        tracking_url=tracking_url,
+    )
+    track = client.update_tracking(order_id, payload)
+    ship = None
+    if track.ok:
+        ship = client.ship_order(order_id)
+    ok = bool(track.ok and (ship is None or ship.ok))
+    shipment.marketplace_request_json = payload
+    shipment.marketplace_response_json = {
+        "tracking": track.data if track.ok else {"error": track.message},
+        "ship": None if ship is None else (ship.data if ship.ok else {"error": ship.message}),
+    }
+    shipment.status = "submitted" if ok else "failed"
+    shipment.save(update_fields=["marketplace_request_json", "marketplace_response_json", "status"])
+
+    if ok:
+        order.shipping_status = "submitted"
+        order.status = OrderStatus.SHIPPING_SUBMITTED
+        order.save(update_fields=["shipping_status", "status", "updated_at"])
+
+    if not track.ok:
+        message = track.message or "Bunnings tracking update failed."
+    elif ship is not None and not ship.ok:
+        message = (
+            "Tracking was sent, but Bunnings ship validation failed: "
+            f"{ship.message or 'OR24 failed'}."
+        )
+    else:
+        message = "Shipping info sent to Bunnings."
+    return {
+        "ok": ok,
+        "message": message,
+        "shipment_id": str(shipment.id),
+    }
+
+
 def _submit_etsy(order: MarketplaceOrder, *, tracking_number: str, carrier: str) -> dict:
     from store_adapters import get_adapter
     from store_adapters.etsy_adapter import EtsyAPIError
@@ -219,6 +286,13 @@ def submit(order: MarketplaceOrder, *, tracking_number: str, carrier: str,
         raise MarketplaceError(
             "Shipping/tracking push is not supported for Reverb yet. "
             "Mark shipped in Reverb seller tools, or ask for Reverb ship API support."
+        )
+    elif kind == "bunnings":
+        result = _submit_bunnings(
+            order,
+            tracking_number=tracking_number,
+            carrier=carrier,
+            tracking_url=tracking_url,
         )
     elif kind != "lasoo":
         raise MarketplaceError(
@@ -313,6 +387,18 @@ def complete(order: MarketplaceOrder) -> dict:
         return {
             "ok": True,
             "message": "Marked complete locally (Etsy tracking already marks shipped).",
+        }
+    if kind == "bunnings":
+        order.shipping_status = "complete"
+        order.status = OrderStatus.SHIPPING_COMPLETE
+        order.save(update_fields=["shipping_status", "status", "updated_at"])
+        last = order.shipments.first()
+        if last:
+            last.status = "complete"
+            last.save(update_fields=["status"])
+        return {
+            "ok": True,
+            "message": "Marked complete locally (Bunnings ship is OR23 tracking + OR24 ship).",
         }
     if kind == "reverb":
         raise MarketplaceError("Shipping complete is not supported for Reverb yet.")

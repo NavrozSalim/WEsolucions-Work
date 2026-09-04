@@ -116,6 +116,8 @@ class StoreSerializer(serializers.ModelSerializer):
             'mydeal_production_seller_id', 'mydeal_production_seller_token',
             'lasoo_environment', 'lasoo_staging_base_url', 'lasoo_production_base_url',
             'lasoo_staging_auth_key', 'lasoo_production_auth_key',
+            'bunnings_environment', 'bunnings_staging_base_url', 'bunnings_production_base_url',
+            'bunnings_staging_shop_key', 'bunnings_production_shop_key',
             'shopify_enabled', 'shopify_shop_domain', 'shopify_location_id',
             'shopify_client_id', 'shopify_client_secret',
             'shopify_connected', 'shopify_has_credentials',
@@ -131,6 +133,8 @@ class StoreSerializer(serializers.ModelSerializer):
             'kogan_service_account_json': {'write_only': True},
             'lasoo_staging_auth_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'lasoo_production_auth_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'bunnings_staging_shop_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'bunnings_production_shop_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'shopify_client_id': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'shopify_client_secret': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'mydeal_sandbox_client_id': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
@@ -198,7 +202,7 @@ class StoreSerializer(serializers.ModelSerializer):
                 })
             if kind not in SHOPIFY_ORDER_MARKETPLACES:
                 raise ValidationError({
-                    'shopify_enabled': 'Shopify order sync is only available for Reverb, Lasoo, MyDeal, and Etsy.',
+                    'shopify_enabled': 'Shopify order sync is only available for Reverb, Lasoo, MyDeal, Etsy, and Bunnings.',
                 })
 
         if 'shopify_shop_domain' in req:
@@ -287,6 +291,7 @@ class StoreSerializer(serializers.ModelSerializer):
         is_kogan = bool(mkt and (str(mkt.code or '').strip().lower() == 'kogan' or str(mkt.name or '').strip().lower() == 'kogan'))
         is_mydeal = bool(mkt and (str(mkt.code or '').strip().lower() == 'mydeal' or str(mkt.name or '').strip().lower() == 'mydeal'))
         is_lasoo = bool(mkt and (str(mkt.code or '').strip().lower() == 'lasoo' or str(mkt.name or '').strip().lower() == 'lasoo'))
+        is_bunnings = bool(mkt and (str(mkt.code or '').strip().lower() == 'bunnings' or str(mkt.name or '').strip().lower() == 'bunnings'))
         is_structured = bool(mkt and requires_structured_credentials(mkt))
         management_mode = (req.get('management_mode') or validated_data.get('management_mode') or 'inventory_only').strip()
         if management_mode not in ('inventory_only', 'full_store'):
@@ -295,9 +300,9 @@ class StoreSerializer(serializers.ModelSerializer):
         if management_mode == 'full_store':
             from stores.credentials import marketplace_kind
             kind = marketplace_kind(mkt)
-            if kind not in ('reverb', 'lasoo', 'mydeal', 'etsy'):
+            if kind not in ('reverb', 'lasoo', 'mydeal', 'etsy', 'bunnings'):
                 raise ValidationError({
-                    'marketplace': 'Managed stores are only available for Reverb, Lasoo, MyDeal, and Etsy right now.',
+                    'marketplace': 'Managed stores are only available for Reverb, Lasoo, MyDeal, Etsy, and Bunnings right now.',
                 })
             if kind == 'mydeal':
                 method = (req.get('mydeal_setup_method') or validated_data.get('mydeal_setup_method') or 'upload').strip()
@@ -315,6 +320,34 @@ class StoreSerializer(serializers.ModelSerializer):
             staging_key = (req.get('lasoo_staging_auth_key') or '').strip()
             if not staging_key:
                 raise ValidationError({'lasoo_staging_auth_key': 'Lasoo staging AuthKey is required.'})
+            validated_data.setdefault('api_token', '')
+        if is_bunnings:
+            from listings.bunnings.client import DEFAULT_PRODUCTION_BASE_URL
+
+            env = (req.get('bunnings_environment') or validated_data.get('bunnings_environment') or 'production').strip()
+            if env not in ('staging', 'production'):
+                env = 'production'
+            validated_data['bunnings_environment'] = env
+            if env == 'production':
+                base_url = (
+                    (req.get('bunnings_production_base_url') or validated_data.get('bunnings_production_base_url') or '')
+                    .strip()
+                    or DEFAULT_PRODUCTION_BASE_URL
+                )
+                shop_key = (req.get('bunnings_production_shop_key') or validated_data.get('bunnings_production_shop_key') or '').strip()
+                if not shop_key:
+                    raise ValidationError({'bunnings_production_shop_key': 'Bunnings production SHOP_KEY is required.'})
+                validated_data['bunnings_production_base_url'] = base_url
+                validated_data['bunnings_production_shop_key'] = shop_key
+            else:
+                base_url = (req.get('bunnings_staging_base_url') or validated_data.get('bunnings_staging_base_url') or '').strip()
+                shop_key = (req.get('bunnings_staging_shop_key') or validated_data.get('bunnings_staging_shop_key') or '').strip()
+                if not base_url:
+                    raise ValidationError({'bunnings_staging_base_url': 'Bunnings staging base URL is required.'})
+                if not shop_key:
+                    raise ValidationError({'bunnings_staging_shop_key': 'Bunnings staging SHOP_KEY is required.'})
+                validated_data['bunnings_staging_base_url'] = base_url
+                validated_data['bunnings_staging_shop_key'] = shop_key
             validated_data.setdefault('api_token', '')
         if is_mydeal:
             method = (req.get('mydeal_setup_method') or 'upload').strip()
@@ -350,7 +383,7 @@ class StoreSerializer(serializers.ModelSerializer):
             has_json = bool((req.get('kogan_service_account_json') or '').strip() or (validated_data.get('kogan_service_account_json') or '').strip())
             if not has_json and not (req.get('api_token') or '').strip():
                 raise ValidationError({'kogan_service_account_json': 'Upload service account JSON for Kogan (or paste it into API token).'})
-        elif is_mydeal or is_lasoo:
+        elif is_mydeal or is_lasoo or is_bunnings:
             pass
         else:
             token_raw = (req.get('api_token') or '').strip()
@@ -401,6 +434,12 @@ class StoreSerializer(serializers.ModelSerializer):
                 'lasoo_production_base_url',
                 'lasoo_staging_auth_key',
                 'lasoo_production_auth_key',
+                # Bunnings (managed stores)
+                'bunnings_environment',
+                'bunnings_staging_base_url',
+                'bunnings_production_base_url',
+                'bunnings_staging_shop_key',
+                'bunnings_production_shop_key',
                 'shopify_enabled',
                 'shopify_shop_domain',
                 'shopify_client_id',
@@ -434,11 +473,18 @@ class StoreSerializer(serializers.ModelSerializer):
             self._save_vendor_price_settings(store, price_settings_data, Vendor)
             self._save_vendor_inventory_settings(store, inventory_settings_data, Vendor)
             self._save_sync_schedule(store, req.get('sync_schedule'), SyncSchedule)
-            if is_structured or (is_mydeal and store.mydeal_setup_method == 'api'):
+            if is_structured or (is_mydeal and store.mydeal_setup_method == 'api') or is_lasoo or is_bunnings:
                 ok, err_msg = verify_store_connection(store)
                 if not ok:
                     re_orphan_store(store)
-                    field = 'mydeal_setup_method' if is_mydeal else 'api_token'
+                    if is_mydeal:
+                        field = 'mydeal_setup_method'
+                    elif is_bunnings:
+                        field = 'bunnings_production_shop_key' if (store.bunnings_environment or 'production') == 'production' else 'bunnings_staging_shop_key'
+                    elif is_lasoo:
+                        field = 'lasoo_staging_auth_key'
+                    else:
+                        field = 'api_token'
                     raise ValidationError({
                         field: err_msg or 'Marketplace rejected these credentials.',
                     })
@@ -457,11 +503,18 @@ class StoreSerializer(serializers.ModelSerializer):
         self._save_vendor_inventory_settings(store, inventory_settings_data, Vendor)
         self._save_sync_schedule(store, req.get('sync_schedule'), SyncSchedule)
 
-        if is_structured or (is_mydeal and store.mydeal_setup_method == 'api'):
+        if is_structured or (is_mydeal and store.mydeal_setup_method == 'api') or is_lasoo or is_bunnings:
             ok, err_msg = verify_store_connection(store)
             if not ok:
                 store.delete()
-                field = 'mydeal_setup_method' if is_mydeal else 'api_token'
+                if is_mydeal:
+                    field = 'mydeal_setup_method'
+                elif is_bunnings:
+                    field = 'bunnings_production_shop_key' if (store.bunnings_environment or 'production') == 'production' else 'bunnings_staging_shop_key'
+                elif is_lasoo:
+                    field = 'lasoo_staging_auth_key'
+                else:
+                    field = 'api_token'
                 raise ValidationError({
                     field: err_msg or 'Marketplace rejected these credentials.',
                 })
@@ -482,6 +535,10 @@ class StoreSerializer(serializers.ModelSerializer):
             'mydeal_production_client_secret',
             'mydeal_production_seller_id',
             'mydeal_production_seller_token',
+        )
+        BUNNINGS_SECRET_FIELDS = (
+            'bunnings_staging_shop_key',
+            'bunnings_production_shop_key',
         )
         self._apply_shopify_fields(
             validated_data,
@@ -517,6 +574,12 @@ class StoreSerializer(serializers.ModelSerializer):
                 'lasoo_production_base_url',
                 'lasoo_staging_auth_key',
                 'lasoo_production_auth_key',
+                # Bunnings (managed stores)
+                'bunnings_environment',
+                'bunnings_staging_base_url',
+                'bunnings_production_base_url',
+                'bunnings_staging_shop_key',
+                'bunnings_production_shop_key',
                 'shopify_enabled',
                 'shopify_shop_domain',
                 'shopify_client_id',
@@ -531,6 +594,7 @@ class StoreSerializer(serializers.ModelSerializer):
                     'shopify_client_id',
                     'shopify_client_secret',
                     *MYDEAL_SECRET_FIELDS,
+                    *BUNNINGS_SECRET_FIELDS,
                 ) and not (value or '').strip() and attr != 'shopify_access_token':
                     # Blank secret in a PATCH means "keep the existing value".
                     continue
@@ -547,6 +611,7 @@ class StoreSerializer(serializers.ModelSerializer):
         mkt_now = instance.marketplace
         is_kogan = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'kogan' or str(mkt_now.name or '').strip().lower() == 'kogan'))
         is_mydeal = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'mydeal' or str(mkt_now.name or '').strip().lower() == 'mydeal'))
+        is_bunnings = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'bunnings' or str(mkt_now.name or '').strip().lower() == 'bunnings'))
         is_structured = bool(mkt_now and requires_structured_credentials(mkt_now))
         token_in_request = 'api_token' in validated_data or bool((req.get('api_token') or '').strip())
         if is_mydeal and 'mydeal_setup_method' in req:
@@ -587,6 +652,8 @@ class StoreSerializer(serializers.ModelSerializer):
             if 'kogan_tab_name' in req and not (req.get('kogan_tab_name') or '').strip():
                 raise ValidationError({'kogan_tab_name': 'Tab name is required for Kogan.'})
         verify_new_credentials = False
+        if is_bunnings and any(k in req for k in ('bunnings_environment', 'bunnings_staging_base_url', 'bunnings_production_base_url', *BUNNINGS_SECRET_FIELDS)):
+            verify_new_credentials = True
         if is_structured and token_in_request:
             token_raw = (validated_data.get('api_token') or req.get('api_token') or '').strip()
             if token_raw:
@@ -645,8 +712,13 @@ class StoreSerializer(serializers.ModelSerializer):
                 _persist_store_changes()
                 ok, err_msg = verify_store_connection(instance)
                 if not ok:
+                    if is_bunnings:
+                        env = instance.bunnings_environment or 'production'
+                        field = 'bunnings_production_shop_key' if env == 'production' else 'bunnings_staging_shop_key'
+                    else:
+                        field = 'api_token'
                     raise ValidationError({
-                        'api_token': err_msg or 'Marketplace rejected these credentials.',
+                        field: err_msg or 'Marketplace rejected these credentials.',
                     })
         else:
             _persist_store_changes()

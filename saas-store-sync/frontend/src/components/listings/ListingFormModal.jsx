@@ -7,6 +7,7 @@ import { createListing, updateListing } from '../../services/listingService';
 import { getStore } from '../../services/storeService';
 import ListingPhotoUploader from './ListingPhotoUploader';
 import { ReverbCategorySelect, ReverbConditionSelect } from './ReverbCatalogSelects';
+import { BunningsCategorySelect, BunningsLogisticSelect } from './BunningsCatalogSelects';
 
 const EMPTY_LASOO = {
     action: 'create',
@@ -221,9 +222,39 @@ const EMPTY_MYDEAL = {
     source_vendor_code: '',
 };
 
+const EMPTY_BUNNINGS = {
+    action: 'create',
+    vendor_name: '',
+    vendor_url: '',
+    vendor_id: '',
+    marketplace_name: '',
+    store_name: '',
+    sku: '',
+    title: '',
+    description: '',
+    brand: '',
+    category: '',
+    gtin: '',
+    mpn: '',
+    image_urls: '',
+    inventory: '1',
+    infinite_quantity: false,
+    sale_price: '',
+    original_price: '',
+    logistic_class: '',
+    leadtime_to_ship: '2',
+    weight: '',
+    weight_unit: 'kg',
+    length: '',
+    height: '',
+    width: '',
+    dimension_unit: 'cm',
+    source_vendor_code: '',
+};
+
 /**
  * Create or edit a single managed-store listing ("created product").
- * Field order matches the bulk listing CSV template for Reverb / Lasoo / MyDeal.
+ * Field order matches the bulk listing CSV template for Reverb / Lasoo / MyDeal / Bunnings.
  */
 export default function ListingFormModal({
     open,
@@ -239,6 +270,7 @@ export default function ListingFormModal({
     const isMydeal = code === 'mydeal';
     const isEtsy = code === 'etsy';
     const isLasoo = code === 'lasoo';
+    const isBunnings = code === 'bunnings';
     const willPushLasoo = Boolean(
         isLasoo
         && isEdit
@@ -247,7 +279,15 @@ export default function ListingFormModal({
             || listing?.last_uploaded_at
         )
     );
-    const emptyForm = isReverb ? EMPTY_REVERB : isMydeal ? EMPTY_MYDEAL : isEtsy ? EMPTY_ETSY : EMPTY_LASOO;
+    const emptyForm = isReverb
+        ? EMPTY_REVERB
+        : isMydeal
+          ? EMPTY_MYDEAL
+          : isEtsy
+            ? EMPTY_ETSY
+            : isBunnings
+              ? EMPTY_BUNNINGS
+              : EMPTY_LASOO;
     const [form, setForm] = useState(emptyForm);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
@@ -371,6 +411,38 @@ export default function ListingFormModal({
                     marketplace_name: listing.marketplace_name || defaults.marketplace_name,
                     store_name: listing.store_name || defaults.store_name,
                 });
+            } else if (isBunnings) {
+                setForm({
+                    ...EMPTY_BUNNINGS,
+                    ...defaults,
+                    action: listing.action || 'create',
+                    sku: listing.sku || '',
+                    title: listing.title || '',
+                    description: listing.description || '',
+                    brand: listing.brand || '',
+                    category: listing.category || '',
+                    gtin: listing.gtin || listing.barcode || '',
+                    mpn: listing.mpn || '',
+                    image_urls: listing.image_urls || '',
+                    inventory: String(listing.inventory ?? 1),
+                    infinite_quantity: !!listing.infinite_quantity,
+                    sale_price: String(listing.sale_price ?? ''),
+                    original_price: String(listing.original_price ?? ''),
+                    logistic_class: listing.logistic_class || '',
+                    leadtime_to_ship: String(listing.leadtime_to_ship || '2'),
+                    weight: listing.weight || '',
+                    weight_unit: listing.weight_unit || 'kg',
+                    length: listing.length || '',
+                    height: listing.height || '',
+                    width: listing.width || '',
+                    dimension_unit: listing.dimension_unit || 'cm',
+                    source_vendor_code: listing.source_vendor_code || '',
+                    vendor_name: listing.vendor_name || '',
+                    vendor_url: listing.vendor_url || '',
+                    vendor_id: listing.vendor_id || '',
+                    marketplace_name: listing.marketplace_name || defaults.marketplace_name,
+                    store_name: listing.store_name || defaults.store_name,
+                });
             } else if (isEtsy) {
                 setForm({
                     ...EMPTY_ETSY,
@@ -432,11 +504,19 @@ export default function ListingFormModal({
             }
         } else {
             setForm({
-                ...(isReverb ? EMPTY_REVERB : isMydeal ? EMPTY_MYDEAL : isEtsy ? EMPTY_ETSY : EMPTY_LASOO),
+                ...(isReverb
+                    ? EMPTY_REVERB
+                    : isMydeal
+                      ? EMPTY_MYDEAL
+                      : isEtsy
+                        ? EMPTY_ETSY
+                        : isBunnings
+                          ? EMPTY_BUNNINGS
+                          : EMPTY_LASOO),
                 ...defaults,
             });
         }
-    }, [open, listing, isReverb, isMydeal, isEtsy, storeMeta.name, storeMeta.marketplace_name]);
+    }, [open, listing, isReverb, isMydeal, isEtsy, isBunnings, storeMeta.name, storeMeta.marketplace_name]);
 
     const vendorOptions = useMemo(() => {
         const opts = [{ value: '', label: storeVendors.length ? 'Select vendor…' : 'No vendors on store Price settings' }];
@@ -579,6 +659,21 @@ export default function ListingFormModal({
                 has_48_hours_dispatch: !!form.has_48_hours_dispatch,
                 infinite_quantity: !!form.infinite_quantity,
             };
+        } else if (isBunnings) {
+            payload = {
+                ...form,
+                vendor_name: selectedVendorName || form.vendor_name || '',
+                source_vendor_code: form.source_vendor_code || '',
+                inventory: parseInt(form.inventory, 10) || 0,
+                original_price: form.original_price === '' ? 0 : form.original_price,
+                sale_price: form.sale_price === '' ? 0 : form.sale_price,
+                barcode: form.gtin || form.barcode || '',
+                gtin: form.gtin || '',
+                infinite_quantity: !!form.infinite_quantity,
+                logistic_class: form.logistic_class || '',
+                leadtime_to_ship: form.leadtime_to_ship || '2',
+                category: form.category || '',
+            };
         } else {
             payload = {
                 ...form,
@@ -629,6 +724,8 @@ export default function ListingFormModal({
                                 ? 'Create Etsy listing'
                               : isMydeal
                                 ? 'Create MyDeal listing'
+                                : isBunnings
+                                  ? 'Create Bunnings listing'
                                 : 'Create listing'}
                     </h2>
                     <button type="button" className="rounded-md p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={onClose}>
@@ -963,6 +1060,90 @@ export default function ListingFormModal({
                                 <Input label="Option 2 Value (Optional)" value={form.option_2_value} onChange={set('option_2_value')} />
                                 <Input label="Option 3 Name (Optional)" value={form.option_3_name} onChange={set('option_3_name')} />
                                 <Input label="Option 3 Value (Optional)" value={form.option_3_value} onChange={set('option_3_value')} />
+                            </div>
+                        ) : isBunnings ? (
+                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                <div className="sm:col-span-2">
+                                    <Select
+                                        label="Vendor Name (Optional)"
+                                        value={form.source_vendor_code || ''}
+                                        onChange={setVendor}
+                                        options={vendorOptions}
+                                        required={storeVendors.length > 0}
+                                    />
+                                    {storeVendors.length === 0 && (
+                                        <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                                            Add vendors under Edit Store → Price, then create listings for scrape routing.
+                                        </p>
+                                    )}
+                                </div>
+                                <VendorSourceFields
+                                    noraSelected={noraSelected}
+                                    vevorSelected={vevorSelected}
+                                    selectedVendor={selectedVendor}
+                                    form={form}
+                                    set={set}
+                                    urlRequired={!!selectedVendor}
+                                />
+                                <Input label="Marketplace Name (Optional)" value={form.marketplace_name} onChange={set('marketplace_name')} placeholder="e.g. Bunnings" />
+                                <Input label="Store Name (Optional)" value={form.store_name} onChange={set('store_name')} />
+                                {!isEdit && (
+                                    <Select
+                                        label="Action"
+                                        value={form.action}
+                                        onChange={set('action')}
+                                        options={[
+                                            { value: 'create', label: 'Create — new listing' },
+                                            { value: 'mapped', label: 'Mapped — already on the store' },
+                                        ]}
+                                    />
+                                )}
+                                <Input label="SKU" value={form.sku} onChange={set('sku')} required />
+                                <div className="sm:col-span-2">
+                                    <Input label="Title" value={form.title} onChange={set('title')} required />
+                                </div>
+                                <div className="sm:col-span-2">
+                                    <Textarea label="Description" rows={4} value={form.description} onChange={set('description')} required />
+                                </div>
+                                <Input label="Brand" value={form.brand} onChange={set('brand')} required />
+                                <BunningsCategorySelect
+                                    storeId={storeId}
+                                    value={form.category}
+                                    onChange={(code) => setForm((f) => ({ ...f, category: code }))}
+                                    required
+                                />
+                                <Input label="GTIN (Optional)" value={form.gtin} onChange={set('gtin')} />
+                                <Input label="MPN (Optional)" value={form.mpn} onChange={set('mpn')} />
+                                <ListingPhotoUploader
+                                    storeId={storeId}
+                                    value={form.image_urls}
+                                    onChange={(urls) => setForm((f) => ({ ...f, image_urls: urls }))}
+                                    required
+                                    label="Image URLs"
+                                />
+                                <Input label="Inventory" type="number" min="0" value={form.inventory} onChange={set('inventory')} required disabled={form.infinite_quantity} />
+                                <label className="mt-6 flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
+                                    <input type="checkbox" className="h-4 w-4 rounded border-slate-300" checked={!!form.infinite_quantity} onChange={set('infinite_quantity')} />
+                                    Infinite Quantity (Optional)
+                                </label>
+                                <Input label="Price (GST inclusive)" type="number" min="0" step="0.01" value={form.sale_price} onChange={set('sale_price')} required />
+                                <Input label="RRP (Optional)" type="number" min="0" step="0.01" value={form.original_price} onChange={set('original_price')} />
+                                <BunningsLogisticSelect
+                                    storeId={storeId}
+                                    value={form.logistic_class}
+                                    onChange={(code) => setForm((f) => ({ ...f, logistic_class: code }))}
+                                    required
+                                />
+                                <Input label="Leadtime To Ship (Optional)" type="number" min="1" step="1" value={form.leadtime_to_ship} onChange={set('leadtime_to_ship')} placeholder="2" />
+                                <Input label="Weight (Optional)" value={form.weight} onChange={set('weight')} />
+                                <Input label="Weight Unit (Optional)" value={form.weight_unit} onChange={set('weight_unit')} />
+                                <Input label="Length (Optional)" value={form.length} onChange={set('length')} />
+                                <Input label="Height (Optional)" value={form.height} onChange={set('height')} />
+                                <Input label="Width (Optional)" value={form.width} onChange={set('width')} />
+                                <Input label="Dimension Unit (Optional)" value={form.dimension_unit} onChange={set('dimension_unit')} />
+                                <p className="sm:col-span-2 text-xs text-slate-500 dark:text-slate-400">
+                                    Create sends a product import then an offer. Mapped SKUs skip the product import and only update the offer. New products may wait for Bunnings review before they are live.
+                                </p>
                             </div>
                         ) : (
                             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

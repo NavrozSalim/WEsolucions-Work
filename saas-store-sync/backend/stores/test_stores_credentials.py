@@ -367,6 +367,48 @@ class LasooConnectionTests(SimpleTestCase):
         self.assertIn('AuthKey', msg or '')
 
 
+class BunningsConnectionTests(SimpleTestCase):
+    def test_marketplace_kind_bunnings(self):
+        from stores.credentials import marketplace_kind
+        self.assertEqual(marketplace_kind(_mkt('bunnings')), 'bunnings')
+        self.assertEqual(marketplace_kind(SimpleNamespace(code='', name='Bunnings')), 'bunnings')
+
+    @patch('listings.bunnings.client.BunningsClient.verify_connection')
+    def test_verify_store_connection_bunnings_ok(self, mock_verify):
+        mock_verify.return_value = SimpleNamespace(
+            ok=True,
+            message='Bunnings production connection successful. (1407 categories).',
+            status=200,
+        )
+        store = SimpleNamespace(
+            name='Bunnings AU',
+            marketplace=_mkt('bunnings'),
+            bunnings_environment='production',
+            bunnings_production_base_url='https://bunnings-prod.mirakl.net',
+            bunnings_production_shop_key='test-key',
+            bunnings_staging_base_url='',
+            bunnings_staging_shop_key='',
+        )
+        ok, msg = verify_store_connection(store)
+        self.assertTrue(ok)
+        self.assertIn('production', msg or '')
+        mock_verify.assert_called_once()
+
+    def test_verify_store_connection_bunnings_missing_key(self):
+        store = SimpleNamespace(
+            name='Bunnings AU',
+            marketplace=_mkt('bunnings'),
+            bunnings_environment='production',
+            bunnings_production_base_url='https://bunnings-prod.mirakl.net',
+            bunnings_production_shop_key='',
+            bunnings_staging_base_url='',
+            bunnings_staging_shop_key='',
+        )
+        ok, msg = verify_store_connection(store)
+        self.assertFalse(ok)
+        self.assertIn('SHOP_KEY', msg or '')
+
+
 class MyDealConnectionTests(SimpleTestCase):
     def _store(self, **overrides):
         base = dict(

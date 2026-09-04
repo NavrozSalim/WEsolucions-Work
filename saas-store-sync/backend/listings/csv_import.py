@@ -1,7 +1,7 @@
 """Parse uploaded CSV / Excel listing templates into normalized row dicts.
 
 Uses stdlib csv + openpyxl (no pandas dependency in this project).
-Supports Lasoo, Reverb, and MyDeal templates (by store marketplace).
+Supports Lasoo, Reverb, MyDeal, Etsy, and Bunnings templates (by store marketplace).
 
 Optional columns are labeled with `` (Optional)`` in the template header.
 Import still accepts headers with or without that suffix.
@@ -12,7 +12,7 @@ import re
 
 from stores.credentials import marketplace_kind
 
-# Maps human template headers -> internal field names (Lasoo + Reverb + MyDeal).
+# Maps human template headers -> internal field names (Lasoo + Reverb + MyDeal + Bunnings).
 COLUMN_MAP = {
     "action": "action",
     "product key": "product_key",
@@ -118,6 +118,12 @@ COLUMN_MAP = {
     "max days for delivery": "max_days_for_delivery",
     "delivery time": "delivery_time",
     "has 48 hours dispatch": "has_48_hours_dispatch",
+    "logistic class": "logistic_class",
+    "logistic-class": "logistic_class",
+    "leadtime to ship": "leadtime_to_ship",
+    "lead time to ship": "leadtime_to_ship",
+    "leadtime-to-ship": "leadtime_to_ship",
+    "category code": "category",
 }
 
 _OPTIONAL_SUFFIX_RE = re.compile(r"\s*\(optional\)\s*$", re.I)
@@ -367,6 +373,62 @@ MYDEAL_EXPORT_FIELDS = [
     ("option_3_value", "Option 3 Value (Optional)"),
 ]
 
+BUNNINGS_TEMPLATE_HEADERS = [
+    "Vendor Name (Optional)",
+    "Vendor URL (Optional)",
+    "Vendor ID (Optional)",
+    "Marketplace Name (Optional)",
+    "Store Name (Optional)",
+    "Action",
+    "SKU",
+    "Title",
+    "Description",
+    "Brand",
+    "Category",
+    "GTIN (Optional)",
+    "MPN (Optional)",
+    "Image URLs",
+    "Inventory",
+    "Price",
+    "RRP (Optional)",
+    "Logistic Class",
+    "Leadtime To Ship (Optional)",
+    "Weight (Optional)",
+    "Weight Unit (Optional)",
+    "Length (Optional)",
+    "Height (Optional)",
+    "Width (Optional)",
+    "Dimension Unit (Optional)",
+]
+
+BUNNINGS_EXPORT_FIELDS = [
+    ("vendor_name", "Vendor Name (Optional)"),
+    ("vendor_url", "Vendor URL (Optional)"),
+    ("vendor_id", "Vendor ID (Optional)"),
+    ("marketplace_name", "Marketplace Name (Optional)"),
+    ("store_name", "Store Name (Optional)"),
+    ("action", "Action"),
+    ("sku", "SKU"),
+    ("title", "Title"),
+    ("description", "Description"),
+    ("brand", "Brand"),
+    ("category", "Category"),
+    ("gtin", "GTIN (Optional)"),
+    ("mpn", "MPN (Optional)"),
+    ("image_urls", "Image URLs"),
+    ("inventory", "Inventory"),
+    ("sale_price", "Price"),
+    ("original_price", "RRP (Optional)"),
+    ("logistic_class", "Logistic Class"),
+    ("leadtime_to_ship", "Leadtime To Ship (Optional)"),
+    ("weight", "Weight (Optional)"),
+    ("weight_unit", "Weight Unit (Optional)"),
+    ("length", "Length (Optional)"),
+    ("height", "Height (Optional)"),
+    ("width", "Width (Optional)"),
+    ("dimension_unit", "Dimension Unit (Optional)"),
+]
+
 TEMPLATE_HEADERS = LASOO_TEMPLATE_HEADERS
 DELETE_TEMPLATE_HEADERS = ["Action", "SKU"]
 VALID_ACTIONS = {"create", "mapped", "delete"}
@@ -399,6 +461,10 @@ def _is_mydeal_store(store) -> bool:
 
 def _is_etsy_store(store) -> bool:
     return marketplace_kind(getattr(store, "marketplace", None)) == "etsy"
+
+
+def _is_bunnings_store(store) -> bool:
+    return marketplace_kind(getattr(store, "marketplace", None)) == "bunnings"
 
 
 def _coerce_bool(value) -> bool:
@@ -689,6 +755,40 @@ def build_template_csv(action: str = "create", store=None) -> str:
         writer.writerow(sample)
         return out.getvalue()
 
+    if _is_bunnings_store(store):
+        sample = {
+            "Vendor Name (Optional)": "Amazon AU",
+            "Vendor URL (Optional)": "https://www.amazon.com.au/dp/EXAMPLE",
+            "Vendor ID (Optional)": "",
+            "Marketplace Name (Optional)": marketplace_name or "Bunnings",
+            "Store Name (Optional)": store_name,
+            "Action": "Mapped" if action == "mapped" else "Create",
+            "SKU": "BN-EXAMPLE-001",
+            "Title": "Example Power Drill",
+            "Description": "Example product description for Bunnings Marketplace.",
+            "Brand": "ExampleBrand",
+            "Category": "HIERARCHY_CODE",
+            "GTIN (Optional)": "9300000000001",
+            "MPN (Optional)": "",
+            "Image URLs": "https://example.com/photo1.jpg|https://example.com/photo2.jpg",
+            "Inventory": "5",
+            "Price": "79.99",
+            "RRP (Optional)": "99.99",
+            "Logistic Class": "SMALL",
+            "Leadtime To Ship (Optional)": "2",
+            "Weight (Optional)": "2.5",
+            "Weight Unit (Optional)": "kg",
+            "Length (Optional)": "30",
+            "Height (Optional)": "20",
+            "Width (Optional)": "15",
+            "Dimension Unit (Optional)": "cm",
+        }
+        out = io.StringIO()
+        writer = csv.DictWriter(out, fieldnames=BUNNINGS_TEMPLATE_HEADERS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(sample)
+        return out.getvalue()
+
     sample_black = {
         "Vendor Name (Optional)": "Nora Inventory",
         "Vendor URL (Optional)": "https://www.example-vendor.com/product/jdxty-xl-b",
@@ -767,4 +867,6 @@ def export_field_specs(store=None) -> list[tuple[str, str]]:
         return list(ETSY_EXPORT_FIELDS)
     if _is_mydeal_store(store):
         return list(MYDEAL_EXPORT_FIELDS)
+    if _is_bunnings_store(store):
+        return list(BUNNINGS_EXPORT_FIELDS)
     return list(LASOO_EXPORT_FIELDS)

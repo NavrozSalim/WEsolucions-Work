@@ -8,6 +8,7 @@ import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
 import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
 import LasooConnectionFields from './LasooConnectionFields';
+import BunningsConnectionFields from './BunningsConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor } from './NoraInventoryUploadField';
 import ShopifyConnectFields, {
     buildShopifyPayload,
@@ -43,9 +44,10 @@ const FREQUENCY_OPTIONS = [
 const DEFAULT_TZ = { USA: 'America/New_York', AU: 'Australia/Sydney' };
 
 // Marketplaces where we can create listings + manage orders (managed store mode).
-const FULL_STORE_MARKETPLACES = ['reverb', 'lasoo', 'mydeal', 'etsy'];
+const FULL_STORE_MARKETPLACES = ['reverb', 'lasoo', 'mydeal', 'etsy', 'bunnings'];
 const LASOO_DEFAULT_STAGING_URL = 'https://stage.api.lasoo.com.au';
 const LASOO_DEFAULT_PRODUCTION_URL = 'https://api.lasoo.com.au';
+const BUNNINGS_DEFAULT_PRODUCTION_URL = 'https://bunnings-prod.mirakl.net';
 const emptyMydealApiFields = () => ({
     mydeal_environment: 'sandbox',
     mydeal_sandbox_base_url: '',
@@ -108,6 +110,11 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         lasoo_staging_auth_key: '',
         lasoo_production_base_url: LASOO_DEFAULT_PRODUCTION_URL,
         lasoo_production_auth_key: '',
+        bunnings_environment: 'production',
+        bunnings_staging_base_url: '',
+        bunnings_staging_shop_key: '',
+        bunnings_production_base_url: BUNNINGS_DEFAULT_PRODUCTION_URL,
+        bunnings_production_shop_key: '',
         ...emptyShopifyFields(),
         region: 'USA',
         vendor_price_settings: [],
@@ -141,6 +148,11 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 lasoo_staging_auth_key: '',
                 lasoo_production_base_url: LASOO_DEFAULT_PRODUCTION_URL,
                 lasoo_production_auth_key: '',
+                bunnings_environment: 'production',
+                bunnings_staging_base_url: '',
+                bunnings_staging_shop_key: '',
+                bunnings_production_base_url: BUNNINGS_DEFAULT_PRODUCTION_URL,
+                bunnings_production_shop_key: '',
                 ...emptyShopifyFields(),
                 region,
                 vendor_price_settings: [],
@@ -299,6 +311,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const isWalmart = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'walmart';
     const isEtsy = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'etsy';
     const isLasoo = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'lasoo';
+    const isBunnings = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'bunnings';
     const showShopifyConnect = isFullStore && selectedMarketplace && FULL_STORE_MARKETPLACES.includes(marketplaceCode(selectedMarketplace));
     const showRrpDiscount = isMydeal || isSears || isKogan;
     const credentialsLabel = isSears
@@ -445,7 +458,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         if (!form.name?.trim()) errs.push('Store name is required');
         if (!form.marketplace_id) errs.push('Marketplace is required');
         if (isFullStore && selectedMarketplace && !FULL_STORE_MARKETPLACES.includes(marketplaceCode(selectedMarketplace))) {
-            errs.push('Managed stores are only available for Reverb, Lasoo, MyDeal, and Etsy right now');
+            errs.push('Managed stores are only available for Reverb, Lasoo, MyDeal, Etsy, and Bunnings right now');
         }
         if (showShopifyConnect) {
             errs.push(...validateShopifyFields(form, { requireSecrets: true }));
@@ -458,6 +471,17 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             } else {
                 if (!form.lasoo_staging_base_url?.trim()) errs.push('Lasoo staging base URL is required');
                 if (!form.lasoo_staging_auth_key?.trim()) errs.push('Lasoo staging AuthKey is required');
+            }
+            return errs;
+        }
+        if (isBunnings) {
+            const env = form.bunnings_environment || 'production';
+            if (env === 'staging') {
+                if (!form.bunnings_staging_base_url?.trim()) errs.push('Bunnings staging base URL is required');
+                if (!form.bunnings_staging_shop_key?.trim()) errs.push('Bunnings staging SHOP_KEY is required');
+            } else {
+                if (!form.bunnings_production_base_url?.trim()) errs.push('Bunnings production base URL is required');
+                if (!form.bunnings_production_shop_key?.trim()) errs.push('Bunnings production SHOP_KEY is required');
             }
             return errs;
         }
@@ -519,7 +543,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         const hasVendors = (form.vendor_price_settings || []).some((vp) => vp.vendor_id);
         // Managed Lasoo stores create listings with their own prices, so vendor
         // pricing is optional there; every other store needs at least one vendor.
-        if (!hasVendors && isLasoo && isFullStore) return errs;
+        if (!hasVendors && (isLasoo || isBunnings) && isFullStore) return errs;
         if (!hasVendors) errs.push('Add at least one vendor with price settings');
         (form.vendor_price_settings || []).forEach((vp) => {
             if (!vp.vendor_id) return;
@@ -539,7 +563,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const validateStep3 = () => {
         const errs = [];
         const hasVendors = (form.vendor_inventory_settings || []).some((vi) => vi.vendor_id);
-        if (!hasVendors && isLasoo && isFullStore) return errs;
+        if (!hasVendors && (isLasoo || isBunnings) && isFullStore) return errs;
         if (!hasVendors) errs.push('Add at least one vendor with inventory ranges');
         return errs;
     };
@@ -550,6 +574,14 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         lasoo_staging_auth_key: form.lasoo_staging_auth_key?.trim(),
         lasoo_production_base_url: form.lasoo_production_base_url?.trim() || '',
         lasoo_production_auth_key: form.lasoo_production_auth_key?.trim() || '',
+    });
+
+    const buildBunningsPayload = () => ({
+        bunnings_environment: form.bunnings_environment || 'production',
+        bunnings_staging_base_url: form.bunnings_staging_base_url?.trim() || '',
+        bunnings_staging_shop_key: form.bunnings_staging_shop_key?.trim() || '',
+        bunnings_production_base_url: form.bunnings_production_base_url?.trim() || BUNNINGS_DEFAULT_PRODUCTION_URL,
+        bunnings_production_shop_key: form.bunnings_production_shop_key?.trim() || '',
     });
 
     const buildMydealPayload = () => {
@@ -664,6 +696,8 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                         ? buildMydealPayload()
                     : isLasoo
                         ? buildLasooPayload()
+                    : isBunnings
+                        ? buildBunningsPayload()
                     : { api_token: form.api_token }),
                 region: form.region,
                 ...buildShopifyPayload(form),
@@ -761,6 +795,8 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     ? buildMydealPayload()
                 : isLasoo
                     ? buildLasooPayload()
+                : isBunnings
+                    ? buildBunningsPayload()
                 : { api_token: form.api_token }),
             region: form.region,
             ...buildShopifyPayload(form),
@@ -941,6 +977,10 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                     if (f.management_mode === 'full_store' && sel && marketplaceCode(sel) === 'mydeal') {
                                                         next.mydeal_setup_method = 'api';
                                                     }
+                                                    if (sel && marketplaceCode(sel) === 'bunnings') {
+                                                        next.region = 'AU';
+                                                        next.schedule_timezone = DEFAULT_TZ.AU;
+                                                    }
                                                     return next;
                                                 });
                                             }}
@@ -952,13 +992,15 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                         />
                                         {isFullStore && (
                                             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                                                Managed store mode currently supports Reverb, Lasoo, MyDeal, and Etsy.
+                                                Managed store mode currently supports Reverb, Lasoo, MyDeal, Etsy, and Bunnings.
                                             </p>
                                         )}
                                     </div>
                                     <div className="sm:col-span-2">
                                         {isLasoo ? (
                                             <LasooConnectionFields form={form} setForm={setForm} mode="create" />
+                                        ) : isBunnings ? (
+                                            <BunningsConnectionFields form={form} setForm={setForm} mode="create" />
                                         ) : isMydeal ? (
                                             <MydealSetupFields
                                                 setupMethod={isFullStore ? 'api' : mydealSetup}

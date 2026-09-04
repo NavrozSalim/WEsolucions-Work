@@ -2811,7 +2811,7 @@ export default function Catalog() {
             {selectedStore && viewMode === 'created' && (
                 <CreatedProductsPanel
                     storeId={selectedStore}
-                    marketplaceCode={selectedStoreData?.marketplace_code}
+                    marketplaceCode={selectedStoreData?.marketplace_code || selectedStoreData?.marketplace_name}
                     reloadNonce={createdReloadNonce}
                     onMessage={(msg, variant) => {
                         setMessage(msg);
@@ -2824,7 +2824,7 @@ export default function Catalog() {
             {selectedStore && viewMode === 'products' && isManagedStore && (
                 <InventoryManagementPanel
                     storeId={selectedStore}
-                    marketplaceCode={selectedStoreData?.marketplace_code}
+                    marketplaceCode={selectedStoreData?.marketplace_code || selectedStoreData?.marketplace_name}
                     reloadNonce={createdReloadNonce}
                     onMessage={handleInventoryMessage}
                 />
@@ -3619,7 +3619,7 @@ export default function Catalog() {
             <ListingFormModal
                 open={createListingOpen && !!selectedStore}
                 storeId={selectedStore}
-                marketplaceCode={selectedStoreData?.marketplace_code}
+                marketplaceCode={selectedStoreData?.marketplace_code || selectedStoreData?.marketplace_name}
                 onClose={() => setCreateListingOpen(false)}
                 onSaved={(listing) => {
                     setMessage(`Listing "${listing?.sku || listing?.external_variant_key || ''}" saved. Publish it from Created products.`);
@@ -3633,7 +3633,7 @@ export default function Catalog() {
             <BulkListingModal
                 open={bulkListingOpen && !!selectedStore}
                 storeId={selectedStore}
-                marketplaceCode={selectedStoreData?.marketplace_code}
+                marketplaceCode={selectedStoreData?.marketplace_code || selectedStoreData?.marketplace_name}
                 onClose={() => setBulkListingOpen(false)}
                 onImported={(data) => {
                     setCreatedReloadNonce((n) => n + 1);

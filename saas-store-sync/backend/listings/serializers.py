@@ -43,6 +43,8 @@ class StoreListingSerializer(serializers.ModelSerializer):
     when_made = serializers.SerializerMethodField()
     shipping_profile_id = serializers.SerializerMethodField()
     readiness_state_id = serializers.SerializerMethodField()
+    logistic_class = serializers.SerializerMethodField()
+    leadtime_to_ship = serializers.SerializerMethodField()
 
     class Meta:
         model = StoreListing
@@ -62,6 +64,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'shipping_cost_category', 'shipping_cost_standard', 'custom_freight_scheme_id',
             'is_direct_import', 'max_days_for_delivery', 'delivery_time', 'has_48_hours_dispatch',
             'taxonomy_id', 'who_made', 'when_made', 'shipping_profile_id', 'readiness_state_id',
+            'logistic_class', 'leadtime_to_ship',
             'inventory_sync_status', 'last_scrape_at', 'last_scrape_error',
             'environment', 'action', 'status', 'validation_errors_json',
             'marketplace_response_json', 'last_uploaded_at',
@@ -80,6 +83,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'shipping_cost_category', 'shipping_cost_standard', 'custom_freight_scheme_id',
             'is_direct_import', 'max_days_for_delivery', 'delivery_time', 'has_48_hours_dispatch',
             'taxonomy_id', 'who_made', 'when_made', 'shipping_profile_id', 'readiness_state_id',
+            'logistic_class', 'leadtime_to_ship',
             'vendor_price', 'inventory_sync_status', 'last_scrape_at', 'last_scrape_error',
         ]
 
@@ -93,6 +97,14 @@ class StoreListingSerializer(serializers.ModelSerializer):
         from .mydeal import products as mydeal_products
 
         return mydeal_products.parse_extras(obj)
+
+    def _bunnings_extras(self, obj):
+        from .bunnings import products as bunnings_products
+
+        return bunnings_products.parse_extras(obj)
+
+    def _offer_extras(self, obj):
+        return self._mydeal_extras(obj) or self._bunnings_extras(obj)
 
     def get_make(self, obj):
         return self._extras(obj).get('make') or obj.brand or ''
@@ -147,6 +159,12 @@ class StoreListingSerializer(serializers.ModelSerializer):
     def get_readiness_state_id(self, obj):
         return self._etsy_extras(obj).get('readiness_state_id') or ''
 
+    def get_logistic_class(self, obj):
+        return self._bunnings_extras(obj).get('logistic_class') or ''
+
+    def get_leadtime_to_ship(self, obj):
+        return self._bunnings_extras(obj).get('leadtime_to_ship') or '2'
+
     def get_tags(self, obj):
         return self._mydeal_extras(obj).get('tags') or ''
 
@@ -157,28 +175,28 @@ class StoreListingSerializer(serializers.ModelSerializer):
         return self._mydeal_extras(obj).get('condition') or 'New'
 
     def get_gtin(self, obj):
-        return self._mydeal_extras(obj).get('gtin') or obj.barcode or ''
+        return self._offer_extras(obj).get('gtin') or obj.barcode or ''
 
     def get_mpn(self, obj):
-        return self._mydeal_extras(obj).get('mpn') or ''
+        return self._offer_extras(obj).get('mpn') or ''
 
     def get_weight(self, obj):
-        return self._mydeal_extras(obj).get('weight') or ''
+        return self._offer_extras(obj).get('weight') or ''
 
     def get_weight_unit(self, obj):
-        return self._mydeal_extras(obj).get('weight_unit') or 'kg'
+        return self._offer_extras(obj).get('weight_unit') or 'kg'
 
     def get_length(self, obj):
-        return self._mydeal_extras(obj).get('length') or ''
+        return self._offer_extras(obj).get('length') or ''
 
     def get_height(self, obj):
-        return self._mydeal_extras(obj).get('height') or ''
+        return self._offer_extras(obj).get('height') or ''
 
     def get_width(self, obj):
-        return self._mydeal_extras(obj).get('width') or ''
+        return self._offer_extras(obj).get('width') or ''
 
     def get_dimension_unit(self, obj):
-        return self._mydeal_extras(obj).get('dimension_unit') or 'cm'
+        return self._offer_extras(obj).get('dimension_unit') or 'cm'
 
     def get_shipping_cost_category(self, obj):
         return self._mydeal_extras(obj).get('shipping_cost_category') or 'Flat'
@@ -355,6 +373,8 @@ class ListingInputSerializer(serializers.Serializer):
     when_made = serializers.CharField(required=False, allow_blank=True, default='')
     shipping_profile_id = serializers.CharField(required=False, allow_blank=True, default='')
     readiness_state_id = serializers.CharField(required=False, allow_blank=True, default='')
+    logistic_class = serializers.CharField(required=False, allow_blank=True, default='')
+    leadtime_to_ship = serializers.CharField(required=False, allow_blank=True, default='')
 
 
 class OrderShipmentSerializer(serializers.ModelSerializer):

@@ -28,7 +28,7 @@ from .client import (
 
 logger = logging.getLogger("listings.shopify")
 
-SHOPIFY_ORDER_MARKETPLACES = ("reverb", "lasoo", "mydeal", "etsy")
+SHOPIFY_ORDER_MARKETPLACES = ("reverb", "lasoo", "mydeal", "etsy", "bunnings")
 
 FIND_ORDER_QUERY = """
 query FindMarketplaceOrder($query: String!) {

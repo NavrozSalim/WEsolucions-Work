@@ -25,6 +25,10 @@ class Store(models.Model):
         ('sandbox', 'Sandbox'),
         ('production', 'Production (Live)'),
     ]
+    BUNNINGS_ENVIRONMENT_CHOICES = [
+        ('staging', 'Staging'),
+        ('production', 'Production'),
+    ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -110,6 +114,18 @@ class Store(models.Model):
     mydeal_production_client_secret = EncryptedTextField(null=True, blank=True)
     mydeal_production_seller_id = EncryptedTextField(null=True, blank=True)
     mydeal_production_seller_token = EncryptedTextField(null=True, blank=True)
+    # --- Bunnings Marketplace (Mirakl Seller API; managed stores) ---
+    bunnings_environment = models.CharField(
+        max_length=20,
+        choices=BUNNINGS_ENVIRONMENT_CHOICES,
+        default='production',
+        blank=True,
+        help_text='Which Bunnings Mirakl environment listing pushes / order pulls use.',
+    )
+    bunnings_staging_base_url = models.URLField(max_length=500, blank=True, default='')
+    bunnings_production_base_url = models.URLField(max_length=500, blank=True, default='')
+    bunnings_staging_shop_key = EncryptedTextField(null=True, blank=True)
+    bunnings_production_shop_key = EncryptedTextField(null=True, blank=True)
     # --- Shopify (optional: push new marketplace orders into Shopify Admin) ---
     shopify_enabled = models.BooleanField(
         default=False,

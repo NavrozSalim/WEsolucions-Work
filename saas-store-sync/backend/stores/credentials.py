@@ -17,7 +17,7 @@ def marketplace_kind(marketplace) -> str:
         return ''
     code = (getattr(marketplace, 'code', None) or '').strip().lower()
     name = (getattr(marketplace, 'name', None) or '').strip().lower()
-    if code in ('sears', 'walmart', 'kogan', 'mydeal', 'reverb', 'lasoo', 'etsy'):
+    if code in ('sears', 'walmart', 'kogan', 'mydeal', 'reverb', 'lasoo', 'bunnings', 'etsy'):
         return code
     if 'walmart' in name:
         return 'walmart'
@@ -31,6 +31,8 @@ def marketplace_kind(marketplace) -> str:
         return 'reverb'
     if 'lasoo' in name:
         return 'lasoo'
+    if 'bunnings' in name:
+        return 'bunnings'
     if 'etsy' in name:
         return 'etsy'
     return code or name
@@ -143,6 +145,22 @@ def verify_lasoo_connection(store) -> tuple[bool, str | None]:
     return False, result.message or 'Lasoo rejected these credentials.'
 
 
+def verify_bunnings_connection(store) -> tuple[bool, str | None]:
+    """Verify Bunnings Mirakl credentials via GET /api/hierarchies (H11)."""
+    from listings.bunnings.client import BunningsClient
+    from listings.errors import MarketplaceError
+
+    try:
+        client = BunningsClient(store)
+    except MarketplaceError as exc:
+        return False, str(exc)
+
+    result = client.verify_connection()
+    if result.ok:
+        return True, result.message or f'Bunnings {client.environment} connection successful.'
+    return False, result.message or 'Bunnings rejected these credentials.'
+
+
 def verify_mydeal_connection(store) -> tuple[bool, str | None]:
     """Verify MyDeal (WMP) client + seller credentials via token + products list."""
     from listings.errors import MarketplaceError
@@ -173,6 +191,8 @@ def verify_store_connection(store) -> tuple[bool, str | None]:
         return verify_lasoo_connection(store)
     if kind == 'mydeal':
         return verify_mydeal_connection(store)
+    if kind == 'bunnings':
+        return verify_bunnings_connection(store)
 
     if requires_structured_credentials(marketplace):
         try:

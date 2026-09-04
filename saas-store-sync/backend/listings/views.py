@@ -247,6 +247,61 @@ class StoreReverbConditionsView(APIView):
         return Response({'conditions': reverb_listings.normalize_conditions_for_ui(raw)})
 
 
+class StoreBunningsCategoriesView(APIView):
+    """Bunnings Mirakl H11 category tree for the listing form."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        from listings.bunnings.client import BunningsClient
+        from listings.bunnings import products as bunnings_products
+        from listings.errors import MarketplaceError
+
+        store = _get_store(request, store_pk)
+        if marketplace_kind(store.marketplace) != 'bunnings':
+            return Response(
+                {'detail': 'Categories catalog is only available for Bunnings stores.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        q = (request.query_params.get('q') or '').strip()
+        try:
+            client = BunningsClient(store)
+            result = client.list_hierarchies()
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if not result.ok:
+            return Response(
+                {'detail': result.message or 'Could not load Bunnings categories.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        categories = bunnings_products.flatten_hierarchies(result.data, q=q, limit=400)
+        return Response({'categories': categories})
+
+
+class StoreBunningsLogisticsView(APIView):
+    """Bunnings logistic classes for offer shipping."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        from listings.bunnings.client import BunningsClient
+        from listings.bunnings import products as bunnings_products
+        from listings.errors import MarketplaceError
+
+        store = _get_store(request, store_pk)
+        if marketplace_kind(store.marketplace) != 'bunnings':
+            return Response(
+                {'detail': 'Logistic classes are only available for Bunnings stores.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            client = BunningsClient(store)
+            result = client.list_logistic_classes()
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if not result.ok:
+            return Response({'classes': [], 'detail': result.message or ''})
+        return Response({'classes': bunnings_products.flatten_logistic_classes(result.data)})
+
+
 class StoreListingDetailView(APIView):
     permission_classes = [IsAuthenticated]
 

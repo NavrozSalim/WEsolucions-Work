@@ -16,7 +16,8 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
     const isReverb = code === 'reverb';
     const isMydeal = code === 'mydeal';
     const isEtsy = code === 'etsy';
-    const templateLabel = isReverb ? 'Reverb' : isMydeal ? 'MyDeal' : isEtsy ? 'Etsy' : 'marketplace';
+    const isBunnings = code === 'bunnings';
+    const templateLabel = isReverb ? 'Reverb' : isMydeal ? 'MyDeal' : isEtsy ? 'Etsy' : isBunnings ? 'Bunnings' : 'marketplace';
     const fileRef = useRef(null);
     const [file, setFile] = useState(null);
     const [action, setAction] = useState('create');
@@ -83,7 +84,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
     const invalidRows = (result?.rows || []).filter((r) => !r.valid);
     const actionHelp = {
         create: 'Each row creates a new listing. Duplicate SKUs already in this app are rejected — use Mapped to update them.',
-        mapped: 'For products already live on the marketplace. Links them into this app by SKU (looks up Reverb). Also updates existing app rows.',
+        mapped: 'For products already live on the marketplace. Links them into this app by SKU. Also updates existing app rows.',
         delete: 'Each row needs SKU — ends the listing on the marketplace and removes it from this app.',
     };
 
@@ -109,7 +110,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                         Headers marked <strong>(Optional)</strong> can be left blank.
                         Optional columns <strong>Vendor Name</strong>, <strong>Marketplace Name</strong>, and{' '}
                         <strong>Store Name</strong> must match a source vendor and your store (or route to another of your stores).
-                        {!isReverb && !isMydeal && (
+                        {!isReverb && !isMydeal && !isBunnings && (
                             <>
                                 {' '}For colour/size variants use the same <strong>Product Key</strong>, unique{' '}
                                 <strong>Variant Key</strong> / <strong>SKU</strong>, fill{' '}
@@ -122,6 +123,9 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                         )}
                         {isMydeal && (
                             <> MyDeal columns include Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
+                        )}
+                        {isBunnings && (
+                            <> Bunnings columns include Category code, Price (GST inclusive), Logistic Class, GTIN, and Image URLs.</>
                         )}
                     </p>
 

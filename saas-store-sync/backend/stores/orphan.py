@@ -46,6 +46,11 @@ def store_credential_fingerprint(store) -> str | None:
             getattr(store, 'lasoo_staging_auth_key', None),
             getattr(store, 'lasoo_production_auth_key', None),
         )
+    if kind == 'bunnings':
+        return credential_fingerprint_from_parts(
+            getattr(store, 'bunnings_staging_shop_key', None),
+            getattr(store, 'bunnings_production_shop_key', None),
+        )
     if kind == 'mydeal':
         return credential_fingerprint_from_parts(
             getattr(store, 'mydeal_sandbox_seller_id', None),
@@ -70,6 +75,11 @@ def fingerprint_from_create_payload(*, marketplace, store_data: dict) -> str | N
         return credential_fingerprint_from_parts(
             store_data.get('lasoo_staging_auth_key'),
             store_data.get('lasoo_production_auth_key'),
+        )
+    if kind == 'bunnings':
+        return credential_fingerprint_from_parts(
+            store_data.get('bunnings_staging_shop_key'),
+            store_data.get('bunnings_production_shop_key'),
         )
     if kind == 'mydeal':
         return credential_fingerprint_from_parts(
@@ -205,6 +215,11 @@ def reclaim_store(store, user, *, store_data: dict | None = None):
         'lasoo_production_base_url',
         'lasoo_staging_auth_key',
         'lasoo_production_auth_key',
+        'bunnings_environment',
+        'bunnings_staging_base_url',
+        'bunnings_production_base_url',
+        'bunnings_staging_shop_key',
+        'bunnings_production_shop_key',
         'shopify_enabled',
         'shopify_shop_domain',
         'shopify_client_id',

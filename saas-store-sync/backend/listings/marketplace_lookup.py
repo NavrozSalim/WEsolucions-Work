@@ -1,4 +1,4 @@
-"""Live marketplace SKU lookup for managed stores (Lasoo + Reverb)."""
+"""Live marketplace SKU lookup for managed stores (Lasoo + Reverb + Bunnings)."""
 from __future__ import annotations
 
 import logging
@@ -147,6 +147,42 @@ def _lookup_reverb(store, sku: str) -> dict:
     }
 
 
+def _lookup_bunnings(store, sku: str) -> dict:
+    from .bunnings import products as bunnings_products
+
+    try:
+        offer = bunnings_products.lookup_offer(store, sku)
+    except MarketplaceError as exc:
+        raise MarketplaceError(str(exc) or "Bunnings offer lookup failed.") from exc
+
+    found = bool(offer)
+    hits = []
+    if offer:
+        shop_sku = str(offer.get("shop_sku") or offer.get("sku") or sku).strip()
+        hits.append({
+            "product_key": str(offer.get("product_id") or shop_sku).strip(),
+            "variant_key": shop_sku,
+            "sku": shop_sku,
+            "title": str(offer.get("product_title") or offer.get("description") or "").strip(),
+            "status": str(offer.get("active") if offer.get("active") is not None else offer.get("state_code") or "unknown"),
+            "created_at": offer.get("date_created"),
+            "updated_at": offer.get("last_updated_date") or offer.get("date_created"),
+            "published_at": None,
+            "marketplace_id": str(offer.get("offer_id") or offer.get("id") or shop_sku),
+            "url": None,
+        })
+    return {
+        "ok": True,
+        "found": found,
+        "marketplace": "bunnings",
+        "environment": getattr(store, "bunnings_environment", None) or "production",
+        "query": {"sku": sku},
+        "message": "Found on Bunnings." if found else "Not found on Bunnings for this SKU.",
+        "results": hits[:10],
+        "local_listing": _local_listing_summary(store, sku),
+    }
+
+
 def lookup_sku(store, sku: str) -> dict:
     """Search the store's marketplace for a SKU / variant key."""
     text = (sku or "").strip()
@@ -160,6 +196,8 @@ def lookup_sku(store, sku: str) -> dict:
         return _lookup_lasoo(store, text)
     if kind == "reverb":
         return _lookup_reverb(store, text)
+    if kind == "bunnings":
+        return _lookup_bunnings(store, text)
     raise MarketplaceError(
         f'Marketplace SKU check is not supported for "{kind or "this marketplace"}" yet.'
     )
@@ -310,7 +348,7 @@ def lookup_skus_bulk(store, skus: list[str]) -> dict:
         )
 
     kind = marketplace_kind(store.marketplace)
-    if kind not in ("lasoo", "reverb"):
+    if kind not in ("lasoo", "reverb", "bunnings"):
         raise MarketplaceError(
             f'Marketplace SKU check is not supported for "{kind or "this marketplace"}" yet.'
         )
@@ -462,7 +500,7 @@ def start_marketplace_lookup_async(store, skus) -> dict:
         )
 
     kind = marketplace_kind(store.marketplace)
-    if kind not in ("lasoo", "reverb"):
+    if kind not in ("lasoo", "reverb", "bunnings"):
         raise MarketplaceError(
             f'Marketplace SKU check is not supported for "{kind or "this marketplace"}" yet.'
         )

@@ -1,6 +1,6 @@
 """Listing CRUD, validation, bulk import, and publish to the store's marketplace.
 
-Lasoo, Reverb, MyDeal, and Etsy managed stores are supported. Dispatch happens in
+Lasoo, Reverb, MyDeal, Etsy, and Bunnings managed stores are supported. Dispatch happens in
 ``publish()`` / validation helpers by marketplace kind.
 """
 import logging
@@ -243,11 +243,14 @@ def _search_lasoo_listing(store, listing: StoreListing) -> dict:
 
 
 def _listing_env(store) -> str:
-    """Reverb/Etsy have no staging API — always production. Lasoo/MyDeal use store setting."""
+    """Reverb/Etsy have no staging API — always production. Lasoo/MyDeal/Bunnings use store setting."""
     if _store_kind(store) in ("reverb", "etsy"):
         return Environment.PRODUCTION
     if _store_kind(store) == "mydeal":
         env = (getattr(store, "mydeal_environment", None) or "sandbox").strip().lower()
+        return Environment.PRODUCTION if env == "production" else Environment.STAGING
+    if _store_kind(store) == "bunnings":
+        env = (getattr(store, "bunnings_environment", None) or "production").strip().lower()
         return Environment.PRODUCTION if env == "production" else Environment.STAGING
     return store.lasoo_environment or Environment.STAGING
 
@@ -259,6 +262,9 @@ def _validate_listing(store, data: dict) -> list[str]:
         return source_errors + reverb_listings.validate_listing(data)
     if kind == "etsy":
         return source_errors + etsy_listings.validate_listing(data)
+    if kind == "bunnings":
+        from .bunnings import products as bunnings_products
+        return source_errors + bunnings_products.validate_listing(data)
     return source_errors + validator.validate_listing(data)
 
 
@@ -326,6 +332,14 @@ def _apply_fields(listing: StoreListing, data: dict):
         listing.image_urls = mapper.normalize_image_urls(data.get("image_urls"))
         listing.infinite_quantity = bool(data.get("infinite_quantity"))
         listing.external_data_object_json = mydeal_products.build_extras(data)
+    elif _store_kind(store) == "bunnings":
+        from .bunnings import products as bunnings_products
+
+        listing.image_urls = mapper.normalize_image_urls(data.get("image_urls"))
+        listing.infinite_quantity = bool(data.get("infinite_quantity"))
+        listing.external_data_object_json = bunnings_products.build_extras(data)
+        if not listing.barcode:
+            listing.barcode = str(data.get("gtin") or data.get("barcode") or "").strip()
     else:
         listing.image_urls = mapper.normalize_image_urls(data.get("image_urls"))
         listing.infinite_quantity = bool(data.get("infinite_quantity"))
@@ -366,7 +380,7 @@ def _finalize_validation(listing: StoreListing, data: dict, *, keep_uploaded: bo
     if errors:
         listing.validation_errors_json = errors
         listing.status = ListingStatus.VALIDATION_FAILED
-        if _store_kind(store) not in ("reverb", "etsy"):
+        if _store_kind(store) not in ("reverb", "etsy", "mydeal", "bunnings"):
             listing.external_data_object_json = ""
         listing.original_price_cents = 0
         listing.sale_price_cents = 0
@@ -392,6 +406,18 @@ def _finalize_validation(listing: StoreListing, data: dict, *, keep_uploaded: bo
             listing.original_price_cents = cents
             listing.sale_price_cents = cents
             listing.external_data_object_json = etsy_listings.build_extras(data)
+        elif _store_kind(store) == "mydeal":
+            from .mydeal import products as mydeal_products
+
+            listing.original_price_cents = mapper.dollars_to_cents(data.get("original_price"))
+            listing.sale_price_cents = mapper.dollars_to_cents(data.get("sale_price"))
+            listing.external_data_object_json = mydeal_products.build_extras(data)
+        elif _store_kind(store) == "bunnings":
+            from .bunnings import products as bunnings_products
+
+            listing.original_price_cents = mapper.dollars_to_cents(data.get("original_price"))
+            listing.sale_price_cents = mapper.dollars_to_cents(data.get("sale_price"))
+            listing.external_data_object_json = bunnings_products.build_extras(data)
         else:
             listing.original_price_cents = mapper.dollars_to_cents(data.get("original_price"))
             listing.sale_price_cents = mapper.dollars_to_cents(data.get("sale_price"))
@@ -505,8 +531,8 @@ def update(listing: StoreListing, data: dict) -> StoreListing:
                 msg = NOT_IN_CONNECT_PUSH.format(sku=sku)
                 listing.status = ListingStatus.FAILED
                 listing.validation_errors_json = [msg]
-                listing.save(update_fields=["status", "validation_errors_json", "updated_at"])
-                raise MarketplaceError(msg)
+            listing.save(update_fields=["status", "validation_errors_json", "updated_at"])
+            raise MarketplaceError(msg)
         pub = _publish_lasoo(listing.user, listing.store, [listing])
         listing.refresh_from_db()
         if not pub.get("ok"):
@@ -515,6 +541,20 @@ def update(listing: StoreListing, data: dict) -> StoreListing:
                     pub.get("message")
                     or "Lasoo did not accept the listing update. It was saved here but not on the marketplace."
                 )
+            )
+    if (
+        was_on_marketplace
+        and listing.status != ListingStatus.VALIDATION_FAILED
+        and _store_kind(listing.store) == "bunnings"
+    ):
+        from .bunnings import products as bunnings_products
+
+        pub = bunnings_products.publish_listings(listing.user, listing.store, [listing])
+        listing.refresh_from_db()
+        if not pub.get("ok"):
+            raise MarketplaceError(
+                pub.get("message")
+                or "Bunnings did not accept the listing update. It was saved here but not on the marketplace."
             )
     return listing
 
@@ -566,10 +606,26 @@ def _attach_mapped_listing(listing: StoreListing) -> list[str]:
         if warnings:
             listing.validation_errors_json = warnings
         return []
-    if kind not in ("reverb", "etsy"):
+    if kind not in ("reverb", "etsy", "bunnings"):
         return []
     if not sku:
         return [f"SKU is required to map a {kind.title()} listing."]
+    if kind == "bunnings":
+        from .bunnings import products as bunnings_products
+
+        try:
+            offer = bunnings_products.lookup_offer(store, sku)
+        except MarketplaceError as exc:
+            return [str(exc) or "Could not look up SKU on Bunnings."]
+        if not offer:
+            return [
+                f'No offer with SKU "{sku}" was found on Bunnings. '
+                "Mapped is for products already on the marketplace — use Create for new ones."
+            ]
+        listing.external_product_key = str(
+            offer.get("product_id") or offer.get("shop_sku") or sku
+        ).strip()
+        return []
     label = "Reverb" if kind == "reverb" else "Etsy"
     try:
         adapter = get_adapter(store)
@@ -631,6 +687,10 @@ def _end_listing_on_marketplace(store, listing: StoreListing) -> bool:
             ) from exc
     if kind == "mydeal":
         return _end_mydeal_listing(store, listing)
+    if kind == "bunnings":
+        from .bunnings import products as bunnings_products
+
+        return bunnings_products.end_listing(store, listing)
     if kind == "etsy":
         adapter = get_adapter(store)
         lid = (listing.external_product_key or "").strip()
@@ -696,7 +756,7 @@ def delete(user, store, listing: StoreListing) -> dict:
     """
     marketplace_deleted = False
     kind = marketplace_kind(store.marketplace)
-    if kind in ("lasoo", "reverb", "mydeal"):
+    if kind in ("lasoo", "reverb", "mydeal", "bunnings"):
         marketplace_deleted = _end_listing_on_marketplace(store, listing)
     variant_key = listing.external_variant_key
     listing.delete()
@@ -722,7 +782,7 @@ def _keys_from_upload_rows(upload: ListingUpload) -> list[str]:
 
 
 def _delete_listings_marketplace(store, listings: list) -> int:
-    """Remove listings from Lasoo/Reverb/MyDeal. Returns marketplace removals count."""
+    """Remove listings from Lasoo/Reverb/MyDeal/Bunnings. Returns marketplace removals count."""
     if not listings:
         return 0
     kind = marketplace_kind(store.marketplace)
@@ -861,6 +921,31 @@ def _listing_to_data(listing: StoreListing) -> dict:
             "option_4_name": listing.option_4_name,
             "option_4_value": listing.option_4_value,
             "variation_image_url": listing.variation_image_url,
+            "vendor_url": listing.vendor_url,
+            "vendor_id": listing.vendor_id,
+            "source_vendor_code": listing.source_vendor_code,
+            "vendor_name": listing.source_vendor_code,
+            "image_urls": listing.image_urls,
+            "inventory": listing.inventory,
+            "infinite_quantity": listing.infinite_quantity,
+            "original_price": listing.original_price,
+            "sale_price": listing.sale_price,
+            **extras,
+        }
+    if _store_kind(listing.store) == "bunnings":
+        from .bunnings import products as bunnings_products
+
+        extras = bunnings_products.parse_extras(listing)
+        return {
+            "product_key": listing.external_product_key,
+            "variant_key": listing.external_variant_key,
+            "title": listing.title,
+            "description": listing.description,
+            "brand": listing.brand,
+            "category": listing.category,
+            "sku": listing.sku,
+            "barcode": listing.barcode,
+            "gtin": extras.get("gtin") or listing.barcode,
             "vendor_url": listing.vendor_url,
             "vendor_id": listing.vendor_id,
             "source_vendor_code": listing.source_vendor_code,
@@ -1399,10 +1484,10 @@ def publish(user, store, listing_ids=None) -> dict:
     ``push_inventory`` so publish never re-creates duplicates on the store.
     """
     kind = marketplace_kind(store.marketplace)
-    if kind not in ("lasoo", "reverb", "mydeal", "etsy"):
+    if kind not in ("lasoo", "reverb", "mydeal", "etsy", "bunnings"):
         raise MarketplaceError(
             f'Publishing created products is not supported yet for "{kind or "this marketplace"}". '
-            "Currently Lasoo, Reverb, MyDeal, and Etsy stores can publish."
+            "Currently Lasoo, Reverb, MyDeal, Etsy, and Bunnings stores can publish."
         )
 
     qs = StoreListing.objects.filter(
@@ -1431,6 +1516,10 @@ def publish(user, store, listing_ids=None) -> dict:
         from .mydeal import products as mydeal_products
 
         return mydeal_products.publish_listings(user, store, publishable)
+    if kind == "bunnings":
+        from .bunnings import products as bunnings_products
+
+        return bunnings_products.publish_listings(user, store, publishable)
     with transaction.atomic():
         return _publish_lasoo(user, store, publishable)
 
@@ -2155,6 +2244,36 @@ def push_inventory(user, store, listing_ids=None) -> dict:
                 "No marketplace listings to push. Publish from Created products first."
             )
         result = mydeal_products.push_inventory(listings, store)
+        if result.get("ok"):
+            StoreListing.objects.filter(id__in=[l.id for l in listings]).update(
+                inventory_sync_status=InventorySyncStatus.SYNCED,
+            )
+        return {
+            "ok": bool(result.get("ok")),
+            "message": result.get("message") or "",
+            "pushed": result.get("updated") or 0,
+            "failed": 0 if result.get("ok") else len(listings),
+            "rows": [],
+        }
+    if kind == "bunnings":
+        from .bunnings import products as bunnings_products
+
+        qs = StoreListing.objects.filter(
+            user=user,
+            store=store,
+            status__in=[
+                ListingStatus.UPLOADED_STAGING,
+                ListingStatus.UPLOADED_PRODUCTION,
+            ],
+        )
+        if listing_ids:
+            qs = qs.filter(id__in=listing_ids)
+        listings = list(qs)
+        if not listings:
+            raise MarketplaceError(
+                "No marketplace listings to push. Publish from Created products first."
+            )
+        result = bunnings_products.push_inventory(listings, store)
         if result.get("ok"):
             StoreListing.objects.filter(id__in=[l.id for l in listings]).update(
                 inventory_sync_status=InventorySyncStatus.SYNCED,

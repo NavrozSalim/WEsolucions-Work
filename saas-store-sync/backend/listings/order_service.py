@@ -33,10 +33,13 @@ def fetch(user, store, page: int = 1, take: int = 50) -> dict:
     if kind == "etsy":
         from .etsy import orders as etsy_orders
         return etsy_orders.fetch(user, store)
+    if kind == "bunnings":
+        from .bunnings import orders as bunnings_orders
+        return bunnings_orders.fetch(user, store, page=page, take=take)
     if kind != "lasoo":
         raise MarketplaceError(
             f'Order management is not supported yet for "{kind or "this marketplace"}". '
-            'Currently Lasoo, Reverb, MyDeal, and Etsy managed stores can fetch orders.'
+            'Currently Lasoo, Reverb, MyDeal, Etsy, and Bunnings managed stores can fetch orders.'
         )
     return _fetch_lasoo(user, store, page=page, take=take)
 
@@ -95,6 +98,11 @@ def create_test_order(user, store) -> dict:
         raise MarketplaceError(
             "MyDeal has no test-order API. Use Fetch orders to pull ReadytoFulfill orders "
             "from the WMP Universal API (sandbox or production)."
+        )
+    if kind == "bunnings":
+        raise MarketplaceError(
+            "Bunnings has no test-order API. Use Fetch orders to pull live Mirakl orders "
+            "(OR11) from the connected shop."
         )
     _require_lasoo(store)
     environment = store.lasoo_environment or 'staging'
@@ -1072,6 +1080,9 @@ def cancel_reasons(store) -> dict:
             "source": "etsy_unsupported",
             "reasons": etsy_orders.cancel_reasons(store),
         }
+    if kind == "bunnings":
+        from .bunnings import orders as bunnings_orders
+        return bunnings_orders.cancel_reasons()
     if kind != "lasoo":
         raise MarketplaceError(
             f'Cancel reasons are not available for "{kind or "this marketplace"}" yet.'
@@ -1125,6 +1136,9 @@ def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
     elif kind == "etsy":
         from .etsy import orders as etsy_orders
         result = etsy_orders.cancel(order, reason=reason)
+    elif kind == "bunnings":
+        from .bunnings import orders as bunnings_orders
+        result = bunnings_orders.cancel(order, reason=reason)
     else:
         result = _cancel_lasoo(order, reason=reason)
     from .shopify.orders import cancel_shopify_order

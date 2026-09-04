@@ -8,6 +8,7 @@ import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
 import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
 import LasooConnectionFields from './LasooConnectionFields';
+import BunningsConnectionFields from './BunningsConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor } from './NoraInventoryUploadField';
 import ShopifyConnectFields, {
     buildShopifyPayload,
@@ -17,6 +18,7 @@ import ShopifyConnectFields, {
 
 const LASOO_DEFAULT_STAGING_URL = 'https://stage.api.lasoo.com.au';
 const LASOO_DEFAULT_PRODUCTION_URL = 'https://api.lasoo.com.au';
+const BUNNINGS_DEFAULT_PRODUCTION_URL = 'https://bunnings-prod.mirakl.net';
 
 const emptyPriceRange = () => ({ from_value: 0, to_value: null, margin_type: 'percentage', margin_percentage: 25 });
 const emptyInventoryRange = () => ({ from_value: 0, to_value: 999999999, range_type: 'multiplier', multiplier: 0.5, fixed_value: null });
@@ -82,6 +84,11 @@ function storeToForm(store) {
         lasoo_staging_auth_key: '',
         lasoo_production_base_url: LASOO_DEFAULT_PRODUCTION_URL,
         lasoo_production_auth_key: '',
+        bunnings_environment: 'production',
+        bunnings_staging_base_url: '',
+        bunnings_staging_shop_key: '',
+        bunnings_production_base_url: BUNNINGS_DEFAULT_PRODUCTION_URL,
+        bunnings_production_shop_key: '',
         ...shopifyFieldsFromStore(null),
         vendor_price_settings: [],
         vendor_inventory_settings: [],
@@ -116,6 +123,11 @@ function storeToForm(store) {
         lasoo_staging_auth_key: '',
         lasoo_production_base_url: store.lasoo_production_base_url || LASOO_DEFAULT_PRODUCTION_URL,
         lasoo_production_auth_key: '',
+        bunnings_environment: store.bunnings_environment || 'production',
+        bunnings_staging_base_url: store.bunnings_staging_base_url || '',
+        bunnings_staging_shop_key: '',
+        bunnings_production_base_url: store.bunnings_production_base_url || BUNNINGS_DEFAULT_PRODUCTION_URL,
+        bunnings_production_shop_key: '',
         ...shopifyFieldsFromStore(store),
         vendor_price_settings: (store.vendor_price_settings || []).map((vp) => ({
             vendor_id: vp.vendor || vp.vendor_id,
@@ -342,13 +354,14 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const isWalmart = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'walmart';
     const isEtsy = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'etsy';
     const isLasoo = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'lasoo';
+    const isBunnings = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'bunnings';
     const marketplaceCode = (store?.marketplace_code || store?.marketplace_name || '').toString().trim().toLowerCase();
-    const showShopifyConnect = isManaged && ['reverb', 'lasoo', 'mydeal', 'etsy'].includes(marketplaceCode);
+    const showShopifyConnect = isManaged && ['reverb', 'lasoo', 'mydeal', 'etsy', 'bunnings'].includes(marketplaceCode);
     const showRrpDiscount = isMydeal || isSears || isKogan;
     // Same Store / Price / Inventory flow as inventory-only stores (including managed).
     const maxStep = 3;
     // Lasoo managed: vendors optional (same as create). Reverb managed: required.
-    const vendorsOptional = isManaged && isLasoo;
+    const vendorsOptional = isManaged && (isLasoo || isBunnings);
     const credentialsLabel = isSears
         ? 'Sears credentials (JSON)'
         : isWalmart
@@ -389,6 +402,18 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
             }
             if (form.lasoo_production_auth_key?.trim()) {
                 payload.lasoo_production_auth_key = form.lasoo_production_auth_key.trim();
+            }
+        }
+
+        if (isBunnings) {
+            payload.bunnings_environment = form.bunnings_environment || 'production';
+            payload.bunnings_staging_base_url = form.bunnings_staging_base_url?.trim() || '';
+            payload.bunnings_production_base_url = form.bunnings_production_base_url?.trim() || BUNNINGS_DEFAULT_PRODUCTION_URL;
+            if (form.bunnings_staging_shop_key?.trim()) {
+                payload.bunnings_staging_shop_key = form.bunnings_staging_shop_key.trim();
+            }
+            if (form.bunnings_production_shop_key?.trim()) {
+                payload.bunnings_production_shop_key = form.bunnings_production_shop_key.trim();
             }
         }
 
@@ -469,6 +494,16 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                 }
             } else if (!form.lasoo_staging_base_url?.trim()) {
                 errs.push('Lasoo staging base URL is required');
+            }
+        }
+        if (isBunnings) {
+            const env = form.bunnings_environment || 'production';
+            if (env === 'production') {
+                if (!form.bunnings_production_base_url?.trim() && !(store?.bunnings_production_base_url || '').trim()) {
+                    errs.push('Bunnings production base URL is required when production is active');
+                }
+            } else if (!form.bunnings_staging_base_url?.trim() && !(store?.bunnings_staging_base_url || '').trim()) {
+                errs.push('Bunnings staging base URL is required when staging is active');
             }
         }
         if (isMydeal && (isManaged || mydealSetup === 'api')) {
@@ -635,6 +670,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                 <div className="sm:col-span-2">
                                     {isLasoo ? (
                                         <LasooConnectionFields form={form} setForm={setForm} mode="edit" />
+                                    ) : isBunnings ? (
+                                        <BunningsConnectionFields form={form} setForm={setForm} mode="edit" />
                                     ) : isMydeal ? (
                                         <MydealSetupFields
                                             setupMethod={isManaged ? 'api' : mydealSetup}

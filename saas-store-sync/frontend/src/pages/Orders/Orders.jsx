@@ -943,7 +943,8 @@ export default function Orders() {
 
     const isReverb = (selectedStoreData?.marketplace_code || '').toLowerCase() === 'reverb';
     const isMydeal = (selectedStoreData?.marketplace_code || '').toLowerCase() === 'mydeal';
-    const orderIdLabel = isReverb ? 'Order ID' : 'Invoice';
+    const isBunnings = (selectedStoreData?.marketplace_code || '').toLowerCase() === 'bunnings';
+    const orderIdLabel = isReverb || isBunnings ? 'Order ID' : 'Invoice';
     const orderDateTz = isMydeal ? MYDEAL_TZ : undefined;
 
     const filteredOrders = useMemo(() => {

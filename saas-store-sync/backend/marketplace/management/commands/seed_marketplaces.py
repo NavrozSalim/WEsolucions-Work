@@ -13,6 +13,7 @@ MARKETPLACES = [
     ('mydeal', 'MyDeal'),
     ('kogan', 'Kogan'),
     ('lasoo', 'Lasoo'),
+    ('bunnings', 'Bunnings'),
 ]
 
 VENDORS = [
