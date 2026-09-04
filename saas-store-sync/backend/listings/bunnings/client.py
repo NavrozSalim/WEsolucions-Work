@@ -8,8 +8,10 @@ Key operations:
   PM11 GET  /api/products/attributes
   P41  POST /api/products/imports
   P42  GET  /api/products/imports/{import}
+  P44  GET  /api/products/imports/{import}/error_report
   OF01 POST /api/offers/imports
   OF02 GET  /api/offers/imports/{import}
+  OF03 GET  /api/offers/imports/{import}/error_report
   OF21 GET  /api/offers
   OR11 GET  /api/orders
   OR21 PUT  /api/orders/{order_id}/accept
@@ -19,6 +21,8 @@ Key operations:
 """
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import time
 
@@ -29,12 +33,21 @@ from ..errors import MarketplaceError
 logger = logging.getLogger("listings.bunnings")
 
 REQUEST_TIMEOUT = 60
-IMPORT_POLL_ATTEMPTS = 8
-IMPORT_POLL_SECONDS = 1.5
+IMPORT_POLL_ATTEMPTS = 15
+IMPORT_POLL_SECONDS = 2.0
 DEFAULT_PRODUCTION_BASE_URL = "https://bunnings-prod.mirakl.net"
 
-_COMPLETE_STATUSES = frozenset({"COMPLETE", "COMPLETED", "SENT"})
-_FAIL_STATUSES = frozenset({"FAILED", "CANCELLED", "CANCELED"})
+# SENT means queued — not finished. COMPLETE can still have rejected rows.
+_COMPLETE_STATUSES = frozenset({"COMPLETE", "COMPLETED"})
+_FAIL_STATUSES = frozenset({
+    "FAILED",
+    "CANCELLED",
+    "CANCELED",
+    "COMPLETE_WITH_ERROR",
+    "COMPLETE_WITH_ERRORS",
+    "COMPLETED_WITH_ERROR",
+    "COMPLETED_WITH_ERRORS",
+})
 
 
 class BunningsResult:
@@ -112,6 +125,7 @@ class BunningsClient:
         data=None,
         empty_body: bool = False,
         timeout: int | None = None,
+        accept: str | None = None,
     ) -> BunningsResult:
         url = f"{self.base_url}{path}"
         logger.info(
@@ -121,7 +135,10 @@ class BunningsClient:
             method.upper(),
             path,
         )
-        headers = self._headers(json_body=json_body is not None and files is None)
+        headers = self._headers(
+            json_body=json_body is not None and files is None,
+            accept=accept or "application/json",
+        )
         try:
             kwargs = {
                 "headers": headers,
@@ -165,8 +182,8 @@ class BunningsClient:
             payload = response.text
         return BunningsResult(ok=True, data=payload, status=response.status_code)
 
-    def get(self, path: str, *, params: dict | None = None) -> BunningsResult:
-        return self.request("GET", path, params=params)
+    def get(self, path: str, *, params: dict | None = None, accept: str | None = None) -> BunningsResult:
+        return self.request("GET", path, params=params, accept=accept)
 
     def verify_connection(self) -> BunningsResult:
         """GET /api/hierarchies (H11) — same check as the standalone test script."""
@@ -225,6 +242,22 @@ class BunningsClient:
     def offer_import_status(self, import_id) -> BunningsResult:
         return self.get(f"/api/offers/imports/{import_id}")
 
+    def import_error_report(self, kind: str, import_id) -> BunningsResult:
+        """P44 / OF03 — CSV of rejected rows (errors column)."""
+        if kind == "product":
+            path = f"/api/products/imports/{import_id}/error_report"
+        else:
+            path = f"/api/offers/imports/{import_id}/error_report"
+        result = self.get(path, accept="*/*")
+        if result.ok or result.status not in (404, 405):
+            return result
+        if kind != "product":
+            return result
+        return self.get(
+            f"/api/products/imports/{import_id}/transformation_error_report",
+            accept="*/*",
+        )
+
     def list_offers(self, *, sku: str = "", max_results: int = 10) -> BunningsResult:
         params = {"max": max(1, min(int(max_results or 10), 100))}
         if sku:
@@ -239,7 +272,11 @@ class BunningsClient:
         attempts: int | None = None,
         interval: float | None = None,
     ) -> BunningsResult:
-        """Poll P42 or OF02 until complete/failed or attempts exhausted."""
+        """Poll P42 or OF02 until complete/failed or attempts exhausted.
+
+        COMPLETE with rejected rows (Complete with errors) is a failure.
+        SENT / WAITING keep polling — they are not success.
+        """
         getter = self.product_import_status if kind == "product" else self.offer_import_status
         tries = attempts if attempts is not None else IMPORT_POLL_ATTEMPTS
         wait = interval if interval is not None else IMPORT_POLL_SECONDS
@@ -249,23 +286,53 @@ class BunningsClient:
             if not last.ok:
                 return last
             status = _import_status(last.data)
-            if status in _FAIL_STATUSES:
-                return BunningsResult(
-                    ok=False,
-                    data=last.data,
-                    message=f"Bunnings {kind} import {import_id} {status}.",
-                    status=last.status,
-                )
+            if status in _FAIL_STATUSES or (
+                status in _COMPLETE_STATUSES and import_has_line_errors(last.data)
+            ):
+                return self._failed_import_result(kind, import_id, last, status)
             if status in _COMPLETE_STATUSES:
                 last.message = f"Bunnings {kind} import {import_id} {status}."
                 return last
             if i < tries - 1 and wait:
                 time.sleep(wait)
-        last.message = (
-            f"Bunnings {kind} import {import_id} still "
-            f"{_import_status(last.data) or 'in progress'}."
+        last = BunningsResult(
+            ok=False,
+            data=last.data,
+            message=(
+                f"Bunnings {kind} import {import_id} still "
+                f"{_import_status(last.data) or 'in progress'}."
+            ),
+            status=last.status,
         )
         return last
+
+    def _failed_import_result(self, kind: str, import_id, last: BunningsResult, status: str) -> BunningsResult:
+        report = self.import_error_report(kind, import_id)
+        raw = report.data if report.ok else ""
+        line_errors = parse_mirakl_error_report(raw)
+        payload = last.data if isinstance(last.data, dict) else {"raw": last.data}
+        payload = dict(payload)
+        payload["line_errors"] = line_errors
+        if isinstance(raw, str) and raw.strip():
+            payload["error_report"] = raw[:8000]
+        detail = format_line_errors(line_errors)
+        if not detail and isinstance(raw, str) and raw.strip() and "error" in raw.lower():
+            detail = raw.strip()[:500]
+        count = line_error_count(last.data) or len(line_errors)
+        status_label = status or "FAILED"
+        if import_has_line_errors(last.data) and "ERROR" not in status_label:
+            status_label = f"{status_label} with errors"
+        message = f"Bunnings {kind} import {import_id} {status_label}."
+        if count:
+            message = f"{message} {count} line(s) rejected."
+        if detail:
+            message = f"{message} {detail}"
+        return BunningsResult(
+            ok=False,
+            data=payload,
+            message=message,
+            status=last.status,
+        )
 
     def list_orders(
         self,
@@ -325,3 +392,117 @@ def _import_status(data) -> str:
         or data.get("importStatus")
         or ""
     ).strip().upper()
+
+
+def _int_field(data, *keys) -> int:
+    if not isinstance(data, dict):
+        return 0
+    for key in keys:
+        val = data.get(key)
+        if val in (None, ""):
+            continue
+        try:
+            return max(0, int(val))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def line_error_count(data) -> int:
+    return _int_field(data, "lines_in_error", "linesInError", "error_lines", "nb_error")
+
+
+def import_has_line_errors(data) -> bool:
+    """True when Mirakl finished with rejected product/offer rows."""
+    if not isinstance(data, dict):
+        return False
+    if "WITH_ERROR" in _import_status(data):
+        return True
+    errors = line_error_count(data)
+    if errors > 0:
+        return True
+    has_report = data.get("has_error_report", data.get("hasErrorReport"))
+    if has_report in (True, "true", "True", 1, "1"):
+        success = _int_field(data, "lines_in_success", "linesInSuccess")
+        read = _int_field(data, "lines_read", "linesRead")
+        if success == 0 and (read > 0 or errors > 0):
+            return True
+    return False
+
+
+def parse_mirakl_error_report(payload) -> list[dict]:
+    """Parse P44/OF03 CSV (or JSON wrapper) into [{sku, errors}, ...]."""
+    if isinstance(payload, dict):
+        nested = payload.get("line_errors")
+        if isinstance(nested, list) and nested:
+            out = []
+            for row in nested:
+                if not isinstance(row, dict):
+                    continue
+                sku = str(row.get("sku") or row.get("product-id") or "").strip()
+                err = str(row.get("errors") or row.get("error") or "").strip()
+                if err:
+                    out.append({"sku": sku, "errors": err})
+            if out:
+                return out
+        payload = (
+            payload.get("error_report")
+            or payload.get("raw")
+            or payload.get("file")
+            or ""
+        )
+    if isinstance(payload, (bytes, bytearray)):
+        text = payload.decode("utf-8-sig", errors="replace")
+    else:
+        text = str(payload or "")
+    text = text.strip()
+    if not text:
+        return []
+    first = text.splitlines()[0]
+    delimiter = ";" if first.count(";") >= first.count(",") else ","
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+    rows: list[dict] = []
+    for raw in reader:
+        if not isinstance(raw, dict):
+            continue
+        mapped = {(k or "").strip().strip('"').lower(): (v or "").strip() for k, v in raw.items()}
+        sku = (
+            mapped.get("product-id")
+            or mapped.get("product_id")
+            or mapped.get("sku")
+            or mapped.get("shop_sku")
+            or ""
+        )
+        err = mapped.get("errors") or mapped.get("error") or mapped.get("error-message") or ""
+        if err:
+            rows.append({"sku": sku, "errors": err})
+    return rows
+
+
+def format_line_errors(rows: list[dict], *, limit: int = 8) -> str:
+    parts = []
+    for row in (rows or [])[:limit]:
+        sku = str(row.get("sku") or "").strip() or "row"
+        err = str(row.get("errors") or "").strip()
+        if err:
+            parts.append(f"{sku}: {err}")
+    extra = len(rows or []) - limit
+    text = " ".join(parts)
+    if extra > 0:
+        text = f"{text} (+{extra} more)"
+    return text
+
+
+def line_errors_by_sku(data) -> dict[str, str]:
+    """Map SKU (lower) → first error string from poll payload."""
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, str] = {}
+    for row in data.get("line_errors") or []:
+        if not isinstance(row, dict):
+            continue
+        sku = str(row.get("sku") or "").strip()
+        err = str(row.get("errors") or "").strip()
+        if sku and err and sku.lower() not in out:
+            out[sku.lower()] = err
+    return out

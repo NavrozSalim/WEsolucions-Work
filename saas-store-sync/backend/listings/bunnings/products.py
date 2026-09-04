@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from ..errors import MarketplaceError
 from ..models import ListingAction, ListingStatus, StoreListing
-from .client import BunningsClient, extract_import_id
+from .client import BunningsClient, extract_import_id, line_errors_by_sku
 
 logger = logging.getLogger("listings.bunnings")
 
@@ -177,6 +177,10 @@ def listing_price(listing: StoreListing) -> Decimal:
     return (Decimal(cents) / Decimal("100")) if cents else Decimal("0")
 
 
+def _looks_like_placeholder(value) -> bool:
+    return "REPLACE_WITH_" in str(value or "").upper()
+
+
 def validate_listing(data: dict) -> list[str]:
     errors: list[str] = []
     sku = str(data.get("sku") or data.get("variant_key") or "").strip()
@@ -189,16 +193,37 @@ def validate_listing(data: dict) -> list[str]:
         errors.append(f"Description is required for SKU {label}.")
     if not str(data.get("brand") or "").strip():
         errors.append(f"Brand is required for SKU {label}.")
-    if not str(data.get("category") or data.get("category_uuid") or "").strip():
+    elif _looks_like_placeholder(data.get("brand")):
+        errors.append(
+            f"Brand for SKU {label} is still a placeholder. "
+            "Use a brand already approved on your Bunnings shop."
+        )
+    category = str(data.get("category") or data.get("category_uuid") or "").strip()
+    if not category:
         errors.append(f"Bunnings category code is required for SKU {label}.")
+    elif _looks_like_placeholder(category):
+        errors.append(
+            f"Category for SKU {label} is still a placeholder. "
+            "Pick the hierarchy code from the Bunnings category search."
+        )
     if not str(data.get("logistic_class") or "").strip():
         errors.append(
             f"Logistic class is required for SKU {label} "
             "(from Bunnings Mirakl shop settings)."
         )
+    elif _looks_like_placeholder(data.get("logistic_class")):
+        errors.append(
+            f"Logistic class for SKU {label} is still a placeholder. "
+            "Use a code from the Bunnings logistic class dropdown."
+        )
     photos = _photo_urls(data.get("image_urls"))
     if not photos:
         errors.append(f"At least one image URL is required for SKU {label}.")
+    elif any(_looks_like_placeholder(url) for url in photos):
+        errors.append(
+            f"Image URL for SKU {label} is still a placeholder. "
+            "Use a public https image URL."
+        )
     price = _dec(data.get("sale_price"))
     if price <= 0:
         price = _dec(data.get("original_price"))
@@ -444,17 +469,39 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
         elif product_import_id:
             polled = client.poll_import("product", product_import_id)
             product_result = polled
-            if not polled.ok and not _import_still_running(polled):
+            if _import_still_running(polled):
+                return {
+                    "ok": False,
+                    "published": 0,
+                    "failed": 0,
+                    "message": (
+                        polled.message
+                        or "Bunnings product import is still running. "
+                        "Wait a minute, then publish again. The listing was not marked live."
+                    ),
+                    "environment": client.environment,
+                }
+            if not polled.ok:
+                sku_errors = line_errors_by_sku(polled.data)
                 for listing in creates:
+                    sku = listing_sku(listing)
+                    detail = sku_errors.get(sku.lower()) if sku else ""
+                    msg = detail or polled.message or "P41 product import failed."
                     _mark_listing(
                         listing,
                         status=ListingStatus.FAILED,
                         request={"p41_import_id": product_import_id},
-                        response={"error": polled.message, "data": polled.data},
-                        errors=[polled.message or "P41 product import failed."],
+                        response={"error": msg, "data": polled.data},
+                        errors=[msg],
                     )
-            elif not polled.ok:
-                logger.info("Bunnings P41 import %s still running; continuing to OF01", product_import_id)
+                if not mapped:
+                    return {
+                        "ok": False,
+                        "published": 0,
+                        "failed": len(creates),
+                        "message": polled.message or "Bunnings product import failed.",
+                        "environment": client.environment,
+                    }
 
     offer_targets = [l for l in listings if l.status != ListingStatus.FAILED]
     if not offer_targets:
@@ -470,11 +517,7 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
     offer_result = client.import_offers(offer_text)
     offer_import_id = extract_import_id(offer_result.data)
     if offer_result.ok and offer_import_id:
-        polled_offer = client.poll_import("offer", offer_import_id)
-        if not polled_offer.ok and not _import_still_running(polled_offer):
-            offer_result = polled_offer
-        elif polled_offer.ok:
-            offer_result = polled_offer
+        offer_result = client.poll_import("offer", offer_import_id)
 
     published = 0
     failed = 0

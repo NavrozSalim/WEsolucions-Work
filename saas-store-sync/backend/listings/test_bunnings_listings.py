@@ -14,7 +14,13 @@ from stores.models import Store
 from listings import csv_import, listing_service, order_service
 from listings.bunnings import orders as bunnings_orders
 from listings.bunnings import products as bunnings_products
-from listings.bunnings.client import BunningsResult, extract_import_id
+from listings.bunnings.client import (
+    BunningsClient,
+    BunningsResult,
+    extract_import_id,
+    import_has_line_errors,
+    parse_mirakl_error_report,
+)
 from listings.errors import MarketplaceError
 from listings.models import ListingStatus, OrderStatus
 
@@ -79,6 +85,89 @@ class BunningsProductsUnitTests(SimpleTestCase):
 
     def test_validate_accepts_complete_row(self):
         self.assertEqual(bunnings_products.validate_listing(VALID_BUNNINGS), [])
+
+    def test_validate_rejects_placeholder_category(self):
+        errors = " ".join(
+            bunnings_products.validate_listing(
+                {**VALID_BUNNINGS, "category": "REPLACE_WITH_CATEGORY_CODE"}
+            )
+        )
+        self.assertIn("placeholder", errors.lower())
+
+    def test_parse_error_report_extracts_category_1004(self):
+        csv_text = (
+            'category;"product-id";"product-id-type";"variant-group-code";"title";'
+            '"description";"brand";"ean";"image-1";"line number";"warnings";"errors"\n'
+            'REPLACE_WITH_CATEGORY_CODE;"TEST-BN-001";"SHOP_SKU";"";"Test Power Drill";'
+            '"desc";"REPLACE_WITH_APPROVED_BRAND";"";"https://x.jpg";"2";"";'
+            '"1004|The category could not be identified"\n'
+        )
+        rows = parse_mirakl_error_report(csv_text)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sku"], "TEST-BN-001")
+        self.assertIn("1004", rows[0]["errors"])
+
+    def test_import_has_line_errors_on_complete_with_errors(self):
+        self.assertTrue(
+            import_has_line_errors(
+                {
+                    "import_status": "COMPLETE",
+                    "lines_in_error": 1,
+                    "lines_in_success": 0,
+                    "has_error_report": True,
+                }
+            )
+        )
+        self.assertFalse(
+            import_has_line_errors(
+                {"import_status": "COMPLETE", "lines_in_error": 0, "lines_in_success": 1}
+            )
+        )
+        self.assertFalse(import_has_line_errors({"import_status": "SENT"}))
+
+    def test_poll_import_fails_complete_with_line_errors(self):
+        store = SimpleNamespace(
+            name="t",
+            bunnings_environment="production",
+            bunnings_production_base_url="https://bunnings-prod.mirakl.net",
+            bunnings_production_shop_key="key",
+        )
+        client = BunningsClient(store)
+        client.product_import_status = lambda _id: BunningsResult(
+            ok=True,
+            data={
+                "import_status": "COMPLETE",
+                "lines_in_error": 1,
+                "lines_in_success": 0,
+                "has_error_report": True,
+            },
+        )
+        client.import_error_report = lambda _kind, _id: BunningsResult(
+            ok=True,
+            data=(
+                'category;product-id;errors\n'
+                'BAD;"BN-1";"1004|The category could not be identified"\n'
+            ),
+        )
+        result = client.poll_import("product", "9", attempts=1, interval=0)
+        self.assertFalse(result.ok)
+        self.assertIn("1004", result.message)
+        self.assertEqual(result.data["line_errors"][0]["sku"], "BN-1")
+
+    def test_poll_import_does_not_treat_sent_as_success(self):
+        store = SimpleNamespace(
+            name="t",
+            bunnings_environment="production",
+            bunnings_production_base_url="https://bunnings-prod.mirakl.net",
+            bunnings_production_shop_key="key",
+        )
+        client = BunningsClient(store)
+        client.product_import_status = lambda _id: BunningsResult(
+            ok=True, data={"import_status": "SENT"}
+        )
+        result = client.poll_import("product", "9", attempts=2, interval=0)
+        self.assertFalse(result.ok)
+        self.assertIn("still", result.message.lower())
 
     def test_validate_variations_require_shared_product_key(self):
         data = {
@@ -311,6 +400,34 @@ class BunningsListingServiceTests(TestCase):
         self.assertFalse(result["ok"])
         listing.refresh_from_db()
         self.assertEqual(listing.status, ListingStatus.FAILED)
+        client.import_offers.assert_not_called()
+
+    @patch("listings.bunnings.products.BunningsClient")
+    def test_publish_skips_offer_when_product_has_line_errors(self, mock_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        client = mock_cls.return_value
+        client.environment = "production"
+        client.import_products.return_value = BunningsResult(ok=True, data={"import_id": "p1"})
+        client.poll_import.return_value = BunningsResult(
+            ok=False,
+            data={
+                "import_status": "COMPLETE",
+                "lines_in_error": 1,
+                "line_errors": [
+                    {
+                        "sku": "BN-1",
+                        "errors": "1004|The category could not be identified",
+                    }
+                ],
+            },
+            message="Bunnings product import p1 COMPLETE with errors. BN-1: 1004|The category could not be identified",
+        )
+        result = listing_service.publish(self.user, self.store)
+        self.assertFalse(result["ok"])
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.FAILED)
+        self.assertTrue(listing.validation_errors_json)
+        self.assertIn("1004", listing.validation_errors_json[0])
         client.import_offers.assert_not_called()
 
     @patch("listings.bunnings.products.BunningsClient")
