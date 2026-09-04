@@ -110,7 +110,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                         Headers marked <strong>(Optional)</strong> can be left blank.
                         Optional columns <strong>Vendor Name</strong>, <strong>Marketplace Name</strong>, and{' '}
                         <strong>Store Name</strong> must match a source vendor and your store (or route to another of your stores).
-                        {!isReverb && !isMydeal && !isBunnings && (
+                        {!isReverb && !isMydeal && (
                             <>
                                 {' '}For colour/size variants use the same <strong>Product Key</strong>, unique{' '}
                                 <strong>Variant Key</strong> / <strong>SKU</strong>, fill{' '}
@@ -125,7 +125,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                             <> MyDeal columns include Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
                         )}
                         {isBunnings && (
-                            <> Bunnings columns include Category code, Price (GST inclusive), Logistic Class, GTIN, and Image URLs.</>
+                            <> Bunnings columns include Category code, Price (GST inclusive), Logistic Class, GTIN, Image URLs, and Product Key / Option Name-Value for size and colour variants (sent as Variant Group Code).</>
                         )}
                     </p>
 

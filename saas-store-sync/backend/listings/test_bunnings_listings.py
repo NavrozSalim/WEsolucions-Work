@@ -50,7 +50,17 @@ def _listing_ns(**overrides):
         original_price=Decimal(str(data["original_price"])),
         sale_price_cents=7999,
         original_price_cents=9999,
-        external_variant_key="",
+        external_product_key=data.get("product_key") or "",
+        external_variant_key=data.get("variant_key") or "",
+        option_1_name=data.get("option_1_name") or "",
+        option_1_value=data.get("option_1_value") or "",
+        option_2_name=data.get("option_2_name") or "",
+        option_2_value=data.get("option_2_value") or "",
+        option_3_name=data.get("option_3_name") or "",
+        option_3_value=data.get("option_3_value") or "",
+        option_4_name=data.get("option_4_name") or "",
+        option_4_value=data.get("option_4_value") or "",
+        variation_image_url=data.get("variation_image_url") or "",
         external_data_object_json=bunnings_products.build_extras(data),
     )
 
@@ -69,6 +79,40 @@ class BunningsProductsUnitTests(SimpleTestCase):
 
     def test_validate_accepts_complete_row(self):
         self.assertEqual(bunnings_products.validate_listing(VALID_BUNNINGS), [])
+
+    def test_validate_variations_require_shared_product_key(self):
+        data = {
+            **VALID_BUNNINGS,
+            "sku": "BN-1-M",
+            "option_1_name": "Size",
+            "option_1_value": "M",
+        }
+        errors = " ".join(bunnings_products.validate_listing(data))
+        self.assertIn("Product Key", errors)
+        data["product_key"] = "BN-1-M"
+        errors = " ".join(bunnings_products.validate_listing(data))
+        self.assertIn("differ from SKU", errors)
+        data["product_key"] = "BN-1"
+        self.assertEqual(bunnings_products.validate_listing(data), [])
+
+    def test_products_csv_includes_variant_group_and_options(self):
+        listing = _listing_ns(
+            sku="BN-1-M",
+            product_key="BN-1",
+            option_1_name="Size",
+            option_1_value="M",
+            option_2_name="Colour",
+            option_2_value="Red",
+            variation_image_url="https://example.com/red-m.jpg",
+        )
+        text = bunnings_products.products_csv([listing])
+        header = text.splitlines()[0]
+        self.assertIn("variant-group-code", header)
+        self.assertIn("size", header)
+        self.assertIn("colour", header)
+        self.assertIn("BN-1-M", text)
+        self.assertIn("BN-1", text)
+        self.assertIn("https://example.com/red-m.jpg", text)
 
     def test_products_csv_uses_semicolon_and_sku(self):
         text = bunnings_products.products_csv([_listing_ns()])
@@ -189,13 +233,38 @@ class BunningsListingServiceTests(TestCase):
         self.assertIn("Logistic Class", csv_text)
         self.assertIn("Leadtime To Ship (Optional)", csv_text)
         self.assertIn("Category", csv_text)
-        self.assertNotIn("Product Key", csv_text)
+        self.assertIn("Product Key (Optional)", csv_text)
+        self.assertIn("Option 1 Name (Optional)", csv_text)
+        self.assertIn("Variation Img URL (Optional)", csv_text)
         rows = csv_import.parse_upload("bunnings.csv", csv_text.encode())
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["sku"], "BN-EXAMPLE-001")
+        self.assertEqual(rows[0]["sku"], "BN-EXAMPLE-001-M")
+        self.assertEqual(rows[0]["product_key"], "BN-EXAMPLE-001")
+        self.assertEqual(rows[0]["option_1_name"], "Size")
+        self.assertEqual(rows[0]["option_1_value"], "M")
         self.assertEqual(rows[0]["sale_price"], "79.99")
         self.assertEqual(rows[0]["logistic_class"], "SMALL")
         self.assertEqual(rows[0]["leadtime_to_ship"], "2")
+
+    def test_create_variation_listing(self):
+        listing = listing_service.create(
+            self.user,
+            self.store,
+            {
+                **VALID_BUNNINGS,
+                "sku": "BN-1-M",
+                "product_key": "BN-1",
+                "option_1_name": "Size",
+                "option_1_value": "M",
+                "option_2_name": "Colour",
+                "option_2_value": "Red",
+            },
+        )
+        self.assertEqual(listing.status, ListingStatus.READY)
+        self.assertEqual(listing.external_product_key, "BN-1")
+        self.assertEqual(listing.sku, "BN-1-M")
+        self.assertEqual(listing.option_1_name, "Size")
+        self.assertEqual(listing.option_1_value, "M")
 
     def test_create_ready_listing_keeps_extras(self):
         listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))

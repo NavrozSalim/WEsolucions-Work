@@ -249,6 +249,17 @@ const EMPTY_BUNNINGS = {
     height: '',
     width: '',
     dimension_unit: 'cm',
+    product_key: '',
+    variant_key: '',
+    option_1_name: '',
+    option_1_value: '',
+    option_2_name: '',
+    option_2_value: '',
+    option_3_name: '',
+    option_3_value: '',
+    option_4_name: '',
+    option_4_value: '',
+    variation_image_url: '',
     source_vendor_code: '',
 };
 
@@ -436,6 +447,17 @@ export default function ListingFormModal({
                     height: listing.height || '',
                     width: listing.width || '',
                     dimension_unit: listing.dimension_unit || 'cm',
+                    product_key: listing.external_product_key || listing.product_key || '',
+                    variant_key: listing.external_variant_key || listing.variant_key || '',
+                    option_1_name: listing.option_1_name || '',
+                    option_1_value: listing.option_1_value || '',
+                    option_2_name: listing.option_2_name || '',
+                    option_2_value: listing.option_2_value || '',
+                    option_3_name: listing.option_3_name || '',
+                    option_3_value: listing.option_3_value || '',
+                    option_4_name: listing.option_4_name || '',
+                    option_4_value: listing.option_4_value || '',
+                    variation_image_url: listing.variation_image_url || '',
                     source_vendor_code: listing.source_vendor_code || '',
                     vendor_name: listing.vendor_name || '',
                     vendor_url: listing.vendor_url || '',
@@ -1098,7 +1120,80 @@ export default function ListingFormModal({
                                         ]}
                                     />
                                 )}
+                                <Input
+                                    label="Product Key (Optional)"
+                                    placeholder="Shared parent key for size/colour variants"
+                                    value={form.product_key}
+                                    onChange={set('product_key')}
+                                />
+                                <Input
+                                    label="Variant Key (Optional)"
+                                    placeholder="Unique per variant (defaults to SKU)"
+                                    value={form.variant_key}
+                                    onChange={set('variant_key')}
+                                />
                                 <Input label="SKU" value={form.sku} onChange={set('sku')} required />
+                                <div className="sm:col-span-2 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 px-3 py-2 text-xs text-slate-600 dark:text-slate-300">
+                                    Variations: same <span className="font-medium">Product Key</span> on every size/colour, unique{' '}
+                                    <span className="font-medium">SKU</span>, Option Name/Value (e.g. Size / M, Colour / Red). Bunnings
+                                    sends this as a Variant Group Code. Leave Product Key blank for a standalone listing.
+                                </div>
+                                <Input
+                                    label="Option 1 Name (Optional)"
+                                    placeholder="e.g. Size"
+                                    value={form.option_1_name}
+                                    onChange={set('option_1_name')}
+                                />
+                                <Input
+                                    label="Option 1 Value (Optional)"
+                                    placeholder="e.g. M"
+                                    value={form.option_1_value}
+                                    onChange={set('option_1_value')}
+                                />
+                                <Input
+                                    label="Option 2 Name (Optional)"
+                                    placeholder="e.g. Colour"
+                                    value={form.option_2_name}
+                                    onChange={set('option_2_name')}
+                                />
+                                <Input
+                                    label="Option 2 Value (Optional)"
+                                    placeholder="e.g. Red"
+                                    value={form.option_2_value}
+                                    onChange={set('option_2_value')}
+                                />
+                                <Input
+                                    label="Option 3 Name (Optional)"
+                                    placeholder="Optional"
+                                    value={form.option_3_name}
+                                    onChange={set('option_3_name')}
+                                />
+                                <Input
+                                    label="Option 3 Value (Optional)"
+                                    placeholder="Optional"
+                                    value={form.option_3_value}
+                                    onChange={set('option_3_value')}
+                                />
+                                <Input
+                                    label="Option 4 Name (Optional)"
+                                    placeholder="Optional"
+                                    value={form.option_4_name}
+                                    onChange={set('option_4_name')}
+                                />
+                                <Input
+                                    label="Option 4 Value (Optional)"
+                                    placeholder="Optional"
+                                    value={form.option_4_value}
+                                    onChange={set('option_4_value')}
+                                />
+                                <div className="sm:col-span-2">
+                                    <Input
+                                        label="Variation Img URL (Optional)"
+                                        placeholder="https://… (image for this size/colour)"
+                                        value={form.variation_image_url}
+                                        onChange={set('variation_image_url')}
+                                    />
+                                </div>
                                 <div className="sm:col-span-2">
                                     <Input label="Title" value={form.title} onChange={set('title')} required />
                                 </div>

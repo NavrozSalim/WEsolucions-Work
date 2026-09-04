@@ -21,6 +21,7 @@ PRODUCT_CSV_HEADERS = [
     "category",
     "product-id",
     "product-id-type",
+    "variant-group-code",
     "title",
     "description",
     "brand",
@@ -32,6 +33,16 @@ PRODUCT_CSV_HEADERS = [
     "image-5",
     "image-6",
 ]
+VARIANT_GROUP_HEADER = "variant-group-code"
+OPTION_ATTR_ALIASES = {
+    "size": "size",
+    "colour": "colour",
+    "color": "color",
+    "finish": "finish",
+    "width": "width",
+    "length": "product-length",
+    "height": "product-height",
+}
 OFFER_CSV_HEADERS = [
     "sku",
     "product-id",
@@ -108,6 +119,56 @@ def listing_sku(listing: StoreListing) -> str:
     return (listing.sku or listing.external_variant_key or "").strip()
 
 
+def _slug_attr(name: str) -> str:
+    text = str(name or "").strip().lower()
+    if not text:
+        return ""
+    if text in OPTION_ATTR_ALIASES:
+        return OPTION_ATTR_ALIASES[text]
+    out: list[str] = []
+    for ch in text:
+        if ch.isalnum():
+            out.append(ch)
+        elif out and out[-1] != "-":
+            out.append("-")
+    return "".join(out).strip("-")
+
+
+def collect_option_pairs(listing_or_data) -> list[tuple[str, str]]:
+    data = listing_or_data
+    if not isinstance(listing_or_data, dict):
+        data = {
+            f"option_{i}_{part}": getattr(listing_or_data, f"option_{i}_{part}", "")
+            for i in (1, 2, 3, 4)
+            for part in ("name", "value")
+        }
+    pairs: list[tuple[str, str]] = []
+    for i in (1, 2, 3, 4):
+        name = str(data.get(f"option_{i}_name") or "").strip()
+        value = str(data.get(f"option_{i}_value") or "").strip()
+        if name or value:
+            pairs.append((name, value))
+    return pairs
+
+
+def variant_group_code(listing_or_data, sku: str = "") -> str:
+    if isinstance(listing_or_data, dict):
+        key = str(
+            listing_or_data.get("product_key")
+            or listing_or_data.get("variant_group_code")
+            or ""
+        ).strip()
+        sku = sku or str(listing_or_data.get("sku") or listing_or_data.get("variant_key") or "").strip()
+    else:
+        key = str(getattr(listing_or_data, "external_product_key", "") or "").strip()
+        sku = sku or listing_sku(listing_or_data)
+    if key and key != sku:
+        return key
+    if collect_option_pairs(listing_or_data):
+        return key or sku
+    return ""
+
+
 def listing_price(listing: StoreListing) -> Decimal:
     price = _dec(listing.sale_price) if listing.sale_price else _dec(listing.original_price)
     if price > 0:
@@ -143,6 +204,26 @@ def validate_listing(data: dict) -> list[str]:
         price = _dec(data.get("original_price"))
     if price <= 0:
         errors.append(f"Price must be greater than 0 for SKU {label} (GST inclusive).")
+    pairs = collect_option_pairs(data)
+    for name, value in pairs:
+        if not name or not value:
+            errors.append(
+                f"Option name and value must both be set for SKU {label} "
+                "(e.g. Size / M)."
+            )
+            break
+    if pairs:
+        product_key = str(data.get("product_key") or "").strip()
+        if not product_key:
+            errors.append(
+                f"Product Key is required for variation listings (SKU {label}). "
+                "Use the same Product Key on every size/colour and a unique SKU per row."
+            )
+        elif product_key == sku:
+            errors.append(
+                f"Product Key must differ from SKU {label} so Bunnings can group "
+                "sizes/colours on one product page."
+            )
     return errors
 
 
@@ -166,11 +247,16 @@ def product_row(listing: StoreListing) -> dict:
     extras = parse_extras(listing)
     sku = listing_sku(listing)
     photos = _photo_urls(listing)
+    variant_img = str(getattr(listing, "variation_image_url", "") or "").strip()
+    if variant_img:
+        photos = [variant_img] + [p for p in photos if p != variant_img]
+        photos = photos[:6]
     gtin = extras.get("gtin") or (listing.barcode or "").strip()
     row = {
         "category": (listing.category or "").strip(),
         "product-id": sku,
         "product-id-type": extras.get("product_id_type") or PRODUCT_ID_TYPE_SHOP_SKU,
+        VARIANT_GROUP_HEADER: variant_group_code(listing, sku),
         "title": (listing.title or sku)[:500],
         "description": listing.description or listing.title or sku,
         "brand": (listing.brand or "").strip(),
@@ -178,6 +264,10 @@ def product_row(listing: StoreListing) -> dict:
     }
     for i in range(6):
         row[f"image-{i + 1}"] = photos[i] if i < len(photos) else ""
+    for name, value in collect_option_pairs(listing):
+        code = _slug_attr(name)
+        if code and value:
+            row[code] = value
     return row
 
 
@@ -202,7 +292,14 @@ def offer_row(listing: StoreListing, *, delete: bool = False) -> dict:
 
 
 def products_csv(listings: list[StoreListing]) -> str:
-    return _write_csv(PRODUCT_CSV_HEADERS, [product_row(l) for l in listings])
+    rows = [product_row(l) for l in listings]
+    extra: list[str] = []
+    known = set(PRODUCT_CSV_HEADERS)
+    for row in rows:
+        for key in row:
+            if key not in known and key not in extra:
+                extra.append(key)
+    return _write_csv(PRODUCT_CSV_HEADERS + extra, rows)
 
 
 def offers_csv(listings: list[StoreListing], *, delete: bool = False) -> str:
