@@ -69,7 +69,7 @@ class MyDealProductGroupTests(SimpleTestCase):
             "option_1_value": "Small",
         }
         errors = " ".join(mydeal_products.validate_listing(data))
-        self.assertIn("Product Key", errors)
+        self.assertIn("Parent SKU", errors)
         data["product_key"] = "POLO-SMALL"
         errors = " ".join(mydeal_products.validate_listing(data))
         self.assertIn("differ from SKU", errors)

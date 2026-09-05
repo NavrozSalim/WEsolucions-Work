@@ -66,6 +66,16 @@ class MapperTests(TestCase):
         product_key, variant_key = mapper.resolve_keys({"sku": "ABC-1"})
         self.assertEqual((product_key, variant_key), ("ABC-1", "ABC-1"))
 
+    def test_parent_sku_fills_blank_sku(self):
+        product_key, variant_key = mapper.resolve_keys({"product_key": "MIXER-1"})
+        self.assertEqual((product_key, variant_key), ("MIXER-1", "MIXER-1"))
+        self.assertEqual(mapper.resolve_sku({"product_key": "MIXER-1"}), "MIXER-1")
+        product_key, variant_key = mapper.resolve_keys({
+            "product_key": "MD-EXAMPLE-001",
+            "sku": "MD-EXAMPLE-001-S",
+        })
+        self.assertEqual((product_key, variant_key), ("MD-EXAMPLE-001", "MD-EXAMPLE-001-S"))
+
     def test_keys_treat_na_variant_as_blank(self):
         product_key, variant_key = mapper.resolve_keys({
             "sku": "JJ-XH1899BK-FCBY",
@@ -196,15 +206,36 @@ class CsvImportTests(TestCase):
         self.assertEqual(rows[0]["vendor_name"], "Nora Inventory")
         self.assertEqual(rows[0]["marketplace_name"], "Lasoo")
 
+    def test_parse_legacy_product_key_headers(self):
+        content = (
+            "Action,Product Key,Variant Key,SKU,Title,Description,Brand,Image URLs,Inventory,Sale Price\n"
+            "Create,PARENT-1,PARENT-1-S,PARENT-1-S,Tee,Desc,Brand,https://img.example.com/a.jpg,1,9.99\n"
+        ).encode()
+        rows = csv_import.parse_upload("legacy.csv", content)
+        self.assertEqual(rows[0]["product_key"], "PARENT-1")
+        self.assertEqual(rows[0]["sku"], "PARENT-1-S")
+        self.assertEqual(rows[0]["variant_key"], "PARENT-1-S")
+
+    def test_parse_parent_sku_only(self):
+        content = (
+            "Action,Parent SKU,Title,Description,Brand,Image URLs,Inventory,Sale Price\n"
+            "Create,MIXER-1,Mixer,Desc,Brand,https://img.example.com/a.jpg,1,9.99\n"
+        ).encode()
+        rows = csv_import.parse_upload("parent.csv", content)
+        self.assertEqual(rows[0]["product_key"], "MIXER-1")
+        self.assertEqual(rows[0]["sku"], "MIXER-1")
+        self.assertEqual(rows[0]["variant_key"], "MIXER-1")
+
     def test_lasoo_template_includes_options_column(self):
         header = csv_import.build_template_csv("create").splitlines()[0]
         cols = header.split(",")
         self.assertIn("Option 1 Name (Optional)", cols)
         self.assertIn("Option 1 Value (Optional)", cols)
         self.assertIn("Variation Img URL (Optional)", cols)
-        self.assertIn("Product Key", cols)
-        self.assertIn("Variant Key", cols)
+        self.assertIn("Parent SKU", cols)
         self.assertIn("SKU", cols)
+        self.assertNotIn("Variant Key", cols)
+        self.assertNotIn("Product Key", cols)
 
     def test_lasoo_template_vendor_columns_follow_vendor_name(self):
         header = csv_import.build_template_csv("create").splitlines()[0]
@@ -1205,7 +1236,9 @@ class ListingServiceTests(TestCase):
         cols = csv_text.splitlines()[0].split(",")
         self.assertEqual(cols[0], "Vendor Name (Optional)")
         self.assertIn("Shipping Cost Category", csv_text)
-        self.assertIn("Product Key (Optional)", csv_text)
+        self.assertIn("Parent SKU", csv_text)
+        self.assertNotIn("Product Key (Optional)", csv_text)
+        self.assertNotIn("Variant Key", csv_text)
         self.assertIn("Is Direct Import", csv_text)
         self.assertIn("GTIN (Optional)", csv_text)
         self.assertIn("RRP (Optional)", csv_text)

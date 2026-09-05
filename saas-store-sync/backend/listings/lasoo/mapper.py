@@ -131,27 +131,24 @@ def clean_key(value) -> str:
 
 
 def resolve_keys(data: dict) -> tuple[str, str]:
-    """Resolve (externalProductKey, externalVariantKey).
+    """Resolve (parent SKU / externalProductKey, sellable SKU / externalVariantKey).
 
-    Multi-variant products: same Product Key on every row, unique Variant Key
-    (usually equal to SKU). Single-variant: blank keys fall back to SKU.
+    Variations: same Parent SKU on every row, unique SKU per size/colour.
+    Standalone: Parent SKU only (SKU may be blank) or SKU only.
     """
-    sku = clean_key(data.get("sku"))
-    variant_key = clean_key(data.get("variant_key")) or sku
-    # If Variant Key is set but SKU is blank, treat SKU as the variant key.
-    if not sku and variant_key:
-        sku = variant_key
-    product_key = clean_key(data.get("product_key")) or sku or variant_key
-    return product_key, variant_key
+    sku = (
+        clean_key(data.get("sku"))
+        or clean_key(data.get("variant_key"))
+        or clean_key(data.get("product_key"))
+    )
+    product_key = clean_key(data.get("product_key")) or sku
+    return product_key, sku
 
 
 def resolve_sku(data: dict) -> str:
-    """SKU used for Lasoo / local storage — prefer explicit SKU, else Variant Key."""
-    sku = clean_key(data.get("sku"))
-    if sku:
-        return sku
-    _, variant_key = resolve_keys(data)
-    return variant_key
+    """Sellable SKU — explicit SKU, else Parent SKU."""
+    product_key, sku = resolve_keys(data)
+    return sku or product_key
 
 
 def build_variant(data: dict) -> dict:

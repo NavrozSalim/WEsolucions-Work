@@ -710,6 +710,18 @@ export default function ListingFormModal({
                 sale_price: form.sale_price === '' ? 0 : form.sale_price,
             };
         }
+        if (!isReverb && !isEtsy) {
+            const parent = String(payload.product_key || '').trim();
+            const sku = String(payload.sku || '').trim();
+            if (!sku && !parent) {
+                setError('Parent SKU or SKU is required.');
+                setSaving(false);
+                return;
+            }
+            payload.sku = sku || parent;
+            payload.variant_key = payload.sku;
+            payload.product_key = parent || payload.sku;
+        }
         const req = isEdit
             ? updateListing(storeId, listing.id, payload)
             : createListing(storeId, payload);
@@ -1023,22 +1035,21 @@ export default function ListingFormModal({
                                     />
                                 )}
                                 <Input
-                                    label="Product Key (Optional)"
-                                    placeholder="Shared parent key for size/colour variants"
+                                    label="Parent SKU"
+                                    placeholder="Same on every size/colour"
                                     value={form.product_key}
                                     onChange={set('product_key')}
                                 />
                                 <Input
-                                    label="Variant Key (Optional)"
-                                    placeholder="Unique per variant (defaults to SKU)"
-                                    value={form.variant_key}
-                                    onChange={set('variant_key')}
+                                    label="SKU"
+                                    placeholder="Variation SKU; blank uses Parent SKU"
+                                    value={form.sku}
+                                    onChange={set('sku')}
                                 />
-                                <Input label="SKU" value={form.sku} onChange={set('sku')} required />
                                 <div className="sm:col-span-2 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 px-3 py-2 text-xs text-slate-600 dark:text-slate-300">
-                                    Variations: same <span className="font-medium">Product Key</span> on every size/colour, unique{' '}
-                                    <span className="font-medium">SKU</span>, Option Name/Value (e.g. Size / Small). MyDeal sends
-                                    these as one product with multiple BuyableProducts. Leave Product Key blank for a standalone listing.
+                                    Standalone: fill <span className="font-medium">Parent SKU</span> (SKU can be blank).
+                                    Variations: same Parent SKU on every size/colour, unique SKU per row, Option Name/Value
+                                    (e.g. Size / Small). MyDeal sends these as one product with multiple buyables.
                                 </div>
                                 <div className="sm:col-span-2">
                                     <Input label="Title" value={form.title} onChange={set('title')} required />
@@ -1142,22 +1153,21 @@ export default function ListingFormModal({
                                     />
                                 )}
                                 <Input
-                                    label="Product Key (Optional)"
-                                    placeholder="Shared parent key for size/colour variants"
+                                    label="Parent SKU"
+                                    placeholder="Same on every size/colour"
                                     value={form.product_key}
                                     onChange={set('product_key')}
                                 />
                                 <Input
-                                    label="Variant Key (Optional)"
-                                    placeholder="Unique per variant (defaults to SKU)"
-                                    value={form.variant_key}
-                                    onChange={set('variant_key')}
+                                    label="SKU"
+                                    placeholder="Variation SKU; blank uses Parent SKU"
+                                    value={form.sku}
+                                    onChange={set('sku')}
                                 />
-                                <Input label="SKU" value={form.sku} onChange={set('sku')} required />
                                 <div className="sm:col-span-2 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 px-3 py-2 text-xs text-slate-600 dark:text-slate-300">
-                                    Variations: same <span className="font-medium">Product Key</span> on every size/colour, unique{' '}
-                                    <span className="font-medium">SKU</span>, Option Name/Value (e.g. Size / M, Colour / Red). Bunnings
-                                    sends this as a Variant Group Code. Leave Product Key blank for a standalone listing.
+                                    Standalone: fill <span className="font-medium">Parent SKU</span> (SKU can be blank).
+                                    Variations: same Parent SKU on every size/colour, unique SKU per row, Option Name/Value
+                                    (e.g. Size / M). Bunnings sends Parent SKU as Variant Group Code.
                                 </div>
                                 <Input
                                     label="Option 1 Name (Optional)"
@@ -1309,21 +1319,20 @@ export default function ListingFormModal({
                                     />
                                 )}
                                 <Input
-                                    label="Product Key (Optional)"
-                                    placeholder="Shared parent key (defaults to SKU)"
+                                    label="Parent SKU"
+                                    placeholder="Same on every size/colour"
                                     value={form.product_key}
                                     onChange={set('product_key')}
                                 />
                                 <Input
-                                    label="Variant Key (Optional)"
-                                    placeholder="Unique per variant (defaults to SKU)"
-                                    value={form.variant_key}
-                                    onChange={set('variant_key')}
+                                    label="SKU"
+                                    placeholder="Variation SKU; blank uses Parent SKU"
+                                    value={form.sku}
+                                    onChange={set('sku')}
                                 />
-                                <Input label="SKU" value={form.sku} onChange={set('sku')} required />
                                 <div className="sm:col-span-2 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 px-3 py-2 text-xs text-slate-600 dark:text-slate-300">
-                                    Multi-variant: same <span className="font-medium">Product Key</span>, unique{' '}
-                                    <span className="font-medium">Variant Key</span> / SKU, Option Name/Value pairs, and{' '}
+                                    Standalone: fill <span className="font-medium">Parent SKU</span> (SKU can be blank).
+                                    Variations: same Parent SKU, unique SKU per size/colour, Option Name/Value pairs, and{' '}
                                     <span className="font-medium">Variation Img URL</span> per variant.
                                 </div>
                                 <Input

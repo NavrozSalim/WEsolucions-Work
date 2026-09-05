@@ -155,7 +155,7 @@ def _listing_price(listing, sku: str) -> Decimal:
 def validate_listing(data: dict) -> list[str]:
     """Return human-readable errors for a MyDeal create/import row."""
     errors: list[str] = []
-    sku = str(data.get("sku") or data.get("variant_key") or "").strip()
+    sku = str(data.get("sku") or data.get("variant_key") or data.get("product_key") or "").strip()
     label = sku or "unknown"
     if not sku:
         errors.append("SKU is required for MyDeal.")
@@ -196,18 +196,18 @@ def validate_listing(data: dict) -> list[str]:
     if pairs:
         if not product_key:
             errors.append(
-                f"Product Key is required for variation listings (SKU {label}). "
-                "Use the same Product Key on every size/colour and a unique SKU per row."
+                f"Parent SKU is required for variation listings (SKU {label}). "
+                "Use the same Parent SKU on every size/colour and a unique SKU per row."
             )
         elif product_key == sku:
             errors.append(
-                f"Product Key must differ from SKU {label} so MyDeal can group "
+                f"Parent SKU must differ from SKU {label} so MyDeal can group "
                 "sizes/colours on one product page."
             )
     elif is_variant:
         errors.append(
             f"At least Option 1 Name and Option 1 Value are required for SKU {label} "
-            "when Product Key differs from SKU."
+            "when Parent SKU differs from SKU."
         )
     return errors
 
@@ -305,7 +305,7 @@ def listing_to_product_group(listing: StoreListing) -> dict:
 def listings_to_product_groups(
     listings: list[StoreListing],
 ) -> list[tuple[dict, list[StoreListing]]]:
-    """Group rows that share Product Key into one MyDeal ProductGroup with many buyables."""
+    """Group rows that share Parent SKU into one MyDeal ProductGroup with many buyables."""
     buckets: OrderedDict[str, dict] = OrderedDict()
     for listing in listings:
         parent_id = parent_product_id(listing)

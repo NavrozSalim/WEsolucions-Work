@@ -110,30 +110,28 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                         Headers marked <strong>(Optional)</strong> can be left blank.
                         Optional columns <strong>Vendor Name</strong>, <strong>Marketplace Name</strong>, and{' '}
                         <strong>Store Name</strong> must match a source vendor and your store (or route to another of your stores).
-                        {!isReverb && (
+                        {!isReverb && !isEtsy && (
                             <>
-                                {' '}For colour/size variants use the same <strong>Product Key</strong>, unique{' '}
-                                <strong>SKU</strong>
-                                {!isMydeal && !isBunnings && (
-                                    <> / <strong>Variant Key</strong></>
-                                )}
+                                {' '}For colour/size variants use the same <strong>Parent SKU</strong> on every row
+                                and a unique <strong>SKU</strong> per size/colour.
                                 {isMydeal ? (
-                                    <>, fill <strong>Option 1 Name/Value</strong> (e.g. Size / Small). Same Product Key is sent as one MyDeal product with multiple buyables.</>
+                                    <> Fill <strong>Option 1 Name/Value</strong> (e.g. Size / Small). Same Parent SKU is sent as one MyDeal product with multiple buyables.</>
                                 ) : isBunnings ? (
-                                    <>, fill <strong>Option Name/Value</strong> (e.g. Size / M). Bunnings sends Product Key as Variant Group Code.</>
+                                    <> Fill <strong>Option Name/Value</strong> (e.g. Size / M). Parent SKU is sent as Variant Group Code.</>
                                 ) : (
-                                    <>, fill <strong>Option 1–4 Name/Value</strong> (e.g. Size / XL), and a <strong>Variation Img URL</strong> on every variant row.</>
+                                    <> Fill <strong>Option 1–4 Name/Value</strong> (e.g. Size / XL), and a <strong>Variation Img URL</strong> on every variant row.</>
                                 )}
+                                {' '}Standalone rows can use Parent SKU only and leave SKU blank.
                             </>
                         )}
                         {isReverb && (
                             <> Reverb columns include Make, Model, Condition, Category, Vendor URL, Price, Photo URLs, status, and free_shipping.</>
                         )}
                         {isMydeal && (
-                            <> MyDeal columns include Product Key, Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
+                            <> MyDeal columns include Parent SKU, Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
                         )}
                         {isBunnings && (
-                            <> Bunnings columns include Category code, Price (GST inclusive), Logistic Class, GTIN, Image URLs, and Product Key / Option Name-Value for size and colour variants (sent as Variant Group Code).</>
+                            <> Bunnings columns include Category code, Price (GST inclusive), Logistic Class, GTIN, Image URLs, and Parent SKU / Option Name-Value for size and colour variants (sent as Variant Group Code).</>
                         )}
                     </p>
 

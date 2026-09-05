@@ -16,6 +16,8 @@ from stores.credentials import marketplace_kind
 COLUMN_MAP = {
     "action": "action",
     "product key": "product_key",
+    "parent sku": "product_key",
+    "parent_sku": "product_key",
     "variant key": "variant_key",
     "title": "title",
     "description": "description",
@@ -145,8 +147,7 @@ LASOO_TEMPLATE_HEADERS = [
     "Marketplace Name (Optional)",
     "Store Name (Optional)",
     "Action",
-    "Product Key",
-    "Variant Key",
+    "Parent SKU",
     "SKU",
     "Option 1 Name (Optional)",
     "Option 1 Value (Optional)",
@@ -176,8 +177,7 @@ LASOO_EXPORT_FIELDS = [
     ("marketplace_name", "Marketplace Name (Optional)"),
     ("store_name", "Store Name (Optional)"),
     ("action", "Action"),
-    ("product_key", "Product Key"),
-    ("variant_key", "Variant Key"),
+    ("product_key", "Parent SKU"),
     ("sku", "SKU"),
     ("option_1_name", "Option 1 Name (Optional)"),
     ("option_1_value", "Option 1 Value (Optional)"),
@@ -297,8 +297,7 @@ MYDEAL_TEMPLATE_HEADERS = [
     "Marketplace Name (Optional)",
     "Store Name (Optional)",
     "Action",
-    "Product Key (Optional)",
-    "Variant Key (Optional)",
+    "Parent SKU",
     "SKU",
     "Title",
     "Description",
@@ -342,8 +341,7 @@ MYDEAL_EXPORT_FIELDS = [
     ("marketplace_name", "Marketplace Name (Optional)"),
     ("store_name", "Store Name (Optional)"),
     ("action", "Action"),
-    ("product_key", "Product Key (Optional)"),
-    ("variant_key", "Variant Key (Optional)"),
+    ("product_key", "Parent SKU"),
     ("sku", "SKU"),
     ("title", "Title"),
     ("description", "Description"),
@@ -387,8 +385,7 @@ BUNNINGS_TEMPLATE_HEADERS = [
     "Marketplace Name (Optional)",
     "Store Name (Optional)",
     "Action",
-    "Product Key (Optional)",
-    "Variant Key (Optional)",
+    "Parent SKU",
     "SKU",
     "Option 1 Name (Optional)",
     "Option 1 Value (Optional)",
@@ -426,8 +423,7 @@ BUNNINGS_EXPORT_FIELDS = [
     ("marketplace_name", "Marketplace Name (Optional)"),
     ("store_name", "Store Name (Optional)"),
     ("action", "Action"),
-    ("product_key", "Product Key (Optional)"),
-    ("variant_key", "Variant Key (Optional)"),
+    ("product_key", "Parent SKU"),
     ("sku", "SKU"),
     ("option_1_name", "Option 1 Name (Optional)"),
     ("option_1_value", "Option 1 Value (Optional)"),
@@ -467,6 +463,7 @@ _HEADER_MARKERS = {
     "action",
     "sku",
     "product key",
+    "parent sku",
     "variant key",
     "vendor name",
     "marketplace name",
@@ -650,6 +647,14 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
             # Don't overwrite RRP for MyDeal when only Price is set — only fill if blank.
             if not str(normalized.get("original_price") or "").strip():
                 normalized["original_price"] = normalized["sale_price"]
+        sku = str(normalized.get("sku") or normalized.get("variant_key") or "").strip()
+        parent = str(normalized.get("product_key") or "").strip()
+        if not sku:
+            sku = parent
+        if sku:
+            normalized["sku"] = sku
+            if not str(normalized.get("variant_key") or "").strip():
+                normalized["variant_key"] = sku
         # Default MyDeal required shipping/delivery fields when blank (template sample fills them).
         if not str(normalized.get("shipping_cost_category") or "").strip():
             # Leave blank for non-MyDeal rows; publish layer has its own defaults.
@@ -736,7 +741,7 @@ def build_template_csv(action: str = "create", store=None) -> str:
         return out.getvalue()
 
     if _is_mydeal_store(store):
-        def _row(*, sku, product_key, variant_key, option_name, option_value, title_suffix=""):
+        def _row(*, sku, parent_sku, option_name, option_value, title_suffix=""):
             return {
                 "Vendor Name (Optional)": "Amazon AU",
                 "Vendor URL (Optional)": "https://www.amazon.com.au/dp/EXAMPLE",
@@ -744,11 +749,10 @@ def build_template_csv(action: str = "create", store=None) -> str:
                 "Marketplace Name (Optional)": marketplace_name or "MyDeal",
                 "Store Name (Optional)": store_name,
                 "Action": "Mapped" if action == "mapped" else "Create",
-                "Product Key (Optional)": product_key,
-                "Variant Key (Optional)": variant_key,
+                "Parent SKU": parent_sku,
                 "SKU": sku,
                 "Title": f"Example Polo Shirt{title_suffix}",
-                "Description": "Example product description for MyDeal / WMP. Same Product Key groups size variants.",
+                "Description": "Example product description for MyDeal / WMP. Same Parent SKU groups size variants.",
                 "Brand (Optional)": "ExampleBrand",
                 "Tags (Optional)": "apparel,polo",
                 "Specifications (Optional)": "",
@@ -787,15 +791,13 @@ def build_template_csv(action: str = "create", store=None) -> str:
         writer.writeheader()
         writer.writerow(_row(
             sku="MD-EXAMPLE-001-S",
-            product_key="MD-EXAMPLE-001",
-            variant_key="MD-EXAMPLE-001-S",
+            parent_sku="MD-EXAMPLE-001",
             option_name="Size",
             option_value="Small",
         ))
         writer.writerow(_row(
             sku="MD-EXAMPLE-001-M",
-            product_key="MD-EXAMPLE-001",
-            variant_key="MD-EXAMPLE-001-M",
+            parent_sku="MD-EXAMPLE-001",
             option_name="Size",
             option_value="Medium",
         ))
@@ -809,8 +811,7 @@ def build_template_csv(action: str = "create", store=None) -> str:
             "Marketplace Name (Optional)": marketplace_name or "Bunnings",
             "Store Name (Optional)": store_name,
             "Action": "Mapped" if action == "mapped" else "Create",
-            "Product Key (Optional)": "BN-EXAMPLE-001",
-            "Variant Key (Optional)": "BN-EXAMPLE-001-M",
+            "Parent SKU": "BN-EXAMPLE-001",
             "SKU": "BN-EXAMPLE-001-M",
             "Option 1 Name (Optional)": "Size",
             "Option 1 Value (Optional)": "M",
@@ -853,8 +854,7 @@ def build_template_csv(action: str = "create", store=None) -> str:
         "Marketplace Name (Optional)": marketplace_name or "Lasoo",
         "Store Name (Optional)": store_name,
         "Action": "Mapped" if action == "mapped" else "Create",
-        "Product Key": "JDXTY",
-        "Variant Key": "JDXTY-XL-B",
+        "Parent SKU": "JDXTY",
         "SKU": "JDXTY-XL-B",
         "Option 1 Name (Optional)": "Size",
         "Option 1 Value (Optional)": "XL",
@@ -866,7 +866,7 @@ def build_template_csv(action: str = "create", store=None) -> str:
         "Option 4 Value (Optional)": "",
         "Variation Img URL (Optional)": "https://img.example.com/jdxty-xl-blue.jpg",
         "Title": "Example Product — XL Blue",
-        "Description": "Same Product Key groups size/colour variants on Lasoo.",
+        "Description": "Same Parent SKU groups size/colour variants on Lasoo.",
         "Brand": "MyBrand",
         "Category (Optional)": "Apparel > T-Shirts",
         "Barcode (Optional)": "123456789012",
@@ -878,7 +878,6 @@ def build_template_csv(action: str = "create", store=None) -> str:
     }
     sample_red = {
         **sample_black,
-        "Variant Key": "JDXTY-S-R",
         "SKU": "JDXTY-S-R",
         "Option 1 Name (Optional)": "Size",
         "Option 1 Value (Optional)": "S",

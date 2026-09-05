@@ -177,7 +177,7 @@ class BunningsProductsUnitTests(SimpleTestCase):
             "option_1_value": "M",
         }
         errors = " ".join(bunnings_products.validate_listing(data))
-        self.assertIn("Product Key", errors)
+        self.assertIn("Parent SKU", errors)
         data["product_key"] = "BN-1-M"
         errors = " ".join(bunnings_products.validate_listing(data))
         self.assertIn("differ from SKU", errors)
@@ -322,7 +322,8 @@ class BunningsListingServiceTests(TestCase):
         self.assertIn("Logistic Class", csv_text)
         self.assertIn("Leadtime To Ship (Optional)", csv_text)
         self.assertIn("Category", csv_text)
-        self.assertIn("Product Key (Optional)", csv_text)
+        self.assertIn("Parent SKU", csv_text)
+        self.assertNotIn("Product Key (Optional)", csv_text)
         self.assertIn("Option 1 Name (Optional)", csv_text)
         self.assertIn("Variation Img URL (Optional)", csv_text)
         rows = csv_import.parse_upload("bunnings.csv", csv_text.encode())

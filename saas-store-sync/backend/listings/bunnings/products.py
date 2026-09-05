@@ -183,7 +183,7 @@ def _looks_like_placeholder(value) -> bool:
 
 def validate_listing(data: dict) -> list[str]:
     errors: list[str] = []
-    sku = str(data.get("sku") or data.get("variant_key") or "").strip()
+    sku = str(data.get("sku") or data.get("variant_key") or data.get("product_key") or "").strip()
     label = sku or "unknown"
     if not sku:
         errors.append("SKU is required for Bunnings.")
@@ -241,12 +241,12 @@ def validate_listing(data: dict) -> list[str]:
         product_key = str(data.get("product_key") or "").strip()
         if not product_key:
             errors.append(
-                f"Product Key is required for variation listings (SKU {label}). "
-                "Use the same Product Key on every size/colour and a unique SKU per row."
+                f"Parent SKU is required for variation listings (SKU {label}). "
+                "Use the same Parent SKU on every size/colour and a unique SKU per row."
             )
         elif product_key == sku:
             errors.append(
-                f"Product Key must differ from SKU {label} so Bunnings can group "
+                f"Parent SKU must differ from SKU {label} so Bunnings can group "
                 "sizes/colours on one product page."
             )
     return errors

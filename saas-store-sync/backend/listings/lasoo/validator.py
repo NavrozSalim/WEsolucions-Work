@@ -39,7 +39,7 @@ def validate_listing(data: dict) -> list[str]:
     key = _variant_label(data)
 
     for field, label in REQUIRED_TEXT_FIELDS:
-        # SKU may be filled from Variant Key — check after resolve below for SKU.
+        # SKU may be filled from Parent SKU when the SKU cell is blank.
         if field == "sku":
             continue
         if not str(data.get(field, "") or "").strip():
@@ -49,11 +49,7 @@ def validate_listing(data: dict) -> list[str]:
     product_key, variant_key = resolve_keys(data)
     sku = (data.get("sku") or "").strip() or variant_key
     if not sku:
-        errors.append(f"SKU is required for variant {key}.")
-    if not product_key:
-        errors.append(f"Product Key is required for variant {key}.")
-    if not variant_key:
-        errors.append(f"Variant Key is required for variant {key}.")
+        errors.append(f"Parent SKU or SKU is required for variant {key}.")
 
     # Validate option name/value pairs (incomplete pairs are errors).
     for i in (1, 2, 3, 4):
@@ -87,8 +83,8 @@ def validate_listing(data: dict) -> list[str]:
                 )
         if not variation_img:
             errors.append(
-                f"Variation Img URL is required for variant {key} when Product Key "
-                "differs from Variant Key."
+                f"Variation Img URL is required for variant {key} when Parent SKU "
+                "differs from SKU."
             )
 
     if not normalize_image_urls(data.get("image_urls")):
