@@ -97,6 +97,55 @@ def parse_extras(listing_or_json) -> dict:
     return data
 
 
+CORE_PRODUCT_CODES = frozenset({
+    "category",
+    "product-id",
+    "product-id-type",
+    "variant-group-code",
+    "title",
+    "description",
+    "brand",
+    "ean",
+    "sku",
+    "image-1",
+    "image-2",
+    "image-3",
+    "image-4",
+    "image-5",
+    "image-6",
+})
+_ATTR_CACHE: dict[tuple, list] = {}
+_DIM_FALLBACKS = {
+    "weight": ("weight", "product-weight", "gross-weight"),
+    "length": ("length", "product-length", "package-length"),
+    "height": ("height", "product-height", "package-height"),
+    "width": ("width", "product-width", "package-width"),
+}
+
+
+def attributes_from_data(data: dict) -> dict:
+    raw = data.get("attributes")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw = {}
+    out = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            code = str(key or "").strip()
+            if code and value not in (None, ""):
+                out[code] = str(value).strip()
+    for key, value in (data or {}).items():
+        if key in ("attributes",):
+            continue
+        text = str(key or "").strip()
+        if text.startswith("attribute_") or text.startswith("pdb_"):
+            if value not in (None, ""):
+                out[text] = str(value).strip()
+    return out
+
+
 def build_extras(data: dict) -> str:
     extras = {
         "marketplace": "bunnings",
@@ -111,6 +160,7 @@ def build_extras(data: dict) -> str:
         "height": str(data.get("height") or "").strip(),
         "width": str(data.get("width") or "").strip(),
         "dimension_unit": str(data.get("dimension_unit") or "").strip() or "cm",
+        "attributes": attributes_from_data(data),
     }
     return json.dumps(extras)
 
@@ -181,7 +231,7 @@ def _looks_like_placeholder(value) -> bool:
     return "REPLACE_WITH_" in str(value or "").upper()
 
 
-def validate_listing(data: dict) -> list[str]:
+def validate_listing(data: dict, store=None) -> list[str]:
     errors: list[str] = []
     sku = str(data.get("sku") or data.get("variant_key") or data.get("product_key") or "").strip()
     label = sku or "unknown"
@@ -249,7 +299,120 @@ def validate_listing(data: dict) -> list[str]:
                 f"Parent SKU must differ from SKU {label} so Bunnings can group "
                 "sizes/colours on one product page."
             )
+    attrs_in = attributes_from_data(data)
+    category = str(data.get("category") or data.get("category_uuid") or "").strip()
+    if store is not None and category and not _looks_like_placeholder(category):
+        for item in load_category_attributes(store, category):
+            if not item.get("required"):
+                continue
+            code = item.get("code") or ""
+            if _attribute_satisfied(code, data, attrs_in):
+                continue
+            label_attr = item.get("label") or code
+            errors.append(
+                f"{label_attr} is required for this Bunnings category (SKU {label})."
+            )
     return errors
+
+
+def flatten_product_attributes(payload) -> list[dict]:
+    """PM11 → form fields. Only required/recommended, skip core P41 columns."""
+    items = []
+    if isinstance(payload, dict):
+        items = payload.get("attributes") or payload.get("data") or []
+    elif isinstance(payload, list):
+        items = payload
+    if not isinstance(items, list):
+        return []
+    out = []
+    seen = set()
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        code = str(raw.get("code") or raw.get("name") or "").strip()
+        if not code or code in CORE_PRODUCT_CODES or code in seen:
+            continue
+        if code.startswith("image-"):
+            continue
+        seen.add(code)
+        level = str(raw.get("requirement_level") or raw.get("requirementLevel") or "").strip().upper()
+        required = bool(raw.get("required")) or level in ("REQUIRED", "MANDATORY")
+        recommended = level in ("RECOMMENDED",)
+        if not required and not recommended:
+            continue
+        values = []
+        raw_values = raw.get("values") or []
+        if isinstance(raw_values, list):
+            for val in raw_values:
+                if isinstance(val, dict):
+                    vcode = str(val.get("code") or val.get("label") or "").strip()
+                    vlabel = str(val.get("label") or val.get("code") or vcode).strip()
+                    if vcode:
+                        values.append({"code": vcode, "label": vlabel})
+                elif val not in (None, ""):
+                    values.append({"code": str(val), "label": str(val)})
+        out.append({
+            "code": code,
+            "label": str(raw.get("label") or raw.get("description") or code).strip(),
+            "required": required,
+            "recommended": recommended,
+            "type": str(raw.get("type") or "TEXT").strip(),
+            "values": values,
+            "variant": bool(raw.get("variant")),
+        })
+    out.sort(key=lambda r: (not r["required"], r["label"].lower()))
+    return out
+
+
+def load_category_attributes(store, hierarchy_code: str) -> list[dict]:
+    code = str(hierarchy_code or "").strip()
+    if not code or store is None:
+        return []
+    cache_key = (str(getattr(store, "id", "")), code)
+    if cache_key in _ATTR_CACHE:
+        return _ATTR_CACHE[cache_key]
+    try:
+        client = BunningsClient(store)
+        result = client.list_product_attributes(code)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Bunnings PM11 failed hierarchy=%s: %s", code, exc)
+        return []
+    if not result.ok:
+        logger.warning("Bunnings PM11 rejected hierarchy=%s: %s", code, result.message)
+        return []
+    rows = flatten_product_attributes(result.data)
+    _ATTR_CACHE[cache_key] = rows
+    return rows
+
+
+def _attribute_satisfied(code: str, data: dict, attrs: dict) -> bool:
+    if str(attrs.get(code) or "").strip():
+        return True
+    low = (code or "").strip().lower()
+    if low in ("ean", "gtin", "barcode"):
+        return bool(str(data.get("gtin") or data.get("barcode") or "").strip())
+    if low == "brand":
+        return bool(str(data.get("brand") or "").strip())
+    if low in ("title", "description"):
+        return bool(str(data.get(low) or "").strip())
+    if low.startswith("image"):
+        return bool(_photo_urls(data.get("image_urls")))
+    extras_map = {
+        "weight": "weight",
+        "product-weight": "weight",
+        "gross-weight": "weight",
+        "length": "length",
+        "product-length": "length",
+        "package-length": "length",
+        "height": "height",
+        "product-height": "height",
+        "width": "width",
+        "product-width": "width",
+    }
+    mapped = extras_map.get(low)
+    if mapped and str(data.get(mapped) or "").strip():
+        return True
+    return False
 
 
 def _write_csv(headers: list[str], rows: list[dict]) -> str:
@@ -293,6 +456,17 @@ def product_row(listing: StoreListing) -> dict:
         code = _slug_attr(name)
         if code and value:
             row[code] = value
+    extras_attrs = extras.get("attributes") if isinstance(extras.get("attributes"), dict) else {}
+    for code, value in extras_attrs.items():
+        key = str(code or "").strip()
+        if key and value not in (None, "") and key not in row:
+            row[key] = str(value).strip()
+    for field, aliases in _DIM_FALLBACKS.items():
+        val = str(extras.get(field) or "").strip()
+        if not val:
+            continue
+        if not any(row.get(alias) for alias in aliases):
+            row[aliases[0]] = val
     return row
 
 
@@ -331,7 +505,7 @@ def offers_csv(listings: list[StoreListing], *, delete: bool = False) -> str:
     return _write_csv(OFFER_CSV_HEADERS, [offer_row(l, delete=delete) for l in listings])
 
 
-def flatten_hierarchies(payload, *, q: str = "", limit: int = 400) -> list[dict]:
+def flatten_hierarchies(payload, *, q: str = "", limit: int = 2000) -> list[dict]:
     """Turn H11 payload into searchable {code, name, path} rows."""
     items = []
     if isinstance(payload, dict):

@@ -182,6 +182,11 @@ export default function Tickets() {
         () => stores.find((s) => s.id === selectedStore),
         [stores, selectedStore]
     );
+    const isBunnings =
+        (selectedStoreData?.marketplace_code || selectedStoreData?.marketplace_name || '')
+            .toString()
+            .trim()
+            .toLowerCase() === 'bunnings';
 
     const handleExportExcel = () => {
         if (!selectedStore || exporting) return;
@@ -254,6 +259,7 @@ export default function Tickets() {
                     <FileDown className={`mr-2 h-4 w-4 ${exporting ? 'opacity-50' : ''}`} />
                     {exporting ? 'Exporting…' : 'Export Excel'}
                 </Button>
+                {!isBunnings && (
                 <Button
                     variant="secondary"
                     type="button"
@@ -263,6 +269,7 @@ export default function Tickets() {
                     <FlaskConical className="mr-2 h-4 w-4" />
                     {creatingTest ? 'Creating…' : 'Create test ticket'}
                 </Button>
+                )}
             </div>
 
             {!selectedStore ? (
@@ -282,7 +289,7 @@ export default function Tickets() {
                         {tickets.length === 0 ? (
                             <p className="px-4 py-8 text-sm text-slate-500 dark:text-slate-400">
                                 No tickets yet. Use “Fetch from marketplace” (hourly sync also runs automatically)
-                                or “Create test ticket”.
+                                {isBunnings ? '.' : ' or “Create test ticket”.'}
                             </p>
                         ) : (
                             <ul className="divide-y divide-slate-100 dark:divide-slate-800 max-h-[32rem] overflow-y-auto">

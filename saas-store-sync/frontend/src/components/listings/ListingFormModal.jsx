@@ -7,7 +7,7 @@ import { createListing, updateListing } from '../../services/listingService';
 import { getStore } from '../../services/storeService';
 import ListingPhotoUploader from './ListingPhotoUploader';
 import { ReverbCategorySelect, ReverbConditionSelect } from './ReverbCatalogSelects';
-import { BunningsCategorySelect, BunningsLogisticSelect } from './BunningsCatalogSelects';
+import { BunningsAttributeFields, BunningsCategorySelect, BunningsLogisticSelect } from './BunningsCatalogSelects';
 
 const EMPTY_LASOO = {
     action: 'create',
@@ -263,6 +263,7 @@ const EMPTY_BUNNINGS = {
     option_4_value: '',
     variation_image_url: '',
     source_vendor_code: '',
+    attributes: {},
 };
 
 /**
@@ -468,6 +469,10 @@ export default function ListingFormModal({
                     vendor_id: listing.vendor_id || '',
                     marketplace_name: listing.marketplace_name || defaults.marketplace_name,
                     store_name: listing.store_name || defaults.store_name,
+                    attributes:
+                        listing.attributes && typeof listing.attributes === 'object'
+                            ? listing.attributes
+                            : {},
                 });
             } else if (isEtsy) {
                 setForm({
@@ -699,6 +704,7 @@ export default function ListingFormModal({
                 logistic_class: form.logistic_class || '',
                 leadtime_to_ship: form.leadtime_to_ship || '2',
                 category: form.category || '',
+                attributes: form.attributes && typeof form.attributes === 'object' ? form.attributes : {},
             };
         } else {
             payload = {
@@ -1235,8 +1241,20 @@ export default function ListingFormModal({
                                 <BunningsCategorySelect
                                     storeId={storeId}
                                     value={form.category}
-                                    onChange={(code) => setForm((f) => ({ ...f, category: code }))}
+                                    onChange={(code) =>
+                                        setForm((f) => ({
+                                            ...f,
+                                            category: code,
+                                            attributes: code === f.category ? f.attributes : {},
+                                        }))
+                                    }
                                     required
+                                />
+                                <BunningsAttributeFields
+                                    storeId={storeId}
+                                    hierarchy={form.category}
+                                    value={form.attributes}
+                                    onChange={(attrs) => setForm((f) => ({ ...f, attributes: attrs }))}
                                 />
                                 <Input label="GTIN (Optional)" value={form.gtin} onChange={set('gtin')} />
                                 <Input label="MPN (Optional)" value={form.mpn} onChange={set('mpn')} />

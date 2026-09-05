@@ -235,10 +235,26 @@ def upsert_order(user, store, raw: dict) -> MarketplaceOrder | None:
     return order
 
 
-def _accept_if_needed(client: BunningsClient, raw: dict) -> bool:
+def _order_from_result(result) -> dict | None:
+    if not result or not result.ok:
+        return None
+    rows = _extract_orders(result)
+    if rows:
+        return rows[0]
+    data = result.data
+    if isinstance(data, dict):
+        inner = data.get("order")
+        if isinstance(inner, dict):
+            return inner
+        if data.get("order_id") or data.get("orderId"):
+            return data
+    return None
+
+
+def _accept_if_needed(client: BunningsClient, raw: dict) -> tuple[dict, bool]:
     state = str(raw.get("order_state") or raw.get("order_state_code") or "").strip().upper()
     if state != "WAITING_ACCEPTANCE":
-        return False
+        return raw, False
     order_id = str(raw.get("order_id") or raw.get("orderId") or "").strip()
     lines = raw.get("order_lines") or []
     payload = []
@@ -250,13 +266,18 @@ def _accept_if_needed(client: BunningsClient, raw: dict) -> bool:
             continue
         payload.append({"id": str(lid), "accepted": True})
     if not order_id or not payload:
-        return False
+        return raw, False
     result = client.accept_order(order_id, payload)
-    if result.ok:
-        raw["order_state"] = "SHIPPING"
-        return True
-    logger.warning("Bunnings accept failed order=%s: %s", order_id, result.message)
-    return False
+    if not result.ok:
+        logger.warning("Bunnings accept failed order=%s: %s", order_id, result.message)
+        return raw, False
+    fresh = client.get_order(order_id)
+    refreshed = _order_from_result(fresh)
+    if refreshed:
+        return refreshed, True
+    updated = dict(raw)
+    updated["order_state"] = "WAITING_DEBIT"
+    return updated, True
 
 
 def fetch(user, store, *, page: int = 1, take: int = 50) -> dict:
@@ -265,27 +286,65 @@ def fetch(user, store, *, page: int = 1, take: int = 50) -> dict:
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc), "fetched": 0}
 
+    from django.utils import timezone
+
     saved = 0
     accepted = 0
-    page_size = min(100, max(1, int(take or 50)))
-    start_page = max(1, int(page or 1))
-    offset = (start_page - 1) * page_size
     errors: list[str] = []
+    last = getattr(store, "bunnings_last_order_sync_at", None)
+    start_update = ""
+    if last:
+        dt = last
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.utc)
+        start_update = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Waiting acceptance first so we can auto-accept, then a broader pull.
-    for states in ("WAITING_ACCEPTANCE", "SHIPPING,SHIPPED,RECEIVED,CLOSED,CANCELED,REFUSED"):
-        result = client.list_orders(offset=offset, max_results=page_size, order_state_codes=states)
-        if not result.ok:
-            errors.append(result.message or f"OR11 {states} failed")
-            continue
-        for raw in _extract_orders(result):
-            if _accept_if_needed(client, raw):
-                accepted += 1
-            if upsert_order(user, store, raw):
-                saved += 1
+    open_states = (
+        "WAITING_ACCEPTANCE,WAITING_DEBIT,WAITING_DEBIT_PAYMENT,"
+        "SHIPPING,TO_COLLECT,SHIPPED,RECEIVED,INCIDENT_OPEN,INCIDENT_CLOSED"
+    )
+    closed_states = "CLOSED,CANCELED,REFUSED,REFUNDED"
+
+    def _pull(states, since=""):
+        nonlocal saved, accepted
+        offset = 0
+        page_size = 100
+        while offset <= 5000:
+            result = client.list_orders(
+                offset=offset,
+                max_results=page_size,
+                order_state_codes=states,
+                start_update_date=since,
+            )
+            if not result.ok:
+                errors.append(result.message or f"OR11 {states} failed")
+                return
+            rows = _extract_orders(result)
+            if not rows:
+                return
+            for raw in rows:
+                raw, did_accept = _accept_if_needed(client, raw)
+                if did_accept:
+                    accepted += 1
+                if upsert_order(user, store, raw):
+                    saved += 1
+            if len(rows) < page_size:
+                return
+            offset += page_size
+
+    _pull("WAITING_ACCEPTANCE", "")
+    _pull(open_states, start_update)
+    _pull(closed_states, start_update)
 
     if saved == 0 and errors:
         return {"ok": False, "message": errors[0][:400], "fetched": 0}
+
+    if hasattr(store, "bunnings_last_order_sync_at"):
+        store.bunnings_last_order_sync_at = timezone.now()
+        try:
+            store.save(update_fields=["bunnings_last_order_sync_at", "updated_at"])
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not persist bunnings_last_order_sync_at for store=%s", store.id)
 
     msg = f"Retrieved {saved} Bunnings order(s)"
     if accepted:
@@ -340,7 +399,11 @@ def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
         else:
             message = "No order lines available to refuse."
     else:
-        result = client.cancel_order(order_id)
+        result = client.cancel_order(
+            order_id,
+            reason_code=(reason or "OTHER").strip() or "OTHER",
+            reason_label=dict(BUNNINGS_CANCEL_REASONS).get((reason or "").strip(), reason or "Other"),
+        )
         marketplace_ok = bool(result.ok)
         message = result.message or ""
 
@@ -368,17 +431,59 @@ def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
     }
 
 
-def build_tracking_payload(*, tracking_number: str, carrier: str, tracking_url: str = "") -> dict:
+def build_tracking_payload(*, tracking_number: str, carrier: str, tracking_url: str = "",
+                           carrier_code: str = "") -> dict:
     payload = {
         "carrier_name": (carrier or "").strip() or "Other",
         "tracking_number": (tracking_number or "").strip(),
     }
     if (tracking_url or "").strip():
         payload["carrier_url"] = tracking_url.strip()
-    code = _carrier_code(carrier)
+    code = (carrier_code or "").strip() or _carrier_code(carrier)
     if code:
         payload["carrier_code"] = code
     return payload
+
+
+def flatten_carriers(payload) -> list[dict]:
+    items = []
+    if isinstance(payload, dict):
+        items = payload.get("carriers") or payload.get("data") or []
+    elif isinstance(payload, list):
+        items = payload
+    if not isinstance(items, list):
+        return []
+    out = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        code = str(raw.get("code") or raw.get("carrier_code") or "").strip()
+        label = str(raw.get("label") or raw.get("name") or code).strip()
+        if code:
+            out.append({"code": code, "name": label})
+    return out
+
+
+def resolve_carrier(store, carrier: str) -> tuple[str, str]:
+    """Match UI carrier text to a Bunnings shop carrier code."""
+    text = (carrier or "").strip()
+    fallback_code = _carrier_code(text)
+    try:
+        client = BunningsClient(store)
+        result = client.list_carriers()
+    except Exception:  # noqa: BLE001
+        return fallback_code, text
+    if not result.ok:
+        return fallback_code, text
+    needle = text.lower()
+    for row in flatten_carriers(result.data):
+        if row["code"].lower() == needle or row["name"].lower() == needle:
+            return row["code"], row["name"]
+    if fallback_code:
+        for row in flatten_carriers(result.data):
+            if row["code"].lower() == fallback_code.lower():
+                return row["code"], row["name"]
+    return fallback_code, text
 
 
 def _carrier_code(carrier: str) -> str:

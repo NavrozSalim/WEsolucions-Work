@@ -31,8 +31,8 @@ def _managed_stores_qs(*, region: str | None = None, marketplace_codes=None):
 
 
 def sync_store_tickets(*, region: str | None = None) -> dict:
-    """Pull tickets for Lasoo + Reverb managed stores (optional region filter)."""
-    stores = _managed_stores_qs(region=region, marketplace_codes=["lasoo", "reverb", "mydeal"])
+    """Pull tickets for Lasoo + Reverb + Bunnings managed stores (optional region filter)."""
+    stores = _managed_stores_qs(region=region, marketplace_codes=["lasoo", "reverb", "mydeal", "bunnings"])
     total_fetched = 0
     store_count = 0
     for store in stores:

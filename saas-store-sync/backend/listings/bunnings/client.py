@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import logging
 import time
 
@@ -201,7 +202,7 @@ class BunningsClient:
         return BunningsResult(ok=True, data=result.data, message=msg, status=result.status)
 
     def list_hierarchies(self) -> BunningsResult:
-        return self.get("/api/hierarchies")
+        return self.get("/api/hierarchies", params={"max": 10000})
 
     def list_product_attributes(self, hierarchy_code: str) -> BunningsResult:
         return self.get("/api/products/attributes", params={"hierarchy": hierarchy_code})
@@ -334,6 +335,44 @@ class BunningsClient:
             status=last.status,
         )
 
+    def list_carriers(self) -> BunningsResult:
+        result = self.get("/api/shipping/carriers")
+        if result.ok or result.status not in (404, 405):
+            return result
+        return self.get("/api/carriers")
+
+    def get_order(self, order_id: str) -> BunningsResult:
+        oid = (order_id or "").strip()
+        result = self.get(f"/api/orders/{oid}")
+        if result.ok or result.status not in (404, 405):
+            return result
+        return self.get("/api/orders", params={"order_ids": oid, "paginate": "false"})
+
+    def list_threads(self, *, with_messages: bool = True, page_token: str = "", updated_since: str = "") -> BunningsResult:
+        params = {
+            "with_messages": "true" if with_messages else "false",
+            "limit": 50,
+        }
+        if page_token:
+            params["page_token"] = page_token
+        if updated_since:
+            params["updated_since"] = updated_since
+        return self.get("/api/inbox/threads", params=params)
+
+    def reply_thread(self, thread_id: str, body: str) -> BunningsResult:
+        """M12 — JSON first, then multipart (Mirakl often requires form-data)."""
+        payload = {"body": body, "to": [{"type": "CUSTOMER"}]}
+        path = f"/api/inbox/threads/{thread_id}/message"
+        result = self.request("POST", path, json_body=payload)
+        if result.ok or result.status not in (400, 415, 422):
+            return result
+        return self.request(
+            "POST",
+            path,
+            files={"file": ("", b"", "application/octet-stream")},
+            data={"body": json.dumps(payload)},
+        )
+
     def list_orders(
         self,
         *,
@@ -369,9 +408,19 @@ class BunningsClient:
         """OR24 PUT /api/orders/{order_id}/ship (empty body)."""
         return self.request("PUT", f"/api/orders/{order_id}/ship", empty_body=True)
 
-    def cancel_order(self, order_id: str) -> BunningsResult:
-        """OR29 PUT /api/orders/{order_id}/cancel (empty body)."""
-        return self.request("PUT", f"/api/orders/{order_id}/cancel", empty_body=True)
+    def cancel_order(self, order_id: str, *, reason_code: str = "", reason_label: str = "") -> BunningsResult:
+        """OR29 PUT /api/orders/{order_id}/cancel."""
+        path = f"/api/orders/{order_id}/cancel"
+        body = {}
+        if (reason_code or "").strip():
+            body["reason_code"] = reason_code.strip()
+        if (reason_label or "").strip():
+            body["reason_label"] = reason_label.strip()
+        if body:
+            result = self.request("PUT", path, json_body=body)
+            if result.ok or result.status not in (400, 415, 422):
+                return result
+        return self.request("PUT", path, empty_body=True)
 
 
 def extract_import_id(data) -> str:

@@ -87,6 +87,12 @@ export const getBunningsCategories = (storeId, q = '') =>
 export const getBunningsLogistics = (storeId) =>
     api.get(`/stores/${storeId}/listings/bunnings/logistics/`);
 
+/** Bunnings PM11 required/recommended attributes for a hierarchy code. */
+export const getBunningsAttributes = (storeId, hierarchy = '') =>
+    api.get(`/stores/${storeId}/listings/bunnings/attributes/`, {
+        params: hierarchy ? { hierarchy } : {},
+    });
+
 /** Scrape vendor URLs on managed listings → update local price/stock. */
 export const scrapeListings = (storeId, listingIds = null) =>
     api.post(`/stores/${storeId}/listings/scrape/`, listingIds ? { listing_ids: listingIds } : {});

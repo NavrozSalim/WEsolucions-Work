@@ -171,10 +171,12 @@ def _submit_bunnings(order: MarketplaceOrder, *, tracking_number: str, carrier: 
         shipment.save(update_fields=["status", "marketplace_response_json"])
         return {"ok": False, "message": str(exc), "shipment_id": str(shipment.id)}
 
+    code, name = bunnings_orders.resolve_carrier(order.store, carrier)
     payload = bunnings_orders.build_tracking_payload(
         tracking_number=tracking,
-        carrier=carrier,
+        carrier=name or carrier,
         tracking_url=tracking_url,
+        carrier_code=code,
     )
     track = client.update_tracking(order_id, payload)
     ship = None

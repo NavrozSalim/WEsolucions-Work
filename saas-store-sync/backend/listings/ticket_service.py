@@ -3,6 +3,7 @@
 Supports:
 - Lasoo Connect (when Tickets/Messages queries exist)
 - Reverb conversations (GET /api/my/conversations + reply)
+- Bunnings / Mirakl inbox (M11 list threads, M12 reply)
 """
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ def _require_lasoo(store):
     if kind != "lasoo":
         raise MarketplaceError(
             f'Ticket management is not supported yet for "{kind or "this marketplace"}". '
-            "Currently Lasoo and Reverb managed stores are supported."
+            "Currently Lasoo, Reverb, and Bunnings managed stores are supported."
         )
 
 
@@ -46,10 +47,13 @@ def fetch(user, store, page: int = 1, take: int = 50) -> dict:
     if kind == "reverb":
         from .reverb import tickets as reverb_tickets
         return reverb_tickets.fetch(user, store)
+    if kind == "bunnings":
+        from .bunnings import tickets as bunnings_tickets
+        return bunnings_tickets.fetch(user, store)
     if kind != "lasoo":
         raise MarketplaceError(
             f'Ticket management is not supported yet for "{kind or "this marketplace"}". '
-            "Currently Lasoo and Reverb managed stores are supported."
+            "Currently Lasoo, Reverb, and Bunnings managed stores are supported."
         )
     return _fetch_lasoo(user, store, page=page, take=take)
 
@@ -60,6 +64,9 @@ def reply(ticket: SupportTicket, *, body: str, sender_name: str = "") -> dict:
     if kind == "reverb":
         from .reverb import tickets as reverb_tickets
         return reverb_tickets.reply(ticket, body=body, sender_name=sender_name)
+    if kind == "bunnings":
+        from .bunnings import tickets as bunnings_tickets
+        return bunnings_tickets.reply(ticket, body=body, sender_name=sender_name)
     if kind != "lasoo":
         raise MarketplaceError(
             f'Ticket replies are not supported yet for "{kind or "this marketplace"}".'
@@ -73,6 +80,9 @@ def create_test_ticket(user, store) -> dict:
     if kind == "reverb":
         from .reverb import tickets as reverb_tickets
         return reverb_tickets.create_test_ticket(user, store)
+    if kind == "bunnings":
+        from .bunnings import tickets as bunnings_tickets
+        return bunnings_tickets.create_test_ticket(user, store)
     _require_lasoo(store)
     return _create_test_ticket_lasoo(user, store)
 

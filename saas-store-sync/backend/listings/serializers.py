@@ -45,6 +45,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
     readiness_state_id = serializers.SerializerMethodField()
     logistic_class = serializers.SerializerMethodField()
     leadtime_to_ship = serializers.SerializerMethodField()
+    attributes = serializers.SerializerMethodField()
 
     class Meta:
         model = StoreListing
@@ -64,7 +65,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'shipping_cost_category', 'shipping_cost_standard', 'custom_freight_scheme_id',
             'is_direct_import', 'max_days_for_delivery', 'delivery_time', 'has_48_hours_dispatch',
             'taxonomy_id', 'who_made', 'when_made', 'shipping_profile_id', 'readiness_state_id',
-            'logistic_class', 'leadtime_to_ship',
+            'logistic_class', 'leadtime_to_ship', 'attributes',
             'inventory_sync_status', 'last_scrape_at', 'last_scrape_error',
             'environment', 'action', 'status', 'validation_errors_json',
             'marketplace_response_json', 'last_uploaded_at',
@@ -83,7 +84,7 @@ class StoreListingSerializer(serializers.ModelSerializer):
             'shipping_cost_category', 'shipping_cost_standard', 'custom_freight_scheme_id',
             'is_direct_import', 'max_days_for_delivery', 'delivery_time', 'has_48_hours_dispatch',
             'taxonomy_id', 'who_made', 'when_made', 'shipping_profile_id', 'readiness_state_id',
-            'logistic_class', 'leadtime_to_ship',
+            'logistic_class', 'leadtime_to_ship', 'attributes',
             'vendor_price', 'inventory_sync_status', 'last_scrape_at', 'last_scrape_error',
         ]
 
@@ -164,6 +165,10 @@ class StoreListingSerializer(serializers.ModelSerializer):
 
     def get_leadtime_to_ship(self, obj):
         return self._bunnings_extras(obj).get('leadtime_to_ship') or '2'
+
+    def get_attributes(self, obj):
+        raw = self._bunnings_extras(obj).get('attributes')
+        return raw if isinstance(raw, dict) else {}
 
     def get_tags(self, obj):
         return self._mydeal_extras(obj).get('tags') or ''
@@ -375,6 +380,7 @@ class ListingInputSerializer(serializers.Serializer):
     readiness_state_id = serializers.CharField(required=False, allow_blank=True, default='')
     logistic_class = serializers.CharField(required=False, allow_blank=True, default='')
     leadtime_to_ship = serializers.CharField(required=False, allow_blank=True, default='')
+    attributes = serializers.JSONField(required=False, allow_null=True, default=dict)
 
 
 class OrderShipmentSerializer(serializers.ModelSerializer):

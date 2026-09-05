@@ -273,7 +273,7 @@ class StoreBunningsCategoriesView(APIView):
                 {'detail': result.message or 'Could not load Bunnings categories.'},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
-        categories = bunnings_products.flatten_hierarchies(result.data, q=q, limit=400)
+        categories = bunnings_products.flatten_hierarchies(result.data, q=q, limit=2000)
         return Response({'categories': categories})
 
 
@@ -300,6 +300,40 @@ class StoreBunningsLogisticsView(APIView):
         if not result.ok:
             return Response({'classes': [], 'detail': result.message or ''})
         return Response({'classes': bunnings_products.flatten_logistic_classes(result.data)})
+
+
+class StoreBunningsAttributesView(APIView):
+    """Bunnings PM11 required/recommended attributes for a hierarchy."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        from listings.bunnings.client import BunningsClient
+        from listings.bunnings import products as bunnings_products
+        from listings.errors import MarketplaceError
+
+        store = _get_store(request, store_pk)
+        if marketplace_kind(store.marketplace) != 'bunnings':
+            return Response(
+                {'detail': 'Product attributes are only available for Bunnings stores.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        hierarchy = (request.query_params.get('hierarchy') or request.query_params.get('category') or '').strip()
+        if not hierarchy:
+            return Response({'attributes': []})
+        try:
+            client = BunningsClient(store)
+            result = client.list_product_attributes(hierarchy)
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if not result.ok:
+            return Response(
+                {'detail': result.message or 'Could not load Bunnings category attributes.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response({
+            'hierarchy': hierarchy,
+            'attributes': bunnings_products.flatten_product_attributes(result.data),
+        })
 
 
 class StoreListingDetailView(APIView):

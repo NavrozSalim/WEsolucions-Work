@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, Loader2, Search } from 'lucide-react';
-import { getBunningsCategories, getBunningsLogistics } from '../../services/listingService';
+import { getBunningsAttributes, getBunningsCategories, getBunningsLogistics } from '../../services/listingService';
 
 /**
  * Searchable Bunnings (Mirakl H11) category picker. Value stored is the hierarchy code.
@@ -99,10 +99,18 @@ export function BunningsCategorySelect({ storeId, value, onChange, required = fa
                             <button
                                 key={opt.code}
                                 type="button"
-                                className={`block w-full px-3 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-800 ${
-                                    value === opt.code ? 'bg-accent-50 dark:bg-accent-900/20 text-accent-700 dark:text-accent-300' : 'text-slate-800 dark:text-slate-200'
+                                disabled={opt.leaf === false}
+                                className={`block w-full px-3 py-2 text-left text-sm ${
+                                    opt.leaf === false
+                                        ? 'cursor-not-allowed text-slate-400'
+                                        : `hover:bg-slate-50 dark:hover:bg-slate-800 ${
+                                              value === opt.code
+                                                  ? 'bg-accent-50 dark:bg-accent-900/20 text-accent-700 dark:text-accent-300'
+                                                  : 'text-slate-800 dark:text-slate-200'
+                                          }`
                                 }`}
                                 onClick={() => {
+                                    if (opt.leaf === false) return;
                                     onChange?.(opt.code, opt.name);
                                     setLabelByCode((prev) => ({ ...prev, [opt.code]: opt.name }));
                                     setOpen(false);
@@ -111,7 +119,7 @@ export function BunningsCategorySelect({ storeId, value, onChange, required = fa
                             >
                                 {opt.name}
                                 {opt.leaf === false ? (
-                                    <span className="ml-1 text-xs text-slate-400">(parent)</span>
+                                    <span className="ml-1 text-xs text-slate-400">(parent — pick a leaf)</span>
                                 ) : null}
                             </button>
                         ))}
@@ -119,7 +127,7 @@ export function BunningsCategorySelect({ storeId, value, onChange, required = fa
                 </div>
             )}
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Pick the Bunnings hierarchy code. Bulk CSV uses the same codes.
+                Pick a leaf Bunnings hierarchy code (parents cannot be published). Bulk CSV uses the same codes.
             </p>
         </div>
     );
@@ -195,6 +203,156 @@ export function BunningsLogisticSelect({ storeId, value, onChange, required = fa
                 ))}
             </select>
             {error && <p className="mt-1 text-xs text-rose-600 dark:text-rose-400">{error}</p>}
+        </div>
+    );
+}
+
+const FORM_COVERED_ATTRS = new Set([
+    'ean',
+    'gtin',
+    'barcode',
+    'brand',
+    'title',
+    'description',
+    'weight',
+    'product-weight',
+    'gross-weight',
+    'length',
+    'product-length',
+    'package-length',
+    'height',
+    'product-height',
+    'package-height',
+    'width',
+    'product-width',
+    'package-width',
+]);
+
+function attrInputType(field) {
+    const t = String(field?.type || '').toUpperCase();
+    if (t.includes('LIST') || t.includes('BOOLEAN')) return 'select';
+    return 'text';
+}
+
+/** PM11 required/recommended fields for the selected Bunnings hierarchy. */
+export function BunningsAttributeFields({ storeId, hierarchy, value, onChange }) {
+    const [fields, setFields] = useState([]);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
+
+    useEffect(() => {
+        if (!storeId || !hierarchy) {
+            setFields([]);
+            setError('');
+            return;
+        }
+        let cancelled = false;
+        setLoading(true);
+        setError('');
+        getBunningsAttributes(storeId, hierarchy)
+            .then((res) => {
+                if (cancelled) return;
+                const list = Array.isArray(res.data?.attributes) ? res.data.attributes : [];
+                setFields(list.filter((f) => f?.code && !FORM_COVERED_ATTRS.has(String(f.code).toLowerCase())));
+            })
+            .catch((err) => {
+                if (cancelled) return;
+                setError(err.response?.data?.detail || 'Could not load category attributes.');
+                setFields([]);
+            })
+            .finally(() => {
+                if (!cancelled) setLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [storeId, hierarchy]);
+
+    const current = value && typeof value === 'object' ? value : {};
+
+    const setCode = (code, next) => {
+        const merged = { ...current };
+        if (next == null || String(next).trim() === '') {
+            delete merged[code];
+        } else {
+            merged[code] = String(next);
+        }
+        onChange?.(merged);
+    };
+
+    if (!hierarchy) return null;
+
+    return (
+        <div className="sm:col-span-2 space-y-3">
+            <div>
+                <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                    Category attributes
+                </p>
+                <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                    Required fields come from Bunnings for this category. Weight and dimensions above still count when Mirakl asks for them.
+                </p>
+            </div>
+            {loading && (
+                <p className="flex items-center gap-2 text-xs text-slate-500">
+                    <Loader2 className="h-4 w-4 animate-spin" /> Loading attributes…
+                </p>
+            )}
+            {error && <p className="text-xs text-rose-600 dark:text-rose-400">{error}</p>}
+            {!loading && !error && fields.length === 0 && (
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                    No extra required attributes for this category.
+                </p>
+            )}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                {fields.map((field) => {
+                    const kind = attrInputType(field);
+                    const label = `${field.label || field.code}${field.required ? '' : ' (Optional)'}`;
+                    const listValues =
+                        Array.isArray(field.values) && field.values.length > 0
+                            ? field.values
+                            : String(field.type || '').toUpperCase().includes('BOOLEAN')
+                              ? [
+                                    { code: 'Yes', label: 'Yes' },
+                                    { code: 'No', label: 'No' },
+                                ]
+                              : [];
+                    if (kind === 'select' && listValues.length > 0) {
+                        return (
+                            <div key={field.code}>
+                                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+                                    {label} {field.required ? <span className="text-rose-500">*</span> : null}
+                                </label>
+                                <select
+                                    value={current[field.code] || ''}
+                                    required={!!field.required}
+                                    onChange={(e) => setCode(field.code, e.target.value)}
+                                    className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-sm focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-none"
+                                >
+                                    <option value="">Select…</option>
+                                    {listValues.map((opt) => (
+                                        <option key={opt.code} value={opt.code}>
+                                            {opt.label || opt.code}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                        );
+                    }
+                    return (
+                        <div key={field.code}>
+                            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+                                {label} {field.required ? <span className="text-rose-500">*</span> : null}
+                            </label>
+                            <input
+                                value={current[field.code] || ''}
+                                required={!!field.required}
+                                onChange={(e) => setCode(field.code, e.target.value)}
+                                className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-sm focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-none"
+                            />
+                        </div>
+                    );
+                })}
+            </div>
         </div>
     );
 }

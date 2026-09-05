@@ -8,6 +8,7 @@ Import still accepts headers with or without that suffix.
 """
 import csv
 import io
+import json
 import re
 
 from stores.credentials import marketplace_kind
@@ -129,7 +130,37 @@ COLUMN_MAP = {
     "variant-group-code": "product_key",
     "variant group code": "product_key",
     "variant_group_code": "product_key",
+    "category attributes json": "attributes",
+    "category attributes": "attributes",
 }
+
+
+def _parse_attributes_blob(value) -> dict:
+    if isinstance(value, dict):
+        return {
+            str(k).strip(): str(v).strip()
+            for k, v in value.items()
+            if str(k or "").strip() and v not in (None, "")
+        }
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {
+        str(k).strip(): str(v).strip()
+        for k, v in parsed.items()
+        if str(k or "").strip() and v not in (None, "")
+    }
+
+
+def _is_attribute_header(header: str) -> bool:
+    text = str(header or "").strip().lower()
+    return text.startswith("attribute_") or text.startswith("pdb_") or "attribute_pdb" in text
 
 _OPTIONAL_SUFFIX_RE = re.compile(r"\s*\(optional\)\s*$", re.I)
 
@@ -414,6 +445,7 @@ BUNNINGS_TEMPLATE_HEADERS = [
     "Height (Optional)",
     "Width (Optional)",
     "Dimension Unit (Optional)",
+    "Category Attributes JSON (Optional)",
 ]
 
 BUNNINGS_EXPORT_FIELDS = [
@@ -452,6 +484,7 @@ BUNNINGS_EXPORT_FIELDS = [
     ("height", "Height (Optional)"),
     ("width", "Width (Optional)"),
     ("dimension_unit", "Dimension Unit (Optional)"),
+    ("attributes", "Category Attributes JSON (Optional)"),
 ]
 
 TEMPLATE_HEADERS = LASOO_TEMPLATE_HEADERS
@@ -607,6 +640,7 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
     rows = []
     for idx, raw in enumerate(records, start=2):
         normalized = {}
+        extra_attrs = {}
         for header, value in raw.items():
             key = COLUMN_MAP.get(_canonical_header(header))
             if key:
@@ -617,9 +651,11 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
                     normalized[key] = str(value).strip()
                     continue
                 normalized[key] = str(value).strip()
+            elif _is_attribute_header(header) and str(value).strip():
+                extra_attrs[str(header).strip()] = str(value).strip()
         if not any(str(v).strip() for v in normalized.values() if not isinstance(v, bool)):
             # Allow bool-only rows? skip empty
-            if not any(normalized.values()):
+            if not any(normalized.values()) and not extra_attrs:
                 continue
         normalized["infinite_quantity"] = _coerce_bool(normalized.get("infinite_quantity", ""))
         normalized["upc_does_not_apply"] = _coerce_bool(normalized.get("upc_does_not_apply", ""))
@@ -660,6 +696,12 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
             # Leave blank for non-MyDeal rows; publish layer has its own defaults.
             pass
         normalized["action"] = _normalize_action(normalized.get("action", ""))
+        merged_attrs = _parse_attributes_blob(normalized.get("attributes"))
+        merged_attrs.update(extra_attrs)
+        if merged_attrs:
+            normalized["attributes"] = merged_attrs
+        elif "attributes" in normalized:
+            normalized.pop("attributes", None)
         normalized["row_number"] = idx
         rows.append(normalized)
     return rows
@@ -840,6 +882,7 @@ def build_template_csv(action: str = "create", store=None) -> str:
             "Height (Optional)": "20",
             "Width (Optional)": "15",
             "Dimension Unit (Optional)": "cm",
+            "Category Attributes JSON (Optional)": "",
         }
         out = io.StringIO()
         writer = csv.DictWriter(out, fieldnames=BUNNINGS_TEMPLATE_HEADERS, lineterminator="\n")
@@ -907,6 +950,8 @@ def snapshot_row_fields(row: dict) -> dict:
             out[key] = "true" if value else "false"
         elif value is None:
             out[key] = ""
+        elif isinstance(value, (dict, list)):
+            out[key] = json.dumps(value)
         else:
             out[key] = str(value).strip() if not isinstance(value, (int, float)) else value
     action = str(out.get("action") or "").strip().lower()

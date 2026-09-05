@@ -264,7 +264,7 @@ def _validate_listing(store, data: dict) -> list[str]:
         return source_errors + etsy_listings.validate_listing(data)
     if kind == "bunnings":
         from .bunnings import products as bunnings_products
-        return source_errors + bunnings_products.validate_listing(data)
+        return source_errors + bunnings_products.validate_listing(data, store=store)
     if kind == "mydeal":
         from .mydeal import products as mydeal_products
         return source_errors + mydeal_products.validate_listing(data)
@@ -1506,13 +1506,13 @@ def publish(user, store, listing_ids=None) -> dict:
             "Currently Lasoo, Reverb, MyDeal, Etsy, and Bunnings stores can publish."
         )
 
+    statuses = [ListingStatus.READY, ListingStatus.FAILED]
+    if kind == "bunnings" and listing_ids:
+        statuses.extend([ListingStatus.UPLOADED_STAGING, ListingStatus.UPLOADED_PRODUCTION])
     qs = StoreListing.objects.filter(
         user=user,
         store=store,
-        status__in=[
-            ListingStatus.READY,
-            ListingStatus.FAILED,
-        ],
+        status__in=statuses,
     )
     if listing_ids:
         qs = qs.filter(id__in=listing_ids)

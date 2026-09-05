@@ -126,6 +126,12 @@ class Store(models.Model):
     bunnings_production_base_url = models.URLField(max_length=500, blank=True, default='')
     bunnings_staging_shop_key = EncryptedTextField(null=True, blank=True)
     bunnings_production_shop_key = EncryptedTextField(null=True, blank=True)
+    bunnings_last_order_sync_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text='Last successful Bunnings order sync cutoff (UTC). Used for incremental OR11 pulls.',
+    )
     # --- Shopify (optional: push new marketplace orders into Shopify Admin) ---
     shopify_enabled = models.BooleanField(
         default=False,

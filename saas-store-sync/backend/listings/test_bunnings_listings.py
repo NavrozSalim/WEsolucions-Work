@@ -22,7 +22,8 @@ from listings.bunnings.client import (
     parse_mirakl_error_report,
 )
 from listings.errors import MarketplaceError
-from listings.models import ListingStatus, OrderStatus
+from listings.models import ListingStatus, MarketplaceOrder, OrderStatus, SupportTicket, TicketStatus
+from listings.bunnings import tickets as bunnings_tickets
 
 VALID_BUNNINGS = {
     "sku": "BN-1",
@@ -248,19 +249,96 @@ class BunningsProductsUnitTests(SimpleTestCase):
         self.assertEqual(rows[0]["code"], "SMALL")
         self.assertEqual(rows[0]["name"], "Small parcel")
 
-    def test_extract_import_id(self):
-        self.assertEqual(extract_import_id({"import_id": 44}), "44")
-        self.assertEqual(extract_import_id({"id": "abc"}), "abc")
-        self.assertEqual(extract_import_id("nope"), "")
+    def test_flatten_product_attributes_required_and_skips_core(self):
+        rows = bunnings_products.flatten_product_attributes({
+            "attributes": [
+                {"code": "title", "label": "Title", "required": True, "type": "TEXT"},
+                {
+                    "code": "attribute_pdb_assembly",
+                    "label": "Assembly Required",
+                    "requirement_level": "REQUIRED",
+                    "type": "LIST",
+                    "values": [{"code": "Yes", "label": "Yes"}, {"code": "No", "label": "No"}],
+                },
+                {
+                    "code": "colour",
+                    "label": "Colour",
+                    "requirement_level": "RECOMMENDED",
+                    "type": "TEXT",
+                },
+                {"code": "optional-foo", "label": "Foo", "requirement_level": "OPTIONAL", "type": "TEXT"},
+            ]
+        })
+        codes = [r["code"] for r in rows]
+        self.assertIn("attribute_pdb_assembly", codes)
+        self.assertIn("colour", codes)
+        self.assertNotIn("title", codes)
+        self.assertNotIn("optional-foo", codes)
+        assembly = next(r for r in rows if r["code"] == "attribute_pdb_assembly")
+        self.assertTrue(assembly["required"])
+
+    def test_validate_requires_pm11_attribute(self):
+        store = SimpleNamespace(id="store-1")
+        with patch(
+            "listings.bunnings.products.load_category_attributes",
+            return_value=[{
+                "code": "attribute_pdb_assembly",
+                "label": "Assembly Required",
+                "required": True,
+            }],
+        ):
+            errors = " ".join(bunnings_products.validate_listing(VALID_BUNNINGS, store=store))
+            self.assertIn("Assembly Required", errors)
+            ok = {
+                **VALID_BUNNINGS,
+                "attributes": {"attribute_pdb_assembly": "Yes"},
+            }
+            self.assertEqual(bunnings_products.validate_listing(ok, store=store), [])
+
+    def test_products_csv_includes_attributes_and_weight(self):
+        listing = _listing_ns(
+            weight="2.5",
+            length="30",
+            attributes={"attribute_pdb_assembly": "Yes"},
+        )
+        text = bunnings_products.products_csv([listing])
+        header = text.splitlines()[0]
+        self.assertIn("attribute_pdb_assembly", header)
+        self.assertIn("Yes", text)
+        self.assertIn("2.5", text)
+        self.assertIn("30", text)
 
 
 class BunningsOrdersUnitTests(SimpleTestCase):
     def test_map_order_status(self):
         self.assertEqual(bunnings_orders.map_order_status("WAITING_ACCEPTANCE"), OrderStatus.NEW)
+        self.assertEqual(bunnings_orders.map_order_status("WAITING_DEBIT"), OrderStatus.PAID)
+        self.assertEqual(bunnings_orders.map_order_status("WAITING_DEBIT_PAYMENT"), OrderStatus.PAID)
         self.assertEqual(bunnings_orders.map_order_status("SHIPPING"), OrderStatus.PAID)
         self.assertEqual(bunnings_orders.map_order_status("SHIPPED"), OrderStatus.SENT)
         self.assertEqual(bunnings_orders.map_order_status("CLOSED"), OrderStatus.SHIPPING_COMPLETE)
         self.assertEqual(bunnings_orders.map_order_status("CANCELED"), OrderStatus.CANCELLED)
+
+    def test_accept_refetches_instead_of_faking_shipping(self):
+        client = SimpleNamespace()
+        client.accept_order = lambda *_a, **_k: BunningsResult(ok=True, data={})
+        client.get_order = lambda _oid: BunningsResult(
+            ok=True,
+            data={
+                "order_id": "X",
+                "order_state": "WAITING_DEBIT",
+                "order_lines": [{"order_line_id": "L1"}],
+            },
+        )
+        raw = {
+            "order_id": "X",
+            "order_state": "WAITING_ACCEPTANCE",
+            "order_lines": [{"order_line_id": "L1"}],
+        }
+        updated, did = bunnings_orders._accept_if_needed(client, raw)
+        self.assertTrue(did)
+        self.assertEqual(updated["order_state"], "WAITING_DEBIT")
+        self.assertNotEqual(updated["order_state"], "SHIPPING")
 
     def test_tracking_payload_maps_auspost(self):
         payload = bunnings_orders.build_tracking_payload(
@@ -316,6 +394,12 @@ class BunningsListingServiceTests(TestCase):
             bunnings_production_base_url="https://bunnings-prod.mirakl.net",
             bunnings_production_shop_key="test-key",
         )
+        self._attr_patch = patch(
+            "listings.bunnings.products.load_category_attributes",
+            return_value=[],
+        )
+        self._attr_patch.start()
+        self.addCleanup(self._attr_patch.stop)
 
     def test_template_headers_and_parse(self):
         csv_text = csv_import.build_template_csv("create", store=self.store)
@@ -335,6 +419,18 @@ class BunningsListingServiceTests(TestCase):
         self.assertEqual(rows[0]["sale_price"], "79.99")
         self.assertEqual(rows[0]["logistic_class"], "SMALL")
         self.assertEqual(rows[0]["leadtime_to_ship"], "2")
+        self.assertIn("Category Attributes JSON (Optional)", csv_text)
+
+        attr_csv = (
+            "SKU,Title,Description,Brand,Category,Image URLs,Inventory,Price,Logistic Class,"
+            "Category Attributes JSON (Optional),attribute_pdb_assembly\n"
+            'BN-ATTR,T,D,B,DRILLS,https://example.com/a.jpg,1,9.99,SMALL,'
+            '"{""foo"":""bar""}",Yes\n'
+        )
+        attr_rows = csv_import.parse_upload("bunnings.csv", attr_csv.encode())
+        self.assertEqual(attr_rows[0]["sku"], "BN-ATTR")
+        self.assertEqual(attr_rows[0]["attributes"]["foo"], "bar")
+        self.assertEqual(attr_rows[0]["attributes"]["attribute_pdb_assembly"], "Yes")
 
     def test_create_variation_listing(self):
         listing = listing_service.create(
@@ -441,3 +537,139 @@ class BunningsListingServiceTests(TestCase):
     def test_create_test_order_rejected(self):
         with self.assertRaises(MarketplaceError):
             order_service.create_test_order(self.user, self.store)
+
+    def test_create_persists_category_attributes_and_weight(self):
+        listing = listing_service.create(
+            self.user,
+            self.store,
+            {
+                **VALID_BUNNINGS,
+                "attributes": {"attribute_pdb_assembly": "Yes"},
+                "weight": "2.5",
+            },
+        )
+        extras = bunnings_products.parse_extras(listing)
+        self.assertEqual(extras.get("attributes", {}).get("attribute_pdb_assembly"), "Yes")
+        self.assertEqual(extras.get("weight"), "2.5")
+
+    @patch("listings.bunnings.products.BunningsClient")
+    def test_publish_retries_false_uploaded_when_ids_given(self, mock_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        listing.status = ListingStatus.UPLOADED_PRODUCTION
+        listing.save(update_fields=["status"])
+        client = mock_cls.return_value
+        client.environment = "production"
+        client.import_products.return_value = BunningsResult(ok=True, data={"import_id": "p1"})
+        client.import_offers.return_value = BunningsResult(ok=True, data={"import_id": "o1"})
+        client.poll_import.return_value = BunningsResult(
+            ok=True, data={"import_status": "COMPLETE"}, message="COMPLETE"
+        )
+        result = listing_service.publish(self.user, self.store, listing_ids=[listing.id])
+        self.assertTrue(result["ok"])
+        client.import_products.assert_called_once()
+
+    @patch("listings.bunnings.orders.BunningsClient")
+    def test_fetch_includes_debit_states(self, mock_cls):
+        client = mock_cls.return_value
+
+        def list_orders(**kwargs):
+            states = kwargs.get("order_state_codes") or ""
+            if "WAITING_DEBIT" in states:
+                return BunningsResult(
+                    ok=True,
+                    data={
+                        "orders": [
+                            {
+                                "order_id": "ORD-DEBIT",
+                                "order_state": "WAITING_DEBIT",
+                                "total_price": "10.00",
+                                "order_lines": [],
+                            }
+                        ]
+                    },
+                )
+            return BunningsResult(ok=True, data={"orders": []})
+
+        client.list_orders.side_effect = lambda **kw: list_orders(**kw)
+        result = bunnings_orders.fetch(self.user, self.store)
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["fetched"], 1)
+        order = MarketplaceOrder.objects.get(store=self.store, external_order_key="ORD-DEBIT")
+        self.assertEqual(order.status, OrderStatus.PAID)
+        self.store.refresh_from_db()
+        self.assertIsNotNone(self.store.bunnings_last_order_sync_at)
+        state_calls = [
+            c.kwargs.get("order_state_codes") or ""
+            for c in client.list_orders.call_args_list
+        ]
+        self.assertTrue(any("WAITING_DEBIT_PAYMENT" in s for s in state_calls))
+
+    @patch("listings.bunnings.orders.BunningsClient")
+    def test_cancel_sends_reason_body(self, mock_cls):
+        client = mock_cls.return_value
+        client.cancel_order.return_value = BunningsResult(ok=True, data={})
+        order = MarketplaceOrder.objects.create(
+            user=self.user,
+            store=self.store,
+            external_order_key="ORD-9",
+            invoice_number="ORD-9",
+            status=OrderStatus.PAID,
+            environment="production",
+            raw_response_json={"status": "SHIPPING", "_bunnings": {"order_state": "SHIPPING"}},
+        )
+        result = bunnings_orders.cancel(order, reason="OUT_OF_STOCK")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["marketplace_ok"])
+        client.cancel_order.assert_called_once()
+        kwargs = client.cancel_order.call_args.kwargs
+        self.assertEqual(kwargs["reason_code"], "OUT_OF_STOCK")
+        self.assertTrue(kwargs["reason_label"])
+
+    def test_upsert_inbox_thread(self):
+        raw = {
+            "id": "th-1",
+            "topic": {"value": "Order question"},
+            "entities": [{"type": "MMP_ORDER", "id": "ORD-1"}],
+            "metadata": {"shop_reply_needed_since": "2026-01-01T00:00:00Z"},
+            "messages": [
+                {
+                    "id": "m1",
+                    "body": "Where is it?",
+                    "date_created": "2026-01-01T00:00:00Z",
+                    "from": {"type": "CUSTOMER", "display_name": "Sam"},
+                }
+            ],
+        }
+        ticket = bunnings_tickets.upsert_thread(self.user, self.store, raw)
+        self.assertIsNotNone(ticket)
+        self.assertEqual(ticket.external_ticket_key, "th-1")
+        self.assertEqual(ticket.related_order_key, "ORD-1")
+        self.assertEqual(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.messages.count(), 1)
+        self.assertEqual(ticket.messages.first().body, "Where is it?")
+
+    @patch("listings.bunnings.tickets.BunningsClient")
+    def test_ticket_fetch_lists_threads(self, mock_cls):
+        client = mock_cls.return_value
+        client.list_threads.return_value = BunningsResult(
+            ok=True,
+            data={
+                "data": [
+                    {
+                        "id": "th-2",
+                        "topic": {"value": "Help"},
+                        "messages": [
+                            {
+                                "id": "m2",
+                                "body": "Hi",
+                                "from": {"type": "CUSTOMER", "display_name": "Pat"},
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        result = bunnings_tickets.fetch(self.user, self.store)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["fetched"], 1)
+        self.assertTrue(SupportTicket.objects.filter(external_ticket_key="th-2").exists())

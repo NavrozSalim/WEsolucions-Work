@@ -131,7 +131,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                             <> MyDeal columns include Parent SKU, Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
                         )}
                         {isBunnings && (
-                            <> Bunnings columns include Category code, Price (GST inclusive), Logistic Class, GTIN, Image URLs, and Parent SKU / Option Name-Value for size and colour variants (sent as Variant Group Code).</>
+                            <> Bunnings columns include a leaf Category code, Price (GST inclusive), Logistic Class, GTIN, Image URLs, Parent SKU / Option Name-Value for variants, and Category Attributes JSON (or extra attribute_* columns from the Bunnings template).</>
                         )}
                     </p>
 
