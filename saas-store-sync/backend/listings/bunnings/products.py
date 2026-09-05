@@ -121,6 +121,26 @@ _DIM_FALLBACKS = {
     "height": ("height", "product-height", "package-height"),
     "width": ("width", "product-width", "package-width"),
 }
+TEMPLATE_SKIP_ATTRS = frozenset({
+    "ean",
+    "gtin",
+    "barcode",
+    "brand",
+    "title",
+    "description",
+    "weight",
+    "product-weight",
+    "gross-weight",
+    "length",
+    "product-length",
+    "package-length",
+    "height",
+    "product-height",
+    "package-height",
+    "width",
+    "product-width",
+    "package-width",
+})
 
 
 def attributes_from_data(data: dict) -> dict:
@@ -362,6 +382,33 @@ def flatten_product_attributes(payload) -> list[dict]:
         })
     out.sort(key=lambda r: (not r["required"], r["label"].lower()))
     return out
+
+
+def template_attribute_columns(store, hierarchy_codes) -> list[dict]:
+    """PM11 columns for a bulk CSV: human label plus [attribute-code] for import."""
+    seen: set[str] = set()
+    columns: list[dict] = []
+    for raw_code in hierarchy_codes or []:
+        hierarchy = str(raw_code or "").strip()
+        if not hierarchy:
+            continue
+        for item in load_category_attributes(store, hierarchy):
+            code = str(item.get("code") or "").strip()
+            if not code or code in seen or code.lower() in TEMPLATE_SKIP_ATTRS:
+                continue
+            seen.add(code)
+            label = str(item.get("label") or code).strip() or code
+            if item.get("required"):
+                header = f"{label} [{code}]"
+            else:
+                header = f"{label} (Optional) [{code}]"
+            columns.append({
+                "code": code,
+                "header": header,
+                "label": label,
+                "required": bool(item.get("required")),
+            })
+    return columns
 
 
 def load_category_attributes(store, hierarchy_code: str) -> list[dict]:

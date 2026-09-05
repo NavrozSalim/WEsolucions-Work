@@ -51,9 +51,9 @@ export const bulkUploadListings = (storeId, file, action = 'create') => {
     });
 };
 
-export const downloadListingTemplate = (storeId, action = 'create') =>
+export const downloadListingTemplate = (storeId, action = 'create', extraParams = {}) =>
     api.get(`/stores/${storeId}/listings/template/`, {
-        params: { action },
+        params: { action, ...extraParams },
         responseType: 'blob',
     });
 

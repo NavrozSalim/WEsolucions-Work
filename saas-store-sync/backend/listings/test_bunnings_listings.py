@@ -277,6 +277,22 @@ class BunningsProductsUnitTests(SimpleTestCase):
         assembly = next(r for r in rows if r["code"] == "attribute_pdb_assembly")
         self.assertTrue(assembly["required"])
 
+    def test_template_attribute_columns_skips_core_and_formats_header(self):
+        store = SimpleNamespace(id="s1")
+        with patch(
+            "listings.bunnings.products.load_category_attributes",
+            return_value=[
+                {"code": "title", "label": "Title", "required": True},
+                {"code": "attribute_pdb_assembly", "label": "Assembly Required", "required": True},
+                {"code": "colour", "label": "Colour", "required": False},
+            ],
+        ):
+            cols = bunnings_products.template_attribute_columns(store, ["BEDSIDE"])
+        codes = [c["code"] for c in cols]
+        self.assertNotIn("title", codes)
+        self.assertEqual(cols[0]["header"], "Assembly Required [attribute_pdb_assembly]")
+        self.assertEqual(cols[1]["header"], "Colour (Optional) [colour]")
+
     def test_validate_requires_pm11_attribute(self):
         store = SimpleNamespace(id="store-1")
         with patch(
@@ -431,6 +447,37 @@ class BunningsListingServiceTests(TestCase):
         self.assertEqual(attr_rows[0]["sku"], "BN-ATTR")
         self.assertEqual(attr_rows[0]["attributes"]["foo"], "bar")
         self.assertEqual(attr_rows[0]["attributes"]["attribute_pdb_assembly"], "Yes")
+
+        labeled = (
+            "SKU,Title,Description,Brand,Category,Image URLs,Inventory,Price,Logistic Class,"
+            "Assembly Required [attribute_pdb_assembly]\n"
+            "BN-LAB,T,D,B,BEDSIDE,https://example.com/a.jpg,1,9.99,SMALL,Yes\n"
+        )
+        labeled_rows = csv_import.parse_upload("bunnings.csv", labeled.encode())
+        self.assertEqual(labeled_rows[0]["attributes"]["attribute_pdb_assembly"], "Yes")
+
+    def test_template_adds_columns_for_selected_categories(self):
+        with patch(
+            "listings.bunnings.products.load_category_attributes",
+            return_value=[{
+                "code": "attribute_pdb_assembly",
+                "label": "Assembly Required",
+                "required": True,
+            }],
+        ):
+            csv_text = csv_import.build_template_csv(
+                "create",
+                store=self.store,
+                hierarchies=["BEDSIDE", "DRILLS"],
+            )
+        self.assertIn("Assembly Required [attribute_pdb_assembly]", csv_text)
+        self.assertNotIn("Category Attributes JSON", csv_text)
+        self.assertIn("BEDSIDE", csv_text)
+        self.assertIn("DRILLS", csv_text)
+        rows = csv_import.parse_upload("bunnings.csv", csv_text.encode())
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["category"], "BEDSIDE")
+        self.assertEqual(rows[1]["category"], "DRILLS")
 
     def test_create_variation_listing(self):
         listing = listing_service.create(

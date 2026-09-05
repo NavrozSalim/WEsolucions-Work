@@ -162,6 +162,20 @@ def _is_attribute_header(header: str) -> bool:
     text = str(header or "").strip().lower()
     return text.startswith("attribute_") or text.startswith("pdb_") or "attribute_pdb" in text
 
+
+_ATTR_CODE_IN_HEADER_RE = re.compile(r"\[([^\]]+)\]\s*$")
+
+
+def _attribute_code_from_header(header: str) -> str:
+    """Read Mirakl attribute code from 'Assembly Required [attribute_pdb_…]'."""
+    text = str(header or "").strip()
+    match = _ATTR_CODE_IN_HEADER_RE.search(text)
+    if match:
+        return match.group(1).strip()
+    if _is_attribute_header(text):
+        return text
+    return ""
+
 _OPTIONAL_SUFFIX_RE = re.compile(r"\s*\(optional\)\s*$", re.I)
 
 
@@ -642,6 +656,11 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
         normalized = {}
         extra_attrs = {}
         for header, value in raw.items():
+            attr_code = _attribute_code_from_header(header)
+            if attr_code:
+                if str(value).strip():
+                    extra_attrs[attr_code] = str(value).strip()
+                continue
             key = COLUMN_MAP.get(_canonical_header(header))
             if key:
                 existing = normalized.get(key)
@@ -651,8 +670,6 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
                     normalized[key] = str(value).strip()
                     continue
                 normalized[key] = str(value).strip()
-            elif _is_attribute_header(header) and str(value).strip():
-                extra_attrs[str(header).strip()] = str(value).strip()
         if not any(str(v).strip() for v in normalized.values() if not isinstance(v, bool)):
             # Allow bool-only rows? skip empty
             if not any(normalized.values()) and not extra_attrs:
@@ -712,7 +729,7 @@ def _marketplace_label(store) -> str:
     return (getattr(mp, "name", None) or getattr(mp, "code", None) or "").strip()
 
 
-def build_template_csv(action: str = "create", store=None) -> str:
+def build_template_csv(action: str = "create", store=None, hierarchies=None) -> str:
     """Template CSV for the given action. Headers mark optional columns."""
     action = (action or "create").strip().lower()
     if action == "delete":
@@ -846,48 +863,74 @@ def build_template_csv(action: str = "create", store=None) -> str:
         return out.getvalue()
 
     if _is_bunnings_store(store):
-        sample = {
-            "Vendor Name (Optional)": "Amazon AU",
-            "Vendor URL (Optional)": "https://www.amazon.com.au/dp/EXAMPLE",
-            "Vendor ID (Optional)": "",
-            "Marketplace Name (Optional)": marketplace_name or "Bunnings",
-            "Store Name (Optional)": store_name,
-            "Action": "Mapped" if action == "mapped" else "Create",
-            "Parent SKU": "BN-EXAMPLE-001",
-            "SKU": "BN-EXAMPLE-001-M",
-            "Option 1 Name (Optional)": "Size",
-            "Option 1 Value (Optional)": "M",
-            "Option 2 Name (Optional)": "Colour",
-            "Option 2 Value (Optional)": "Red",
-            "Option 3 Name (Optional)": "",
-            "Option 3 Value (Optional)": "",
-            "Option 4 Name (Optional)": "",
-            "Option 4 Value (Optional)": "",
-            "Variation Img URL (Optional)": "https://example.com/photo-red-m.jpg",
-            "Title": "Example Power Drill",
-            "Description": "Example product description for Bunnings Marketplace.",
-            "Brand": "ExampleBrand",
-            "Category": "HIERARCHY_CODE",
-            "GTIN (Optional)": "9300000000001",
-            "MPN (Optional)": "",
-            "Image URLs": "https://example.com/photo1.jpg|https://example.com/photo2.jpg",
-            "Inventory": "5",
-            "Price": "79.99",
-            "RRP (Optional)": "99.99",
-            "Logistic Class": "SMALL",
-            "Leadtime To Ship (Optional)": "2",
-            "Weight (Optional)": "2.5",
-            "Weight Unit (Optional)": "kg",
-            "Length (Optional)": "30",
-            "Height (Optional)": "20",
-            "Width (Optional)": "15",
-            "Dimension Unit (Optional)": "cm",
-            "Category Attributes JSON (Optional)": "",
-        }
+        hierarchy_codes = [
+            str(code).strip()
+            for code in (hierarchies or [])
+            if str(code or "").strip()
+        ]
+        attr_columns = []
+        if hierarchy_codes:
+            from listings.bunnings import products as bunnings_products
+
+            attr_columns = bunnings_products.template_attribute_columns(store, hierarchy_codes)
+        headers = list(BUNNINGS_TEMPLATE_HEADERS)
+        if hierarchy_codes:
+            headers = [h for h in headers if h != "Category Attributes JSON (Optional)"]
+            headers.extend(col["header"] for col in attr_columns)
+
+        def _bunnings_sample(category_code: str, index: int = 1) -> dict:
+            sku_suffix = "" if index == 1 else f"-{index}"
+            row = {
+                "Vendor Name (Optional)": "Amazon AU",
+                "Vendor URL (Optional)": "https://www.amazon.com.au/dp/EXAMPLE",
+                "Vendor ID (Optional)": "",
+                "Marketplace Name (Optional)": marketplace_name or "Bunnings",
+                "Store Name (Optional)": store_name,
+                "Action": "Mapped" if action == "mapped" else "Create",
+                "Parent SKU": f"BN-EXAMPLE-001{sku_suffix}",
+                "SKU": f"BN-EXAMPLE-001{sku_suffix}-M",
+                "Option 1 Name (Optional)": "Size",
+                "Option 1 Value (Optional)": "M",
+                "Option 2 Name (Optional)": "Colour",
+                "Option 2 Value (Optional)": "Red",
+                "Option 3 Name (Optional)": "",
+                "Option 3 Value (Optional)": "",
+                "Option 4 Name (Optional)": "",
+                "Option 4 Value (Optional)": "",
+                "Variation Img URL (Optional)": "https://example.com/photo-red-m.jpg",
+                "Title": "Example Power Drill",
+                "Description": "Example product description for Bunnings Marketplace.",
+                "Brand": "ExampleBrand",
+                "Category": category_code or "HIERARCHY_CODE",
+                "GTIN (Optional)": "9300000000001",
+                "MPN (Optional)": "",
+                "Image URLs": "https://example.com/photo1.jpg|https://example.com/photo2.jpg",
+                "Inventory": "5",
+                "Price": "79.99",
+                "RRP (Optional)": "99.99",
+                "Logistic Class": "SMALL",
+                "Leadtime To Ship (Optional)": "2",
+                "Weight (Optional)": "2.5",
+                "Weight Unit (Optional)": "kg",
+                "Length (Optional)": "30",
+                "Height (Optional)": "20",
+                "Width (Optional)": "15",
+                "Dimension Unit (Optional)": "cm",
+            }
+            if "Category Attributes JSON (Optional)" in headers:
+                row["Category Attributes JSON (Optional)"] = ""
+            for col in attr_columns:
+                row[col["header"]] = ""
+            return row
+
         out = io.StringIO()
-        writer = csv.DictWriter(out, fieldnames=BUNNINGS_TEMPLATE_HEADERS, lineterminator="\n")
+        writer = csv.DictWriter(out, fieldnames=headers, lineterminator="\n")
         writer.writeheader()
-        writer.writerow(sample)
+        if hierarchy_codes:
+            for i, code in enumerate(hierarchy_codes, start=1):
+                writer.writerow(_bunnings_sample(code, i))
+        else:
+            writer.writerow(_bunnings_sample(""))
         return out.getvalue()
 
     sample_black = {

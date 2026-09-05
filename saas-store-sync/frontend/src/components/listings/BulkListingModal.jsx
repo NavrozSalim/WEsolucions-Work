@@ -3,6 +3,7 @@ import { Download, UploadCloud, X } from 'lucide-react';
 import Button from '../ui/Button';
 import Select from '../ui/Select';
 import { bulkUploadListings, downloadListingTemplate } from '../../services/listingService';
+import { BunningsCategoryMultiSelect } from './BunningsCatalogSelects';
 
 const ACTION_OPTIONS = [
     { value: 'create', label: 'Create — new listings' },
@@ -24,6 +25,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
     const [uploading, setUploading] = useState(false);
     const [error, setError] = useState('');
     const [result, setResult] = useState(null);
+    const [bunningsCategories, setBunningsCategories] = useState([]);
 
     if (!open) return null;
 
@@ -32,6 +34,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
         setAction('create');
         setError('');
         setResult(null);
+        setBunningsCategories([]);
         if (fileRef.current) fileRef.current.value = '';
     };
 
@@ -41,12 +44,24 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
     };
 
     const handleTemplate = () => {
-        downloadListingTemplate(storeId, action)
+        const extra = {};
+        if (isBunnings && (action === 'create' || action === 'mapped')) {
+            if (!bunningsCategories.length) {
+                setError('Select at least one Bunnings category, then download the template.');
+                return;
+            }
+            extra.hierarchies = bunningsCategories.map((c) => c.code).join(',');
+        }
+        setError('');
+        downloadListingTemplate(storeId, action, extra)
             .then((res) => {
                 const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `listing_template_${action}.csv`;
+                const suffix = extra.hierarchies
+                    ? `_${bunningsCategories.map((c) => c.code).slice(0, 3).join('_')}`
+                    : '';
+                a.download = `listing_template_${action}${suffix}.csv`;
                 a.click();
                 URL.revokeObjectURL(url);
             })
@@ -131,7 +146,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                             <> MyDeal columns include Parent SKU, Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
                         )}
                         {isBunnings && (
-                            <> Bunnings columns include a leaf Category code, Price (GST inclusive), Logistic Class, GTIN, Image URLs, Parent SKU / Option Name-Value for variants, and Category Attributes JSON (or extra attribute_* columns from the Bunnings template).</>
+                            <> Bunnings: pick the leaf categories for this file, download the template, then fill the extra columns Bunnings requires for those categories (shown as named columns, not JSON). Also fill Category, Price (GST inclusive), Logistic Class, GTIN, Image URLs, and Parent SKU / Option Name-Value for variants.</>
                         )}
                     </p>
 
@@ -139,14 +154,35 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                         <Select
                             label="Action for this file"
                             value={action}
-                            onChange={(e) => { setAction(e.target.value); setFile(null); if (fileRef.current) fileRef.current.value = ''; }}
+                            onChange={(e) => {
+                                setAction(e.target.value);
+                                setFile(null);
+                                setBunningsCategories([]);
+                                if (fileRef.current) fileRef.current.value = '';
+                            }}
                             options={ACTION_OPTIONS}
                         />
                         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{actionHelp[action]}</p>
                     </div>
 
+                    {isBunnings && (action === 'create' || action === 'mapped') && (
+                        <div className="mt-4">
+                            <BunningsCategoryMultiSelect
+                                storeId={storeId}
+                                values={bunningsCategories}
+                                onChange={setBunningsCategories}
+                                required
+                            />
+                        </div>
+                    )}
+
                     <div className="mt-4 flex flex-wrap items-center gap-2">
-                        <Button variant="secondary" size="sm" onClick={handleTemplate}>
+                        <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={handleTemplate}
+                            disabled={isBunnings && (action === 'create' || action === 'mapped') && bunningsCategories.length === 0}
+                        >
                             <Download className="mr-1.5 h-4 w-4" />
                             Download template
                         </Button>

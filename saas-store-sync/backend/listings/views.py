@@ -401,8 +401,18 @@ class StoreListingTemplateView(APIView):
     def get(self, request, store_pk):
         store = _get_store(request, store_pk)
         action = (request.query_params.get('action') or 'create').strip().lower()
+        raw_hierarchies = (
+            request.query_params.get('hierarchies')
+            or request.query_params.get('hierarchy')
+            or ''
+        )
+        hierarchies = [
+            part.strip()
+            for part in str(raw_hierarchies).replace(';', ',').split(',')
+            if part.strip()
+        ]
         resp = HttpResponse(
-            csv_import.build_template_csv(action, store=store),
+            csv_import.build_template_csv(action, store=store, hierarchies=hierarchies or None),
             content_type='text/csv',
         )
         name = f'listing_template_{action}.csv'
