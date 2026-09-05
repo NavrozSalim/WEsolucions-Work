@@ -1,8 +1,10 @@
 """HTTP client for the MyDeal (WMP) Universal API.
 
 Auth flow (API doc §0.4 / OpenIddict):
-  1. POST /mydealaccesstoken with HTTP Basic (client_id:client_secret) and
-     grant_type=client_credentials → bearer access_token
+  1. POST /mydealaccesstoken with grant_type=client_credentials → bearer access_token.
+     Production (api-integrations.mydeal.com.au) requires ClientID/Secret in the form
+     body. Sandbox expects HTTP Basic (body-only → OpenIddict ID2029). We try the
+     environment's preferred style first, then the other once on 400/401 client errors.
   2. Subsequent calls send Authorization: Bearer <token> plus SellerID / SellerToken
      headers for the active seller.
 
@@ -105,6 +107,37 @@ class MyDealClient:
             "Accept": "application/json",
         }
 
+    def _token_auth_modes(self) -> tuple[str, ...]:
+        # Production OpenIddict accepts form-body client_id/client_secret and rejects
+        # HTTP Basic (ID2055). Sandbox is the reverse (body-only → ID2029).
+        if self.environment == "production":
+            return ("body", "basic")
+        return ("basic", "body")
+
+    def _post_access_token(self, url: str, *, mode: str):
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        }
+        if mode == "body":
+            return requests.post(
+                url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": self._client_id,
+                    "client_secret": self._client_secret,
+                },
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+            )
+        return requests.post(
+            url,
+            data={"grant_type": "client_credentials"},
+            auth=(self._client_id, self._client_secret),
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+        )
+
     def get_access_token(self, *, force: bool = False) -> str:
         """Obtain (or reuse cached) bearer token via client_credentials."""
         now = time.time()
@@ -117,53 +150,45 @@ class MyDealClient:
             return self._access_token
 
         url = self._url("/mydealaccesstoken")
-        logger.info(
-            "MyDeal token request store=%s env=%s",
-            self.store.name,
-            self.environment,
-        )
-        try:
-            # OpenIddict (MyDeal sandbox/prod) expects client credentials via HTTP Basic
-            # auth, not form-body client_id/client_secret (body-only → ID2029 missing client_id).
-            resp = requests.post(
-                url,
-                data={"grant_type": "client_credentials"},
-                auth=(self._client_id, self._client_secret),
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Accept": "application/json",
-                },
-                timeout=REQUEST_TIMEOUT,
+        last_error: MarketplaceError | None = None
+        for index, mode in enumerate(self._token_auth_modes()):
+            logger.info(
+                "MyDeal token request store=%s env=%s mode=%s",
+                self.store.name,
+                self.environment,
+                mode,
             )
-        except requests.RequestException as exc:
-            logger.error("MyDeal token connection error: %s", exc)
-            raise MarketplaceError("Could not reach MyDeal token endpoint. Check the base URL.") from exc
+            try:
+                resp = self._post_access_token(url, mode=mode)
+            except requests.RequestException as exc:
+                logger.error("MyDeal token connection error: %s", exc)
+                raise MarketplaceError(
+                    "Could not reach MyDeal token endpoint. Check the base URL."
+                ) from exc
 
-        body = _safe_json(resp)
-        if not resp.ok:
+            body = _safe_json(resp)
+            if resp.ok:
+                token, expires_in = _parse_token_response(body)
+                if not token:
+                    raise MarketplaceError("MyDeal token response did not include access_token.")
+                self._access_token = token
+                self._token_expires_at = time.time() + max(expires_in, 60)
+                return token
+
             msg = _token_error_message(body, resp.status_code)
             logger.error(
-                "MyDeal token error status=%s amzn=%s body=%s",
+                "MyDeal token error status=%s mode=%s amzn=%s body=%s",
                 resp.status_code,
+                mode,
                 resp.headers.get("x-amzn-ErrorType") or "",
                 body,
             )
-            raise MarketplaceError(msg)
+            last_error = MarketplaceError(msg)
+            if index == 0 and _token_style_mismatch(body, resp.status_code):
+                continue
+            raise last_error
 
-        token = ""
-        expires_in = 3599
-        if isinstance(body, dict):
-            token = str(body.get("access_token") or "").strip()
-            try:
-                expires_in = int(body.get("expires_in") or 3599)
-            except (TypeError, ValueError):
-                expires_in = 3599
-        if not token:
-            raise MarketplaceError("MyDeal token response did not include access_token.")
-
-        self._access_token = token
-        self._token_expires_at = time.time() + max(expires_in, 60)
-        return token
+        raise last_error or MarketplaceError("MyDeal rejected client credentials.")
 
     def request(
         self,
@@ -449,6 +474,36 @@ def _safe_json(resp):
         return resp.json()
     except Exception:  # noqa: BLE001
         return {"raw": (resp.text or "")[:2000]}
+
+
+def _parse_token_response(body) -> tuple[str, int]:
+    token = ""
+    expires_in = 3599
+    if isinstance(body, dict):
+        token = str(body.get("access_token") or "").strip()
+        try:
+            expires_in = int(body.get("expires_in") or 3599)
+        except (TypeError, ValueError):
+            expires_in = 3599
+    return token, expires_in
+
+
+def _token_style_mismatch(body, status: int) -> bool:
+    """True when OpenIddict rejected this auth style (Basic vs form body)."""
+    if status not in (400, 401):
+        return False
+    if not isinstance(body, dict):
+        return False
+    err = str(body.get("error") or "").strip().lower()
+    desc = str(body.get("error_description") or body.get("message") or "").lower()
+    uri = str(body.get("error_uri") or "")
+    if err in ("invalid_client", "invalid_request"):
+        return True
+    if "ID2029" in uri or "ID2052" in uri or "ID2055" in uri:
+        return True
+    if "client_id" in desc or "client credentials" in desc:
+        return True
+    return False
 
 
 def _token_error_message(body, status: int) -> str:

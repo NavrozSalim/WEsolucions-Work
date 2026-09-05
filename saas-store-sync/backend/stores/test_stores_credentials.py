@@ -493,6 +493,93 @@ class MyDealConnectionTests(SimpleTestCase):
         self.assertEqual(kwargs['headers']['SellerToken'], 'stoken')
 
     @patch('listings.mydeal.client.requests.post')
+    def test_mydeal_production_token_uses_form_body(self, mock_post):
+        from listings.mydeal.client import MyDealClient
+
+        token_resp = MagicMock()
+        token_resp.ok = True
+        token_resp.status_code = 200
+        token_resp.json.return_value = {'access_token': 'tok-prod', 'expires_in': 14400}
+        mock_post.return_value = token_resp
+
+        store = self._store(
+            mydeal_environment='production',
+            mydeal_production_base_url='https://api-integrations.mydeal.com.au',
+            mydeal_production_client_id='MyDealUniversalApiIntegration',
+            mydeal_production_client_secret='live-secret',
+            mydeal_production_seller_id='sid',
+            mydeal_production_seller_token='stoken',
+        )
+        token = MyDealClient(store).get_access_token(force=True)
+        self.assertEqual(token, 'tok-prod')
+        mock_post.assert_called_once()
+        token_kwargs = mock_post.call_args.kwargs
+        token_body = token_kwargs.get('data') or {}
+        self.assertEqual(token_body.get('grant_type'), 'client_credentials')
+        self.assertEqual(token_body.get('client_id'), 'MyDealUniversalApiIntegration')
+        self.assertEqual(token_body.get('client_secret'), 'live-secret')
+        self.assertIsNone(token_kwargs.get('auth'))
+
+    @patch('listings.mydeal.client.requests.post')
+    def test_mydeal_production_falls_back_to_basic(self, mock_post):
+        from listings.mydeal.client import MyDealClient
+
+        body_fail = MagicMock()
+        body_fail.ok = False
+        body_fail.status_code = 400
+        body_fail.headers = {}
+        body_fail.json.return_value = {
+            'error': 'invalid_request',
+            'error_description': "The mandatory 'client_id' parameter is missing.",
+            'error_uri': 'https://documentation.openiddict.com/errors/ID2029',
+        }
+        basic_ok = MagicMock()
+        basic_ok.ok = True
+        basic_ok.status_code = 200
+        basic_ok.json.return_value = {'access_token': 'tok-basic', 'expires_in': 3600}
+        mock_post.side_effect = [body_fail, basic_ok]
+
+        store = self._store(
+            mydeal_environment='production',
+            mydeal_production_base_url='https://api-integrations.mydeal.com.au',
+            mydeal_production_client_id='cid',
+            mydeal_production_client_secret='csecret',
+            mydeal_production_seller_id='sid',
+            mydeal_production_seller_token='stoken',
+        )
+        token = MyDealClient(store).get_access_token(force=True)
+        self.assertEqual(token, 'tok-basic')
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertEqual(mock_post.call_args.kwargs.get('auth'), ('cid', 'csecret'))
+
+    @patch('listings.mydeal.client.requests.post')
+    def test_mydeal_sandbox_falls_back_to_form_body(self, mock_post):
+        from listings.mydeal.client import MyDealClient
+
+        basic_fail = MagicMock()
+        basic_fail.ok = False
+        basic_fail.status_code = 401
+        basic_fail.headers = {}
+        basic_fail.json.return_value = {
+            'error': 'invalid_client',
+            'error_description': 'The specified client credentials are invalid.',
+            'error_uri': 'https://documentation.openiddict.com/errors/ID2055',
+        }
+        body_ok = MagicMock()
+        body_ok.ok = True
+        body_ok.status_code = 200
+        body_ok.json.return_value = {'access_token': 'tok-body', 'expires_in': 14400}
+        mock_post.side_effect = [basic_fail, body_ok]
+
+        token = MyDealClient(self._store()).get_access_token(force=True)
+        self.assertEqual(token, 'tok-body')
+        self.assertEqual(mock_post.call_count, 2)
+        token_body = mock_post.call_args.kwargs.get('data') or {}
+        self.assertEqual(token_body.get('client_id'), 'cid')
+        self.assertEqual(token_body.get('client_secret'), 'csecret')
+        self.assertIsNone(mock_post.call_args.kwargs.get('auth'))
+
+    @patch('listings.mydeal.client.requests.post')
     def test_mydeal_token_gateway_forbidden_message(self, mock_post):
         from listings.errors import MarketplaceError
         from listings.mydeal.client import MyDealClient
