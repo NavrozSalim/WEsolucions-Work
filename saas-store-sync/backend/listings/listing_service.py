@@ -265,6 +265,9 @@ def _validate_listing(store, data: dict) -> list[str]:
     if kind == "bunnings":
         from .bunnings import products as bunnings_products
         return source_errors + bunnings_products.validate_listing(data)
+    if kind == "mydeal":
+        from .mydeal import products as mydeal_products
+        return source_errors + mydeal_products.validate_listing(data)
     return source_errors + validator.validate_listing(data)
 
 
@@ -724,15 +727,18 @@ def _end_mydeal_listing(store, listing: StoreListing) -> bool:
     sku = (listing.sku or listing.external_variant_key or "").strip()
     if not sku:
         return False
-    ext = (listing.external_product_key or "").strip()
-    # Prefer stored product key; fall back to SKU (standalone ProductSKU key mode).
-    if not ext or ext == listing.external_variant_key:
-        ext = sku
+    parent = (listing.external_product_key or "").strip() or sku
+    variant = (listing.external_variant_key or sku).strip() or sku
     try:
         from .mydeal.client import MyDealClient
 
         client = MyDealClient(store)
-        result = client.end_listing(sku=sku, external_product_id=ext)
+        result = client.end_listing(
+            sku=parent,
+            external_product_id=parent,
+            buyable_sku=sku,
+            external_buyable_id=variant,
+        )
     except MarketplaceError as exc:
         msg = str(exc or "").lower()
         if "not configured" in msg or "no sandbox" in msg or "no production" in msg:

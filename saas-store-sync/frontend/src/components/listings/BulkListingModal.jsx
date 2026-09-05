@@ -110,19 +110,27 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                         Headers marked <strong>(Optional)</strong> can be left blank.
                         Optional columns <strong>Vendor Name</strong>, <strong>Marketplace Name</strong>, and{' '}
                         <strong>Store Name</strong> must match a source vendor and your store (or route to another of your stores).
-                        {!isReverb && !isMydeal && (
+                        {!isReverb && (
                             <>
                                 {' '}For colour/size variants use the same <strong>Product Key</strong>, unique{' '}
-                                <strong>Variant Key</strong> / <strong>SKU</strong>, fill{' '}
-                                <strong>Option 1–4 Name/Value</strong> (e.g. Size / XL, Color / Blue), and a{' '}
-                                <strong>Variation Img URL</strong> on every variant row.
+                                <strong>SKU</strong>
+                                {!isMydeal && !isBunnings && (
+                                    <> / <strong>Variant Key</strong></>
+                                )}
+                                {isMydeal ? (
+                                    <>, fill <strong>Option 1 Name/Value</strong> (e.g. Size / Small). Same Product Key is sent as one MyDeal product with multiple buyables.</>
+                                ) : isBunnings ? (
+                                    <>, fill <strong>Option Name/Value</strong> (e.g. Size / M). Bunnings sends Product Key as Variant Group Code.</>
+                                ) : (
+                                    <>, fill <strong>Option 1–4 Name/Value</strong> (e.g. Size / XL), and a <strong>Variation Img URL</strong> on every variant row.</>
+                                )}
                             </>
                         )}
                         {isReverb && (
                             <> Reverb columns include Make, Model, Condition, Category, Vendor URL, Price, Photo URLs, status, and free_shipping.</>
                         )}
                         {isMydeal && (
-                            <> MyDeal columns include Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
+                            <> MyDeal columns include Product Key, Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
                         )}
                         {isBunnings && (
                             <> Bunnings columns include Category code, Price (GST inclusive), Logistic Class, GTIN, Image URLs, and Product Key / Option Name-Value for size and colour variants (sent as Variant Group Code).</>

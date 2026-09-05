@@ -186,6 +186,8 @@ const EMPTY_MYDEAL = {
     marketplace_name: '',
     store_name: '',
     sku: '',
+    product_key: '',
+    variant_key: '',
     title: '',
     description: '',
     brand: '',
@@ -382,6 +384,8 @@ export default function ListingFormModal({
                     ...defaults,
                     action: listing.action || 'create',
                     sku: listing.sku || '',
+                    product_key: listing.external_product_key || listing.product_key || '',
+                    variant_key: listing.external_variant_key || listing.variant_key || '',
                     title: listing.title || '',
                     description: listing.description || '',
                     brand: listing.brand || '',
@@ -1018,7 +1022,24 @@ export default function ListingFormModal({
                                         ]}
                                     />
                                 )}
+                                <Input
+                                    label="Product Key (Optional)"
+                                    placeholder="Shared parent key for size/colour variants"
+                                    value={form.product_key}
+                                    onChange={set('product_key')}
+                                />
+                                <Input
+                                    label="Variant Key (Optional)"
+                                    placeholder="Unique per variant (defaults to SKU)"
+                                    value={form.variant_key}
+                                    onChange={set('variant_key')}
+                                />
                                 <Input label="SKU" value={form.sku} onChange={set('sku')} required />
+                                <div className="sm:col-span-2 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 px-3 py-2 text-xs text-slate-600 dark:text-slate-300">
+                                    Variations: same <span className="font-medium">Product Key</span> on every size/colour, unique{' '}
+                                    <span className="font-medium">SKU</span>, Option Name/Value (e.g. Size / Small). MyDeal sends
+                                    these as one product with multiple BuyableProducts. Leave Product Key blank for a standalone listing.
+                                </div>
                                 <div className="sm:col-span-2">
                                     <Input label="Title" value={form.title} onChange={set('title')} required />
                                 </div>
