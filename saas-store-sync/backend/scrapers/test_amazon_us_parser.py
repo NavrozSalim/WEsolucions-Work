@@ -122,5 +122,133 @@ class TestAmazonUSDeliveryStockGate(unittest.TestCase):
         self.assertEqual(AmazonParser.extract_stock(soup, today=self.TODAY), 99)
 
 
+AU_NEW_MARKUP_HTML = """
+<html><body>
+<div id="buybox">
+  <div id="desktop_buybox">
+    <div id="corePrice_feature_div">
+      <span class="a-price aok-align-center apex-pricetopay-value" data-a-size="xl">
+        <span class="a-offscreen">$34.06</span>
+        <span aria-hidden="true">
+          <span class="a-price-symbol">$</span>
+          <span class="a-price-whole">34<span class="a-price-decimal">.</span></span>
+          <span class="a-price-fraction">06</span>
+        </span>
+      </span>
+    </div>
+    <span class="a-price aok-align-center reinventPricePriceToPayMargin priceToPay apex-pricetopay-value">
+      <span class="a-offscreen"> </span>
+      <span aria-hidden="true">
+        <span class="a-price-symbol">$</span>
+        <span class="a-price-whole">34<span class="a-price-decimal">.</span></span>
+        <span class="a-price-fraction">06</span>
+      </span>
+    </span>
+    <div id="availability"><span>In stock</span></div>
+  </div>
+</div>
+<div id="similarities">
+  <span class="a-price">
+    <span class="a-offscreen">$13.99</span>
+    <span aria-hidden="true">
+      <span class="a-price-symbol">$</span>
+      <span class="a-price-whole">13<span class="a-price-decimal">.</span></span>
+      <span class="a-price-fraction">99</span>
+    </span>
+  </span>
+</div>
+</body></html>
+"""
+
+AU_EMPTY_OFFSCREEN_NO_FORM_HTML = """
+<html><body>
+<div id="buybox">
+  <div id="corePrice_feature_div">
+    <span class="a-price aok-align-center reinventPricePriceToPayMargin priceToPay apex-pricetopay-value">
+      <span class="a-offscreen"> </span>
+      <span aria-hidden="true">
+        <span class="a-price-symbol">$</span>
+        <span class="a-price-whole">34<span class="a-price-decimal">.</span></span>
+        <span class="a-price-fraction">06</span>
+      </span>
+    </span>
+  </div>
+</div>
+<div id="similarities">
+  <span class="a-price">
+    <span class="a-offscreen"></span>
+    <span aria-hidden="true">
+      <span class="a-price-symbol">$</span>
+      <span class="a-price-whole">13<span class="a-price-fraction">99</span></span>
+    </span>
+  </span>
+</div>
+</body></html>
+"""
+
+AU_AUD_PREFIX_HTML = """
+<html><body>
+<div id="desktop_buybox">
+  <div id="corePrice_feature_div">
+    <span class="a-price apex-pricetopay-value">
+      <span class="a-offscreen">AUD$34.06</span>
+      <span aria-hidden="true">
+        <span class="a-price-whole">34<span class="a-price-decimal">.</span></span>
+        <span class="a-price-fraction">06</span>
+      </span>
+    </span>
+  </div>
+</div>
+</body></html>
+"""
+
+RELATED_ONLY_NESTED_FRACTION_HTML = """
+<html><body>
+<span class="a-price">
+  <span class="a-offscreen"></span>
+  <span aria-hidden="true">
+    <span class="a-price-symbol">$</span>
+    <span class="a-price-whole">13<span class="a-price-fraction">99</span></span>
+  </span>
+</span>
+</body></html>
+"""
+
+
+class TestAmazonAUPriceMarkup(unittest.TestCase):
+    def test_new_apex_markup_prefers_buybox_not_related_13_99(self):
+        soup = BeautifulSoup(AU_NEW_MARKUP_HTML, "html.parser")
+        self.assertEqual(AmazonParser.extract_price(soup, AU_NEW_MARKUP_HTML, market="AU"), 34.06)
+
+    def test_empty_pricetopay_offscreen_rebuilds_whole_and_fraction(self):
+        soup = BeautifulSoup(AU_EMPTY_OFFSCREEN_NO_FORM_HTML, "html.parser")
+        price = AmazonParser.extract_price(soup, AU_EMPTY_OFFSCREEN_NO_FORM_HTML, market="AU")
+        self.assertEqual(price, 34.06)
+        self.assertNotEqual(price, 1399.0)
+
+    def test_nested_fraction_in_whole_is_13_99_not_1399(self):
+        soup = BeautifulSoup(RELATED_ONLY_NESTED_FRACTION_HTML, "html.parser")
+        price = AmazonParser.extract_price(soup, RELATED_ONLY_NESTED_FRACTION_HTML, market="AU")
+        self.assertEqual(price, 13.99)
+
+    def test_aud_prefix_accepted_for_au_market(self):
+        soup = BeautifulSoup(AU_AUD_PREFIX_HTML, "html.parser")
+        self.assertEqual(AmazonParser.extract_price(soup, AU_AUD_PREFIX_HTML, market="AU"), 34.06)
+
+    def test_aud_prefix_rejected_for_us_market(self):
+        soup = BeautifulSoup(AU_AUD_PREFIX_HTML, "html.parser")
+        self.assertIsNone(AmazonParser.extract_price(soup, AU_AUD_PREFIX_HTML, market="US"))
+
+    def test_form_price_still_wins_on_au_page(self):
+        html = AU_NEW_MARKUP_HTML.replace(
+            "</div>\n</div>\n<div id=\"similarities\">",
+            """<form id="addToCart" action="/gp/product/handle-buy-box/ref=dp_start-bbf_1_glance">
+            <input type="hidden" name="items[0.base][customerVisiblePrice][amount]" value="34.06">
+            </form></div></div><div id="similarities">""",
+        )
+        soup = BeautifulSoup(html, "html.parser")
+        self.assertEqual(AmazonParser.extract_price(soup, html, market="AU"), 34.06)
+
+
 if __name__ == "__main__":
     unittest.main()

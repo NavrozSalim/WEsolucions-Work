@@ -10,6 +10,7 @@ from scrapers.amazon_au_scraper import (
     amazon_au_postcode,
     apply_au_error_stock,
 )
+from scrapers.amazon_us_scraper import AmazonParser
 
 
 class AmazonAUErrorStockTests(SimpleTestCase):
@@ -58,6 +59,40 @@ class AmazonAUErrorStockTests(SimpleTestCase):
         soup = BeautifulSoup(html, "html.parser")
         self.assertEqual(apply_au_error_stock(soup, 99), 99)
         self.assertIsNone(apply_au_error_stock(soup, None))
+
+
+class AmazonAUPriceMarkupTests(SimpleTestCase):
+    def test_b00000jrrd_style_page_is_34_06_not_1399(self):
+        html = """
+        <html><body>
+          <div id="buybox">
+            <div id="corePrice_feature_div">
+              <span class="a-price aok-align-center apex-pricetopay-value">
+                <span class="a-offscreen">$34.06</span>
+                <span aria-hidden="true">
+                  <span class="a-price-symbol">$</span>
+                  <span class="a-price-whole">34<span class="a-price-decimal">.</span></span>
+                  <span class="a-price-fraction">06</span>
+                </span>
+              </span>
+            </div>
+            <span class="a-price priceToPay apex-pricetopay-value">
+              <span class="a-offscreen"> </span>
+            </span>
+            <div id="availability"><span>In stock</span></div>
+          </div>
+          <div id="similarities">
+            <span class="a-price">
+              <span class="a-offscreen"></span>
+              <span class="a-price-whole">13<span class="a-price-fraction">99</span></span>
+            </span>
+          </div>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        price = AmazonParser.extract_price(soup, html, market="AU")
+        self.assertEqual(price, 34.06)
+        self.assertEqual(AmazonParser.extract_stock(soup), 99)
 
 
 class AmazonAUPostcodeTests(SimpleTestCase):

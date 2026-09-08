@@ -189,7 +189,7 @@ class AmazonAUHTTP:
         except Exception:
             soup = BeautifulSoup(html, "html.parser")
 
-        price = AmazonParser.extract_price(soup, html)
+        price = AmazonParser.extract_price(soup, html, market="AU")
         stock = AmazonParser.extract_stock(soup)
         title = AmazonParser.extract_title(soup)
         stock = apply_au_error_stock(soup, stock)
@@ -305,7 +305,13 @@ def _selenium_scrape_page(url: str, driver) -> ScrapeResult:
         random_delay(3, 5)
         AmazonScraper.solve_captcha(driver)
 
-        for sel in ["span.a-price", "#priceblock_ourprice", ".apexPriceToPay", "#availability"]:
+        for sel in [
+            "span.a-price",
+            ".apex-pricetopay-value",
+            "#corePrice_feature_div",
+            ".apexPriceToPay",
+            "#availability",
+        ]:
             try:
                 WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
                 break
@@ -330,7 +336,7 @@ def _selenium_scrape_page(url: str, driver) -> ScrapeResult:
 
         soup = BeautifulSoup(html, "html.parser")
 
-        price = AmazonParser.extract_price(soup, html)
+        price = AmazonParser.extract_price(soup, html, market="AU")
         stock = AmazonParser.extract_stock(soup)
         title = AmazonParser.extract_title(soup)
         stock = apply_au_error_stock(soup, stock)

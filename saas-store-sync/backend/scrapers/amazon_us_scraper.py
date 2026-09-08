@@ -65,13 +65,19 @@ _BUYBOX_ROOT_SELECTORS = (
     "#buybox",
     "#desktop_buybox",
     "#apex_desktop",
+    "#corePrice_feature_div",
+    "#corePriceDisplay_desktop_feature_div",
     "#rightCol",
 )
 
 _BUYBOX_FORM_SELECTORS = (
     "form#addToCart",
     "form[action*='handle-buy-box']",
-    "form[action*='add-to-cart']",
+)
+
+_EMPTY_OFFSCREEN_VALUES = {"", "null", "none", "n/a"}
+_ALWAYS_FOREIGN_CURRENCY_PREFIXES = (
+    "PKR", "INR", "AED", "EUR", "GBP", "CAD", "JPY", "CNY", "₹", "€", "£", "¥",
 )
 
 _PRIMARY_DELIVERY_DATE_SELECTORS = (
@@ -153,23 +159,33 @@ class AmazonParser:
     PRICE_SELECTORS = [
         "div.a-section.aok-hidden.twister-plus-buying-options-price-data",  # hidden JSON blob
         "#corePrice_feature_div span.a-offscreen",
+        "#corePrice_feature_div .a-price",
+        ".apex-pricetopay-value span.a-offscreen",
+        ".apex-pricetopay-value",
         "span.priceToPay span.a-offscreen",
+        "span.priceToPay",
         ".apexPriceToPay span.a-offscreen",
+        ".apexPriceToPay",
         "span.a-price span.a-offscreen",
         "#priceblock_ourprice",
         "#priceblock_dealprice",
         "#priceblock_saleprice",
-        ".a-price.a-text-price span.a-offscreen",
-        "span.a-price-whole",
+        "#corePriceDisplay_desktop_feature_div .a-price",
         "#corePriceDisplay_desktop_feature_div .a-offscreen",
+        "span.a-price",
+        "span.a-price-whole",
     ]
 
     PRICE_JSON_PATTERNS = [
         r'"priceAmount":\s*([\d.]+)',
         r'"displayAmount"\s*:\s*"\$?([\d,.]+)"',
         r'"lowPrice"\s*:\s*"([\d.]+)"',
-        r'"price"\s*:\s*"([\d.]+)"',
         r'"currentPrice"\s*:\s*{\s*"value"\s*:\s*"([\d.]+)"',
+    ]
+
+    # Too broad for a full PDP (recs / widgets). Only used inside a buy-box root.
+    PRICE_JSON_GENERIC_PATTERNS = [
+        r'"price"\s*:\s*"([\d.]+)"',
     ]
 
     AVAILABILITY_SELECTORS = [
@@ -188,12 +204,24 @@ class AmazonParser:
     ]
 
     @classmethod
-    def _buybox_root(cls, soup: BeautifulSoup):
+    def _buybox_roots(cls, soup: BeautifulSoup):
+        roots = []
+        seen = set()
         for sel in _BUYBOX_ROOT_SELECTORS:
             el = soup.select_one(sel)
-            if el:
-                return el
-        return None
+            if el is None:
+                continue
+            marker = id(el)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            roots.append(el)
+        return roots
+
+    @classmethod
+    def _buybox_root(cls, soup: BeautifulSoup):
+        roots = cls._buybox_roots(soup)
+        return roots[0] if roots else None
 
     @classmethod
     def is_map_price_page(cls, soup: BeautifulSoup, page_html: str = "") -> bool:
@@ -211,14 +239,16 @@ class AmazonParser:
 
     @classmethod
     def extract_buybox_form_price(cls, soup: BeautifulSoup) -> Optional[float]:
-        """Read MAP price from hidden add-to-cart form fields on the buy box."""
+        """Read MAP / buy-box price from hidden add-to-cart form fields.
+
+        Ignores page-wide "frequently bought together" add-to-cart forms.
+        """
         forms = []
         for sel in _BUYBOX_FORM_SELECTORS:
             forms.extend(soup.select(sel))
         if not forms:
-            buybox = cls._buybox_root(soup)
-            if buybox:
-                forms = buybox.select("form")
+            for buybox in cls._buybox_roots(soup):
+                forms.extend(buybox.select("form"))
 
         seen = set()
         for form in forms:
@@ -239,8 +269,7 @@ class AmazonParser:
                 if p:
                     return p
 
-        buybox = cls._buybox_root(soup)
-        if buybox:
+        for buybox in cls._buybox_roots(soup):
             box_html = str(buybox)
             m = re.search(
                 r'customerVisiblePrice\]\[amount\]"[^>]*value="([\d.]+)"',
@@ -254,7 +283,15 @@ class AmazonParser:
         return None
 
     @classmethod
-    def _extract_price_from_scope(cls, scope, page_html: str = "", *, allow_regex: bool = True) -> Optional[float]:
+    def _extract_price_from_scope(
+        cls,
+        scope,
+        page_html: str = "",
+        *,
+        allow_regex: bool = True,
+        allow_aud: bool = False,
+        allow_generic_json: bool = False,
+    ) -> Optional[float]:
         if scope is None:
             return None
 
@@ -273,6 +310,8 @@ class AmazonParser:
                     text = str(val)
                     if any(p in text.lower() for p in _MAP_PRICE_PHRASES):
                         continue
+                    if _currency_rejected(text, allow_aud=allow_aud):
+                        continue
                     p = parse_price_text(text)
                     if p:
                         return p
@@ -280,20 +319,19 @@ class AmazonParser:
                 pass
 
         for sel in cls.PRICE_SELECTORS[1:]:
-            elem = scope.select_one(sel)
-            if elem:
-                text = elem.get_text(strip=True)
-                if any(p in text.lower() for p in _MAP_PRICE_PHRASES):
+            for elem in scope.select(sel):
+                if _is_strikethrough_price(elem):
                     continue
-                if _is_non_usd(text):
-                    continue
-                p = parse_price_text(text)
+                p = _price_from_amazon_node(elem, allow_aud=allow_aud)
                 if p:
                     return p
 
-        if allow_regex and page_html:
+        if allow_regex:
             scoped_html = str(scope)
-            for pat in cls.PRICE_JSON_PATTERNS:
+            patterns = list(cls.PRICE_JSON_PATTERNS)
+            if allow_generic_json:
+                patterns.extend(cls.PRICE_JSON_GENERIC_PATTERNS)
+            for pat in patterns:
                 m = re.search(pat, scoped_html)
                 if m:
                     p = parse_price_text(m.group(1))
@@ -312,8 +350,18 @@ class AmazonParser:
         return None
 
     @classmethod
-    def extract_price(cls, soup: BeautifulSoup, page_html: str = "") -> Optional[float]:
-        """Try buybox-scoped selectors; MAP pages use hidden customerVisiblePrice fields."""
+    def extract_price(
+        cls,
+        soup: BeautifulSoup,
+        page_html: str = "",
+        *,
+        market: str = "US",
+    ) -> Optional[float]:
+        """Try buybox-scoped selectors; MAP pages use hidden customerVisiblePrice fields.
+
+        ``market="AU"`` accepts AUD / A$ offscreen text. US still skips those so a
+        mis-geolocated AU page is not stored as a USD price.
+        """
         form_price = cls.extract_buybox_form_price(soup)
         if form_price is not None:
             return form_price
@@ -322,17 +370,25 @@ class AmazonParser:
         if is_map:
             return None
 
-        buybox = cls._buybox_root(soup)
-        if buybox:
+        allow_aud = str(market or "").upper() in ("AU", "AUD", "AMAZONAU")
+        for buybox in cls._buybox_roots(soup):
             price = cls._extract_price_from_scope(
                 buybox,
                 page_html,
-                allow_regex=not is_map,
+                allow_regex=True,
+                allow_aud=allow_aud,
+                allow_generic_json=True,
             )
             if price is not None:
                 return price
 
-        return cls._extract_price_from_scope(soup, page_html, allow_regex=True)
+        return cls._extract_price_from_scope(
+            soup,
+            page_html,
+            allow_regex=True,
+            allow_aud=allow_aud,
+            allow_generic_json=False,
+        )
 
     @classmethod
     def extract_delivery_days(cls, soup: BeautifulSoup, *, today: Optional[date] = None) -> Optional[int]:
@@ -445,16 +501,142 @@ def _extract_asin(url: str, soup: BeautifulSoup = None) -> Optional[str]:
     return None
 
 
-def _is_non_usd(price_text: str) -> bool:
-    """Detect non-USD currency prefixes so we can skip mis-geolocated prices."""
+def _css_classes(elem) -> tuple:
+    if elem is None:
+        return ()
+    raw = elem.get("class")
+    if not raw:
+        return ()
+    if isinstance(raw, str):
+        return tuple(raw.split())
+    return tuple(raw)
+
+
+def _currency_rejected(price_text: str, *, allow_aud: bool = False) -> bool:
+    """True when offscreen / JSON price text is a foreign currency we should skip."""
     if not price_text:
         return False
-    prefixes = ("PKR", "INR", "AED", "EUR", "GBP", "CAD", "AUD", "JPY", "CNY", "₹", "€", "£", "¥")
     stripped = price_text.strip()
-    for pfx in prefixes:
-        if stripped.upper().startswith(pfx):
+    upper = stripped.upper()
+    if upper.startswith("A$") or upper.startswith("AU$") or upper.startswith("AUD"):
+        return not allow_aud
+    for pfx in _ALWAYS_FOREIGN_CURRENCY_PREFIXES:
+        if upper.startswith(pfx):
             return True
     return False
+
+
+def _is_non_usd(price_text: str) -> bool:
+    """Detect non-USD currency prefixes so we can skip mis-geolocated prices."""
+    return _currency_rejected(price_text, allow_aud=False)
+
+
+def _is_strikethrough_price(elem) -> bool:
+    cur = elem
+    for _ in range(6):
+        if cur is None or not getattr(cur, "get", None):
+            break
+        classes = _css_classes(cur)
+        if "a-text-price" in classes or "basisPrice" in classes or "apex-basis-price-value" in classes:
+            return True
+        cur = getattr(cur, "parent", None)
+    return False
+
+
+def _offscreen_text_usable(text: str) -> bool:
+    t = (text or "").strip()
+    if not t or t.lower() in _EMPTY_OFFSCREEN_VALUES:
+        return False
+    if any(p in t.lower() for p in _MAP_PRICE_PHRASES):
+        return False
+    return True
+
+
+def _closest_a_price(elem):
+    cur = elem
+    while cur is not None:
+        if "a-price" in _css_classes(cur):
+            return cur
+        cur = getattr(cur, "parent", None)
+    return None
+
+
+def _whole_dollar_digits(whole_el) -> str:
+    """Integer dollars from ``a-price-whole``, never concatenated cents."""
+    if whole_el is None:
+        return ""
+    parts = []
+    for child in whole_el.children:
+        name = getattr(child, "name", None)
+        if name is None:
+            parts.append(str(child))
+            continue
+        classes = _css_classes(child)
+        if "a-price-decimal" in classes or "a-price-fraction" in classes:
+            continue
+        parts.append(child.get_text() if hasattr(child, "get_text") else "")
+    raw = "".join(parts).replace(",", "").strip()
+    match = re.search(r"(\d+)", raw)
+    return match.group(1) if match else ""
+
+
+def _price_from_amazon_node(elem, *, allow_aud: bool = False) -> Optional[float]:
+    """Parse one Amazon price node without turning $13.99 into 1399."""
+    if elem is None:
+        return None
+
+    classes = _css_classes(elem)
+    price_el = elem if "a-price" in classes else _closest_a_price(elem)
+
+    if "a-offscreen" in classes:
+        text = elem.get_text(strip=True)
+        if _offscreen_text_usable(text):
+            if _currency_rejected(text, allow_aud=allow_aud):
+                return None
+            return parse_price_text(text)
+        price_el = price_el or _closest_a_price(elem.parent if elem.parent else elem)
+
+    search_root = price_el or elem
+    off = None
+    if search_root is not None:
+        off = search_root.find("span", class_="a-offscreen", recursive=False)
+        if off is None:
+            off = search_root.select_one("span.a-offscreen")
+    if off is not None:
+        text = off.get_text(strip=True)
+        if _offscreen_text_usable(text):
+            if _currency_rejected(text, allow_aud=allow_aud):
+                return None
+            return parse_price_text(text)
+
+    whole_el = None
+    frac_el = None
+    if "a-price-whole" in classes:
+        whole_el = elem
+        parent = elem.parent
+        if parent is not None:
+            frac_el = parent.find("span", class_="a-price-fraction")
+        if frac_el is None:
+            frac_el = elem.find("span", class_="a-price-fraction")
+    elif search_root is not None:
+        whole_el = search_root.select_one("span.a-price-whole")
+        frac_el = search_root.select_one("span.a-price-fraction")
+
+    if whole_el is not None:
+        whole = _whole_dollar_digits(whole_el)
+        if not whole:
+            return None
+        frac = ""
+        if frac_el is not None:
+            frac = re.sub(r"\D", "", frac_el.get_text() or "")
+        if frac:
+            return parse_price_text(f"{whole}.{frac}")
+        return parse_price_text(whole)
+
+    text = elem.get_text(strip=True)
+    if _offscreen_text_usable(text) and not _currency_rejected(text, allow_aud=allow_aud):
+        return parse_price_text(text)
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -980,7 +1162,13 @@ class AmazonScraper:
             if blocked:
                 return ScrapeResult.fail(f"blocked_{reason}", f"Blocked: {reason}", html, "amazon_us", url)
 
-            for sel in ["span.a-price", "#corePrice_feature_div", ".apexPriceToPay", "#availability"]:
+            for sel in [
+                "span.a-price",
+                ".apex-pricetopay-value",
+                "#corePrice_feature_div",
+                ".apexPriceToPay",
+                "#availability",
+            ]:
                     try:
                         WebDriverWait(driver, 6).until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
                         break
