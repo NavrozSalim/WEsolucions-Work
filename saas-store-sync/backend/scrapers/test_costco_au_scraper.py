@@ -740,6 +740,8 @@ class IngestOnlyToggleTests(SimpleTestCase):
 
             self.assertTrue(_is_ingest_only_product(FakeProduct("heb")))
             self.assertTrue(_is_ingest_only_product(FakeProduct("vevorau")))
+            self.assertTrue(_is_ingest_only_product(FakeProduct("costwayau")))
+            self.assertTrue(_is_ingest_only_product(FakeProduct("costway")))
 
 
 class HebDispatcherTests(SimpleTestCase):

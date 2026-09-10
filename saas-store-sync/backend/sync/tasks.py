@@ -34,7 +34,8 @@ def _is_ingest_only_product(product) -> bool:
     """Vendors whose price/stock comes from a desktop runner or S3 feed.
 
     HEB is always ingest-only (Windows desktop runner). Vevor AU is always
-    ingest-only. Costco AU is ingest-only **only when** the AU worker has no
+    ingest-only. Costway AU is always ingest-only (CSV on the AU worker).
+    Costco AU is ingest-only **only when** the AU worker has no
     residential proxies configured — once ``COSTCO_AU_PROXY_URLS`` is set,
     Costco runs through the live server scraper.
     """
@@ -43,6 +44,8 @@ def _is_ingest_only_product(product) -> bool:
     if code in ('vevor', 'vevorau'):
         return True
     if code.startswith('vevor_'):
+        return True
+    if code in ('costway', 'costwayau') or code.startswith('costway'):
         return True
     if code in ('heb', 'hebus') or code.startswith('heb_'):
         return True
@@ -511,11 +514,11 @@ def run_store_sync(self, store_id):
     try:
         for pm in mappings.iterator(chunk_size=300):
             processed += 1
-            # Ingest-only vendors (HEB, Costco AU, Vevor AU): the desktop
-            # runner / S3 feed writes store_price + store_stock directly via
-            # the ingest endpoint. Do NOT re-apply older VendorPrice rows
-            # here — the mapping already holds whatever the most recent
-            # fresh scrape produced. Skip silently and never mark 'failed'.
+            # Ingest-only vendors (HEB, Costco AU, Vevor AU, Costway AU): the desktop
+            # runner / feed writes store_price + store_stock directly.
+            # Do NOT re-apply older VendorPrice rows here — the mapping already
+            # holds whatever the most recent fresh scrape produced. Skip silently
+            # and never mark 'failed'.
             if pm.product and _is_ingest_only_product(pm.product):
                 logger.info(
                     "Ingest-only row untouched (sku=%s vendor=%s)",
@@ -668,28 +671,62 @@ def _store_has_pending_vevor_listings(store_id) -> bool:
     ).exists()
 
 
+def _store_has_pending_costway_listings(store_id) -> bool:
+    from vendor.models import Vendor
+
+    vendor_ids = list(
+        Vendor.objects.filter(code__iregex=r'^costway(au|_au|-au)?$').values_list('id', flat=True)
+    )
+    if not vendor_ids:
+        return False
+    return ProductMapping.objects.filter(
+        store_id=store_id,
+        is_active=True,
+        sync_status='pending',
+        product__vendor_id__in=vendor_ids,
+    ).exists()
+
+
 def _scheduled_ingest_refresh(store) -> dict:
     """
-    After pending reset: refresh ingest-only vendors (Vevor XLSX feed inline;
-    HEB/Costco desktop jobs queued when applicable).
+    After pending reset: refresh ingest-only vendors (Vevor XLSX feed inline on
+    main; Costway CSV via AU ``heavy-au`` worker and wait; HEB/Costco desktop
+    jobs queued when applicable).
     """
     from catalog.ingest_views import SUPPORTED_VENDORS
     from catalog.models import HebScrapeJob
-    from catalog.tasks import run_vevor_au_ingest
+    from catalog.tasks import invoke_costway_au_ingest, run_vevor_au_ingest
     from catalog.views import (
         CatalogScrapeTriggerView,
         _dispatch_server_vendor_job,
         _store_has_pending_vendor_products,
     )
 
-    result = {'vevor': None, 'desktop_jobs': []}
+    result = {'vevor': None, 'costway': None, 'desktop_jobs': []}
 
     if _store_has_pending_vevor_listings(store.id):
         logger.info('Scheduled update: running Vevor AU feed ingest for store %s', store.name)
         result['vevor'] = run_vevor_au_ingest(str(store.id))
 
+    if _store_has_pending_costway_listings(store.id):
+        logger.info(
+            'Scheduled update: running Costway AU CSV ingest on heavy-au for store %s',
+            store.name,
+        )
+        try:
+            result['costway'] = invoke_costway_au_ingest(str(store.id))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                'Scheduled Costway AU ingest failed for store %s: %s', store.name, exc,
+            )
+            result['costway'] = {
+                'status': 'failed',
+                'error': str(exc)[:500],
+                'updated': 0,
+            }
+
     for vendor_code, cfg in SUPPORTED_VENDORS.items():
-        if vendor_code == 'vevor':
+        if vendor_code in ('vevor', 'costway'):
             continue
         if CatalogScrapeTriggerView._vendor_runs_live(vendor_code, cfg):
             continue
@@ -1110,6 +1147,11 @@ def run_store_update(self, store_id, source='beat'):
     if isinstance(vevor_ingest, dict):
         updated += int(vevor_ingest.get('updated') or 0)
         processed += int(vevor_ingest.get('listing_count') or vevor_ingest.get('matched') or 0)
+
+    costway_ingest = ingest_refresh.get('costway') if isinstance(ingest_refresh, dict) else None
+    if isinstance(costway_ingest, dict):
+        updated += int(costway_ingest.get('updated') or 0)
+        processed += int(costway_ingest.get('listing_count') or costway_ingest.get('matched') or 0)
 
     hint = None
     if n_active == 0:

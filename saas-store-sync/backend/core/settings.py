@@ -383,6 +383,7 @@ if sys.platform == 'win32':
 # - ``light``: scrape chord finalizers, resume-after-stop, Beat ``check_scheduled_updates``.
 # - ``celery``: default (analytics, vendor price prune).
 # US VPS: -Q heavy-us. AU VPS: -Q heavy-au. Vevor AU feed → ``light`` (no browser).
+# Costway AU CSV feed → ``heavy-au`` (AU-IP only; never fetch from main/light/sync).
 # Managed listing Start Scraping (Lasoo / Reverb / Etsy) also uses heavy-us / heavy-au.
 # Orders/tickets VPS: -Q orders-us (USA stores) / -Q orders-au (AU stores).
 from kombu import Queue  # noqa: E402
@@ -410,6 +411,8 @@ CELERY_TASK_ROUTES = (
         'catalog.tasks.catalog_update_task': {'queue': 'ingest'},
         'catalog.tasks.resume_catalog_scrape_after_stop': {'queue': 'light'},
         'catalog.run_vevor_au_ingest': {'queue': 'light'},
+        # Costway dropship CSV is AU-IP only — AU scraper VPS, not main light worker.
+        'catalog.run_costway_au_ingest': {'queue': 'heavy-au'},
         # Store-wide scrape + marketplace push: separate from catalog file ingest.
         'sync.tasks.run_store_sync': {'queue': 'sync'},
         'sync.tasks.run_store_update': {'queue': 'sync'},
@@ -430,6 +433,13 @@ CELERY_TASK_ROUTES = (
         'vendor.prune_old_vendor_prices': {'queue': 'celery'},
     },
 )
+
+try:
+    COSTWAY_AU_INGEST_WAIT_SEC = max(
+        30, min(1800, int(os.getenv('COSTWAY_AU_INGEST_WAIT_SEC', '600') or '600')),
+    )
+except (TypeError, ValueError):
+    COSTWAY_AU_INGEST_WAIT_SEC = 600
 
 # AliExpress Drop Shipping + optional Affiliate API (price lookup by product ID).
 ALIEXPRESS_APP_KEY = os.getenv('ALIEXPRESS_APP_KEY', '').strip()

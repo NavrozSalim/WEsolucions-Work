@@ -12,6 +12,7 @@ run on ``light`` so the main app worker can finish jobs without requiring
 the US worker to subscribe to non-scrape queues.
 
 ``catalog.run_vevor_au_ingest`` also runs on ``light`` (XLSX feed, no browser).
+``catalog.run_costway_au_ingest`` runs on ``heavy-au`` (AU-IP CSV feed).
 
 Managed Inventory Start Scraping (``listings.scrape_store_listings``) uses the
 same ``heavy-us`` / ``heavy-au`` split so Lasoo eBay AU links run on the AU
@@ -21,7 +22,7 @@ Deploy:
 
 - Main server workers: ``-Q celery`` | ``-Q ingest`` | ``-Q sync`` | ``-Q light`` — ingest for file/sync; sync for ``run_store_*``; light for scrape finalizers + Beat tick.
 - US worker: ``-Q heavy-us`` (same ``REDIS_URL`` / ``DATABASE_URL`` as main)
-- AU worker: ``-Q heavy-au`` (Amazon AU, eBay AU)
+- AU worker: ``-Q heavy-au`` (Amazon AU, eBay AU, Costway AU CSV ingest)
 - Single-host dev: listen to ``heavy-us`` and ``heavy-au`` together if needed.
 """
 from __future__ import annotations

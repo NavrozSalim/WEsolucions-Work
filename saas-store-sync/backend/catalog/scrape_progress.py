@@ -43,7 +43,7 @@ def invalidate_scrape_progress_cache(store_id: str | None) -> None:
 def heal_stale_server_vendor_job(store, vendor_code: str, job) -> None:
     """Mark a stuck ``CLAIMED`` server-vendor job done when no listings are pending.
 
-    Server-side feed ingests (VevorAU) set ``CLAIMED`` at dispatch and ``DONE`` when
+    Server-side feed ingests (VevorAU, CostwayAU) set ``CLAIMED`` at dispatch and ``DONE`` when
     the Celery task finishes. If the worker crashed or an older build omitted the
     finalize step, the UI would show "scraping" forever even though every listing
     has left ``sync_status='pending'``.
@@ -161,6 +161,8 @@ def build_scrape_progress_payload(store) -> dict[str, Any]:
             mapped = 'costco'
         elif rc in ('vevorau', 'vevor') or rc.startswith('vevor_'):
             mapped = 'vevor'
+        elif rc in ('costwayau', 'costway') or rc.startswith('costway'):
+            mapped = 'costway'
         if mapped in runner_codes:
             continue
         if rc not in other_codes:

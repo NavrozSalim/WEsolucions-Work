@@ -13,6 +13,7 @@ from catalog.models import CatalogUpload, CatalogUploadRow, HebScrapeJob, Ingest
 from catalog.scrape_progress import build_scrape_progress_payload, heal_stale_server_vendor_job
 from catalog.tasks import (
     run_catalog_sync,
+    run_costway_au_ingest,
     run_store_wide_catalog_scrape,
     run_vevor_au_ingest,
     store_has_scrapeable_pending_mappings,
@@ -334,6 +335,117 @@ class VevorIngestTenantTests(TestCase):
         vevor = payload['vendors']['vevor']
         self.assertEqual(vevor['job']['status'], 'done')
         self.assertEqual(vevor['sync_pending'], 0)
+
+
+class CostwayIngestTenantTests(TestCase):
+    def test_costway_requires_store_id(self):
+        out = run_costway_au_ingest(store_id=None)
+        self.assertEqual(out.get('status'), 'skipped')
+        self.assertEqual(out.get('updated'), 0)
+
+    @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+    @patch('scrapers.costway_au_ingest.fetch_costway_feed')
+    def test_costway_skips_when_no_pending_rows(self, mock_fetch):
+        mp, _ = Marketplace.objects.get_or_create(code='kogan_costway', defaults={'name': 'Kogan Costway'})
+        user = User.objects.create_user(username='costway_u', email='costway_u@example.com', password='pass12345')
+        store = Store.objects.create(
+            user=user, name='Costway Store', region='AU', api_token='tok-cw', marketplace=mp,
+        )
+        vendor, _ = Vendor.objects.get_or_create(code='costwayau', defaults={'name': 'CostwayAU'})
+        product = Product.objects.create(
+            vendor=vendor, vendor_sku='TP10003', owner=user,
+        )
+        ProductMapping.objects.create(
+            store=store,
+            product=product,
+            marketplace_id='MID-CW-1',
+            sync_status='scraped',
+            is_active=True,
+        )
+        out = run_costway_au_ingest(store_id=str(store.id))
+        self.assertEqual(out.get('status'), 'skipped')
+        self.assertEqual(out.get('reason'), 'no_pending_costway')
+        self.assertEqual(out.get('updated'), 0)
+        mock_fetch.assert_not_called()
+
+    @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+    def test_costway_only_store_has_no_scrapeable_pending(self):
+        mp, _ = Marketplace.objects.get_or_create(code='kogan_costway2', defaults={'name': 'Kogan Costway'})
+        user = User.objects.create_user(username='costway_u2', email='costway_u2@example.com', password='pass12345')
+        store = Store.objects.create(
+            user=user, name='Costway Only', region='AU', api_token='tok-cw2', marketplace=mp,
+        )
+        vendor, _ = Vendor.objects.get_or_create(code='costwayau', defaults={'name': 'CostwayAU'})
+        product = Product.objects.create(vendor=vendor, vendor_sku='TP10003', owner=user)
+        ProductMapping.objects.create(
+            store=store, product=product, marketplace_id='MID-CW-2', sync_status='pending', is_active=True,
+        )
+        self.assertFalse(store_has_scrapeable_pending_mappings(store))
+
+    @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+    @patch('scrapers.costway_au_ingest.fetch_costway_feed')
+    def test_costway_ingest_applies_price_and_qty(self, mock_fetch):
+        import os
+        import tempfile
+
+        csv_body = (
+            'SKU,Item NO.,Title,Description,Price,Category,Link,QTY,Weight,Image\n'
+            'TP10003,73982054,Costway chair,"Desc with, comma",109.95,Baby,'
+            'http://au.costway.com/tp.html,5,37.58882,http://au.costway.com/i.jpg\n'
+        )
+        tmp = tempfile.NamedTemporaryFile(prefix='costway_ing_', suffix='.csv', delete=False)
+        tmp.write(csv_body.encode('utf-8'))
+        tmp.close()
+        mock_fetch.return_value = tmp.name
+
+        mp, _ = Marketplace.objects.get_or_create(code='kogan_costway3', defaults={'name': 'Kogan Costway'})
+        user = User.objects.create_user(username='costway_u3', email='costway_u3@example.com', password='pass12345')
+        store = Store.objects.create(
+            user=user, name='Costway Apply', region='AU', api_token='tok-cw3', marketplace=mp,
+        )
+        vendor, _ = Vendor.objects.get_or_create(code='costwayau', defaults={'name': 'CostwayAU'})
+        product = Product.objects.create(vendor=vendor, vendor_sku='TP10003', owner=user)
+        pm = ProductMapping.objects.create(
+            store=store, product=product, marketplace_id='MID-CW-3', sync_status='pending', is_active=True,
+        )
+        try:
+            out = run_costway_au_ingest(store_id=str(store.id))
+        finally:
+            if os.path.exists(tmp.name):
+                os.unlink(tmp.name)
+        self.assertEqual(out.get('status'), 'ok')
+        self.assertEqual(out.get('matched'), 1)
+        self.assertEqual(out.get('updated'), 1)
+        pm.refresh_from_db()
+        self.assertEqual(pm.sync_status, 'scraped')
+        self.assertEqual(float(pm.store_price), 109.95)
+        self.assertEqual(int(pm.store_stock), 5)
+
+    @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+    def test_heal_stale_costway_claimed_job_when_no_sync_pending(self):
+        mp, _ = Marketplace.objects.get_or_create(code='kogan_costway4', defaults={'name': 'Kogan Costway'})
+        user = User.objects.create_user(username='costway_u4', email='costway_u4@example.com', password='pass12345')
+        store = Store.objects.create(
+            user=user, name='Costway Heal', region='AU', api_token='tok-cw4', marketplace=mp,
+        )
+        vendor, _ = Vendor.objects.get_or_create(code='costwayau', defaults={'name': 'CostwayAU'})
+        product = Product.objects.create(vendor=vendor, vendor_sku='TP10003', owner=user)
+        ProductMapping.objects.create(
+            store=store, product=product, marketplace_id='MID-CW-4', sync_status='scraped', is_active=True,
+        )
+        job = HebScrapeJob.objects.create(
+            store=store,
+            requested_by=user,
+            vendor_code='costway',
+            status=HebScrapeJob.Status.CLAIMED,
+        )
+        heal_stale_server_vendor_job(store, 'costway', job)
+        job.refresh_from_db()
+        self.assertEqual(job.status, HebScrapeJob.Status.DONE)
+        payload = build_scrape_progress_payload(store)
+        costway = payload['vendors']['costway']
+        self.assertEqual(costway['job']['status'], 'done')
+        self.assertEqual(costway['sync_pending'], 0)
 
 
 class CostcoServerScrapeRoutingTests(TestCase):

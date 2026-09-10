@@ -345,6 +345,7 @@ class RunStoreUpdateScrapeWhenDisconnectedTests(SimpleTestCase):
 
 
 class ScheduledIngestRefreshTests(SimpleTestCase):
+    @patch('sync.tasks._store_has_pending_costway_listings', return_value=False)
     @patch('sync.tasks._store_has_pending_vevor_listings', return_value=True)
     @patch('catalog.tasks.run_vevor_au_ingest', return_value={'updated': 100, 'status': 'ok'})
     @patch('catalog.views._store_has_pending_vendor_products', return_value=False)
@@ -363,5 +364,29 @@ class ScheduledIngestRefreshTests(SimpleTestCase):
                 result = _scheduled_ingest_refresh(store)
 
         self.assertEqual(result['vevor']['updated'], 100)
+
+    @patch('sync.tasks._store_has_pending_vevor_listings', return_value=False)
+    @patch('sync.tasks._store_has_pending_costway_listings', return_value=True)
+    @patch(
+        'catalog.tasks.invoke_costway_au_ingest',
+        return_value={'updated': 50, 'status': 'ok', 'listing_count': 50},
+    )
+    @patch('catalog.views._store_has_pending_vendor_products', return_value=False)
+    def test_scheduled_ingest_refresh_runs_costway_on_au_worker(self, *_mocks):
+        from sync.tasks import _scheduled_ingest_refresh
+
+        store = MagicMock()
+        store.id = 'store-uuid'
+        store.name = 'TFS Costway'
+
+        from catalog.models import HebScrapeJob
+
+        with patch.object(HebScrapeJob.objects, 'filter') as mock_filter:
+            mock_filter.return_value.order_by.return_value.first.return_value = None
+            with patch.object(HebScrapeJob.objects, 'create'):
+                result = _scheduled_ingest_refresh(store)
+
+        self.assertEqual(result['costway']['updated'], 50)
+        self.assertIsNone(result['vevor'])
 
 

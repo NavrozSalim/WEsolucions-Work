@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from catalog.celery_routing import (
     CatalogScrapeTaskRouter,
@@ -147,6 +147,7 @@ class CeleryStaticTaskRoutesTests(SimpleTestCase):
             (catalog_tasks.catalog_update_task, 'ingest'),
             (catalog_tasks.resume_catalog_scrape_after_stop, 'light'),
             (catalog_tasks.vevor_au_ingest_task, 'light'),
+            (catalog_tasks.costway_au_ingest_task, 'heavy-au'),
             (sync_tasks.run_store_sync, 'sync'),
             (sync_tasks.run_store_update, 'sync'),
             (sync_tasks.run_store_push_listings_only, 'sync'),
@@ -168,6 +169,33 @@ class CeleryStaticTaskRoutesTests(SimpleTestCase):
                     {'queue': expected_queue},
                     msg=f"Update core/settings.py CELERY_TASK_ROUTES for {task.name}",
                 )
+
+
+class CostwayIngestInvokeTests(SimpleTestCase):
+    """Costway CSV must be fetched on heavy-au, never inline on sync/light."""
+
+    @override_settings(CELERY_TASK_ALWAYS_EAGER=False)
+    @patch('catalog.tasks.costway_au_ingest_task.apply_async')
+    def test_invoke_dispatches_to_heavy_au_and_waits(self, mock_async):
+        from catalog.celery_routing import QUEUE_HEAVY_AU
+        from catalog.tasks import invoke_costway_au_ingest
+
+        mock_async.return_value.get.return_value = {'status': 'ok', 'updated': 2}
+        out = invoke_costway_au_ingest('store-1')
+        self.assertEqual(out['updated'], 2)
+        self.assertEqual(mock_async.call_args.kwargs.get('queue'), QUEUE_HEAVY_AU)
+        mock_async.return_value.get.assert_called_once()
+
+    @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
+    @patch('catalog.tasks.costway_au_ingest_task.apply_async')
+    @patch('catalog.tasks.run_costway_au_ingest', return_value={'status': 'ok', 'updated': 1})
+    def test_invoke_eager_runs_inline_without_queue(self, mock_run, mock_async):
+        from catalog.tasks import invoke_costway_au_ingest
+
+        out = invoke_costway_au_ingest('store-1')
+        self.assertEqual(out['updated'], 1)
+        mock_run.assert_called_once()
+        mock_async.assert_not_called()
 
 
 class ScrapeProgressCacheTests(SimpleTestCase):
@@ -419,3 +447,6 @@ class AliExpressVendorAliasTests(SimpleTestCase):
         self.assertEqual(resolve_canonical_vendor_code('AliExpress AU'), 'aliexpressau')
         self.assertEqual(resolve_canonical_vendor_code('aliexpress'), 'aliexpressuk')
         self.assertEqual(resolve_canonical_vendor_code('aliexpress_us'), 'aliexpressus')
+        self.assertEqual(resolve_canonical_vendor_code('Costway'), 'costwayau')
+        self.assertEqual(resolve_canonical_vendor_code('CostwayAU'), 'costwayau')
+        self.assertEqual(resolve_canonical_vendor_code('costco'), 'costcoau')

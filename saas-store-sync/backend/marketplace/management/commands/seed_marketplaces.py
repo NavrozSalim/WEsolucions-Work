@@ -19,6 +19,7 @@ MARKETPLACES = [
 VENDORS = [
     ('amazon', 'Amazon'),
     ('vevor', 'Vevor'),
+    ('costwayau', 'CostwayAU'),
     ('aliexpress', 'AliExpress'),
     ('ebay', 'eBay'),
     ('heb', 'HEB'),

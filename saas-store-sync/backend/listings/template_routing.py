@@ -20,6 +20,9 @@ VENDOR_NAME_ALIASES: dict[str, str] = {
     "vevor": "vevor",
     "vevor au": "vevorau",
     "vevorau": "vevorau",
+    "costway": "costwayau",
+    "costway au": "costwayau",
+    "costwayau": "costwayau",
     "ebay": "ebay",
     "ebay us": "ebay",
     "ebay au": "ebayau",
@@ -212,6 +215,12 @@ def is_nora_like(code: str | None) -> bool:
     return "nora" in c
 
 
+def is_feed_vendor_like(code: str | None) -> bool:
+    """Vevor / Costway: price and stock come from a catalog feed, not the product page."""
+    c = (code or "").strip().lower().replace("-", "").replace("_", "").replace(" ", "")
+    return c.startswith("vevor") or c.startswith("costway")
+
+
 def validate_source_vendor_for_store(store, data: dict) -> list[str]:
     """Ensure source_vendor_code (or Vendor Name) matches a store price vendor.
 
@@ -268,6 +277,9 @@ def validate_source_vendor_for_store(store, data: dict) -> list[str]:
                 "Vendor ID is required when Vendor is Nora Inventory "
                 "(supplier barcode)."
             )
+    elif is_feed_vendor_like(code):
+        # SKU / Vendor ID is enough; Price and QTY come from the vendor CSV/XLSX feed.
+        pass
     else:
         url = (data.get("vendor_url") or "").strip()
         if not url:

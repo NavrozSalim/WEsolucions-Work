@@ -789,6 +789,22 @@ def _dispatch_server_vendor_job(vendor_code: str, store, job) -> None:
             logging.getLogger(__name__).exception(
                 'Failed to dispatch VevorAU Celery task for job %s', job.id,
             )
+    elif vendor_code == 'costway':
+        try:
+            from catalog.tasks import costway_au_ingest_task
+            from catalog.celery_routing import QUEUE_HEAVY_AU
+            costway_au_ingest_task.apply_async(
+                args=[str(store.id), str(job.id)],
+                queue=QUEUE_HEAVY_AU,
+            )
+            job.status = HebScrapeJob.Status.CLAIMED
+            job.claimed_at = _tz.now()
+            job.save(update_fields=['status', 'claimed_at'])
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                'Failed to dispatch CostwayAU Celery task for job %s', job.id,
+            )
 
 
 class CatalogScrapeTriggerView(APIView):
@@ -1101,7 +1117,7 @@ class CatalogScrapeTriggerView(APIView):
             append_catalog_log(
                 store.id,
                 'Browser scrape skipped (no pending Amazon/eBay listings). '
-                'Feed vendors (VevorAU, etc.) were queued separately.',
+                'Feed vendors (VevorAU, CostwayAU, etc.) were queued separately.',
                 action_type='scrape_start',
                 user_id=request.user.id,
                 metadata={'scope': 'store', 'browser_scrape': False},

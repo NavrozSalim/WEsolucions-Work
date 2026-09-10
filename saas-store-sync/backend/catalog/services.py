@@ -27,7 +27,7 @@ EXPECTED_COLUMNS = INTERNAL_FIELDS
 
 CANONICAL_VENDOR_NAMES = (
     'AmazonUS', 'AmazonAU', 'EbayUS', 'EbayAU',
-    'VevorAU', 'CostcoAU', 'HebUS', 'Nora Inventory',
+    'VevorAU', 'CostwayAU', 'CostcoAU', 'HebUS', 'Nora Inventory',
     'AliExpress UK', 'AliExpress US', 'AliExpress AU',
 )
 
@@ -41,6 +41,8 @@ _VENDOR_ALIAS_TO_CODE: dict[str, str] = {
     'ebayau': 'ebayau', 'ebay au': 'ebayau', 'ebay-au': 'ebayau', 'ebay_au': 'ebayau',
     'vevorau': 'vevorau', 'vevor au': 'vevorau', 'vevor-au': 'vevorau',
     'vevor_au': 'vevorau', 'vevor': 'vevorau',
+    'costwayau': 'costwayau', 'costway au': 'costwayau', 'costway-au': 'costwayau',
+    'costway_au': 'costwayau', 'costway': 'costwayau',
     'costcoau': 'costcoau', 'costco au': 'costcoau', 'costco-au': 'costcoau',
     'costco_au': 'costcoau', 'costco': 'costcoau',
     'hebus': 'hebus', 'heb us': 'hebus', 'heb-us': 'hebus',

@@ -20,7 +20,9 @@ Desktop / feed ingest-only vendors (NOT scraped server-side):
 
 * **HEB US**    — Windows desktop runner via ``/api/v1/ingest/heb/``
 * **Vevor AU**  — refreshed from the public S3 XLSX feed via
-  ``catalog.tasks.run_vevor_au_ingest``
+  ``catalog.tasks.run_vevor_au_ingest`` (main ``light`` worker)
+* **Costway AU** — refreshed from the AU-IP dropship CSV via
+  ``catalog.tasks.run_costway_au_ingest`` (AU ``heavy-au`` worker)
 
 The catalog and store-sync tasks detect ingest-only vendors via
 ``catalog.tasks._is_ingest_only_product`` and skip server-side HTTP scraping
@@ -216,6 +218,12 @@ def _vevor_ingest_only_result() -> dict:
     return _res()
 
 
+def _costway_ingest_only_result() -> dict:
+    """Costway AU is refreshed from the dropship CSV on the AU worker."""
+    from .costway_au_ingest import _ingest_only_result as _res
+    return _res()
+
+
 def get_price_and_stock(
     vendor_url: str,
     region: str,
@@ -285,6 +293,10 @@ def get_price_and_stock(
     if "vevor.com.au" in url_lower or "vevor.au" in url_lower:
         logger.info("Vevor AU URL skipped server-side (feed ingest): %s", vendor_url[:80])
         return _normalize_scrape_payload(_vevor_ingest_only_result())
+
+    if "costway.com" in url_lower:
+        logger.info("Costway AU URL skipped server-side (CSV ingest): %s", vendor_url[:80])
+        return _normalize_scrape_payload(_costway_ingest_only_result())
 
     if any(host in url_lower for host in ("aliexpress.com", "aliexpress.us", "aliexpress.co.uk")):
         scrape_fn, _ = _get_aliexpress_scraper()

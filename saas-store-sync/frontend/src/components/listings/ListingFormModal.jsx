@@ -98,6 +98,14 @@ function isVevorCode(code) {
     return /vevor/i.test(String(code || ''));
 }
 
+function isCostwayCode(code) {
+    return /costway/i.test(String(code || ''));
+}
+
+function isFeedVendorCode(code) {
+    return isVevorCode(code) || isCostwayCode(code);
+}
+
 function vendorUrlPlaceholder(code) {
     const c = String(code || '').toLowerCase();
     if (c.includes('amazonau') || c.includes('amazon_au') || c.includes('amazon-au')) {
@@ -109,6 +117,7 @@ function vendorUrlPlaceholder(code) {
     }
     if (c.includes('ebay')) return 'https://www.ebay.com/itm/…';
     if (c.includes('costco')) return 'https://www.costco.com.au/…';
+    if (c.includes('costway')) return 'https://au.costway.com/…';
     if (c.includes('vevor')) return 'https://www.vevor.com.au/…';
     if (c.includes('heb')) return 'https://www.heb.com/…';
     return 'https://… (product page used for price & stock scrape)';
@@ -117,11 +126,13 @@ function vendorUrlPlaceholder(code) {
 function VendorSourceFields({
     noraSelected,
     vevorSelected,
+    costwaySelected,
     selectedVendor,
     form,
     set,
     urlRequired = false,
 }) {
+    const feedSelected = vevorSelected || costwaySelected;
     return (
         <>
             <div className="sm:col-span-2">
@@ -131,7 +142,7 @@ function VendorSourceFields({
                     value={form.vendor_url}
                     onChange={set('vendor_url')}
                     type="url"
-                    required={!!urlRequired && !noraSelected}
+                    required={!!urlRequired && !noraSelected && !feedSelected}
                 />
                 {noraSelected ? (
                     <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
@@ -143,15 +154,22 @@ function VendorSourceFields({
                         Price and stock come from the Vevor feed by product ID (listing SKU or Vendor ID), not this page.
                     </p>
                 ) : null}
+                {costwaySelected ? (
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                        Price and stock come from the Costway AU CSV feed by SKU (listing SKU or Vendor ID), not this page.
+                    </p>
+                ) : null}
             </div>
-            {(noraSelected || vevorSelected) ? (
+            {(noraSelected || feedSelected) ? (
                 <div className="sm:col-span-2">
                     <Input
                         label="Vendor ID (Optional)"
                         placeholder={
                             noraSelected
                                 ? 'Nora BarCode after cleaning, e.g. 8FNZ100-DL-G1'
-                                : 'Vevor SKU from the feed, if different from listing SKU'
+                                : costwaySelected
+                                    ? 'Costway SKU from the feed, if different from listing SKU'
+                                    : 'Vevor SKU from the feed, if different from listing SKU'
                         }
                         value={form.vendor_id}
                         onChange={set('vendor_id')}
@@ -560,6 +578,7 @@ export default function ListingFormModal({
     const selectedVendor = form.source_vendor_code || '';
     const noraSelected = isNoraCode(selectedVendor);
     const vevorSelected = isVevorCode(selectedVendor);
+    const costwaySelected = isCostwayCode(selectedVendor);
     const selectedVendorName =
         storeVendors.find((v) => v.code === selectedVendor)?.name || form.vendor_name || '';
 
@@ -573,7 +592,7 @@ export default function ListingFormModal({
     const setVendor = (e) => {
         const code = e.target.value;
         const name = storeVendors.find((v) => v.code === code)?.name || '';
-        const keepVendorId = isNoraCode(code) || isVevorCode(code);
+        const keepVendorId = isNoraCode(code) || isFeedVendorCode(code);
         setForm((f) => ({
             ...f,
             source_vendor_code: code,
@@ -581,7 +600,7 @@ export default function ListingFormModal({
             ...(keepVendorId
                 ? { vendor_url: f.vendor_url }
                 : {
-                    vendor_id: (isNoraCode(f.source_vendor_code) || isVevorCode(f.source_vendor_code))
+                    vendor_id: (isNoraCode(f.source_vendor_code) || isFeedVendorCode(f.source_vendor_code))
                         ? ''
                         : f.vendor_id,
                 }),
@@ -815,6 +834,7 @@ export default function ListingFormModal({
                                 <VendorSourceFields
                                     noraSelected={noraSelected}
                                     vevorSelected={vevorSelected}
+                                    costwaySelected={costwaySelected}
                                     selectedVendor={selectedVendor}
                                     form={form}
                                     set={set}
@@ -961,6 +981,7 @@ export default function ListingFormModal({
                                 <VendorSourceFields
                                     noraSelected={noraSelected}
                                     vevorSelected={vevorSelected}
+                                    costwaySelected={costwaySelected}
                                     selectedVendor={selectedVendor}
                                     form={form}
                                     set={set}
@@ -1022,6 +1043,7 @@ export default function ListingFormModal({
                                 <VendorSourceFields
                                     noraSelected={noraSelected}
                                     vevorSelected={vevorSelected}
+                                    costwaySelected={costwaySelected}
                                     selectedVendor={selectedVendor}
                                     form={form}
                                     set={set}
@@ -1140,6 +1162,7 @@ export default function ListingFormModal({
                                 <VendorSourceFields
                                     noraSelected={noraSelected}
                                     vevorSelected={vevorSelected}
+                                    costwaySelected={costwaySelected}
                                     selectedVendor={selectedVendor}
                                     form={form}
                                     set={set}
@@ -1308,6 +1331,7 @@ export default function ListingFormModal({
                                 <VendorSourceFields
                                     noraSelected={noraSelected}
                                     vevorSelected={vevorSelected}
+                                    costwaySelected={costwaySelected}
                                     selectedVendor={selectedVendor}
                                     form={form}
                                     set={set}

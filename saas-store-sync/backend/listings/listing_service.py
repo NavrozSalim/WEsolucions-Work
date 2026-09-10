@@ -197,14 +197,22 @@ def _is_vevor_listing(listing) -> bool:
     )
 
 
+def _is_costway_listing(listing) -> bool:
+    from scrapers.costway_au_ingest import is_costway_product_url, is_costway_vendor_code
+
+    return is_costway_vendor_code(getattr(listing, "source_vendor_code", None)) or is_costway_product_url(
+        getattr(listing, "vendor_url", None)
+    )
+
+
 def _listing_is_scrapeable(listing, nora_map) -> bool:
-    """True when a managed listing can be scraped (URL, Nora ID, or Vevor SKU)."""
+    """True when a managed listing can be scraped (URL, Nora ID, or feed SKU)."""
     has_url = bool((listing.vendor_url or "").strip())
     if has_url:
         return True
     if nora_map is not None and bool((listing.vendor_id or "").strip()):
         return True
-    if _is_vevor_listing(listing):
+    if _is_vevor_listing(listing) or _is_costway_listing(listing):
         return bool(
             (listing.vendor_id or "").strip()
             or (listing.sku or "").strip()
@@ -1558,7 +1566,7 @@ def _scrapeable_listings_qs(user, store, listing_ids=None):
 
 
 def _estimate_scrape_total(user, store, listing_ids=None) -> int:
-    """Count rows that will be scraped (Vendor URL, Nora Vendor ID, or Vevor SKU).
+    """Count rows that will be scraped (Vendor URL, Nora Vendor ID, or feed SKU).
 
     Used so the progress bar shows X/Y as soon as scrape is queued.
     """
@@ -1625,11 +1633,11 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
     if not batch:
         if store_wide:
             raise MarketplaceError(
-                "No Pending listings with a Vendor URL, Nora Vendor ID, or Vevor product ID to scrape. "
+                "No Pending listings with a Vendor URL, Nora Vendor ID, Vevor SKU, or Costway SKU to scrape. "
                 "Use Reset status to move Scraped or Failed rows back to Pending first."
             )
         raise MarketplaceError(
-            "No listings with a Vendor URL, Nora Vendor ID, or Vevor product ID to scrape. "
+            "No listings with a Vendor URL, Nora Vendor ID, Vevor SKU, or Costway SKU to scrape. "
             "Add a vendor link / Vendor ID on each listing first."
         )
 
@@ -1758,10 +1766,16 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
 
     Nora Inventory is the only hybrid vendor: price from Vendor URL (e.g. eBay),
     inventory from the Nora Excel map. Other vendors follow catalog-store rules
-    (eBay/Amazon URL scrape; Vevor AU XLSX feed by product ID).
+    (eBay/Amazon URL scrape; Vevor AU XLSX feed and Costway AU CSV feed by SKU).
     """
     from scrapers import close_amazon_session, get_price_and_stock
     from scrapers.nora_au_ingest import is_nora_vendor_code
+    from scrapers.costway_au_ingest import (
+        is_costway_product_url,
+        is_costway_vendor_code,
+        load_costway_feed_lookups,
+        lookup_costway_price_stock,
+    )
     from scrapers.vevor_au_ingest import (
         is_vevor_product_url,
         is_vevor_vendor_code,
@@ -1801,7 +1815,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
 
     if not listings:
         raise MarketplaceError(
-            "No listings with a Vendor URL, Nora Vendor ID, or Vevor product ID to scrape. "
+            "No listings with a Vendor URL, Nora Vendor ID, Vevor SKU, or Costway SKU to scrape. "
             "Add a vendor link / Vendor ID on each listing first."
         )
 
@@ -1899,6 +1913,8 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
     now = timezone.now()
     vevor_lookups = None
     vevor_feed_error = ""
+    costway_lookups = None
+    costway_feed_error = ""
     try:
         try:
             if any(_is_vevor_listing(listing) for listing in listings):
@@ -1933,6 +1949,38 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     vevor_feed_error = (
                         str(feed_err) or "Vevor AU feed download failed."
                     )[:500]
+            if any(_is_costway_listing(listing) for listing in listings):
+                early = scrape_prog.scrape_job_state(store.id, my_gen)
+                if early == "superseded":
+                    return {
+                        "ok": True,
+                        "cancelled": True,
+                        "superseded": True,
+                        "message": "A newer scrape started; this worker stopped.",
+                        "scraped": 0,
+                        "failed": 0,
+                        "pushed": 0,
+                        "rows": [],
+                    }
+                if early == "cancel":
+                    return _cancel_result(0, 0, [])
+                _set_progress(
+                    total=total,
+                    processed=0,
+                    scraped=0,
+                    failed=0,
+                    phase="running",
+                    message="Downloading Costway AU feed…",
+                )
+                try:
+                    costway_lookups = load_costway_feed_lookups()
+                except Exception as feed_err:  # noqa: BLE001
+                    logger.exception(
+                        "Costway AU feed unavailable for managed scrape store=%s", store.id,
+                    )
+                    costway_feed_error = (
+                        str(feed_err) or "Costway AU feed download failed."
+                    )[:500]
             for idx, listing in enumerate(listings):
                 loop_state = scrape_prog.scrape_job_state(store.id, my_gen)
                 if loop_state == "superseded":
@@ -1964,6 +2012,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                 url_l = url.lower()
                 looks_like_other_vendor = (
                     is_vevor_product_url(url)
+                    or is_costway_product_url(url)
                     or "ebay." in url_l
                     or "amazon." in url_l
                     or "aliexpress." in url_l
@@ -1974,6 +2023,9 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                 )
                 uses_vevor = (not explicit_nora) and (
                     is_vevor_vendor_code(src_code) or is_vevor_product_url(url)
+                )
+                uses_costway = (not explicit_nora) and (not uses_vevor) and (
+                    is_costway_vendor_code(src_code) or is_costway_product_url(url)
                 )
                 row = {
                     "id": str(listing.id),
@@ -2031,6 +2083,33 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     )
                     if not entry:
                         _fail_row("SKU not in Vevor AU XLSX feed")
+                        continue
+                    try:
+                        price = float(entry.get("Posted Price") or 0)
+                    except (TypeError, ValueError):
+                        price = None
+                    try:
+                        stock = int(entry.get("Posted Inventory") or 0)
+                    except (TypeError, ValueError):
+                        stock = 0
+                    result = {"price": price, "inventory": stock}
+                elif uses_costway:
+                    if costway_feed_error:
+                        _fail_row(costway_feed_error)
+                        continue
+                    lookups = costway_lookups or {}
+                    entry = lookup_costway_price_stock(
+                        lookups.get("lookup") or {},
+                        lookups.get("lookup_compact") or {},
+                        lookups.get("lookup_by_url") or {},
+                        vendor_id=listing.vendor_id or "",
+                        sku=listing.sku or "",
+                        variant_key=listing.external_variant_key or "",
+                        product_key=listing.external_product_key or "",
+                        vendor_url=url,
+                    )
+                    if not entry:
+                        _fail_row("SKU not in Costway AU CSV feed")
                         continue
                     try:
                         price = float(entry.get("Posted Price") or 0)

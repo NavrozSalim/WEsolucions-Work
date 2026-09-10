@@ -1,8 +1,8 @@
 # Australia browser + AU feed worker — run on an AU-region VPS (e.g. Contabo AU).
 #
-# Consumes Celery queue ``heavy-au``: Amazon AU, eBay AU.
-# Vevor AU feed ingest (``catalog.run_vevor_au_ingest``) runs on the main app's ``light`` worker.
-# (Vevor AU XLSX feed). Same broker/DB as the main stack.
+# Consumes Celery queue ``heavy-au``: Amazon AU, eBay AU, Costway AU CSV ingest.
+# Vevor AU feed ingest (``catalog.run_vevor_au_ingest``) runs on the main app's ``light`` worker
+# (public S3 XLSX). Costway dropship CSV is AU-IP only and MUST run on this worker.
 #
 # Requirements:
 # - Same backend image as main (build or pull BACKEND_IMAGE).
@@ -62,6 +62,7 @@ services:
       - EBAY_BIN_HYDRATE_MAX_SEC=${EBAY_BIN_HYDRATE_MAX_SEC:-2}
       - CATALOG_SCRAPE_CHUNK_SIZE=${CATALOG_SCRAPE_CHUNK_SIZE:-}
       - VEVOR_AU_FEED_URL=${VEVOR_AU_FEED_URL:-https://ads-feed.s3.us-west-2.amazonaws.com/ads/business/563/vevor-563.xlsx}
+      - COSTWAY_AU_FEED_URL=${COSTWAY_AU_FEED_URL:-https://au.costway.com/media/feed/Dropship-AU.csv}
       - PROXY_URL=${PROXY_URL:-}
       - PROXY_URLS=${PROXY_URLS:-}
       - COSTCO_AU_PROXY_URL=${COSTCO_AU_PROXY_URL:-}

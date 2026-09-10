@@ -71,7 +71,8 @@ def _is_ingest_only_product(product) -> bool:
     """True when the vendor has no live server-side scraper for this deployment.
 
     HEB is always ingest-only (Windows desktop runner). Vevor AU is always
-    ingest-only (feed). Costco AU is ingest-only **only when** residential
+    ingest-only (feed). Costway AU is always ingest-only (CSV feed on the AU
+    worker). Costco AU is ingest-only **only when** residential
     proxies are not configured — set ``COSTCO_AU_PROXY_URLS`` on the AU worker
     and Costco moves into the live server-scrape path.
     """
@@ -80,6 +81,8 @@ def _is_ingest_only_product(product) -> bool:
     if code in ('vevor', 'vevorau'):
         return True
     if code.startswith('vevor_'):
+        return True
+    if code in ('costway', 'costwayau') or code.startswith('costway'):
         return True
     if code in ('heb', 'hebus') or code.startswith('heb_'):
         return True
@@ -98,8 +101,12 @@ def _ingest_only_vendor_ids() -> list:
     HEB is always desktop-ingest. Costco AU joins this set only when proxies
     aren't configured (see ``_costco_au_runs_on_server``).
     """
-    codes = ['vevor', 'vevorau', 'heb', 'hebus']
-    prefix_q = Q(code__istartswith='vevor_') | Q(code__istartswith='heb_')
+    codes = ['vevor', 'vevorau', 'costway', 'costwayau', 'heb', 'hebus']
+    prefix_q = (
+        Q(code__istartswith='vevor_')
+        | Q(code__istartswith='costway')
+        | Q(code__istartswith='heb_')
+    )
     if not _costco_au_runs_on_server():
         codes.extend(['costcoau', 'costco_au', 'costco-au'])
         prefix_q = prefix_q | Q(code__istartswith='costco_')
@@ -2265,6 +2272,255 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
 def vevor_au_ingest_task(self, store_id: str | None = None, job_id: str | None = None):
     """Celery entrypoint for the Vevor AU XLSX feed refresh."""
     return run_vevor_au_ingest(store_id=store_id, job_id=job_id)
+
+
+def run_costway_au_ingest(store_id: str | None = None, *, job_id: str | None = None) -> dict:
+    """Refresh VendorPrice rows for Costway AU from the dropship CSV.
+
+    The CSV is AU-IP only. This function must execute on the AU worker
+    (``catalog.run_costway_au_ingest`` → ``heavy-au``). Do not call it inline
+    from the main ``sync`` / ``light`` workers.
+
+    When ``job_id`` is set (Start Scraping), all active Costway mappings for
+    the store are refreshed. Without ``job_id``, only ``pending`` rows run.
+    ``store_id`` is required (multi-tenant).
+    """
+    from scrapers.costway_au_ingest import (
+        COSTWAY_AU_FEED_URL,
+        fetch_costway_feed,
+        load_costway_via_csv,
+        lookup_sku,
+    )
+    from sync.tasks import (
+        _apply_inventory,
+        _apply_pricing,
+        _build_store_vendor_pricing_inventory_caches,
+        _get_inventory_for_vendor_from_cache,
+        _get_pricing_for_vendor_from_cache,
+    )
+    from vendor.models import Vendor, VendorPrice
+
+    vendor_ids = list(
+        Vendor.objects.filter(code__iregex=r'^costway(au|_au|-au)?$')
+        .values_list('id', flat=True)
+    )
+    if not vendor_ids:
+        return {'status': 'no_vendor', 'message': 'Costway vendor not seeded.', 'updated': 0}
+
+    if not store_id:
+        logger.warning(
+            'run_costway_au_ingest: store_id missing; refusing global apply (multi-tenant).'
+        )
+        return {'status': 'skipped', 'message': 'store_id is required', 'updated': 0}
+
+    pm_qs = ProductMapping.objects.filter(
+        store_id=store_id,
+        is_active=True,
+        product__vendor_id__in=vendor_ids,
+    ).select_related('product', 'product__vendor', 'store')
+
+    user_triggered = bool(job_id)
+    if not user_triggered:
+        pm_qs = pm_qs.filter(sync_status='pending')
+
+    if not pm_qs.exists():
+        reason = 'no_costway_listings' if user_triggered else 'no_pending_costway'
+        result = {
+            'status': 'skipped',
+            'reason': reason,
+            'updated': 0,
+            'store_id': str(store_id),
+            'job_id': str(job_id) if job_id else None,
+        }
+        if job_id:
+            _finalize_vevor_scrape_job(
+                job_id, store_id,
+                stats={'received': 0, 'matched': 0, 'applied': 0},
+            )
+        logger.info('Costway AU ingest skipped: %s', result)
+        return result
+
+    try:
+        csv_path = fetch_costway_feed(COSTWAY_AU_FEED_URL)
+    except Exception as e:
+        logger.exception('Costway AU feed download failed: %s', e)
+        _finalize_vevor_scrape_job(
+            job_id, store_id, status='failed', stats={'error': str(e)[:240]},
+        )
+        return {'status': 'failed', 'error': str(e), 'updated': 0}
+
+    try:
+        lookup, lookup_compact, pos_rows = load_costway_via_csv(csv_path)
+    except Exception as e:
+        logger.exception('Costway AU feed parse failed: %s', e)
+        _finalize_vevor_scrape_job(
+            job_id, store_id, status='failed', stats={'error': str(e)[:240]},
+        )
+        return {'status': 'failed', 'error': str(e), 'updated': 0}
+    finally:
+        try:
+            import os as _os
+            _os.unlink(csv_path)
+        except Exception:
+            pass
+
+    if not lookup:
+        _finalize_vevor_scrape_job(
+            job_id, store_id,
+            stats={'received': pos_rows, 'matched': 0, 'applied': 0},
+        )
+        return {'status': 'empty_feed', 'feed_rows': pos_rows, 'updated': 0}
+
+    pm_list = list(pm_qs)
+    store = pm_list[0].store if pm_list else None
+    if store is None:
+        try:
+            from stores.models import Store
+            store = Store.objects.get(id=store_id)
+        except Exception:
+            store = None
+
+    price_by_vid, price_fb, inv_by_vid, inv_fb = (
+        _build_store_vendor_pricing_inventory_caches(store) if store else ({}, {}, {}, {})
+    )
+
+    now = timezone.now()
+    matched = missing = updated_rows = 0
+    pm_batch: list[ProductMapping] = []
+    vp_batch: list[VendorPrice] = []
+    bulk_pm_size = int(getattr(settings, 'COSTWAY_INGEST_BULK_BATCH', 500) or 500)
+    bulk_pm_size = max(50, min(bulk_pm_size, 2000))
+    pm_fields = (
+        'store_price', 'store_stock', 'sync_status',
+        'failed_sync_count', 'last_scrape_time', 'scrape_error',
+    )
+
+    def _flush_pm_batch() -> None:
+        nonlocal updated_rows
+        if not pm_batch:
+            return
+        ProductMapping.objects.bulk_update(pm_batch, pm_fields, batch_size=bulk_pm_size)
+        updated_rows += len(pm_batch)
+        pm_batch.clear()
+
+    def _flush_vp_batch() -> None:
+        if not vp_batch:
+            return
+        VendorPrice.objects.bulk_create(vp_batch, batch_size=bulk_pm_size)
+        vp_batch.clear()
+
+    for pm in pm_list:
+        product = pm.product
+        if not product:
+            continue
+        raw_sku = (product.vendor_sku or '').strip()
+        if not raw_sku:
+            missing += 1
+            _fail_mapping(pm, 'costway_feed_sku_missing', 'Missing vendor SKU', store=store)
+            continue
+        entry = lookup_sku(lookup, lookup_compact, raw_sku)
+        if not entry:
+            missing += 1
+            _fail_mapping(
+                pm, 'costway_feed_sku_missing', 'SKU not in Costway AU CSV feed', store=store,
+            )
+            continue
+        matched += 1
+        try:
+            price = Decimal(str(entry['Posted Price'] or 0))
+            stock_val = int(entry.get('Posted Inventory') or 0)
+        except Exception as parse_err:
+            missing += 1
+            _fail_mapping(pm, 'costway_feed_row_invalid', str(parse_err)[:240], store=store)
+            continue
+
+        vp_batch.append(VendorPrice(product=product, price=price, stock=stock_val))
+        if len(vp_batch) >= bulk_pm_size:
+            _flush_vp_batch()
+
+        try:
+            pricing = _get_pricing_for_vendor_from_cache(product.vendor_id, price_by_vid, price_fb)
+            inventory = _get_inventory_for_vendor_from_cache(product.vendor_id, inv_by_vid, inv_fb)
+            new_price = _apply_pricing(
+                price,
+                pricing,
+                pack_qty=getattr(pm, 'pack_qty', None),
+                prep_fees=getattr(pm, 'prep_fees', None),
+                shipping_fees=getattr(pm, 'shipping_fees', None),
+            )
+            if new_price is None:
+                new_price = price
+            new_stock = _apply_inventory(stock_val, inventory)
+            pm.store_price = new_price
+            pm.store_stock = new_stock
+            pm.sync_status = 'scraped'
+            pm.failed_sync_count = 0
+            pm.last_scrape_time = now
+            pm.scrape_error = None
+            pm_batch.append(pm)
+            if len(pm_batch) >= bulk_pm_size:
+                _flush_pm_batch()
+        except Exception as apply_err:
+            logger.exception(
+                'Costway AU apply failed for SKU %s (store=%s): %s',
+                product.vendor_sku, pm.store_id, apply_err,
+            )
+
+    _flush_vp_batch()
+    _flush_pm_batch()
+
+    result = {
+        'status': 'ok',
+        'feed_rows': pos_rows,
+        'feed_unique_skus': len(lookup),
+        'matched': matched,
+        'missing': missing,
+        'updated': updated_rows,
+        'store_id': str(store_id) if store_id else None,
+        'job_id': str(job_id) if job_id else None,
+        'user_triggered': user_triggered,
+        'listing_count': len(pm_list),
+    }
+
+    if job_id:
+        _finalize_vevor_scrape_job(
+            job_id, store_id,
+            stats={
+                'received': pos_rows,
+                'matched': matched,
+                'applied': updated_rows,
+            },
+        )
+
+    logger.info('Costway AU ingest summary: %s', result)
+    return result
+
+
+@shared_task(bind=True, max_retries=3, name='catalog.run_costway_au_ingest')
+def costway_au_ingest_task(self, store_id: str | None = None, job_id: str | None = None):
+    """Celery entrypoint — must run on ``heavy-au`` (AU-IP CSV)."""
+    return run_costway_au_ingest(store_id=store_id, job_id=job_id)
+
+
+def invoke_costway_au_ingest(store_id: str, *, job_id: str | None = None) -> dict:
+    """Run Costway CSV ingest on the AU worker and wait for Price/QTY to land.
+
+    Scheduled ``run_store_update`` lives on the main ``sync`` worker, which
+    cannot download the geo-restricted CSV. Catalog Start Scraping uses
+    ``costway_au_ingest_task.delay`` (async). This helper is the wait path.
+    """
+    from catalog.celery_routing import QUEUE_HEAVY_AU
+
+    if getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
+        return run_costway_au_ingest(store_id=store_id, job_id=job_id)
+
+    timeout = int(getattr(settings, 'COSTWAY_AU_INGEST_WAIT_SEC', 600) or 600)
+    timeout = max(30, min(timeout, 1800))
+    async_result = costway_au_ingest_task.apply_async(
+        kwargs={'store_id': str(store_id), 'job_id': job_id},
+        queue=QUEUE_HEAVY_AU,
+    )
+    return async_result.get(timeout=timeout)
 
 
 @shared_task(bind=True, max_retries=3)

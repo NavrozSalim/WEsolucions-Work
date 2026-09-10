@@ -1087,6 +1087,19 @@ class ListingServiceTests(TestCase):
         self.assertEqual(listing.source_vendor_code, "noraau")
         self.assertEqual(listing.vendor_id, "NORA-1")
 
+    def test_bulk_import_costway_vendor_name(self):
+        from vendor.models import Vendor
+        Vendor.objects.get_or_create(code="costwayau", defaults={"name": "CostwayAU"})
+        content = (
+            "Action,SKU,Title,Description,Brand,Image URLs,Inventory,Original Price,Sale Price,"
+            "Vendor Name\n"
+            "Create,TP10003,Tee,Desc,Brand,https://img.example.com/a.jpg,1,10,9,Costway\n"
+        ).encode()
+        result = listing_service.bulk_import(self.user, self.store, "costway.csv", content, action="create")
+        self.assertEqual(result["imported"], 1)
+        listing = StoreListing.objects.get(sku="TP10003")
+        self.assertEqual(listing.source_vendor_code, "costwayau")
+
     def test_bulk_import_routes_to_named_store(self):
         other = Store.objects.create(
             user=self.user,
