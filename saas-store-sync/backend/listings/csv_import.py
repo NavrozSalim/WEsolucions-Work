@@ -167,7 +167,7 @@ _ATTR_CODE_IN_HEADER_RE = re.compile(r"\[([^\]]+)\]\s*$")
 
 
 def _attribute_code_from_header(header: str) -> str:
-    """Read Mirakl attribute code from 'Assembly Required [attribute_pdb_…]'."""
+    """Bunnings PM11 code: exact header, or legacy 'Label [code]'."""
     text = str(header or "").strip()
     match = _ATTR_CODE_IN_HEADER_RE.search(text)
     if match:
@@ -656,12 +656,11 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
         normalized = {}
         extra_attrs = {}
         for header, value in raw.items():
-            attr_code = _attribute_code_from_header(header)
-            if attr_code:
-                if str(value).strip():
-                    extra_attrs[attr_code] = str(value).strip()
+            text = str(header or "").strip()
+            if not text:
                 continue
-            key = COLUMN_MAP.get(_canonical_header(header))
+            attr_code = _attribute_code_from_header(text)
+            key = None if attr_code else COLUMN_MAP.get(_canonical_header(text))
             if key:
                 existing = normalized.get(key)
                 if existing and not str(value).strip():
@@ -670,6 +669,8 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
                     normalized[key] = str(value).strip()
                     continue
                 normalized[key] = str(value).strip()
+            elif str(value).strip():
+                extra_attrs[attr_code or text] = str(value).strip()
         if not any(str(v).strip() for v in normalized.values() if not isinstance(v, bool)):
             # Allow bool-only rows? skip empty
             if not any(normalized.values()) and not extra_attrs:

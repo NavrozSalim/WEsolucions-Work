@@ -268,8 +268,7 @@ export function BunningsCategoryMultiSelect({ storeId, values = [], onChange, re
                 </div>
             )}
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                The downloaded template includes extra columns for these categories. Fill those columns
-                instead of Category Attributes JSON. Up to {MAX_BULK_CATEGORIES} categories per file.
+                Extra CSV columns use the Bunnings attribute codes for these categories. Up to {MAX_BULK_CATEGORIES} categories per file.
             </p>
         </div>
     );
@@ -431,7 +430,7 @@ export function BunningsAttributeFields({ storeId, hierarchy, value, onChange })
                     Category attributes
                 </p>
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                    Required fields come from Bunnings for this category. Weight and dimensions above still count when Mirakl asks for them.
+                    Field names are the Bunnings attribute codes for this category. Weight and dimensions above still count when Mirakl asks for them.
                 </p>
             </div>
             {loading && (
@@ -448,7 +447,6 @@ export function BunningsAttributeFields({ storeId, hierarchy, value, onChange })
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 {fields.map((field) => {
                     const kind = attrInputType(field);
-                    const label = `${field.label || field.code}${field.required ? '' : ' (Optional)'}`;
                     const listValues =
                         Array.isArray(field.values) && field.values.length > 0
                             ? field.values
@@ -458,12 +456,23 @@ export function BunningsAttributeFields({ storeId, hierarchy, value, onChange })
                                     { code: 'No', label: 'No' },
                                 ]
                               : [];
+                    const nameEl = (
+                        <>
+                            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+                                {field.code} {field.required ? <span className="text-rose-500">*</span> : null}
+                            </label>
+                            {field.label && field.label !== field.code ? (
+                                <p className="mb-1 text-xs text-slate-500 dark:text-slate-400">
+                                    {field.label}
+                                    {field.required ? '' : ' (optional)'}
+                                </p>
+                            ) : null}
+                        </>
+                    );
                     if (kind === 'select' && listValues.length > 0) {
                         return (
                             <div key={field.code}>
-                                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
-                                    {label} {field.required ? <span className="text-rose-500">*</span> : null}
-                                </label>
+                                {nameEl}
                                 <select
                                     value={current[field.code] || ''}
                                     required={!!field.required}
@@ -482,9 +491,7 @@ export function BunningsAttributeFields({ storeId, hierarchy, value, onChange })
                     }
                     return (
                         <div key={field.code}>
-                            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
-                                {label} {field.required ? <span className="text-rose-500">*</span> : null}
-                            </label>
+                            {nameEl}
                             <input
                                 value={current[field.code] || ''}
                                 required={!!field.required}

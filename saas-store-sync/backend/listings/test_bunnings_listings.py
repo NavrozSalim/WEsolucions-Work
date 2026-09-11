@@ -290,8 +290,8 @@ class BunningsProductsUnitTests(SimpleTestCase):
             cols = bunnings_products.template_attribute_columns(store, ["BEDSIDE"])
         codes = [c["code"] for c in cols]
         self.assertNotIn("title", codes)
-        self.assertEqual(cols[0]["header"], "Assembly Required [attribute_pdb_assembly]")
-        self.assertEqual(cols[1]["header"], "Colour (Optional) [colour]")
+        self.assertEqual(cols[0]["header"], "attribute_pdb_assembly")
+        self.assertEqual(cols[1]["header"], "colour")
 
     def test_validate_requires_pm11_attribute(self):
         store = SimpleNamespace(id="store-1")
@@ -456,6 +456,13 @@ class BunningsListingServiceTests(TestCase):
         labeled_rows = csv_import.parse_upload("bunnings.csv", labeled.encode())
         self.assertEqual(labeled_rows[0]["attributes"]["attribute_pdb_assembly"], "Yes")
 
+        colour_csv = (
+            "SKU,Title,Description,Brand,Category,Image URLs,Inventory,Price,Logistic Class,colour\n"
+            "BN-COL,T,D,B,BEDSIDE,https://example.com/a.jpg,1,9.99,SMALL,White\n"
+        )
+        colour_rows = csv_import.parse_upload("bunnings.csv", colour_csv.encode())
+        self.assertEqual(colour_rows[0]["attributes"]["colour"], "White")
+
     def test_template_adds_columns_for_selected_categories(self):
         with patch(
             "listings.bunnings.products.load_category_attributes",
@@ -470,7 +477,8 @@ class BunningsListingServiceTests(TestCase):
                 store=self.store,
                 hierarchies=["BEDSIDE", "DRILLS"],
             )
-        self.assertIn("Assembly Required [attribute_pdb_assembly]", csv_text)
+        self.assertIn("attribute_pdb_assembly", csv_text)
+        self.assertNotIn("Assembly Required [attribute_pdb_assembly]", csv_text)
         self.assertNotIn("Category Attributes JSON", csv_text)
         self.assertIn("BEDSIDE", csv_text)
         self.assertIn("DRILLS", csv_text)

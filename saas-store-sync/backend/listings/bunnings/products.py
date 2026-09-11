@@ -385,7 +385,7 @@ def flatten_product_attributes(payload) -> list[dict]:
 
 
 def template_attribute_columns(store, hierarchy_codes) -> list[dict]:
-    """PM11 columns for a bulk CSV: human label plus [attribute-code] for import."""
+    """PM11 columns for a bulk CSV. Header is the Bunnings attribute code."""
     seen: set[str] = set()
     columns: list[dict] = []
     for raw_code in hierarchy_codes or []:
@@ -397,15 +397,10 @@ def template_attribute_columns(store, hierarchy_codes) -> list[dict]:
             if not code or code in seen or code.lower() in TEMPLATE_SKIP_ATTRS:
                 continue
             seen.add(code)
-            label = str(item.get("label") or code).strip() or code
-            if item.get("required"):
-                header = f"{label} [{code}]"
-            else:
-                header = f"{label} (Optional) [{code}]"
             columns.append({
                 "code": code,
-                "header": header,
-                "label": label,
+                "header": code,
+                "label": str(item.get("label") or code).strip() or code,
                 "required": bool(item.get("required")),
             })
     return columns
