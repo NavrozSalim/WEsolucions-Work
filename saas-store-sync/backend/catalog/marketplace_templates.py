@@ -10,6 +10,17 @@ from typing import Any
 
 from stores.models import Store
 
+# Catalog sample CSV kinds (inventory-only upload). Managed listing
+# templates (Lasoo/Etsy/Bunnings create) live in listings.csv_import.
+KNOWN_CATALOG_TEMPLATE_KINDS = frozenset({
+    'reverb',
+    'walmart',
+    'sears',
+    'kogan',
+    'mydeal',
+})
+SKU_AS_PARENT_KINDS = frozenset({'reverb', 'kogan', 'mydeal'})
+
 # Internal field keys matching EXPECTED_COLUMNS in services.py
 INTERNAL_FIELDS = [
     'vendor name',
@@ -42,7 +53,7 @@ def store_marketplace_kind(store: Store) -> str:
     code = (getattr(m, 'code', '') or '').strip().lower()
     name = (getattr(m, 'name', '') or '').strip().lower()
 
-    if code in ('reverb', 'walmart', 'sears', 'kogan'):
+    if code in KNOWN_CATALOG_TEMPLATE_KINDS:
         return code
     if 'walmart' in name:
         return 'walmart'
@@ -52,7 +63,9 @@ def store_marketplace_kind(store: Store) -> str:
         return 'reverb'
     if 'kogan' in name:
         return 'kogan'
-    if name in ('reverb', 'walmart', 'sears', 'kogan'):
+    if 'mydeal' in name or name in ('woolworths', 'wmp'):
+        return 'mydeal'
+    if name in KNOWN_CATALOG_TEMPLATE_KINDS:
         return name
     return 'other'
 
@@ -61,15 +74,43 @@ def template_kind_from_store_adapter(store: Store) -> str:
     """
     Listing marketplace for CSV templates, aligned with store_adapters (same as sync/push).
     Works when Marketplace.code is lowercase or name variants differ from FK parsing.
+
+    MyDeal has no store_adapters listing adapter (get_adapter raises). Callers
+    must fall through to store_marketplace_kind — never let that raise leak
+    into the sample-template download.
     """
     from store_adapters import get_adapter
 
-    cls_name = type(get_adapter(store)).__name__
+    try:
+        cls_name = type(get_adapter(store)).__name__
+    except ValueError:
+        return 'other'
     return {
         'ReverbAdapter': 'reverb',
         'WalmartAdapter': 'walmart',
         'SearsAdapter': 'sears',
+        'KoganAdapter': 'kogan',
     }.get(cls_name, 'other')
+
+
+def resolve_sample_template_kind(store: Store | None = None, kind_param: str = '') -> str:
+    """Kind used for catalog/delete sample CSVs (query param wins when known)."""
+    param = (kind_param or '').strip().lower()
+    if param in KNOWN_CATALOG_TEMPLATE_KINDS:
+        return param
+    if store is not None:
+        kind = template_kind_from_store_adapter(store)
+        if kind != 'other':
+            return kind
+        return store_marketplace_kind(store)
+    return 'other'
+
+
+def normalize_sample_template_action(raw: str) -> str:
+    action = (raw or 'catalog').strip().lower()
+    if action in ('delete', 'del'):
+        return 'delete'
+    return 'catalog'
 
 
 def resolve_catalog_marketplace_kind(store: Store) -> str:
@@ -147,7 +188,7 @@ def build_field_indices(header: list, store: Store) -> dict[str, int | None]:
 
     kind = resolve_catalog_marketplace_kind(store)
     if sku_i is not None:
-        if kind in ('reverb', 'kogan'):
+        if kind in SKU_AS_PARENT_KINDS:
             if idx['marketplace parent sku'] is None:
                 idx['marketplace parent sku'] = sku_i
         elif kind == 'walmart':
@@ -203,8 +244,8 @@ def validate_marketplace_headers(indices: dict[str, int | None], store: Store) -
 
     kind = resolve_catalog_marketplace_kind(store)
 
-    if kind in ('reverb', 'kogan'):
-        label = 'Kogan' if kind == 'kogan' else 'Reverb'
+    if kind in SKU_AS_PARENT_KINDS:
+        label = {'kogan': 'Kogan', 'mydeal': 'MyDeal'}.get(kind, 'Reverb')
         has_listing_sku = _req('marketplace parent sku')
         has_vendor_ref = _req('vendor url') or _req('vendor id')
         if not has_listing_sku:
@@ -249,23 +290,67 @@ def validate_marketplace_headers(indices: dict[str, int | None], store: Store) -
     return None
 
 
-def sample_template_filename(store: Store) -> str:
-    return sample_template_filename_for_kind(resolve_catalog_marketplace_kind(store))
+def sample_template_filename(store: Store, action: str = 'catalog') -> str:
+    return sample_template_filename_for_kind(
+        resolve_catalog_marketplace_kind(store),
+        action=action,
+    )
 
 
-def sample_template_filename_for_kind(kind: str) -> str:
+def sample_template_filename_for_kind(kind: str, action: str = 'catalog') -> str:
+    action = normalize_sample_template_action(action)
+    kind = (kind or 'other').strip().lower() or 'other'
+    if action == 'delete':
+        if kind == 'other':
+            return 'catalog_delete_template.csv'
+        return f'catalog_delete_template_{kind}.csv'
     if kind == 'other':
         return 'catalog_upload_template.csv'
     return f'catalog_upload_template_{kind}.csv'
 
 
-def sample_template_rows(store: Store) -> tuple[list[str], list[list[str]]]:
+def sample_template_rows(store: Store, action: str = 'catalog') -> tuple[list[str], list[list[str]]]:
     """CSV header row + example data rows for the store's marketplace."""
-    return sample_template_rows_for_kind(resolve_catalog_marketplace_kind(store))
+    return sample_template_rows_for_kind(
+        resolve_catalog_marketplace_kind(store),
+        action=action,
+    )
 
 
-def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]]:
-    """CSV header row + example rows when store is unknown or marketplace is generic."""
+def _to_delete_sample_rows(headers: list[str], rows: list[list[str]]) -> list[list[str]]:
+    """Same columns as the catalog file; one example row with Action=Delete."""
+    action_i = next(
+        (i for i, h in enumerate(headers) if str(h).strip().lower() == 'action'),
+        None,
+    )
+    src = rows[:1] if rows else [[''] * len(headers)]
+    out: list[list[str]] = []
+    for row in src:
+        cells = list(row) + [''] * max(0, len(headers) - len(row))
+        cells = cells[: len(headers)]
+        if action_i is not None:
+            cells[action_i] = 'Delete'
+        out.append(cells)
+    return out
+
+
+def sample_template_rows_for_kind(
+    kind: str,
+    action: str = 'catalog',
+) -> tuple[list[str], list[list[str]]]:
+    """CSV header + example rows for this marketplace.
+
+    action=delete keeps the same columns (so ingest still accepts the file)
+    and sets the sample Action to Delete — only those SKUs are removed.
+    """
+    headers, rows = _catalog_template_rows_for_kind(kind)
+    if normalize_sample_template_action(action) == 'delete':
+        return headers, _to_delete_sample_rows(headers, rows)
+    return headers, rows
+
+
+def _catalog_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]]:
+    kind = (kind or 'other').strip().lower() or 'other'
     if kind == 'walmart':
         headers = [
             'Vendor Name',
@@ -360,7 +445,7 @@ def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]
                 '',
                 'No',
                 '',
-                'Reverb',
+                'Marketplace',
                 'My Store',
                 'LISTING-SKU-001',
                 '',
@@ -375,8 +460,11 @@ def sample_template_rows_for_kind(kind: str) -> tuple[list[str], list[list[str]]
         ]
         return headers, rows
 
-    # reverb / kogan: minimal template (identical columns & semantics)
-    marketplace_label = 'Kogan' if kind == 'kogan' else 'Reverb'
+    # reverb / kogan / mydeal: same SKU-based catalog columns, different label
+    marketplace_label = {
+        'kogan': 'Kogan',
+        'mydeal': 'MyDeal',
+    }.get(kind, 'Reverb')
     headers = [
         'Vendor Name',
         'Vendor ID',
@@ -490,7 +578,7 @@ def upload_row_to_cells(
             r.vendor_url_raw or '',
             r.action_raw or 'Add',
         ]
-    elif kind in ('reverb', 'kogan'):
+    elif kind in SKU_AS_PARENT_KINDS:
         cells = [
             r.vendor_name_raw or '',
             r.vendor_id_raw or '',

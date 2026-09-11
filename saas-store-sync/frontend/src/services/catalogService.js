@@ -242,27 +242,40 @@ export const cancelCatalogScrape = (storeId) =>
 export const cancelCatalogPushListings = (storeId) =>
     api.post(`/stores/${storeId}/catalog/push-listings/cancel/`, {});
 
-/** Map store row from /catalog/stores/ to reverb | walmart | sears for sample CSV columns. */
+/** Map store row from /catalog/stores/ to a catalog sample CSV kind. */
+export const CATALOG_TEMPLATE_KINDS = ['reverb', 'walmart', 'sears', 'kogan', 'mydeal'];
+
 export const resolveMarketplaceTemplateKind = (store) => {
     if (!store) return '';
     const c = String(store.marketplace_code || '').trim().toLowerCase();
-    if (['reverb', 'walmart', 'sears'].includes(c)) return c;
+    if (CATALOG_TEMPLATE_KINDS.includes(c)) return c;
     const n = String(store.marketplace_name || '').trim().toLowerCase();
     if (n.includes('walmart')) return 'walmart';
     if (n.includes('sears')) return 'sears';
     if (n.includes('reverb')) return 'reverb';
+    if (n.includes('kogan')) return 'kogan';
+    if (n.includes('mydeal') || n === 'woolworths' || n === 'wmp') return 'mydeal';
     return '';
 };
 
-export const downloadSampleTemplate = (storeId = null, marketplaceKind = '') => {
+export const downloadSampleTemplate = (storeId = null, marketplaceKind = '', action = 'catalog') => {
     const params = {};
     if (storeId) params.store_id = storeId;
     const kind = String(marketplaceKind || '').trim().toLowerCase();
-    if (['reverb', 'walmart', 'sears'].includes(kind)) params.marketplace = kind;
+    if (CATALOG_TEMPLATE_KINDS.includes(kind)) params.marketplace = kind;
+    const act = String(action || 'catalog').trim().toLowerCase();
+    if (act === 'delete') params.action = 'delete';
     params._cb = String(Date.now());
+    const fallback = act === 'delete'
+        ? (kind && CATALOG_TEMPLATE_KINDS.includes(kind)
+            ? `catalog_delete_template_${kind}.csv`
+            : 'catalog_delete_template.csv')
+        : (kind && CATALOG_TEMPLATE_KINDS.includes(kind)
+            ? `catalog_upload_template_${kind}.csv`
+            : 'catalog_upload_template.csv');
     return apiDownload(api, '/catalog/sample-template/', {
         params,
-        fallbackFilename: 'catalog_upload_template.csv',
+        fallbackFilename: fallback,
         mimeType: 'text/csv',
     });
 };

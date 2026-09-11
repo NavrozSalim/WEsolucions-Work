@@ -12,7 +12,11 @@ from catalog.celery_routing import (
 from catalog.marketplace_templates import (
     build_field_indices,
     col_index,
+    resolve_sample_template_kind,
+    sample_template_filename_for_kind,
     sample_template_rows_for_kind,
+    store_marketplace_kind,
+    template_kind_from_store_adapter,
     upload_row_to_cells,
     validate_marketplace_headers,
 )
@@ -421,6 +425,59 @@ class SearsCatalogRulesTests(SimpleTestCase):
         adapter = MagicMock()
         self.assertIsNone(_resolve_listing_id_for_pm(adapter, pm, store))
         adapter.lookup_listing_by_sku.assert_not_called()
+
+    def test_mydeal_kind_from_store_not_generic_other(self):
+        store = _store('mydeal', 'MyDeal')
+        self.assertEqual(store_marketplace_kind(store), 'mydeal')
+        self.assertEqual(template_kind_from_store_adapter(store), 'other')
+        self.assertEqual(resolve_sample_template_kind(store), 'mydeal')
+
+    def test_kogan_and_mydeal_are_distinct_templates(self):
+        kogan_h, kogan_rows = sample_template_rows_for_kind('kogan')
+        mydeal_h, mydeal_rows = sample_template_rows_for_kind('mydeal')
+        self.assertEqual(kogan_h, mydeal_h)
+        self.assertEqual(kogan_rows[0][kogan_h.index('Marketplace Name')], 'Kogan')
+        self.assertEqual(mydeal_rows[0][mydeal_h.index('Marketplace Name')], 'MyDeal')
+        self.assertNotIn('Reverb', mydeal_rows[0])
+
+    def test_each_marketplace_catalog_template_is_distinct(self):
+        walmart, _ = sample_template_rows_for_kind('walmart')
+        sears, _ = sample_template_rows_for_kind('sears')
+        reverb, _ = sample_template_rows_for_kind('reverb')
+        other, _ = sample_template_rows_for_kind('other')
+        self.assertIn('Fulfillment Center ID', walmart)
+        self.assertIn('Lag Time', walmart)
+        self.assertNotIn('Vendor SKU', sears)
+        self.assertIn('Marketplace Child SKU', sears)
+        self.assertEqual(reverb, ['Vendor Name', 'Vendor ID', 'Marketplace Name', 'Store Name', 'SKU', 'Vendor URL', 'Action'])
+        self.assertIn('Pack QTY', other)
+        self.assertNotEqual(walmart, sears)
+        self.assertNotEqual(walmart, reverb)
+        self.assertNotEqual(sears, reverb)
+
+    def test_delete_template_keeps_marketplace_columns_and_sets_action(self):
+        for kind in ('walmart', 'sears', 'reverb', 'kogan', 'mydeal', 'other'):
+            headers, rows = sample_template_rows_for_kind(kind, action='delete')
+            catalog_h, _ = sample_template_rows_for_kind(kind, action='catalog')
+            self.assertEqual(headers, catalog_h)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][headers.index('Action')], 'Delete')
+            self.assertEqual(
+                sample_template_filename_for_kind(kind, action='delete'),
+                'catalog_delete_template.csv' if kind == 'other' else f'catalog_delete_template_{kind}.csv',
+            )
+
+    def test_mydeal_minimal_headers_valid(self):
+        header = ['Vendor Name', 'Store Name', 'SKU', 'Vendor URL', 'Action']
+        idx = build_field_indices(header, _store('mydeal'))
+        self.assertIsNotNone(idx['marketplace parent sku'])
+        self.assertIsNone(validate_marketplace_headers(idx, _store('mydeal')))
+
+    def test_query_param_marketplace_wins_over_store(self):
+        store = _store('kogan', 'Kogan')
+        self.assertEqual(resolve_sample_template_kind(store, 'mydeal'), 'mydeal')
+        self.assertEqual(resolve_sample_template_kind(None, 'walmart'), 'walmart')
+        self.assertEqual(resolve_sample_template_kind(None, 'unknown'), 'other')
 
 
 class WalmartCatalogRulesTests(SimpleTestCase):

@@ -34,10 +34,10 @@ from catalog.pagination import CatalogProductPagination
 from catalog.services import create_upload_file_and_queue
 from catalog.marketplace_templates import (
     export_headers_for_store,
+    normalize_sample_template_action,
+    resolve_sample_template_kind,
     sample_template_filename_for_kind,
     sample_template_rows_for_kind,
-    store_marketplace_kind,
-    template_kind_from_store_adapter,
     upload_row_to_cells,
 )
 from users.org_scope import get_store_for_user, stores_for_user
@@ -1920,26 +1920,18 @@ class CatalogSampleTemplateView(APIView):
     def get(self, request):
         store_id = request.query_params.get('store_id')
         kind_param = (request.query_params.get('marketplace') or '').strip().lower()
+        action = normalize_sample_template_action(request.query_params.get('action') or 'catalog')
         store = None
         if store_id:
             store = get_store_for_user(
                 request.user, store_id, select_related=('marketplace',),
             )
 
-        if kind_param in ('reverb', 'walmart', 'sears'):
-            kind = kind_param
-        elif store:
-            kind = template_kind_from_store_adapter(store)
-            if kind == 'other':
-                kind = store_marketplace_kind(store)
-        elif kind_param:
-            kind = 'other'
-        else:
-            kind = 'other'
+        kind = resolve_sample_template_kind(store, kind_param)
 
         response = HttpResponse(content_type='text/csv')
-        fname = sample_template_filename_for_kind(kind)
-        headers, sample_rows = sample_template_rows_for_kind(kind)
+        fname = sample_template_filename_for_kind(kind, action=action)
+        headers, sample_rows = sample_template_rows_for_kind(kind, action=action)
 
         response['Content-Disposition'] = f'attachment; filename="{fname}"'
         writer = csv.writer(response)

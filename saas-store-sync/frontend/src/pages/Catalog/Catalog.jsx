@@ -3649,10 +3649,13 @@ export default function Catalog() {
                 onUpload={handleUpload}
                 storeName={selectedStoreData?.name}
                 storeMarketplace={selectedStoreData?.marketplace_name}
+                storeMarketplaceCode={selectedStoreData?.marketplace_code}
                 storeId={selectedStore}
-                downloadSample={() =>
-                    downloadSampleTemplate(selectedStore, resolveMarketplaceTemplateKind(selectedStoreData)).catch((err) =>
-                        setMessage(formatCatalogError(err) || 'Failed to download template'),
+                downloadSample={(action = 'catalog') =>
+                    downloadSampleTemplate(
+                        selectedStore,
+                        resolveMarketplaceTemplateKind(selectedStoreData),
+                        action,
                     )
                 }
                 loading={uploading}

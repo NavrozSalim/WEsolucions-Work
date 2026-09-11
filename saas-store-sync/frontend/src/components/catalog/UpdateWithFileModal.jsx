@@ -4,12 +4,85 @@ import Button from '../ui/Button';
 
 const ACCEPT = '.xlsx,.xls,.csv';
 
+function marketplaceKind(code, name) {
+    const c = String(code || '').trim().toLowerCase();
+    if (['walmart', 'sears', 'reverb', 'kogan', 'mydeal'].includes(c)) return c;
+    const n = String(name || '').trim().toLowerCase();
+    if (n.includes('walmart')) return 'walmart';
+    if (n.includes('sears')) return 'sears';
+    if (n.includes('reverb')) return 'reverb';
+    if (n.includes('kogan')) return 'kogan';
+    if (n.includes('mydeal') || n === 'woolworths' || n === 'wmp') return 'mydeal';
+    return '';
+}
+
+function templateCopy(kind) {
+    switch (kind) {
+        case 'walmart':
+            return {
+                catalogTitle: 'Walmart catalog template',
+                deleteTitle: 'Walmart delete template',
+                catalogHint:
+                    'Walmart: Vendor Name, Vendor ID, Marketplace Name, Store Name, SKU, Vendor URL, Action, Pack QTY, Prep Fees, Shipping Fees, Fulfillment Center ID, Lag Time.',
+                deleteHint:
+                    'Delete only the SKUs in this file. Same Walmart columns; set Action to Delete. Leave Replace store catalog unchecked.',
+            };
+        case 'sears':
+            return {
+                catalogTitle: 'Sears catalog template',
+                deleteTitle: 'Sears delete template',
+                catalogHint:
+                    'Sears: Vendor Name, Store Name, Marketplace Child SKU, Vendor URL, and Action (no Vendor SKU column). Optional: Parent SKU, Vendor ID.',
+                deleteHint:
+                    'Delete only the SKUs in this file. Same Sears columns; set Action to Delete. Leave Replace store catalog unchecked.',
+            };
+        case 'reverb':
+            return {
+                catalogTitle: 'Reverb catalog template',
+                deleteTitle: 'Reverb delete template',
+                catalogHint:
+                    'Reverb: Vendor Name, Vendor ID, Marketplace Name, Store Name, SKU, Vendor URL, Action.',
+                deleteHint:
+                    'Delete only the SKUs in this file. Same Reverb columns; set Action to Delete. Leave Replace store catalog unchecked.',
+            };
+        case 'kogan':
+            return {
+                catalogTitle: 'Kogan catalog template',
+                deleteTitle: 'Kogan delete template',
+                catalogHint:
+                    'Kogan: Vendor Name, Vendor ID, Marketplace Name, Store Name, SKU, Vendor URL, Action.',
+                deleteHint:
+                    'Delete only the SKUs in this file. Same Kogan columns; set Action to Delete. Leave Replace store catalog unchecked.',
+            };
+        case 'mydeal':
+            return {
+                catalogTitle: 'MyDeal catalog template',
+                deleteTitle: 'MyDeal delete template',
+                catalogHint:
+                    'MyDeal catalog: Vendor Name, Vendor ID, Marketplace Name, Store Name, SKU, Vendor URL, Action. Price/Inventory CSVs from the MyDeal portal stay on Download templates on the Catalog page.',
+                deleteHint:
+                    'Delete only the SKUs in this file. Same MyDeal catalog columns; set Action to Delete. Does not replace the MyDeal Price/Inventory portal files.',
+            };
+        default:
+            return {
+                catalogTitle: 'Catalog template (matches store marketplace)',
+                deleteTitle: 'Delete template (selected products only)',
+                catalogHint:
+                    'This store uses the generic catalog columns. Pick a store to download a marketplace-specific file when one exists.',
+                deleteHint:
+                    'Delete only the SKUs in this file. Set Action to Delete. Leave Replace store catalog unchecked.',
+            };
+    }
+}
+
 export default function UpdateWithFileModal({
-    open, onClose, onUpload, storeName, storeMarketplace, storeId, downloadSample, loading = false,
+    open, onClose, onUpload, storeName, storeMarketplace, storeMarketplaceCode, storeId, downloadSample, loading = false,
     file, setFile,
 }) {
     const [dragActive, setDragActive] = useState(false);
     const [error, setError] = useState('');
+    const [downloadError, setDownloadError] = useState('');
+    const [downloading, setDownloading] = useState('');
     const fileInputRef = useRef(null);
 
     const validateFile = (f) => {
@@ -75,27 +148,25 @@ export default function UpdateWithFileModal({
 
     const handleClose = () => {
         setError('');
+        setDownloadError('');
+        setDownloading('');
         onClose();
     };
 
-    if (!open) return null;
-    const mk = (storeMarketplace || '').trim().toLowerCase();
-    const isWalmart = mk === 'walmart';
-    const isReverb = mk === 'reverb';
-    const isSears = mk === 'sears';
+    const handleDownload = (action) => {
+        if (!downloadSample) return;
+        setDownloadError('');
+        setDownloading(action);
+        Promise.resolve(downloadSample(action))
+            .catch((err) => {
+                setDownloadError(err?.message || 'Failed to download template');
+            })
+            .finally(() => setDownloading(''));
+    };
 
-    const templateHint = (() => {
-        if (isWalmart) {
-            return 'Walmart template: Vendor Name, Vendor ID, Marketplace Name, Store Name, SKU, Vendor URL, Action, Pack QTY, Prep Fees, Shipping Fees, Fulfillment Center ID, Lag Time.';
-        }
-        if (isSears) {
-            return 'Sears template: Vendor Name, Store Name, Marketplace Child SKU, Vendor URL, and Action (no Vendor SKU column). Optional: Parent SKU, Vendor ID.';
-        }
-        if (isReverb) {
-            return 'Reverb template: Vendor Name, Vendor ID, Marketplace Name, Store Name, SKU, Vendor URL, Action.';
-        }
-        return 'Pick a store to download the matching template, or use the generic template (all columns).';
-    })();
+    if (!open) return null;
+    const kind = marketplaceKind(storeMarketplaceCode, storeMarketplace);
+    const copy = templateCopy(kind);
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -130,26 +201,42 @@ export default function UpdateWithFileModal({
                         </div>
                     )}
 
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Template</label>
-                        <p className="text-sm text-slate-600 dark:text-slate-400">
-                            {isWalmart
-                                ? 'Walmart catalog template'
-                                : isSears
-                                  ? 'Sears catalog template'
-                                  : isReverb
-                                    ? 'Reverb catalog template'
-                                    : 'Catalog template (matches store marketplace)'}
-                        </p>
-                        <button
-                            type="button"
-                            onClick={() => downloadSample?.()}
-                            className="mt-2 inline-flex items-center gap-2 text-sm font-medium text-accent-600 dark:text-accent-400 hover:underline"
-                        >
-                            <Download className="h-4 w-4" />
-                            Download CSV template
-                        </button>
-                        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">{templateHint}</p>
+                    <div className="space-y-4">
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+                                Catalog template
+                            </label>
+                            <p className="text-sm text-slate-600 dark:text-slate-400">{copy.catalogTitle}</p>
+                            <button
+                                type="button"
+                                onClick={() => handleDownload('catalog')}
+                                disabled={!!downloading}
+                                className="mt-2 inline-flex items-center gap-2 text-sm font-medium text-accent-600 dark:text-accent-400 hover:underline disabled:opacity-60"
+                            >
+                                <Download className="h-4 w-4" />
+                                {downloading === 'catalog' ? 'Downloading…' : 'Download catalog template'}
+                            </button>
+                            <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">{copy.catalogHint}</p>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+                                Delete template
+                            </label>
+                            <p className="text-sm text-slate-600 dark:text-slate-400">{copy.deleteTitle}</p>
+                            <button
+                                type="button"
+                                onClick={() => handleDownload('delete')}
+                                disabled={!!downloading}
+                                className="mt-2 inline-flex items-center gap-2 text-sm font-medium text-accent-600 dark:text-accent-400 hover:underline disabled:opacity-60"
+                            >
+                                <Download className="h-4 w-4" />
+                                {downloading === 'delete' ? 'Downloading…' : 'Download delete template'}
+                            </button>
+                            <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">{copy.deleteHint}</p>
+                        </div>
+                        {downloadError && (
+                            <p className="text-sm text-rose-600 dark:text-rose-400">{downloadError}</p>
+                        )}
                     </div>
 
                     <div>
