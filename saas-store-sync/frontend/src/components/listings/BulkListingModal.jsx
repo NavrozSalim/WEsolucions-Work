@@ -56,7 +56,8 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
         const suffix = extra.hierarchies
             ? `_${bunningsCategories.map((c) => c.code).slice(0, 3).join('_')}`
             : '';
-        downloadListingTemplate(storeId, action, extra, `listing_template_${action}${suffix}.csv`)
+        const ext = isBunnings && (action === 'create' || action === 'mapped') ? 'xlsx' : 'csv';
+        downloadListingTemplate(storeId, action, extra, `listing_template_${action}${suffix}.${ext}`)
             .catch((err) => setError(err.message || 'Could not download the template.'));
     };
 
@@ -138,7 +139,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                             <> MyDeal columns include Parent SKU, Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
                         )}
                         {isBunnings && (
-                            <> Bunnings: pick the leaf categories, then download the template. Fill category, product-id, sku, price, quantity, logistic-class, DISPLAY_NAME, BRAND, GTIN, PRIMARY_IMAGE, and extra PM11 columns such as KEY_SELLING_POINT_1. Use variant-group-code plus Option Name/Value for variants.</>
+                            <> Bunnings downloads an Excel file: orange Hub columns, green required product fields, darker green category fields, then blue offer fields. Row 1 is labels, row 2 is codes — keep both. Use the dropdowns where they appear. Fill CATEGORY, DISPLAY_NAME, BRAND, GTIN, PRIMARY_IMAGE, sku, price, quantity, logistic-class, and any extra category columns. Use VARIANT_GROUP_CODE plus Option Name/Value for variants.</>
                         )}
                     </p>
 

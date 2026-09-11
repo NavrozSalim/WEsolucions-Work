@@ -414,11 +414,21 @@ class StoreListingTemplateView(APIView):
             for part in str(raw_hierarchies).replace(';', ',').split(',')
             if part.strip()
         ]
-        resp = HttpResponse(
-            csv_import.build_template_csv(action, store=store, hierarchies=hierarchies or None),
-            content_type='text/csv',
-        )
-        name = f'listing_template_{action}.csv'
+        if marketplace_kind(store.marketplace) == 'bunnings' and action in ('create', 'mapped'):
+            from listings.bunnings.template_xlsx import build_template_xlsx
+
+            content = build_template_xlsx(action, store=store, hierarchies=hierarchies or None)
+            resp = HttpResponse(
+                content,
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+            name = f'listing_template_{action}.xlsx'
+        else:
+            resp = HttpResponse(
+                csv_import.build_template_csv(action, store=store, hierarchies=hierarchies or None),
+                content_type='text/csv',
+            )
+            name = f'listing_template_{action}.csv'
         resp['Content-Disposition'] = f'attachment; filename="{name}"'
         return resp
 

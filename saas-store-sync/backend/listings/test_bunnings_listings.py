@@ -301,7 +301,7 @@ class BunningsProductsUnitTests(SimpleTestCase):
         self.assertNotIn("BRAND", codes)
         self.assertEqual(cols[0]["header"], "attribute_pdb_assembly")
         self.assertIn("colour", codes)
-        self.assertIn("KEY_SELLING_POINT_1", codes)
+        self.assertNotIn("KEY_SELLING_POINT_1", codes)
 
     def test_validate_requires_pm11_attribute(self):
         store = SimpleNamespace(id="store-1")
@@ -587,6 +587,156 @@ class BunningsListingServiceTests(TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["category"], "BEDSIDE")
         self.assertEqual(rows[1]["category"], "DRILLS")
+
+    def test_xlsx_template_colors_dropdowns_and_parse(self):
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
+        from listings.bunnings.template_xlsx import (
+            COLOR_CATEGORY,
+            COLOR_OFFER,
+            COLOR_PRODUCT,
+            COLOR_SYSTEM,
+            build_template_xlsx,
+        )
+
+        pm11 = [
+            {"code": "DISPLAY_NAME", "label": "Website Display Name", "required": True, "values": []},
+            {"code": "KEY_SELLING_POINT_1", "label": "Key Selling Point 1", "required": True, "values": []},
+            {
+                "code": "attribute_pdb_assembly",
+                "label": "Assembly Required",
+                "required": True,
+                "values": [{"code": "Yes", "label": "Yes"}, {"code": "No", "label": "No"}],
+            },
+            {
+                "code": "colour",
+                "label": "Colour",
+                "required": False,
+                "values": [{"code": "White", "label": "White"}],
+            },
+        ]
+        logistics = BunningsResult(
+            ok=True,
+            data={"logistic_classes": [{"code": "SMALL", "label": "Small"}]},
+        )
+        with patch(
+            "listings.bunnings.products.load_category_attributes",
+            return_value=pm11,
+        ), patch("listings.bunnings.template_xlsx.BunningsClient") as client_cls:
+            client_cls.return_value.list_logistic_classes.return_value = logistics
+            content = build_template_xlsx(
+                "create",
+                store=self.store,
+                hierarchies=["BEDSIDE", "DRILLS"],
+            )
+
+        wb = load_workbook(BytesIO(content))
+        self.assertEqual(wb.sheetnames[0], "Data")
+        self.assertIn("ReferenceData", wb.sheetnames)
+        ws = wb["Data"]
+        codes = [cell.value for cell in ws[2]]
+        self.assertEqual(str(ws.freeze_panes), "A3")
+        self.assertIn("Vendor Name (Optional)", codes)
+        self.assertIn("DISPLAY_NAME", codes)
+        self.assertIn("attribute_pdb_assembly", codes)
+        self.assertIn("sku", codes)
+        self.assertNotIn("colour", codes)
+        self.assertEqual(codes.count("DISPLAY_NAME"), 1)
+        self.assertEqual(codes.count("KEY_SELLING_POINT_1"), 1)
+        self.assertLess(codes.index("DISPLAY_NAME"), codes.index("attribute_pdb_assembly"))
+        self.assertLess(codes.index("attribute_pdb_assembly"), codes.index("sku"))
+
+        def rgb(cell):
+            return str(getattr(cell.fill.fgColor, "rgb", "") or "").upper()[-6:]
+
+        self.assertEqual(rgb(ws.cell(1, codes.index("Action") + 1)), COLOR_SYSTEM)
+        self.assertEqual(rgb(ws.cell(2, codes.index("DISPLAY_NAME") + 1)), COLOR_PRODUCT)
+        self.assertEqual(rgb(ws.cell(1, codes.index("attribute_pdb_assembly") + 1)), COLOR_CATEGORY)
+        self.assertEqual(rgb(ws.cell(1, codes.index("sku") + 1)), COLOR_OFFER)
+
+        ref_headers = [cell.value for cell in wb["ReferenceData"][1] if cell.value]
+        self.assertIn("CATEGORY", ref_headers)
+        self.assertIn("Action", ref_headers)
+        self.assertIn("DEFAULT_VARIANT", ref_headers)
+        self.assertIn("product-id-type", ref_headers)
+        self.assertIn("state", ref_headers)
+        self.assertIn("logistic-class", ref_headers)
+        self.assertIn("attribute_pdb_assembly", ref_headers)
+        formulas = [str(dv.formula1) for dv in ws.data_validations.dataValidation]
+        self.assertTrue(any("ReferenceData!" in formula for formula in formulas))
+
+        rows = csv_import.parse_upload("bunnings.xlsx", content)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["row_number"], 3)
+        self.assertEqual(rows[0]["sku"], "BN-EXAMPLE-001-M")
+        self.assertEqual(rows[0]["product_key"], "BN-EXAMPLE-001")
+        self.assertEqual(rows[0]["title"], "Example Power Drill")
+        self.assertEqual(rows[0]["description"], "Example product text")
+        self.assertEqual(rows[0]["brand"], "ExampleBrand")
+        self.assertEqual(rows[0]["gtin"], "9300000000001")
+        self.assertEqual(rows[0]["image_urls"], "https://example.com/photo1.jpg")
+        self.assertEqual(rows[0]["category"], "BEDSIDE")
+        self.assertEqual(rows[1]["category"], "DRILLS")
+        self.assertEqual(rows[0]["sale_price"], "79.99")
+        self.assertEqual(rows[0]["inventory"], "5")
+        self.assertEqual(rows[0]["logistic_class"], "SMALL")
+        self.assertEqual(rows[0]["leadtime_to_ship"], "2")
+        self.assertEqual(rows[0].get("product_id_type"), "SHOP_SKU")
+        attrs = rows[0].get("attributes") or {}
+        self.assertEqual(attrs.get("KEY_SELLING_POINT_1"), "Example selling point 1")
+        self.assertIn("Keep key selling points separate", attrs.get("LONG_DESCRIPTION") or "")
+        self.assertEqual(attrs.get("DEFAULT_VARIANT"), "Yes")
+        self.assertNotIn("state", attrs)
+        self.assertNotIn("product-id-type", attrs)
+
+    def test_xlsx_parse_prefers_code_row_over_labels(self):
+        from io import BytesIO
+
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Data"
+        ws.append(["Website Display Name", "Offer SKU", "Offer Price", "Category", "Barcode"])
+        ws.append(["DISPLAY_NAME", "sku", "price", "CATEGORY", "GTIN"])
+        ws.append(["Parsed Title", "SKU-1", "12.50", "DRILLS", "9300000000001"])
+        buf = BytesIO()
+        wb.save(buf)
+        rows = csv_import.parse_upload("codes.xlsx", buf.getvalue())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "Parsed Title")
+        self.assertEqual(rows[0]["sku"], "SKU-1")
+        self.assertEqual(rows[0]["sale_price"], "12.50")
+        self.assertEqual(rows[0]["category"], "DRILLS")
+        self.assertEqual(rows[0]["gtin"], "9300000000001")
+
+    def test_template_download_returns_xlsx_for_create(self):
+        from rest_framework.test import APIClient
+
+        api = APIClient()
+        api.force_authenticate(user=self.user)
+        with patch("listings.bunnings.template_xlsx.BunningsClient") as client_cls:
+            client_cls.return_value.list_logistic_classes.return_value = BunningsResult(
+                ok=True, data={"logistic_classes": [{"code": "SMALL"}]},
+            )
+            resp = api.get(
+                f"/api/v1/stores/{self.store.id}/listings/template/",
+                {"action": "create", "hierarchies": "BEDSIDE"},
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("spreadsheetml.sheet", resp["Content-Type"])
+        self.assertIn("listing_template_create.xlsx", resp["Content-Disposition"])
+        self.assertGreater(len(resp.content), 1000)
+
+        delete_resp = api.get(
+            f"/api/v1/stores/{self.store.id}/listings/template/",
+            {"action": "delete"},
+        )
+        self.assertEqual(delete_resp.status_code, 200)
+        self.assertIn("text/csv", delete_resp["Content-Type"])
+        self.assertIn("listing_template_delete.csv", delete_resp["Content-Disposition"])
 
     def test_create_variation_listing(self):
         listing = listing_service.create(

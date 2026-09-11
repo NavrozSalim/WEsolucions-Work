@@ -136,8 +136,12 @@ COLUMN_MAP = {
     "product id type": "product_id_type",
     "quantity": "inventory",
     "display_name": "title",
+    "website display name": "title",
     "product_description": "description",
     "primary_image": "image_urls",
+    "offer sku": "sku",
+    "offer price": "sale_price",
+    "offer quantity": "inventory",
     "category attributes json": "attributes",
     "category attributes": "attributes",
 }
@@ -459,6 +463,14 @@ BUNNINGS_OPERATOR_HEADERS = [
     "BRAND",
     "GTIN",
     "PRIMARY_IMAGE",
+    "SUPPLIER_ITEM_NUMBER",
+    "SECTION_DESCRIPTION",
+    "PRIMARY_UOM",
+    "DEFAULT_VARIANT",
+    "KEY_SELLING_POINT_1",
+    "KEY_SELLING_POINT_2",
+    "KEY_SELLING_POINT_3",
+    "WARRANTY_INFORMATION",
 ]
 BUNNINGS_OFFER_HEADERS = [
     "sku",
@@ -528,7 +540,49 @@ _HEADER_MARKERS = {
     "quantity",
     "logistic-class",
     "variant-group-code",
+    "variant_group_code",
+    "primary_image",
+    "gtin",
+    "product-id-type",
+    "leadtime-to-ship",
+    "supplier_item_number",
+    "key_selling_point_1",
 }
+
+# Codes that belong on the offer / routing sheets, not P41 attributes.
+_SKIP_EXTRA_ATTR_HEADERS = frozenset({
+    "state",
+    "update-delete",
+    "update_delete",
+    "update delete",
+    "sku",
+    "price",
+    "quantity",
+    "product-id",
+    "product id",
+    "product-id-type",
+    "product id type",
+    "logistic-class",
+    "logistic class",
+    "leadtime-to-ship",
+    "leadtime to ship",
+    "offer sku",
+    "offer price",
+    "offer quantity",
+    "offer state",
+})
+
+_OPERATOR_HEADER_BONUS = frozenset({
+    "DISPLAY_NAME",
+    "PRIMARY_IMAGE",
+    "SUPPLIER_ITEM_NUMBER",
+    "LONG_DESCRIPTION",
+    "VARIANT_GROUP_CODE",
+    "KEY_SELLING_POINT_1",
+    "product-id-type",
+    "logistic-class",
+    "leadtime-to-ship",
+})
 
 
 def _is_reverb_store(store) -> bool:
@@ -574,6 +628,9 @@ def _normalize_action(raw: str) -> str:
 
 def _header_score(cells: list[str]) -> int:
     score = 0
+    exact = {str(cell or "").strip() for cell in cells}
+    if exact & _OPERATOR_HEADER_BONUS:
+        score += 8
     for cell in cells:
         key = _canonical_header(cell)
         if key in _HEADER_MARKERS or key in COLUMN_MAP:
@@ -614,15 +671,19 @@ def _records_from_header_and_rows(headers: list[str], data_rows: list[tuple]) ->
     return records
 
 
-def _read_xlsx_rows(content: bytes) -> list[dict]:
+def _read_xlsx_rows(content: bytes) -> tuple[list[dict], int]:
     from openpyxl import load_workbook
 
     wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     try:
-        ws = wb.active
+        if "Data" in wb.sheetnames:
+            ws = wb["Data"]
+        else:
+            ws = wb.active
         raw_rows = [tuple(row) for row in ws.iter_rows(values_only=True)]
         headers, data_rows = _pick_header_row(raw_rows)
-        return _records_from_header_and_rows(headers, data_rows)
+        header_idx = max(0, len(raw_rows) - len(data_rows) - 1) if raw_rows else 0
+        return _records_from_header_and_rows(headers, data_rows), header_idx
     finally:
         wb.close()
 
@@ -654,12 +715,14 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
     """Return a list of row dicts (1-based 'row_number' included; row 1 = header)."""
     name = (filename or "").lower()
     if name.endswith((".xlsx", ".xlsm")):
-        records = _read_xlsx_rows(content)
+        records, header_idx = _read_xlsx_rows(content)
+        first_data_row = header_idx + 2
     else:
         records = _read_csv_rows(content)
+        first_data_row = 2
 
     rows = []
-    for idx, raw in enumerate(records, start=2):
+    for idx, raw in enumerate(records, start=first_data_row):
         normalized = {}
         extra_attrs = {}
         for header, value in raw.items():
@@ -667,7 +730,8 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
             if not text:
                 continue
             attr_code = _attribute_code_from_header(text)
-            key = None if attr_code else COLUMN_MAP.get(_canonical_header(text))
+            canonical = _canonical_header(text)
+            key = None if attr_code else COLUMN_MAP.get(canonical)
             if key:
                 existing = normalized.get(key)
                 if existing and not str(value).strip():
@@ -678,8 +742,11 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
                 normalized[key] = str(value).strip()
             elif str(value).strip():
                 extra_key = attr_code or text
-                if _canonical_header(extra_key) in {"product-id-type", "product_id_type"}:
+                extra_canonical = _canonical_header(extra_key)
+                if extra_canonical in {"product-id-type", "product_id_type"}:
                     normalized["product_id_type"] = str(value).strip()
+                    continue
+                if extra_canonical in _SKIP_EXTRA_ATTR_HEADERS:
                     continue
                 extra_attrs[extra_key] = str(value).strip()
         if not any(str(v).strip() for v in normalized.values() if not isinstance(v, bool)):
@@ -714,6 +781,11 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
                 normalized["original_price"] = normalized["sale_price"]
         sku = str(normalized.get("sku") or normalized.get("variant_key") or "").strip()
         parent = str(normalized.get("product_key") or "").strip()
+        if not sku:
+            for extra_key, extra_val in extra_attrs.items():
+                if _canonical_header(extra_key).replace("-", "_") == "supplier_item_number" and str(extra_val).strip():
+                    sku = str(extra_val).strip()
+                    break
         if not sku:
             sku = parent
         if sku:
@@ -937,6 +1009,14 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
                 "BRAND": brand,
                 "GTIN": gtin,
                 "PRIMARY_IMAGE": image,
+                "SUPPLIER_ITEM_NUMBER": sku,
+                "SECTION_DESCRIPTION": description[:30],
+                "PRIMARY_UOM": "Each",
+                "DEFAULT_VARIANT": "Yes" if index == 1 else "No",
+                "KEY_SELLING_POINT_1": "Example selling point 1",
+                "KEY_SELLING_POINT_2": "Example selling point 2",
+                "KEY_SELLING_POINT_3": "Example selling point 3",
+                "WARRANTY_INFORMATION": "12 Months",
                 "sku": sku,
                 "price": "79.99",
                 "quantity": "5",

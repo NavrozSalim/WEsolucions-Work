@@ -52,12 +52,17 @@ export const bulkUploadListings = (storeId, file, action = 'create') => {
     });
 };
 
-export const downloadListingTemplate = (storeId, action = 'create', extraParams = {}, filename) =>
-    apiDownload(api, `/stores/${storeId}/listings/template/`, {
+export const downloadListingTemplate = (storeId, action = 'create', extraParams = {}, filename) => {
+    const fallbackFilename = filename || `listing_template_${action}.csv`;
+    const xlsx = String(fallbackFilename).toLowerCase().endsWith('.xlsx');
+    return apiDownload(api, `/stores/${storeId}/listings/template/`, {
         params: { action, ...extraParams },
-        fallbackFilename: filename || `listing_template_${action}.csv`,
-        mimeType: 'text/csv',
+        fallbackFilename,
+        mimeType: xlsx
+            ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            : 'text/csv',
     });
+};
 
 /** Upload listing photo files; returns { urls: string[], photos: [...] }. */
 export const uploadListingPhotos = (storeId, files) => {

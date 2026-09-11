@@ -151,12 +151,15 @@ TEMPLATE_SKIP_ATTRS = frozenset({
     "product-id",
     "product-id-type",
     "variant-group-code",
+    "variant_group_code",
     "sku",
     "price",
     "quantity",
     "state",
     "logistic-class",
     "leadtime-to-ship",
+    "update-delete",
+    "update_delete",
     "ean",
     "title",
     "description",
@@ -169,10 +172,18 @@ TEMPLATE_SKIP_ATTRS = frozenset({
     "display_name",
     "product_description",
     "long_description",
+    "section_description",
     "brand",
     "gtin",
     "barcode",
     "primary_image",
+    "supplier_item_number",
+    "primary_uom",
+    "default_variant",
+    "key_selling_point_1",
+    "key_selling_point_2",
+    "key_selling_point_3",
+    "warranty_information",
 })
 # Listing fields that satisfy Bunnings operator attribute codes (PM11 / P41).
 OPERATOR_FROM_LISTING = {
@@ -568,9 +579,18 @@ def product_row(listing: StoreListing) -> dict:
         code = _slug_attr(name)
         if code and value:
             row[code] = value
+    skip_extra = CORE_PRODUCT_CODES | {h.lower() for h in OFFER_CSV_HEADERS} | {
+        "update-delete",
+        "update_delete",
+        "update delete",
+    }
     for code, value in extras_attrs.items():
         key = str(code or "").strip()
-        if key and value not in (None, "") and not str(row.get(key) or "").strip():
+        if not key or value in (None, ""):
+            continue
+        if key.lower() in skip_extra:
+            continue
+        if not str(row.get(key) or "").strip():
             row[key] = str(value).strip()
     for field, aliases in _DIM_FALLBACKS.items():
         val = str(extras.get(field) or "").strip()
