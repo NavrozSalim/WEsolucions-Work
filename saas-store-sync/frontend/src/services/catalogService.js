@@ -1,4 +1,5 @@
 import api from './api';
+import { apiDownload } from '../utils/downloadFile';
 
 export const getCatalogStores = (marketplaceId) =>
     api.get(marketplaceId ? `/catalog/stores/?marketplace_id=${marketplaceId}` : '/catalog/stores/');
@@ -80,30 +81,20 @@ export const deleteCatalogUpload = (storeId, uploadId) =>
     api.delete(`/stores/${storeId}/catalog/uploads/${uploadId}/delete/`);
 
 /** Download original catalog file (reconstructed CSV) via the detail endpoint */
-export const downloadCatalogUploadFile = (storeId, uploadId, filename) =>
-    api.get(`/stores/${storeId}/catalog/uploads/${uploadId}/?action=download`, { responseType: 'blob' }).then((res) => {
-        const url = window.URL.createObjectURL(new Blob([res.data]));
-        const link = document.createElement('a');
-        link.href = url;
-        const safeName = (filename || 'catalog').replace(/\.[^/.]+$/, '');
-        link.setAttribute('download', `${safeName}.csv`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
+export const downloadCatalogUploadFile = (storeId, uploadId, filename) => {
+    const safeName = (filename || 'catalog').replace(/\.[^/.]+$/, '');
+    return apiDownload(api, `/stores/${storeId}/catalog/uploads/${uploadId}/`, {
+        params: { action: 'download' },
+        fallbackFilename: `${safeName}.csv`,
+        mimeType: 'text/csv',
     });
+};
 
-/** Get error file URL for failed rows (use window.open or <a download> with auth header handled by api) */
+/** Download failed catalog upload rows as CSV. */
 export const downloadCatalogUploadErrors = (storeId, uploadId) =>
-    api.get(`/stores/${storeId}/catalog/uploads/${uploadId}/errors/`, { responseType: 'blob' }).then((res) => {
-        const url = window.URL.createObjectURL(new Blob([res.data]));
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', `upload_errors_${uploadId}.csv`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
+    apiDownload(api, `/stores/${storeId}/catalog/uploads/${uploadId}/errors/`, {
+        fallbackFilename: `upload_errors_${uploadId}.csv`,
+        mimeType: 'text/csv',
     });
 
 /** Store-scoped upload. Creates CatalogUpload + rows. Run Sync catalog (triggerCatalogSync) separately to create ProductMappings. */
@@ -264,47 +255,25 @@ export const resolveMarketplaceTemplateKind = (store) => {
 };
 
 export const downloadSampleTemplate = (storeId = null, marketplaceKind = '') => {
-    const params = new URLSearchParams();
-    if (storeId) params.set('store_id', storeId);
+    const params = {};
+    if (storeId) params.store_id = storeId;
     const kind = String(marketplaceKind || '').trim().toLowerCase();
-    if (['reverb', 'walmart', 'sears'].includes(kind)) params.set('marketplace', kind);
-    params.set('_cb', String(Date.now()));
-    const qs = params.toString();
-    const path = `/catalog/sample-template/?${qs}`;
-    return api.get(path, { responseType: 'blob' }).then((res) => {
-        let filename = 'catalog_upload_template.csv';
-        const cd = res.headers?.['content-disposition'] || res.headers?.['Content-Disposition'];
-        if (cd && cd.includes('filename=')) {
-            const m = cd.match(/filename="?([^";\n]+)"?/i);
-            if (m) filename = m[1].trim();
-        }
-        const url = window.URL.createObjectURL(new Blob([res.data]));
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', filename);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
+    if (['reverb', 'walmart', 'sears'].includes(kind)) params.marketplace = kind;
+    params._cb = String(Date.now());
+    return apiDownload(api, '/catalog/sample-template/', {
+        params,
+        fallbackFilename: 'catalog_upload_template.csv',
+        mimeType: 'text/csv',
     });
 };
 
 /** Export active product mappings as CSV. Optional sync_status filter (e.g. failed). */
-export const exportCatalogProducts = (storeId, { syncStatus } = {}) => {
-    const path = syncStatus
-        ? `/stores/${storeId}/products/export/?sync_status=${encodeURIComponent(syncStatus)}`
-        : `/stores/${storeId}/products/export/`;
-    return api.get(path, { responseType: 'blob' }).then((res) => {
-        const url = window.URL.createObjectURL(new Blob([res.data]));
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', `catalog_export_${storeId}.csv`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
+export const exportCatalogProducts = (storeId, { syncStatus } = {}) =>
+    apiDownload(api, `/stores/${storeId}/products/export/`, {
+        params: syncStatus ? { sync_status: syncStatus } : undefined,
+        fallbackFilename: `catalog_export_${storeId}.csv`,
+        mimeType: 'text/csv',
     });
-};
 
 /** Manual sync for large catalogs can run for hours — keep polling until Celery finishes. */
 const PUSH_LISTINGS_MAX_WAIT_MS = 6 * 60 * 60 * 1000;
@@ -439,11 +408,19 @@ export const uploadMydealTemplate = (storeId, kind, file) => {
 };
 
 /** type: price | inventory | both */
-export const downloadMydealTemplates = (storeId, type = 'both') =>
-    api.get(`/stores/${storeId}/mydeal/templates/export/`, {
+export const downloadMydealTemplates = (storeId, type = 'both') => {
+    const fallback = type === 'price'
+        ? 'Mydeal-Price-Template.csv'
+        : type === 'inventory'
+            ? 'Mydeal-Inventory-Template.csv'
+            : 'Mydeal-Templates.zip';
+    const mime = type === 'both' ? 'application/zip' : 'text/csv';
+    return apiDownload(api, `/stores/${storeId}/mydeal/templates/export/`, {
         params: { type },
-        responseType: 'blob',
+        fallbackFilename: fallback,
+        mimeType: mime,
     });
+};
 
 /**
  * Push scraped/synced listings to marketplace (no vendor scrape).

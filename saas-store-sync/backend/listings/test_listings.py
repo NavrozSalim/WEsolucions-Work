@@ -338,6 +338,34 @@ class ListingServiceTests(TestCase):
         self.assertEqual(listing.original_price_cents, 2999)
         self.assertEqual(listing.environment, "staging")
 
+    def test_export_inventory_includes_listings_created_by_other_users(self):
+        User = get_user_model()
+        other = User.objects.create_user(username="other", email="o@example.com", password="pw")
+        StoreListing.objects.create(
+            user=self.user,
+            store=self.store,
+            sku="MINE-1",
+            external_product_key="MINE-1",
+            external_variant_key="MINE-1",
+            title="Mine",
+            status=ListingStatus.UPLOADED_STAGING,
+        )
+        StoreListing.objects.create(
+            user=other,
+            store=self.store,
+            sku="OTHER-1",
+            external_product_key="OTHER-1",
+            external_variant_key="OTHER-1",
+            title="Other",
+            status=ListingStatus.UPLOADED_PRODUCTION,
+        )
+        content = listing_service.export_inventory_xlsx(self.user, self.store)
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(content))
+        skus = {row[0] for row in wb.active.iter_rows(values_only=True) if row and row[0] != "SKU"}
+        self.assertIn("MINE-1", skus)
+        self.assertIn("OTHER-1", skus)
+
     def test_create_invalid_listing_flags_validation(self):
         data = {**VALID_DATA, "title": "", "image_urls": ""}
         listing = listing_service.create(self.user, self.store, data)

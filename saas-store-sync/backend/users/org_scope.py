@@ -38,6 +38,16 @@ def stores_for_user(user) -> QuerySet:
     return base.filter(user_id__in=ids)
 
 
+def get_store_for_user(user, store_id, *, select_related=()):
+    """Return a store the user may access, or raise Http404."""
+    from django.shortcuts import get_object_or_404
+
+    qs = stores_for_user(user)
+    if select_related:
+        qs = qs.select_related(*select_related)
+    return get_object_or_404(qs, pk=store_id)
+
+
 def user_can_access_store(user, store) -> bool:
     if not user or not store:
         return False

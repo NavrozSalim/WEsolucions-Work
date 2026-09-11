@@ -12,6 +12,7 @@ import {
     lookupListingOnMarketplace,
     startMarketplaceLookupJob,
 } from '../../services/listingService';
+import { saveBlob } from '../../utils/downloadFile';
 
 function formatWhen(value) {
     if (!value) return '—';
@@ -162,14 +163,7 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
             'YOUR-SKU-003',
         ].join('\n');
         const blob = new Blob(['\uFEFF' + content + '\n'], { type: 'text/csv;charset=utf-8' });
-        const url = window.URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', 'marketplace_sku_search_template.csv');
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
+        saveBlob(blob, 'marketplace_sku_search_template.csv', 'text/csv;charset=utf-8');
     };
 
     const handleDownloadCsv = () => {
@@ -177,7 +171,7 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
         setDownloading(true);
         setError('');
         downloadMarketplaceLookupJobCsv(storeId)
-            .catch((err) => setError(apiError(err, 'Could not download CSV.')))
+            .catch((err) => setError(err.message || apiError(err, 'Could not download CSV.')))
             .finally(() => setDownloading(false));
     };
 

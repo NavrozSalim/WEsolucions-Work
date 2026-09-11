@@ -504,7 +504,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
         const status = syncFilter === 'all' ? '' : syncFilter;
         exportListingInventory(storeId, status)
             .then(() => onMessage?.('Inventory exported.', 'success'))
-            .catch(() => onMessage?.('Export failed.', 'error'))
+            .catch((err) => onMessage?.(err.message || 'Export failed.', 'error'))
             .finally(() => setExporting(false));
     };
 

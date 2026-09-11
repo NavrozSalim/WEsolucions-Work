@@ -55,9 +55,9 @@ CREATED_STATUSES = (
 
 
 def _get_store(request, store_pk) -> Store:
-    from users.org_scope import stores_for_user
+    from users.org_scope import get_store_for_user
 
-    return get_object_or_404(stores_for_user(request.user), pk=store_pk)
+    return get_store_for_user(request.user, store_pk, select_related=('marketplace',))
 
 
 def _get_listing(request, store, pk) -> StoreListing:

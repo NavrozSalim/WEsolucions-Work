@@ -53,19 +53,11 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
             extra.hierarchies = bunningsCategories.map((c) => c.code).join(',');
         }
         setError('');
-        downloadListingTemplate(storeId, action, extra)
-            .then((res) => {
-                const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
-                const a = document.createElement('a');
-                a.href = url;
-                const suffix = extra.hierarchies
-                    ? `_${bunningsCategories.map((c) => c.code).slice(0, 3).join('_')}`
-                    : '';
-                a.download = `listing_template_${action}${suffix}.csv`;
-                a.click();
-                URL.revokeObjectURL(url);
-            })
-            .catch(() => setError('Could not download the template.'));
+        const suffix = extra.hierarchies
+            ? `_${bunningsCategories.map((c) => c.code).slice(0, 3).join('_')}`
+            : '';
+        downloadListingTemplate(storeId, action, extra, `listing_template_${action}${suffix}.csv`)
+            .catch((err) => setError(err.message || 'Could not download the template.'));
     };
 
     const handleUpload = () => {

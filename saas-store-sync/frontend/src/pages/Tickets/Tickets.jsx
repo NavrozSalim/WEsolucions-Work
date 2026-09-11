@@ -195,7 +195,7 @@ export default function Tickets() {
             .then(() => setMessage({ text: 'Tickets Excel downloaded.', variant: 'success' }))
             .catch((err) => {
                 setMessage({
-                    text: err.response?.data?.detail || 'Failed to export tickets.',
+                    text: err.message || err.response?.data?.detail || 'Failed to export tickets.',
                     variant: 'error',
                 });
             })

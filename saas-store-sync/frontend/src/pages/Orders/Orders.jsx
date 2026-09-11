@@ -989,7 +989,7 @@ export default function Orders() {
             })
             .catch((err) => {
                 setMessage({
-                    text: err.response?.data?.detail || 'Failed to export orders.',
+                    text: err.message || err.response?.data?.detail || 'Failed to export orders.',
                     variant: 'error',
                 });
             })

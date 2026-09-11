@@ -148,8 +148,12 @@ function isMydealMarketplace(storeData) {
 }
 
 function formatCatalogError(err) {
+    if (err?.isDownloadError && err.message) return err.message;
     const status = err.response?.status;
     const d = err.response?.data;
+    if (typeof Blob !== 'undefined' && d instanceof Blob) {
+        return err.message || 'Download failed.';
+    }
     if (status === 429) {
         if (typeof d === 'string' && d.trim()) return d;
         if (typeof d?.detail === 'string' && d.detail.trim()) return d.detail;
@@ -1187,7 +1191,6 @@ export default function Catalog() {
     const [deleteListingUploadConfirm, setDeleteListingUploadConfirm] = useState(null);
     const [deletingListingUploadId, setDeletingListingUploadId] = useState(null);
     const [modalFile, setModalFile] = useState(null);
-    const [modalTemplate, setModalTemplate] = useState('standard');
     const [progress, setProgress] = useState(0);
     const progressRef = useRef(null);
     const [currentPage, setCurrentPage] = useState(1);
@@ -1881,7 +1884,6 @@ export default function Catalog() {
             .then((res) => {
                 setUploadModalOpen(false);
                 setModalFile(null);
-                setModalTemplate('standard');
                 return getCatalogUploads(selectedStore).then((r) => {
                     setUploads(Array.isArray(r.data) ? r.data : []);
                     return res;
@@ -1911,23 +1913,7 @@ export default function Catalog() {
         setMydealDownloading(true);
         setMydealDownloadOpen(false);
         downloadMydealTemplates(selectedStore, type)
-            .then((res) => {
-                const profile = selectedStoreData?.name || selectedStoreData?.mydeal_templates?.store_name || 'Mydeal';
-                const name = type === 'price'
-                    ? `Mydeal - ${profile} - Price Template.csv`
-                    : type === 'inventory'
-                        ? `Mydeal - ${profile} - Inventory Template.csv`
-                        : `Mydeal - ${profile} - Templates.zip`;
-                const blob = new Blob([res.data], {
-                    type: type === 'both' ? 'application/zip' : 'text/csv',
-                });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = name;
-                a.click();
-                URL.revokeObjectURL(url);
-            })
+            .then(() => setMessage('Templates downloaded.'))
             .catch((err) => setMessage(formatCatalogError(err) || 'Download failed'))
             .finally(() => setMydealDownloading(false));
     };
@@ -2376,7 +2362,7 @@ export default function Catalog() {
         setExportDownloading(true);
         exportCatalogProducts(selectedStore, { syncStatus })
             .then(() => setMessage('Catalog export downloaded.'))
-            .catch(() => setMessage('Export failed. Try again.'))
+            .catch((err) => setMessage(formatCatalogError(err) || 'Export failed. Try again.'))
             .finally(() => setExportDownloading(false));
     };
 
@@ -2970,8 +2956,8 @@ export default function Catalog() {
                                                     upload={u}
                                                     storeId={selectedStore}
                                                     deletingId={deletingListingUploadId}
-                                                    onExport={(sid, uid, fname) => exportListingUpload(sid, uid, fname).catch(() => setMessage('Failed to export upload'))}
-                                                    onDownloadErrors={(sid, uid, fname) => downloadListingUploadErrors(sid, uid, fname).catch(() => setMessage('Failed to download error file'))}
+                                                    onExport={(sid, uid, fname) => exportListingUpload(sid, uid, fname).catch((err) => setMessage(formatCatalogError(err) || 'Failed to export upload'))}
+                                                    onDownloadErrors={(sid, uid, fname) => downloadListingUploadErrors(sid, uid, fname).catch((err) => setMessage(formatCatalogError(err) || 'Failed to download error file'))}
                                                     onDelete={(upload) => setDeleteListingUploadConfirm({
                                                         upload,
                                                         deleteSystem: true,
@@ -3037,8 +3023,8 @@ export default function Catalog() {
                                                     onSync={handleSync}
                                                     onScrape={handleScrape}
                                                     onDelete={setDeleteUploadConfirm}
-                                                    onDownload={(sid, uid, fname) => downloadCatalogUploadFile(sid, uid, fname).catch(() => setMessage('Failed to download catalog file'))}
-                                                    onDownloadErrors={(sid, uid) => downloadCatalogUploadErrors(sid, uid).catch(() => setMessage('Failed to download error file'))}
+                                                    onDownload={(sid, uid, fname) => downloadCatalogUploadFile(sid, uid, fname).catch((err) => setMessage(formatCatalogError(err) || 'Failed to download catalog file'))}
+                                                    onDownloadErrors={(sid, uid) => downloadCatalogUploadErrors(sid, uid).catch((err) => setMessage(formatCatalogError(err) || 'Failed to download error file'))}
                                                 />
                                             </td>
                                         </tr>
@@ -3665,15 +3651,13 @@ export default function Catalog() {
                 storeMarketplace={selectedStoreData?.marketplace_name}
                 storeId={selectedStore}
                 downloadSample={() =>
-                    downloadSampleTemplate(selectedStore, resolveMarketplaceTemplateKind(selectedStoreData)).catch(() =>
-                        setMessage('Failed to download template'),
+                    downloadSampleTemplate(selectedStore, resolveMarketplaceTemplateKind(selectedStoreData)).catch((err) =>
+                        setMessage(formatCatalogError(err) || 'Failed to download template'),
                     )
                 }
                 loading={uploading}
                 file={modalFile}
                 setFile={setModalFile}
-                template={modalTemplate}
-                setTemplate={setModalTemplate}
             />
 
             <ConfirmModal

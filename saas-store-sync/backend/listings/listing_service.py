@@ -2624,7 +2624,6 @@ def export_inventory_xlsx(user, store, sync_status: str = "") -> bytes:
     from openpyxl import Workbook
 
     qs = StoreListing.objects.filter(
-        user=user,
         store=store,
         status__in=[
             ListingStatus.UPLOADED_STAGING,

@@ -1,4 +1,5 @@
 import api from './api';
+import { apiDownload } from '../utils/downloadFile';
 
 // --- Managed store listings ---
 export const getListings = (storeId, params) => api.get(`/stores/${storeId}/listings/`, { params });
@@ -51,10 +52,11 @@ export const bulkUploadListings = (storeId, file, action = 'create') => {
     });
 };
 
-export const downloadListingTemplate = (storeId, action = 'create', extraParams = {}) =>
-    api.get(`/stores/${storeId}/listings/template/`, {
+export const downloadListingTemplate = (storeId, action = 'create', extraParams = {}, filename) =>
+    apiDownload(api, `/stores/${storeId}/listings/template/`, {
         params: { action, ...extraParams },
-        responseType: 'blob',
+        fallbackFilename: filename || `listing_template_${action}.csv`,
+        mimeType: 'text/csv',
     });
 
 /** Upload listing photo files; returns { urls: string[], photos: [...] }. */
@@ -119,20 +121,10 @@ export const criticalZeroListingInventory = (storeId) =>
 
 /** Download managed inventory Excel. */
 export const exportListingInventory = (storeId, syncStatus = '') =>
-    api.get(`/stores/${storeId}/listings/inventory-export/`, {
+    apiDownload(api, `/stores/${storeId}/listings/inventory-export/`, {
         params: syncStatus ? { sync_status: syncStatus } : {},
-        responseType: 'blob',
-    }).then((res) => {
-        const url = window.URL.createObjectURL(new Blob([res.data], {
-            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        }));
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', 'managed_inventory.xlsx');
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
+        fallbackFilename: 'managed_inventory.xlsx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
 
 /** Managed upload history. scope: 'history' (default) | 'logs' | 'all' */
@@ -181,17 +173,9 @@ export const cancelMarketplaceLookupJob = (storeId) =>
 
 /** Download CSV for the latest marketplace check results. */
 export const downloadMarketplaceLookupJobCsv = (storeId) =>
-    api.get(`/stores/${storeId}/listings/marketplace-lookup/download/`, {
-        responseType: 'blob',
-    }).then((res) => {
-        const url = window.URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', 'marketplace_sku_check.csv');
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
+    apiDownload(api, `/stores/${storeId}/listings/marketplace-lookup/download/`, {
+        fallbackFilename: 'marketplace_sku_check.csv',
+        mimeType: 'text/csv',
     });
 
 /** @deprecated Prefer startMarketplaceLookupJob — kept for compatibility. */
@@ -200,32 +184,22 @@ export async function bulkLookupListingsOnMarketplace(storeId, payload = {}) {
 }
 
 /** Download failed rows from a managed Upload history entry as CSV. */
-export const downloadListingUploadErrors = (storeId, uploadId, filename = '') =>
-    api.get(`/stores/${storeId}/listings/uploads/${uploadId}/errors/`, { responseType: 'blob' }).then((res) => {
-        const base = (filename || 'upload').replace(/\.[^.]+$/, '') || 'upload';
-        const url = window.URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', `${base}_errors.csv`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
+export const downloadListingUploadErrors = (storeId, uploadId, filename = '') => {
+    const base = (filename || 'upload').replace(/\.[^.]+$/, '') || 'upload';
+    return apiDownload(api, `/stores/${storeId}/listings/uploads/${uploadId}/errors/`, {
+        fallbackFilename: `${base}_errors.csv`,
+        mimeType: 'text/csv',
     });
+};
 
 /** Export all rows from a managed Upload history entry as CSV. */
-export const exportListingUpload = (storeId, uploadId, filename = '') =>
-    api.get(`/stores/${storeId}/listings/uploads/${uploadId}/export/`, { responseType: 'blob' }).then((res) => {
-        const base = (filename || 'upload').replace(/\.[^.]+$/, '') || 'upload';
-        const url = window.URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', `${base}_export.csv`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
+export const exportListingUpload = (storeId, uploadId, filename = '') => {
+    const base = (filename || 'upload').replace(/\.[^.]+$/, '') || 'upload';
+    return apiDownload(api, `/stores/${storeId}/listings/uploads/${uploadId}/export/`, {
+        fallbackFilename: `${base}_export.csv`,
+        mimeType: 'text/csv',
     });
+};
 
 /**
  * Delete a managed Upload history entry.
@@ -256,19 +230,12 @@ export const getOrderCancelReasons = (storeId) =>
 export const exportOrdersExcel = (storeId, storeName = '', { status } = {}) => {
     const params = {};
     if (status && status !== 'all') params.status = status;
-    return api.get(`/stores/${storeId}/orders/export/`, { params, responseType: 'blob' }).then((res) => {
-        const safe = String(storeName || storeId).replace(/[^\w.-]+/g, '_').slice(0, 40) || 'store';
-        const suffix = status && status !== 'all' ? `_${status}` : '';
-        const url = window.URL.createObjectURL(new Blob([res.data], {
-            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        }));
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', `orders_${safe}${suffix}.xlsx`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
+    const safe = String(storeName || storeId).replace(/[^\w.-]+/g, '_').slice(0, 40) || 'store';
+    const suffix = status && status !== 'all' ? `_${status}` : '';
+    return apiDownload(api, `/stores/${storeId}/orders/export/`, {
+        params,
+        fallbackFilename: `orders_${safe}${suffix}.xlsx`,
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
 };
 
@@ -280,17 +247,10 @@ export const replyToTicket = (storeId, ticketId, data) =>
     api.post(`/stores/${storeId}/tickets/${ticketId}/reply/`, data);
 
 /** Download store tickets as Excel (.xlsx). */
-export const exportTicketsExcel = (storeId, storeName = '') =>
-    api.get(`/stores/${storeId}/tickets/export/`, { responseType: 'blob' }).then((res) => {
-        const safe = String(storeName || storeId).replace(/[^\w.-]+/g, '_').slice(0, 40) || 'store';
-        const url = window.URL.createObjectURL(new Blob([res.data], {
-            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        }));
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', `tickets_${safe}.xlsx`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
+export const exportTicketsExcel = (storeId, storeName = '') => {
+    const safe = String(storeName || storeId).replace(/[^\w.-]+/g, '_').slice(0, 40) || 'store';
+    return apiDownload(api, `/stores/${storeId}/tickets/export/`, {
+        fallbackFilename: `tickets_${safe}.xlsx`,
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
+};

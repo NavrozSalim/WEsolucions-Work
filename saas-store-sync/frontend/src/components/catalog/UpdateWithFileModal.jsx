@@ -1,13 +1,12 @@
 import { useState, useRef, useCallback } from 'react';
 import { UploadCloud, FileSpreadsheet, X, Download } from 'lucide-react';
 import Button from '../ui/Button';
-import Select from '../ui/Select';
 
 const ACCEPT = '.xlsx,.xls,.csv';
 
 export default function UpdateWithFileModal({
     open, onClose, onUpload, storeName, storeMarketplace, storeId, downloadSample, loading = false,
-    file, setFile, template, setTemplate,
+    file, setFile,
 }) {
     const [dragActive, setDragActive] = useState(false);
     const [error, setError] = useState('');
@@ -133,34 +132,23 @@ export default function UpdateWithFileModal({
 
                     <div>
                         <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Template</label>
-                        <Select
-                            value={template}
-                            onChange={(e) => setTemplate(e.target.value)}
-                            options={[
-                                {
-                                    value: 'standard',
-                                    label: isWalmart
-                                        ? 'Walmart catalog template'
-                                        : isSears
-                                          ? 'Sears catalog template'
-                                          : isReverb
-                                            ? 'Reverb catalog template'
-                                            : 'Catalog template (matches store marketplace)',
-                                },
-                                { value: 'download', label: 'Download sample CSV' },
-                            ]}
-                            className="w-full"
-                        />
-                        {template === 'download' && (
-                            <button
-                                type="button"
-                                onClick={() => downloadSample?.()}
-                                className="mt-2 inline-flex items-center gap-2 text-sm text-accent-600 dark:text-accent-400 hover:underline"
-                            >
-                                <Download className="h-4 w-4" />
-                                Download CSV template
-                            </button>
-                        )}
+                        <p className="text-sm text-slate-600 dark:text-slate-400">
+                            {isWalmart
+                                ? 'Walmart catalog template'
+                                : isSears
+                                  ? 'Sears catalog template'
+                                  : isReverb
+                                    ? 'Reverb catalog template'
+                                    : 'Catalog template (matches store marketplace)'}
+                        </p>
+                        <button
+                            type="button"
+                            onClick={() => downloadSample?.()}
+                            className="mt-2 inline-flex items-center gap-2 text-sm font-medium text-accent-600 dark:text-accent-400 hover:underline"
+                        >
+                            <Download className="h-4 w-4" />
+                            Download CSV template
+                        </button>
                         <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">{templateHint}</p>
                     </div>
 

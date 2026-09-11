@@ -40,6 +40,7 @@ from catalog.marketplace_templates import (
     template_kind_from_store_adapter,
     upload_row_to_cells,
 )
+from users.org_scope import get_store_for_user, stores_for_user
 from products.models import Product
 from stores.models import Store
 from rest_framework.permissions import IsAuthenticated
@@ -225,10 +226,11 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
         store_id = self.kwargs.get('store_pk')
         if not store_id:
             return ProductMapping.objects.none()
+        if not stores_for_user(self.request.user).filter(pk=store_id).exists():
+            return ProductMapping.objects.none()
         qs = ProductMapping.objects.filter(
             is_active=True,
             store_id=store_id,
-            store__user=self.request.user,
         ).select_related(
             'product',
             'product__vendor',
@@ -313,10 +315,16 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def export(self, request, store_pk=None):
         """Download product mappings as CSV. Optional ?sync_status=failed|synced|..."""
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk, select_related=('marketplace',))
+        latest_vp = VendorPrice.objects.filter(
+            product=OuterRef('product_id'),
+        ).order_by('-scraped_at')
         qs = ProductMapping.objects.filter(store=store, is_active=True).select_related(
             'product', 'product__vendor',
-        ).prefetch_related('product__vendor_prices').order_by('product__vendor_sku')
+        ).annotate(
+            export_vendor_price=Subquery(latest_vp.values('price')[:1]),
+            export_vendor_stock=Subquery(latest_vp.values('stock')[:1]),
+        ).order_by('product__vendor_sku')
         st = (request.query_params.get('sync_status') or '').strip()
         if st:
             qs = qs.filter(sync_status=st)
@@ -333,15 +341,8 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
                 or pm.marketplace_parent_sku
                 or (pm.product.vendor_sku if pm.product else '')
             )
-            vp = None
-            if pm.product_id:
-                vp = pm.product.vendor_prices.order_by('-scraped_at').first()
-            vprice = ''
-            vinventory = ''
-            if vp and vp.price is not None:
-                vprice = str(vp.price)
-            if vp and vp.stock is not None:
-                vinventory = str(vp.stock)
+            vprice = str(pm.export_vendor_price) if pm.export_vendor_price is not None else ''
+            vinventory = str(pm.export_vendor_stock) if pm.export_vendor_stock is not None else ''
             writer.writerow([
                 sku or '',
                 (pm.title or '')[:500],
@@ -373,10 +374,7 @@ class CatalogClearView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, store_pk):
-        try:
-            store = Store.objects.get(id=store_pk, user=request.user)
-        except Store.DoesNotExist:
-            return Response({"error": "Store not found"}, status=status.HTTP_404_NOT_FOUND)
+        store = get_store_for_user(request.user, store_pk)
         count, _ = ProductMapping.objects.filter(store=store).delete()
         log_action(
             request.user, 'catalog_cleared', 'store', str(store.id),
@@ -400,11 +398,7 @@ class StoreCatalogUploadView(APIView):
     parser_classes = (MultiPartParser, FormParser)
 
     def post(self, request, store_pk):
-        store = get_object_or_404(
-            Store.objects.defer('api_token', 'kogan_service_account_json'),
-            id=store_pk,
-            user=request.user,
-        )
+        store = get_store_for_user(request.user, store_pk)
         file_obj = request.data.get('file')
         if not file_obj:
             return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
@@ -453,11 +447,7 @@ class CatalogUploadListView(APIView):
     throttle_classes = [ProgressReadRateThrottle]
 
     def get(self, request, store_pk):
-        store = get_object_or_404(
-            Store.objects.defer('api_token', 'kogan_service_account_json'),
-            id=store_pk,
-            user=request.user,
-        )
+        store = get_store_for_user(request.user, store_pk)
         uploads = list(
             CatalogUpload.objects.filter(store=store)
             .select_related('user', 'store', 'store__marketplace')
@@ -498,7 +488,7 @@ class CatalogUploadDeleteView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, store_pk, upload_id):
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         upload = get_object_or_404(CatalogUpload, id=upload_id, store=store)
         rows = list(upload.rows.select_related('product_mapping', 'product').all())
         pm_ids = {r.product_mapping_id for r in rows if r.product_mapping_id}
@@ -526,7 +516,7 @@ class CatalogUploadErrorFileView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk, upload_id):
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         upload = get_object_or_404(CatalogUpload, id=upload_id, store=store)
         failed_rows = upload.rows.filter(
             sync_status=CatalogUploadRow.SyncStatus.ERROR,
@@ -550,7 +540,7 @@ class CatalogUploadDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk, upload_id):
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         upload = get_object_or_404(CatalogUpload, id=upload_id, store=store)
 
         if request.query_params.get('action') == 'download':
@@ -634,7 +624,7 @@ class CatalogSyncTriggerView(APIView):
 
     def post(self, request, store_pk):
         from catalog.tasks import catalog_sync_task
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         upload_id = request.data.get('upload_id')
         if upload_id:
             upload = get_object_or_404(CatalogUpload, id=upload_id, store=store)
@@ -927,7 +917,7 @@ class CatalogScrapeTriggerView(APIView):
             run_store_wide_catalog_scrape,
             store_has_scrapeable_pending_mappings,
         )
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         dup = self._reject_if_server_scrape_active(store)
         if dup is not None:
             append_catalog_log(
@@ -1155,7 +1145,7 @@ class CatalogScrapeCancelView(APIView):
         from catalog.activity_log import append_catalog_log
         from catalog.ingest_views import SUPPORTED_VENDORS
 
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
 
         vendor_filter = (request.query_params.get('vendor') or '').strip().lower()
         if vendor_filter and vendor_filter not in SUPPORTED_VENDORS:
@@ -1285,7 +1275,7 @@ class CatalogUpdateTriggerView(APIView):
 
     def post(self, request, store_pk):
         from catalog.tasks import catalog_update_task
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         upload_id = request.data.get('upload_id')
         if upload_id:
             upload = get_object_or_404(CatalogUpload, id=upload_id, store=store)
@@ -1316,7 +1306,7 @@ class CatalogSyncLogsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk):
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         logs = (
             CatalogSyncLog.objects.filter(catalog_upload__store=store)
             .select_related('catalog_upload_row')
@@ -1452,7 +1442,7 @@ class CatalogScrapeProgressView(APIView):
     def get(self, request, store_pk):
         from catalog.scrape_progress import get_scrape_progress_payload
 
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         payload = get_scrape_progress_payload(store)
         return Response(
             payload,
@@ -1466,7 +1456,7 @@ class CatalogScrapeRunsView(APIView):
 
     def get(self, request, store_pk):
         from sync.models import ScrapeRun
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         runs = ScrapeRun.objects.filter(store=store).order_by('-started_at')[:50]
         data = [
             {
@@ -1489,7 +1479,7 @@ class CatalogUpdateLogsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk):
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         logs = (
             ReverbUpdateLog.objects.filter(product_mapping__store=store)
             .select_related('product_mapping')
@@ -1518,7 +1508,7 @@ class CatalogJobStatusView(APIView):
 
     def get(self, request, store_pk, job_id):
         from celery.result import AsyncResult
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         result = AsyncResult(job_id)
         data = {
             "job_id": job_id,
@@ -1543,7 +1533,7 @@ class CatalogActivityLogListView(APIView):
     def get(self, request, store_pk):
         from datetime import timedelta
 
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         since = timezone.now() - timedelta(days=1)
         qs = (
             CatalogActivityLog.objects.filter(store=store, created_at__gte=since)
@@ -1570,7 +1560,7 @@ class CatalogPushListingsView(APIView):
         )
         from sync.tasks import _execute_store_push_listings_only, run_store_push_listings_only
 
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         append_catalog_log(
             store.id,
             'You started Manual sync (push listings to the marketplace).',
@@ -1674,7 +1664,7 @@ class CatalogPushListingsProgressView(APIView):
     def get(self, request, store_pk):
         from catalog.push_listings_progress import build_push_listings_progress_payload
 
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         return Response(
             build_push_listings_progress_payload(store),
             headers={'Cache-Control': 'no-store, max-age=0, private'},
@@ -1697,7 +1687,7 @@ class CatalogPushListingsCancelView(APIView):
         )
         from sync.sears_seller_lock import release_sears_seller_lock
 
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         store_id = str(store.id)
         lock_owner = get_push_listings_lock_owner(store_id)
 
@@ -1805,7 +1795,7 @@ class CatalogResetListingsPendingView(APIView):
                 {'error': 'scope must be one of: all, failed, needs_attention'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         qs = ProductMapping.objects.filter(store=store, is_active=True)
         if scope == 'failed':
             qs = qs.filter(sync_status='failed')
@@ -1854,7 +1844,7 @@ class StoreCriticalZeroView(APIView):
                 {'error': 'You must send {"confirm": true} to run this action.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         log_action(
             request.user, 'critical_zero_inventory', 'store', str(store.id),
             metadata={'store_name': store.name}, request=request,
@@ -1893,7 +1883,7 @@ class StoreFailedZeroInventoryView(APIView):
                 {'error': 'You must send {"confirm": true} to run this action.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        store = get_object_or_404(Store, id=store_pk, user=request.user)
+        store = get_store_for_user(request.user, store_pk)
         log_action(
             request.user, 'failed_zero_inventory', 'store', str(store.id),
             metadata={'store_name': store.name}, request=request,
@@ -1932,10 +1922,8 @@ class CatalogSampleTemplateView(APIView):
         kind_param = (request.query_params.get('marketplace') or '').strip().lower()
         store = None
         if store_id:
-            store = get_object_or_404(
-                Store.objects.select_related('marketplace'),
-                id=store_id,
-                user=request.user,
+            store = get_store_for_user(
+                request.user, store_id, select_related=('marketplace',),
             )
 
         if kind_param in ('reverb', 'walmart', 'sears'):

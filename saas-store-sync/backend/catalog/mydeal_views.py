@@ -1,7 +1,6 @@
 """API views for Mydeal template upload and export."""
 from __future__ import annotations
 
-from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -15,18 +14,14 @@ from catalog.mydeal_templates import (
     store_is_mydeal,
     template_status,
 )
-from stores.models import Store
+from users.org_scope import get_store_for_user
 
 
 class MydealTemplateStatusView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk):
-        store = get_object_or_404(
-            Store.objects.select_related('marketplace'),
-            id=store_pk,
-            user=request.user,
-        )
+        store = get_store_for_user(request.user, store_pk, select_related=('marketplace',))
         if not store_is_mydeal(store):
             return Response(
                 {'error': 'Not a Mydeal store.'},
@@ -40,11 +35,7 @@ class MydealTemplateUploadView(APIView):
     parser_classes = (MultiPartParser, FormParser)
 
     def post(self, request, store_pk):
-        store = get_object_or_404(
-            Store.objects.select_related('marketplace'),
-            id=store_pk,
-            user=request.user,
-        )
+        store = get_store_for_user(request.user, store_pk, select_related=('marketplace',))
         if not store_is_mydeal(store):
             return Response(
                 {'error': 'Not a Mydeal store.'},
@@ -76,11 +67,7 @@ class MydealTemplateExportView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk):
-        store = get_object_or_404(
-            Store.objects.select_related('marketplace'),
-            id=store_pk,
-            user=request.user,
-        )
+        store = get_store_for_user(request.user, store_pk, select_related=('marketplace',))
         if not store_is_mydeal(store):
             return Response(
                 {'error': 'Not a Mydeal store.'},
