@@ -8,6 +8,7 @@ from scrapers.amazon_us_scraper import (
     AmazonParser,
     MAX_DELIVERY_DAYS,
     _parse_delivery_days_from_text,
+    _price_from_amazon_node,
 )
 
 
@@ -228,8 +229,62 @@ class TestAmazonAUPriceMarkup(unittest.TestCase):
 
     def test_nested_fraction_in_whole_is_13_99_not_1399(self):
         soup = BeautifulSoup(RELATED_ONLY_NESTED_FRACTION_HTML, "html.parser")
-        price = AmazonParser.extract_price(soup, RELATED_ONLY_NESTED_FRACTION_HTML, market="AU")
-        self.assertEqual(price, 13.99)
+        node = soup.select_one("span.a-price")
+        self.assertEqual(_price_from_amazon_node(node, allow_aud=True), 13.99)
+
+    def test_related_only_page_is_not_used_as_buybox_price(self):
+        soup = BeautifulSoup(RELATED_ONLY_NESTED_FRACTION_HTML, "html.parser")
+        self.assertIsNone(
+            AmazonParser.extract_price(soup, RELATED_ONLY_NESTED_FRACTION_HTML, market="AU")
+        )
+
+    def test_related_100_89_in_rightcol_is_not_10089(self):
+        html = """
+        <html><body>
+          <div id="buybox">
+            <div id="corePrice_feature_div">
+              <span class="a-price apex-pricetopay-value">
+                <span class="a-offscreen">$55.24</span>
+                <span aria-hidden="true">
+                  <span class="a-price-whole">55<span class="a-price-decimal">.</span></span>
+                  <span class="a-price-fraction">24</span>
+                </span>
+              </span>
+            </div>
+          </div>
+          <div id="rightCol">
+            <div id="similarities">
+              <span class="a-price">
+                <span class="a-offscreen"></span>
+                <span aria-hidden="true">
+                  <span class="a-price-whole">100<span class="a-price-fraction">89</span></span>
+                </span>
+              </span>
+            </div>
+          </div>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        price = AmazonParser.extract_price(soup, html, market="AU")
+        self.assertEqual(price, 55.24)
+        self.assertNotEqual(price, 10089.0)
+
+    def test_missing_buybox_does_not_take_related_carousel_price(self):
+        html = """
+        <html><body>
+          <div id="rightCol">
+            <div id="similarities">
+              <span class="a-price">
+                <span class="a-offscreen">$100.89</span>
+                <span class="a-price-whole">100</span>
+                <span class="a-price-fraction">89</span>
+              </span>
+            </div>
+          </div>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        self.assertIsNone(AmazonParser.extract_price(soup, html, market="AU"))
 
     def test_aud_prefix_accepted_for_au_market(self):
         soup = BeautifulSoup(AU_AUD_PREFIX_HTML, "html.parser")

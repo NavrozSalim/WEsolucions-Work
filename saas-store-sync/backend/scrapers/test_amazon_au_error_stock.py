@@ -92,6 +92,7 @@ class AmazonAUPriceMarkupTests(SimpleTestCase):
         soup = BeautifulSoup(html, "html.parser")
         price = AmazonParser.extract_price(soup, html, market="AU")
         self.assertEqual(price, 34.06)
+        self.assertNotEqual(price, 1399.0)
         self.assertEqual(AmazonParser.extract_stock(soup), 99)
 
 

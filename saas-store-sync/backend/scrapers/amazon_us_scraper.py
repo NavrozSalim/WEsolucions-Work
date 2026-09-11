@@ -67,7 +67,18 @@ _BUYBOX_ROOT_SELECTORS = (
     "#apex_desktop",
     "#corePrice_feature_div",
     "#corePriceDisplay_desktop_feature_div",
-    "#rightCol",
+)
+
+_RELATED_WIDGET_ID_MARKERS = (
+    "similarities",
+    "purchase-sims",
+    "sp_detail",
+    "anoncarousel",
+    "desktop-dp-tts",
+    "p13n",
+    "productsrelated",
+    "fbt",
+    "bundle",
 )
 
 _BUYBOX_FORM_SELECTORS = (
@@ -174,6 +185,24 @@ class AmazonParser:
         "#corePriceDisplay_desktop_feature_div .a-offscreen",
         "span.a-price",
         "span.a-price-whole",
+    ]
+
+    # Full-page fallback must not use bare ``span.a-price`` / ``a-price-whole`` —
+    # those match related-item carousels ($100.89 stored as 10089).
+    SAFE_PAGE_PRICE_SELECTORS = [
+        "#corePrice_feature_div span.a-offscreen",
+        "#corePrice_feature_div .a-price",
+        ".apex-pricetopay-value span.a-offscreen",
+        ".apex-pricetopay-value",
+        "span.priceToPay span.a-offscreen",
+        "span.priceToPay",
+        ".apexPriceToPay span.a-offscreen",
+        ".apexPriceToPay",
+        "#priceblock_ourprice",
+        "#priceblock_dealprice",
+        "#priceblock_saleprice",
+        "#corePriceDisplay_desktop_feature_div .a-price",
+        "#corePriceDisplay_desktop_feature_div .a-offscreen",
     ]
 
     PRICE_JSON_PATTERNS = [
@@ -291,6 +320,7 @@ class AmazonParser:
         allow_regex: bool = True,
         allow_aud: bool = False,
         allow_generic_json: bool = False,
+        selectors=None,
     ) -> Optional[float]:
         if scope is None:
             return None
@@ -318,9 +348,9 @@ class AmazonParser:
             except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
                 pass
 
-        for sel in cls.PRICE_SELECTORS[1:]:
+        for sel in selectors or cls.PRICE_SELECTORS[1:]:
             for elem in scope.select(sel):
-                if _is_strikethrough_price(elem):
+                if _is_strikethrough_price(elem) or _is_related_widget(elem):
                     continue
                 p = _price_from_amazon_node(elem, allow_aud=allow_aud)
                 if p:
@@ -388,6 +418,7 @@ class AmazonParser:
             allow_regex=True,
             allow_aud=allow_aud,
             allow_generic_json=False,
+            selectors=cls.SAFE_PAGE_PRICE_SELECTORS,
         )
 
     @classmethod
@@ -543,6 +574,22 @@ def _is_strikethrough_price(elem) -> bool:
     return False
 
 
+def _is_related_widget(elem) -> bool:
+    """True for recommendation / carousel prices, not the featured buy box."""
+    cur = elem
+    for _ in range(14):
+        if cur is None or not getattr(cur, "get", None):
+            break
+        eid = (cur.get("id") or "").lower()
+        if any(marker in eid for marker in _RELATED_WIDGET_ID_MARKERS):
+            return True
+        classes = " ".join(_css_classes(cur)).lower()
+        if "p13n" in classes or "carousel" in classes or "_fbt_" in classes:
+            return True
+        cur = getattr(cur, "parent", None)
+    return False
+
+
 def _offscreen_text_usable(text: str) -> bool:
     t = (text or "").strip()
     if not t or t.lower() in _EMPTY_OFFSCREEN_VALUES:
@@ -632,6 +679,10 @@ def _price_from_amazon_node(elem, *, allow_aud: bool = False) -> Optional[float]
         if frac:
             return parse_price_text(f"{whole}.{frac}")
         return parse_price_text(whole)
+
+    # Never concatenate visible whole+fraction (e.g. 100 + 89 → 10089).
+    if "a-price" in classes or price_el is not None:
+        return None
 
     text = elem.get_text(strip=True)
     if _offscreen_text_usable(text) and not _currency_rejected(text, allow_aud=allow_aud):
