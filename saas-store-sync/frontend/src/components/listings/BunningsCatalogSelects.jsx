@@ -62,7 +62,7 @@ export function BunningsCategorySelect({ storeId, value, onChange, required = fa
     return (
         <div ref={rootRef} className="relative sm:col-span-2">
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
-                Category {required ? <span className="text-rose-500">*</span> : null}
+                category {required ? <span className="text-rose-500">*</span> : null}
             </label>
             <button
                 type="button"
@@ -268,7 +268,7 @@ export function BunningsCategoryMultiSelect({ storeId, values = [], onChange, re
                 </div>
             )}
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Extra CSV columns use the Bunnings attribute codes for these categories. Up to {MAX_BULK_CATEGORIES} categories per file.
+                Extra CSV columns use Bunnings attribute codes for these categories (DISPLAY_NAME, BRAND, GTIN, KEY_SELLING_POINT_1, …). Up to {MAX_BULK_CATEGORIES} categories per file.
             </p>
         </div>
     );
@@ -298,7 +298,7 @@ export function BunningsLogisticSelect({ storeId, value, onChange, required = fa
         return (
             <div>
                 <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
-                    Logistic Class {required ? <span className="text-rose-500">*</span> : null}
+                    logistic-class {required ? <span className="text-rose-500">*</span> : null}
                 </label>
                 <input
                     value={value || ''}
@@ -325,7 +325,7 @@ export function BunningsLogisticSelect({ storeId, value, onChange, required = fa
     return (
         <div>
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
-                Logistic Class {required ? <span className="text-rose-500">*</span> : null}
+                logistic-class {required ? <span className="text-rose-500">*</span> : null}
             </label>
             <select
                 value={value || ''}
@@ -355,6 +355,12 @@ const FORM_COVERED_ATTRS = new Set([
     'brand',
     'title',
     'description',
+    'display_name',
+    'product_description',
+    'long_description',
+    'section_description',
+    'primary_image',
+    'category',
     'weight',
     'product-weight',
     'gross-weight',
@@ -430,7 +436,7 @@ export function BunningsAttributeFields({ storeId, hierarchy, value, onChange })
                     Category attributes
                 </p>
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                    Field names are the Bunnings attribute codes for this category. Weight and dimensions above still count when Mirakl asks for them.
+                    Extra fields are Bunnings codes for this category (for example KEY_SELLING_POINT_1). DISPLAY_NAME, PRODUCT_DESCRIPTION, BRAND, GTIN, PRIMARY_IMAGE, and category are the fields above.
                 </p>
             </div>
             {loading && (

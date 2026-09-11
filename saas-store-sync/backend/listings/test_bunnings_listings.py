@@ -208,10 +208,14 @@ class BunningsProductsUnitTests(SimpleTestCase):
         text = bunnings_products.products_csv([_listing_ns()])
         header = text.splitlines()[0]
         self.assertIn("category;product-id;product-id-type", header)
+        self.assertIn("DISPLAY_NAME", header)
+        self.assertIn("PRODUCT_DESCRIPTION", header)
+        self.assertIn("PRIMARY_IMAGE", header)
         self.assertIn("BN-1", text)
         self.assertIn("DRILLS", text)
         self.assertIn("9300000000001", text)
         self.assertIn("https://example.com/a.jpg", text)
+        self.assertIn("Power Drill", text)
 
     def test_offers_csv_price_qty_and_delete(self):
         text = bunnings_products.offers_csv([_listing_ns()])
@@ -283,15 +287,21 @@ class BunningsProductsUnitTests(SimpleTestCase):
             "listings.bunnings.products.load_category_attributes",
             return_value=[
                 {"code": "title", "label": "Title", "required": True},
+                {"code": "DISPLAY_NAME", "label": "Website Display Name", "required": True},
+                {"code": "BRAND", "label": "Brand", "required": True},
                 {"code": "attribute_pdb_assembly", "label": "Assembly Required", "required": True},
                 {"code": "colour", "label": "Colour", "required": False},
+                {"code": "KEY_SELLING_POINT_1", "label": "Key Selling Point 1", "required": True},
             ],
         ):
             cols = bunnings_products.template_attribute_columns(store, ["BEDSIDE"])
         codes = [c["code"] for c in cols]
         self.assertNotIn("title", codes)
+        self.assertNotIn("DISPLAY_NAME", codes)
+        self.assertNotIn("BRAND", codes)
         self.assertEqual(cols[0]["header"], "attribute_pdb_assembly")
-        self.assertEqual(cols[1]["header"], "colour")
+        self.assertIn("colour", codes)
+        self.assertIn("KEY_SELLING_POINT_1", codes)
 
     def test_validate_requires_pm11_attribute(self):
         store = SimpleNamespace(id="store-1")
@@ -310,6 +320,21 @@ class BunningsProductsUnitTests(SimpleTestCase):
                 "attributes": {"attribute_pdb_assembly": "Yes"},
             }
             self.assertEqual(bunnings_products.validate_listing(ok, store=store), [])
+
+    def test_validate_operator_codes_covered_by_listing_fields(self):
+        store = SimpleNamespace(id="store-1")
+        with patch(
+            "listings.bunnings.products.load_category_attributes",
+            return_value=[
+                {"code": "DISPLAY_NAME", "label": "Website Display Name", "required": True},
+                {"code": "PRODUCT_DESCRIPTION", "label": "Product Description", "required": True},
+                {"code": "BRAND", "label": "Brand", "required": True},
+                {"code": "GTIN", "label": "Barcode", "required": True},
+                {"code": "PRIMARY_IMAGE", "label": "Image", "required": True},
+                {"code": "CATEGORY", "label": "Category", "required": True},
+            ],
+        ):
+            self.assertEqual(bunnings_products.validate_listing(VALID_BUNNINGS, store=store), [])
 
     def test_products_csv_includes_attributes_and_weight(self):
         listing = _listing_ns(
@@ -419,23 +444,39 @@ class BunningsListingServiceTests(TestCase):
 
     def test_template_headers_and_parse(self):
         csv_text = csv_import.build_template_csv("create", store=self.store)
-        self.assertIn("Logistic Class", csv_text)
-        self.assertIn("Leadtime To Ship (Optional)", csv_text)
-        self.assertIn("Category", csv_text)
-        self.assertIn("Parent SKU", csv_text)
+        self.assertIn("logistic-class", csv_text)
+        self.assertIn("leadtime-to-ship", csv_text)
+        self.assertIn("category", csv_text)
+        self.assertIn("product-id", csv_text)
+        self.assertIn("product-id-type", csv_text)
+        self.assertIn("variant-group-code", csv_text)
+        self.assertIn("DISPLAY_NAME", csv_text)
+        self.assertIn("PRODUCT_DESCRIPTION", csv_text)
+        self.assertIn("PRIMARY_IMAGE", csv_text)
+        self.assertIn("BRAND", csv_text)
+        self.assertIn("GTIN", csv_text)
+        self.assertNotIn("Parent SKU", csv_text)
         self.assertNotIn("Product Key (Optional)", csv_text)
+        self.assertNotIn("Category Attributes JSON", csv_text)
+        self.assertNotIn("Image URLs", csv_text)
         self.assertIn("Option 1 Name (Optional)", csv_text)
         self.assertIn("Variation Img URL (Optional)", csv_text)
         rows = csv_import.parse_upload("bunnings.csv", csv_text.encode())
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["sku"], "BN-EXAMPLE-001-M")
         self.assertEqual(rows[0]["product_key"], "BN-EXAMPLE-001")
+        self.assertEqual(rows[0]["title"], "Example Power Drill")
+        self.assertEqual(rows[0]["brand"], "ExampleBrand")
+        self.assertEqual(rows[0]["gtin"], "9300000000001")
+        self.assertEqual(rows[0]["image_urls"], "https://example.com/photo1.jpg")
         self.assertEqual(rows[0]["option_1_name"], "Size")
         self.assertEqual(rows[0]["option_1_value"], "M")
         self.assertEqual(rows[0]["sale_price"], "79.99")
+        self.assertEqual(rows[0]["inventory"], "5")
         self.assertEqual(rows[0]["logistic_class"], "SMALL")
         self.assertEqual(rows[0]["leadtime_to_ship"], "2")
-        self.assertIn("Category Attributes JSON (Optional)", csv_text)
+        self.assertEqual(rows[0].get("product_id_type"), "SHOP_SKU")
+        self.assertNotIn("product-id-type", rows[0].get("attributes") or {})
 
         attr_csv = (
             "SKU,Title,Description,Brand,Category,Image URLs,Inventory,Price,Logistic Class,"
@@ -463,14 +504,46 @@ class BunningsListingServiceTests(TestCase):
         colour_rows = csv_import.parse_upload("bunnings.csv", colour_csv.encode())
         self.assertEqual(colour_rows[0]["attributes"]["colour"], "White")
 
+        operator_csv = (
+            "category,product-id,product-id-type,variant-group-code,DISPLAY_NAME,"
+            "PRODUCT_DESCRIPTION,BRAND,GTIN,PRIMARY_IMAGE,sku,price,quantity,"
+            "logistic-class,KEY_SELLING_POINT_1\n"
+            "DRILLS,BN-OP,SHOP_SKU,BN-PARENT,Op Title,Op Desc,OpBrand,9300000000001,"
+            "https://example.com/a.jpg,BN-OP,9.99,1,SMALL,Point one\n"
+        )
+        operator_rows = csv_import.parse_upload("bunnings.csv", operator_csv.encode())
+        self.assertEqual(operator_rows[0]["sku"], "BN-OP")
+        self.assertEqual(operator_rows[0]["product_key"], "BN-PARENT")
+        self.assertEqual(operator_rows[0]["title"], "Op Title")
+        self.assertEqual(operator_rows[0]["description"], "Op Desc")
+        self.assertEqual(operator_rows[0]["brand"], "OpBrand")
+        self.assertEqual(operator_rows[0]["gtin"], "9300000000001")
+        self.assertEqual(operator_rows[0]["image_urls"], "https://example.com/a.jpg")
+        self.assertEqual(operator_rows[0]["inventory"], "1")
+        self.assertEqual(operator_rows[0]["product_id_type"], "SHOP_SKU")
+        self.assertEqual(operator_rows[0]["attributes"]["KEY_SELLING_POINT_1"], "Point one")
+        self.assertNotIn("product-id-type", operator_rows[0].get("attributes") or {})
+
     def test_template_adds_columns_for_selected_categories(self):
         with patch(
             "listings.bunnings.products.load_category_attributes",
-            return_value=[{
-                "code": "attribute_pdb_assembly",
-                "label": "Assembly Required",
-                "required": True,
-            }],
+            return_value=[
+                {
+                    "code": "attribute_pdb_assembly",
+                    "label": "Assembly Required",
+                    "required": True,
+                },
+                {
+                    "code": "DISPLAY_NAME",
+                    "label": "Website Display Name",
+                    "required": True,
+                },
+                {
+                    "code": "KEY_SELLING_POINT_1",
+                    "label": "Key Selling Point 1",
+                    "required": True,
+                },
+            ],
         ):
             csv_text = csv_import.build_template_csv(
                 "create",
@@ -478,8 +551,13 @@ class BunningsListingServiceTests(TestCase):
                 hierarchies=["BEDSIDE", "DRILLS"],
             )
         self.assertIn("attribute_pdb_assembly", csv_text)
+        self.assertIn("DISPLAY_NAME", csv_text)
+        self.assertIn("KEY_SELLING_POINT_1", csv_text)
         self.assertNotIn("Assembly Required [attribute_pdb_assembly]", csv_text)
         self.assertNotIn("Category Attributes JSON", csv_text)
+        header = csv_text.splitlines()[0]
+        self.assertLess(header.index("DISPLAY_NAME"), header.index("sku"))
+        self.assertLess(header.index("KEY_SELLING_POINT_1"), header.index("sku"))
         self.assertIn("BEDSIDE", csv_text)
         self.assertIn("DRILLS", csv_text)
         rows = csv_import.parse_upload("bunnings.csv", csv_text.encode())

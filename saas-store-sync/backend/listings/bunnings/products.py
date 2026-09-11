@@ -32,6 +32,13 @@ PRODUCT_CSV_HEADERS = [
     "image-4",
     "image-5",
     "image-6",
+    "DISPLAY_NAME",
+    "PRODUCT_DESCRIPTION",
+    "LONG_DESCRIPTION",
+    "BRAND",
+    "GTIN",
+    "PRIMARY_IMAGE",
+    "CATEGORY",
 ]
 VARIANT_GROUP_HEADER = "variant-group-code"
 OPTION_ATTR_ALIASES = {
@@ -121,26 +128,49 @@ _DIM_FALLBACKS = {
     "height": ("height", "product-height", "package-height"),
     "width": ("width", "product-width", "package-width"),
 }
+# Already present as Mirakl identification / offer columns on the bulk template.
 TEMPLATE_SKIP_ATTRS = frozenset({
+    "category",
+    "product-id",
+    "product-id-type",
+    "variant-group-code",
+    "sku",
+    "price",
+    "quantity",
+    "state",
+    "logistic-class",
+    "leadtime-to-ship",
     "ean",
-    "gtin",
-    "barcode",
-    "brand",
     "title",
     "description",
-    "weight",
-    "product-weight",
-    "gross-weight",
-    "length",
-    "product-length",
-    "package-length",
-    "height",
-    "product-height",
-    "package-height",
-    "width",
-    "product-width",
-    "package-width",
+    "image-1",
+    "image-2",
+    "image-3",
+    "image-4",
+    "image-5",
+    "image-6",
+    "display_name",
+    "product_description",
+    "long_description",
+    "brand",
+    "gtin",
+    "barcode",
+    "primary_image",
 })
+# Listing fields that satisfy Bunnings operator attribute codes (PM11 / P41).
+OPERATOR_FROM_LISTING = {
+    "display_name": "title",
+    "title": "title",
+    "product_description": "description",
+    "long_description": "description",
+    "description": "description",
+    "section_description": "description",
+    "brand": "brand",
+    "gtin": "gtin",
+    "ean": "gtin",
+    "barcode": "gtin",
+    "category": "category",
+}
 
 
 def attributes_from_data(data: dict) -> dict:
@@ -427,17 +457,28 @@ def load_category_attributes(store, hierarchy_code: str) -> list[dict]:
     return rows
 
 
-def _attribute_satisfied(code: str, data: dict, attrs: dict) -> bool:
+def _attr_lookup(attrs: dict, code: str) -> str:
+    if not isinstance(attrs, dict):
+        return ""
     if str(attrs.get(code) or "").strip():
-        return True
+        return str(attrs.get(code)).strip()
     low = (code or "").strip().lower()
-    if low in ("ean", "gtin", "barcode"):
+    for key, value in attrs.items():
+        if str(key or "").strip().lower() == low and value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _attribute_satisfied(code: str, data: dict, attrs: dict) -> bool:
+    if _attr_lookup(attrs, code):
+        return True
+    low = (code or "").strip().lower().replace("-", "_")
+    mapped = OPERATOR_FROM_LISTING.get(low)
+    if mapped == "gtin":
         return bool(str(data.get("gtin") or data.get("barcode") or "").strip())
-    if low == "brand":
-        return bool(str(data.get("brand") or "").strip())
-    if low in ("title", "description"):
-        return bool(str(data.get(low) or "").strip())
-    if low.startswith("image"):
+    if mapped and str(data.get(mapped) or "").strip():
+        return True
+    if low in ("primary_image",) or low.startswith("image"):
         return bool(_photo_urls(data.get("image_urls")))
     extras_map = {
         "weight": "weight",
@@ -451,8 +492,8 @@ def _attribute_satisfied(code: str, data: dict, attrs: dict) -> bool:
         "width": "width",
         "product-width": "width",
     }
-    mapped = extras_map.get(low)
-    if mapped and str(data.get(mapped) or "").strip():
+    dim = extras_map.get((code or "").strip().lower())
+    if dim and str(data.get(dim) or "").strip():
         return True
     return False
 
@@ -482,15 +523,27 @@ def product_row(listing: StoreListing) -> dict:
         photos = [variant_img] + [p for p in photos if p != variant_img]
         photos = photos[:6]
     gtin = extras.get("gtin") or (listing.barcode or "").strip()
+    title = (listing.title or sku)[:500]
+    description = listing.description or listing.title or sku
+    brand = (listing.brand or "").strip()
+    category = (listing.category or "").strip()
+    extras_attrs = extras.get("attributes") if isinstance(extras.get("attributes"), dict) else {}
     row = {
-        "category": (listing.category or "").strip(),
+        "category": category,
         "product-id": sku,
         "product-id-type": extras.get("product_id_type") or PRODUCT_ID_TYPE_SHOP_SKU,
         VARIANT_GROUP_HEADER: variant_group_code(listing, sku),
-        "title": (listing.title or sku)[:500],
-        "description": listing.description or listing.title or sku,
-        "brand": (listing.brand or "").strip(),
+        "title": title,
+        "description": description,
+        "brand": brand,
         "ean": gtin,
+        "DISPLAY_NAME": _attr_lookup(extras_attrs, "DISPLAY_NAME") or title,
+        "PRODUCT_DESCRIPTION": _attr_lookup(extras_attrs, "PRODUCT_DESCRIPTION") or description,
+        "LONG_DESCRIPTION": _attr_lookup(extras_attrs, "LONG_DESCRIPTION") or description,
+        "BRAND": _attr_lookup(extras_attrs, "BRAND") or brand,
+        "GTIN": _attr_lookup(extras_attrs, "GTIN") or gtin,
+        "PRIMARY_IMAGE": _attr_lookup(extras_attrs, "PRIMARY_IMAGE") or (photos[0] if photos else ""),
+        "CATEGORY": _attr_lookup(extras_attrs, "CATEGORY") or category,
     }
     for i in range(6):
         row[f"image-{i + 1}"] = photos[i] if i < len(photos) else ""
@@ -498,10 +551,9 @@ def product_row(listing: StoreListing) -> dict:
         code = _slug_attr(name)
         if code and value:
             row[code] = value
-    extras_attrs = extras.get("attributes") if isinstance(extras.get("attributes"), dict) else {}
     for code, value in extras_attrs.items():
         key = str(code or "").strip()
-        if key and value not in (None, "") and key not in row:
+        if key and value not in (None, "") and not str(row.get(key) or "").strip():
             row[key] = str(value).strip()
     for field, aliases in _DIM_FALLBACKS.items():
         val = str(extras.get(field) or "").strip()

@@ -1182,21 +1182,21 @@ export default function ListingFormModal({
                                     />
                                 )}
                                 <Input
-                                    label="Parent SKU"
+                                    label="variant-group-code"
                                     placeholder="Same on every size/colour"
                                     value={form.product_key}
                                     onChange={set('product_key')}
                                 />
                                 <Input
-                                    label="SKU"
-                                    placeholder="Variation SKU; blank uses Parent SKU"
+                                    label="sku / product-id"
+                                    placeholder="Offer SKU; also sent as product-id"
                                     value={form.sku}
                                     onChange={set('sku')}
                                 />
                                 <div className="sm:col-span-2 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 px-3 py-2 text-xs text-slate-600 dark:text-slate-300">
-                                    Standalone: fill <span className="font-medium">Parent SKU</span> (SKU can be blank).
-                                    Variations: same Parent SKU on every size/colour, unique SKU per row, Option Name/Value
-                                    (e.g. Size / M). Bunnings sends Parent SKU as Variant Group Code.
+                                    Standalone: fill <span className="font-medium">variant-group-code</span> (sku can be blank).
+                                    Variations: same variant-group-code on every size/colour, unique sku per row, Option Name/Value
+                                    (e.g. Size / M).
                                 </div>
                                 <Input
                                     label="Option 1 Name (Optional)"
@@ -1255,12 +1255,12 @@ export default function ListingFormModal({
                                     />
                                 </div>
                                 <div className="sm:col-span-2">
-                                    <Input label="Title" value={form.title} onChange={set('title')} required />
+                                    <Input label="DISPLAY_NAME" value={form.title} onChange={set('title')} required />
                                 </div>
                                 <div className="sm:col-span-2">
-                                    <Textarea label="Description" rows={4} value={form.description} onChange={set('description')} required />
+                                    <Textarea label="PRODUCT_DESCRIPTION" rows={4} value={form.description} onChange={set('description')} required />
                                 </div>
-                                <Input label="Brand" value={form.brand} onChange={set('brand')} required />
+                                <Input label="BRAND" value={form.brand} onChange={set('brand')} required />
                                 <BunningsCategorySelect
                                     storeId={storeId}
                                     value={form.category}
@@ -1279,21 +1279,21 @@ export default function ListingFormModal({
                                     value={form.attributes}
                                     onChange={(attrs) => setForm((f) => ({ ...f, attributes: attrs }))}
                                 />
-                                <Input label="GTIN (Optional)" value={form.gtin} onChange={set('gtin')} />
+                                <Input label="GTIN" value={form.gtin} onChange={set('gtin')} />
                                 <Input label="MPN (Optional)" value={form.mpn} onChange={set('mpn')} />
                                 <ListingPhotoUploader
                                     storeId={storeId}
                                     value={form.image_urls}
                                     onChange={(urls) => setForm((f) => ({ ...f, image_urls: urls }))}
                                     required
-                                    label="Image URLs"
+                                    label="PRIMARY_IMAGE"
                                 />
-                                <Input label="Inventory" type="number" min="0" value={form.inventory} onChange={set('inventory')} required disabled={form.infinite_quantity} />
+                                <Input label="quantity" type="number" min="0" value={form.inventory} onChange={set('inventory')} required disabled={form.infinite_quantity} />
                                 <label className="mt-6 flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
                                     <input type="checkbox" className="h-4 w-4 rounded border-slate-300" checked={!!form.infinite_quantity} onChange={set('infinite_quantity')} />
                                     Infinite Quantity (Optional)
                                 </label>
-                                <Input label="Price (GST inclusive)" type="number" min="0" step="0.01" value={form.sale_price} onChange={set('sale_price')} required />
+                                <Input label="price" type="number" min="0" step="0.01" value={form.sale_price} onChange={set('sale_price')} required />
                                 <Input label="RRP (Optional)" type="number" min="0" step="0.01" value={form.original_price} onChange={set('original_price')} />
                                 <BunningsLogisticSelect
                                     storeId={storeId}
@@ -1301,7 +1301,7 @@ export default function ListingFormModal({
                                     onChange={(code) => setForm((f) => ({ ...f, logistic_class: code }))}
                                     required
                                 />
-                                <Input label="Leadtime To Ship (Optional)" type="number" min="1" step="1" value={form.leadtime_to_ship} onChange={set('leadtime_to_ship')} placeholder="2" />
+                                <Input label="leadtime-to-ship" type="number" min="1" step="1" value={form.leadtime_to_ship} onChange={set('leadtime_to_ship')} placeholder="2" />
                                 <Input label="Weight (Optional)" value={form.weight} onChange={set('weight')} />
                                 <Input label="Weight Unit (Optional)" value={form.weight_unit} onChange={set('weight_unit')} />
                                 <Input label="Length (Optional)" value={form.length} onChange={set('length')} />
@@ -1309,7 +1309,7 @@ export default function ListingFormModal({
                                 <Input label="Width (Optional)" value={form.width} onChange={set('width')} />
                                 <Input label="Dimension Unit (Optional)" value={form.dimension_unit} onChange={set('dimension_unit')} />
                                 <p className="sm:col-span-2 text-xs text-slate-500 dark:text-slate-400">
-                                    Create sends a product import then an offer. Mapped SKUs skip the product import and only update the offer. New products may wait for Bunnings review before they are live.
+                                    Create sends a product import then an offer. Mapped SKUs skip the product import and only update the offer. DISPLAY_NAME, PRODUCT_DESCRIPTION, BRAND, GTIN, and PRIMARY_IMAGE are sent with the Bunnings operator codes. New products may wait for Bunnings review before they are live.
                                 </p>
                             </div>
                         ) : (

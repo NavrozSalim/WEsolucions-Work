@@ -124,7 +124,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                                 {isMydeal ? (
                                     <> Fill <strong>Option 1 Name/Value</strong> (e.g. Size / Small). Same Parent SKU is sent as one MyDeal product with multiple buyables.</>
                                 ) : isBunnings ? (
-                                    <> Fill <strong>Option Name/Value</strong> (e.g. Size / M). Parent SKU is sent as Variant Group Code.</>
+                                    <> Fill <strong>Option Name/Value</strong> (e.g. Size / M). <strong>variant-group-code</strong> groups sizes/colours.</>
                                 ) : (
                                     <> Fill <strong>Option 1–4 Name/Value</strong> (e.g. Size / XL), and a <strong>Variation Img URL</strong> on every variant row.</>
                                 )}
@@ -138,7 +138,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                             <> MyDeal columns include Parent SKU, Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
                         )}
                         {isBunnings && (
-                            <> Bunnings: pick the leaf categories, download the template, then fill extra columns named exactly as Bunnings attribute codes (for example attribute_pdb_…). Also fill Category, Price (GST inclusive), Logistic Class, GTIN, Image URLs, and Parent SKU / Option Name-Value for variants.</>
+                            <> Bunnings: pick the leaf categories, then download the template. Fill category, product-id, sku, price, quantity, logistic-class, DISPLAY_NAME, BRAND, GTIN, PRIMARY_IMAGE, and extra PM11 columns such as KEY_SELLING_POINT_1. Use variant-group-code plus Option Name/Value for variants.</>
                         )}
                     </p>
 

@@ -130,6 +130,14 @@ COLUMN_MAP = {
     "variant-group-code": "product_key",
     "variant group code": "product_key",
     "variant_group_code": "product_key",
+    "product-id": "sku",
+    "product id": "sku",
+    "product-id-type": "product_id_type",
+    "product id type": "product_id_type",
+    "quantity": "inventory",
+    "display_name": "title",
+    "product_description": "description",
+    "primary_image": "image_urls",
     "category attributes json": "attributes",
     "category attributes": "attributes",
 }
@@ -423,15 +431,17 @@ MYDEAL_EXPORT_FIELDS = [
     ("option_3_value", "Option 3 Value (Optional)"),
 ]
 
-BUNNINGS_TEMPLATE_HEADERS = [
+BUNNINGS_PREFIX_HEADERS = [
     "Vendor Name (Optional)",
     "Vendor URL (Optional)",
     "Vendor ID (Optional)",
     "Marketplace Name (Optional)",
     "Store Name (Optional)",
     "Action",
-    "Parent SKU",
-    "SKU",
+    "category",
+    "product-id",
+    "product-id-type",
+    "variant-group-code",
     "Option 1 Name (Optional)",
     "Option 1 Value (Optional)",
     "Option 2 Name (Optional)",
@@ -441,26 +451,25 @@ BUNNINGS_TEMPLATE_HEADERS = [
     "Option 4 Name (Optional)",
     "Option 4 Value (Optional)",
     "Variation Img URL (Optional)",
-    "Title",
-    "Description",
-    "Brand",
-    "Category",
-    "GTIN (Optional)",
-    "MPN (Optional)",
-    "Image URLs",
-    "Inventory",
-    "Price",
-    "RRP (Optional)",
-    "Logistic Class",
-    "Leadtime To Ship (Optional)",
-    "Weight (Optional)",
-    "Weight Unit (Optional)",
-    "Length (Optional)",
-    "Height (Optional)",
-    "Width (Optional)",
-    "Dimension Unit (Optional)",
-    "Category Attributes JSON (Optional)",
 ]
+BUNNINGS_OPERATOR_HEADERS = [
+    "DISPLAY_NAME",
+    "PRODUCT_DESCRIPTION",
+    "LONG_DESCRIPTION",
+    "BRAND",
+    "GTIN",
+    "PRIMARY_IMAGE",
+]
+BUNNINGS_OFFER_HEADERS = [
+    "sku",
+    "price",
+    "quantity",
+    "logistic-class",
+    "leadtime-to-ship",
+]
+BUNNINGS_TEMPLATE_HEADERS = (
+    BUNNINGS_PREFIX_HEADERS + BUNNINGS_OPERATOR_HEADERS + BUNNINGS_OFFER_HEADERS
+)
 
 BUNNINGS_EXPORT_FIELDS = [
     ("vendor_name", "Vendor Name (Optional)"),
@@ -469,8 +478,9 @@ BUNNINGS_EXPORT_FIELDS = [
     ("marketplace_name", "Marketplace Name (Optional)"),
     ("store_name", "Store Name (Optional)"),
     ("action", "Action"),
-    ("product_key", "Parent SKU"),
-    ("sku", "SKU"),
+    ("category", "category"),
+    ("sku", "product-id"),
+    ("product_key", "variant-group-code"),
     ("option_1_name", "Option 1 Name (Optional)"),
     ("option_1_value", "Option 1 Value (Optional)"),
     ("option_2_name", "Option 2 Name (Optional)"),
@@ -480,25 +490,17 @@ BUNNINGS_EXPORT_FIELDS = [
     ("option_4_name", "Option 4 Name (Optional)"),
     ("option_4_value", "Option 4 Value (Optional)"),
     ("variation_image_url", "Variation Img URL (Optional)"),
-    ("title", "Title"),
-    ("description", "Description"),
-    ("brand", "Brand"),
-    ("category", "Category"),
-    ("gtin", "GTIN (Optional)"),
-    ("mpn", "MPN (Optional)"),
-    ("image_urls", "Image URLs"),
-    ("inventory", "Inventory"),
-    ("sale_price", "Price"),
-    ("original_price", "RRP (Optional)"),
-    ("logistic_class", "Logistic Class"),
-    ("leadtime_to_ship", "Leadtime To Ship (Optional)"),
-    ("weight", "Weight (Optional)"),
-    ("weight_unit", "Weight Unit (Optional)"),
-    ("length", "Length (Optional)"),
-    ("height", "Height (Optional)"),
-    ("width", "Width (Optional)"),
-    ("dimension_unit", "Dimension Unit (Optional)"),
-    ("attributes", "Category Attributes JSON (Optional)"),
+    ("title", "DISPLAY_NAME"),
+    ("description", "PRODUCT_DESCRIPTION"),
+    ("description", "LONG_DESCRIPTION"),
+    ("brand", "BRAND"),
+    ("gtin", "GTIN"),
+    ("image_urls", "PRIMARY_IMAGE"),
+    ("sku", "sku"),
+    ("sale_price", "price"),
+    ("inventory", "quantity"),
+    ("logistic_class", "logistic-class"),
+    ("leadtime_to_ship", "leadtime-to-ship"),
 ]
 
 TEMPLATE_HEADERS = LASOO_TEMPLATE_HEADERS
@@ -521,6 +523,11 @@ _HEADER_MARKERS = {
     "price",
     "image urls",
     "photo urls",
+    "product-id",
+    "display_name",
+    "quantity",
+    "logistic-class",
+    "variant-group-code",
 }
 
 
@@ -670,7 +677,11 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
                     continue
                 normalized[key] = str(value).strip()
             elif str(value).strip():
-                extra_attrs[attr_code or text] = str(value).strip()
+                extra_key = attr_code or text
+                if _canonical_header(extra_key) in {"product-id-type", "product_id_type"}:
+                    normalized["product_id_type"] = str(value).strip()
+                    continue
+                extra_attrs[extra_key] = str(value).strip()
         if not any(str(v).strip() for v in normalized.values() if not isinstance(v, bool)):
             # Allow bool-only rows? skip empty
             if not any(normalized.values()) and not extra_attrs:
@@ -716,6 +727,15 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
         normalized["action"] = _normalize_action(normalized.get("action", ""))
         merged_attrs = _parse_attributes_blob(normalized.get("attributes"))
         merged_attrs.update(extra_attrs)
+        if not str(normalized.get("description") or "").strip():
+            for key, val in merged_attrs.items():
+                if str(key).strip().lower().replace("-", "_") in {
+                    "long_description",
+                    "product_description",
+                    "section_description",
+                } and str(val or "").strip():
+                    normalized["description"] = str(val).strip()
+                    break
         if merged_attrs:
             normalized["attributes"] = merged_attrs
         elif "attributes" in normalized:
@@ -874,13 +894,23 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
             from listings.bunnings import products as bunnings_products
 
             attr_columns = bunnings_products.template_attribute_columns(store, hierarchy_codes)
-        headers = list(BUNNINGS_TEMPLATE_HEADERS)
-        if hierarchy_codes:
-            headers = [h for h in headers if h != "Category Attributes JSON (Optional)"]
-            headers.extend(col["header"] for col in attr_columns)
+        known_headers = {h.lower() for h in BUNNINGS_PREFIX_HEADERS + BUNNINGS_OPERATOR_HEADERS + BUNNINGS_OFFER_HEADERS}
+        extra_attr_headers = [
+            col["header"]
+            for col in attr_columns
+            if str(col.get("header") or "").strip().lower() not in known_headers
+        ]
+        headers = list(BUNNINGS_PREFIX_HEADERS) + list(BUNNINGS_OPERATOR_HEADERS) + extra_attr_headers + list(BUNNINGS_OFFER_HEADERS)
 
         def _bunnings_sample(category_code: str, index: int = 1) -> dict:
             sku_suffix = "" if index == 1 else f"-{index}"
+            sku = f"BN-EXAMPLE-001{sku_suffix}-M"
+            parent = f"BN-EXAMPLE-001{sku_suffix}"
+            title = "Example Power Drill"
+            description = "Example product description for Bunnings Marketplace."
+            brand = "ExampleBrand"
+            gtin = "9300000000001"
+            image = "https://example.com/photo1.jpg"
             row = {
                 "Vendor Name (Optional)": "Amazon AU",
                 "Vendor URL (Optional)": "https://www.amazon.com.au/dp/EXAMPLE",
@@ -888,8 +918,10 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
                 "Marketplace Name (Optional)": marketplace_name or "Bunnings",
                 "Store Name (Optional)": store_name,
                 "Action": "Mapped" if action == "mapped" else "Create",
-                "Parent SKU": f"BN-EXAMPLE-001{sku_suffix}",
-                "SKU": f"BN-EXAMPLE-001{sku_suffix}-M",
+                "category": category_code or "HIERARCHY_CODE",
+                "product-id": sku,
+                "product-id-type": "SHOP_SKU",
+                "variant-group-code": parent,
                 "Option 1 Name (Optional)": "Size",
                 "Option 1 Value (Optional)": "M",
                 "Option 2 Name (Optional)": "Colour",
@@ -899,29 +931,39 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
                 "Option 4 Name (Optional)": "",
                 "Option 4 Value (Optional)": "",
                 "Variation Img URL (Optional)": "https://example.com/photo-red-m.jpg",
-                "Title": "Example Power Drill",
-                "Description": "Example product description for Bunnings Marketplace.",
-                "Brand": "ExampleBrand",
-                "Category": category_code or "HIERARCHY_CODE",
-                "GTIN (Optional)": "9300000000001",
-                "MPN (Optional)": "",
-                "Image URLs": "https://example.com/photo1.jpg|https://example.com/photo2.jpg",
-                "Inventory": "5",
-                "Price": "79.99",
-                "RRP (Optional)": "99.99",
-                "Logistic Class": "SMALL",
-                "Leadtime To Ship (Optional)": "2",
-                "Weight (Optional)": "2.5",
-                "Weight Unit (Optional)": "kg",
-                "Length (Optional)": "30",
-                "Height (Optional)": "20",
-                "Width (Optional)": "15",
-                "Dimension Unit (Optional)": "cm",
+                "DISPLAY_NAME": title,
+                "PRODUCT_DESCRIPTION": description,
+                "LONG_DESCRIPTION": description,
+                "BRAND": brand,
+                "GTIN": gtin,
+                "PRIMARY_IMAGE": image,
+                "sku": sku,
+                "price": "79.99",
+                "quantity": "5",
+                "logistic-class": "SMALL",
+                "leadtime-to-ship": "2",
             }
-            if "Category Attributes JSON (Optional)" in headers:
-                row["Category Attributes JSON (Optional)"] = ""
+            sample_by_code = {
+                "display_name": title,
+                "product_description": description,
+                "long_description": description,
+                "brand": brand,
+                "gtin": gtin,
+                "primary_image": image,
+                "category": category_code or "HIERARCHY_CODE",
+                "supplier_item_number": sku,
+                "key_selling_point_1": "Example selling point 1",
+                "key_selling_point_2": "Example selling point 2",
+                "key_selling_point_3": "Example selling point 3",
+                "primary_uom": "EA",
+                "warranty_information": "1 year manufacturer warranty",
+                "section_description": description,
+            }
             for col in attr_columns:
-                row[col["header"]] = ""
+                header = col["header"]
+                code = str(col.get("code") or header or "").strip()
+                key = code.lower().replace("-", "_")
+                row[header] = sample_by_code.get(key, "")
             return row
 
         out = io.StringIO()
