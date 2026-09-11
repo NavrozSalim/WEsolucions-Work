@@ -642,6 +642,26 @@ class BunningsListingServiceTests(TestCase):
         client.import_offers.assert_called_once()
 
     @patch("listings.bunnings.products.BunningsClient")
+    def test_publish_retries_previous_failed_create_sends_offer(self, mock_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        listing.status = ListingStatus.FAILED
+        listing.validation_errors_json = ["The product does not exist"]
+        listing.save(update_fields=["status", "validation_errors_json"])
+        client = mock_cls.return_value
+        client.environment = "production"
+        client.import_products.return_value = BunningsResult(ok=True, data={"import_id": "p1"})
+        client.import_offers.return_value = BunningsResult(ok=True, data={"import_id": "o1"})
+        client.poll_import.return_value = BunningsResult(
+            ok=True, data={"import_status": "COMPLETE"}, message="COMPLETE"
+        )
+        result = listing_service.publish(self.user, self.store)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["published"], 1)
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.UPLOADED_PRODUCTION)
+        client.import_offers.assert_called_once()
+
+    @patch("listings.bunnings.products.BunningsClient")
     def test_publish_marks_failed_when_p41_fails(self, mock_cls):
         listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
         client = mock_cls.return_value

@@ -804,12 +804,14 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
 
     product_import_id = ""
     product_result = None
+    p41_failed_ids: set = set()
     if creates:
         csv_text = products_csv(creates)
         product_result = client.import_products(csv_text)
         product_import_id = extract_import_id(product_result.data)
         if not product_result.ok:
             for listing in creates:
+                p41_failed_ids.add(listing.id)
                 _mark_listing(
                     listing,
                     status=ListingStatus.FAILED,
@@ -843,6 +845,7 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
             if not polled.ok:
                 sku_errors = line_errors_by_sku(polled.data)
                 for listing in creates:
+                    p41_failed_ids.add(listing.id)
                     sku = listing_sku(listing)
                     detail = sku_errors.get(sku.lower()) if sku else ""
                     msg = detail or polled.message or "P41 product import failed."
@@ -864,13 +867,17 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
         if product_result and product_result.ok:
             wait_for_catalog_products(client, [listing_sku(l) for l in creates])
 
-    offer_targets = [l for l in listings if l.status != ListingStatus.FAILED]
+    # Previous Push failed rows must still get OF01 after a successful P41 retry.
+    offer_targets = [l for l in listings if l.id not in p41_failed_ids]
     if not offer_targets:
+        detail = ""
+        if product_result is not None:
+            detail = (product_result.message or "").strip()
         return {
             "ok": False,
             "published": 0,
             "failed": len(listings),
-            "message": "Bunnings product import failed; offer was not sent.",
+            "message": detail or "Bunnings product import failed; offer was not sent.",
             "environment": client.environment,
         }
 
