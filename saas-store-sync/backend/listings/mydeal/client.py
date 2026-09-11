@@ -374,6 +374,14 @@ class MyDealClient:
 
     # --- Products ---
 
+    def get_product(self, id_or_sku: str, *, by: str = "sku") -> MyDealResult:
+        """GET /products/{idorsku} by ProductSKU (by=sku) or ExternalProductID (by=id)."""
+        key = str(id_or_sku or "").strip()
+        if not key:
+            return MyDealResult(ok=False, message="SKU is required.")
+        param = "id" if str(by or "sku").strip().lower() == "id" else "sku"
+        return self.request("GET", f"/products/{key}", params={param: key})
+
     def upsert_products(self, product_groups: list[dict]) -> MyDealResult:
         """Create or update products via POST /products (async pending-responses)."""
         if not product_groups:

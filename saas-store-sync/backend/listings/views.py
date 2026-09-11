@@ -686,7 +686,7 @@ class StoreListingUploadDeleteView(APIView):
 
 
 class StoreListingMarketplaceLookupView(APIView):
-    """Live SKU check on the store marketplace (Lasoo Variants_Search / Reverb my/listings).
+    """Live SKU check on the store marketplace (Lasoo / Reverb / Bunnings / MyDeal).
 
     GET  ?sku=… → single lookup JSON
     POST JSON {skus:[…]} / {text:"…"} / multipart file → start background bulk job

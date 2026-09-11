@@ -187,7 +187,8 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
             <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
                 Search {storeName || 'this store'} live on the marketplace by SKU / variant key.
                 For Lasoo, Found means the SKU is in Connect seller inventory — not that it is live on lasoo.com.au.
-                Use <span className="font-medium">Check all listings</span> to reconcile Hub against Connect.
+                For MyDeal, Found means the SKU is in the seller catalog. Pending / not-approved listings are not live on the website.
+                Use <span className="font-medium">Check all listings</span> to reconcile Hub against the marketplace.
             </p>
 
             <div className="mb-4 inline-flex rounded-md border border-slate-200 dark:border-slate-600 p-0.5 bg-slate-50 dark:bg-slate-800">

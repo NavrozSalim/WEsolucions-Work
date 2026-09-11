@@ -11,6 +11,7 @@ from . import marketplace_lookup
 from .errors import MarketplaceError
 from .lasoo.client import LasooResult
 from .models import ListingStatus, StoreListing
+from .mydeal.client import MyDealResult
 
 
 class MarketplaceLookupTests(TestCase):
@@ -41,6 +42,45 @@ class MarketplaceLookupTests(TestCase):
             marketplace=reverb,
             management_mode="full_store",
         )
+
+    def _mydeal_store(self):
+        mydeal, _ = Marketplace.objects.get_or_create(code="mydeal", defaults={"name": "MyDeal"})
+        return Store.objects.create(
+            user=self.user,
+            name="MyDeal Lookup",
+            region="AU",
+            api_token="",
+            marketplace=mydeal,
+            management_mode="full_store",
+            mydeal_setup_method="api",
+            mydeal_environment="production",
+            mydeal_production_base_url="https://universal-api.mydeal.com.au",
+            mydeal_production_client_id="cid",
+            mydeal_production_client_secret="csecret",
+            mydeal_production_seller_id="sid",
+            mydeal_production_seller_token="stoken",
+        )
+
+    def _mydeal_product(self, *, listing_status="Pending", approved=False):
+        return {
+            "ResponseStatus": "Complete",
+            "Data": {
+                "ExternalProductId": "SHD-10001-01",
+                "ProductSKU": "SHD-10001-01",
+                "Title": "Azure Reverie canvas",
+                "BuyableProducts": [
+                    {
+                        "ExternalBuyableProductID": "SHD-10001-01-01",
+                        "SKU": "SHD-10001-01-01",
+                        "Price": 108.99,
+                        "Quantity": 2,
+                        "ListingStatus": listing_status,
+                        "Approved": approved,
+                        "Active": True,
+                    }
+                ],
+            },
+        }
 
     @patch("listings.marketplace_lookup.LasooClient")
     def test_lasoo_lookup_found(self, mock_client_cls):
@@ -369,3 +409,109 @@ class MarketplaceLookupTests(TestCase):
         self.assertFalse(data["active"])
         self.assertGreaterEqual(len(data["rows"]), 1)
         self.assertLess(len(data["rows"]), 3)
+
+    def _seed_mydeal_listing(self, store):
+        return StoreListing.objects.create(
+            user=self.user,
+            store=store,
+            external_product_key="SHD-10001-01",
+            external_variant_key="SHD-10001-01-01",
+            sku="SHD-10001-01-01",
+            title="Azure Reverie canvas",
+            description="d",
+            brand="Shemaya",
+            image_urls="https://img.example.com/a.jpg",
+            original_price="145.99",
+            sale_price="108.99",
+            status=ListingStatus.UPLOADED_PRODUCTION,
+            environment="production",
+        )
+
+    @patch("listings.mydeal.client.MyDealClient")
+    def test_mydeal_lookup_found_pending_not_live(self, mock_client_cls):
+        store = self._mydeal_store()
+        self._seed_mydeal_listing(store)
+        mock_client = MagicMock()
+        mock_client.environment = "production"
+        mock_client.get_product.return_value = MyDealResult(
+            ok=True,
+            data=self._mydeal_product(listing_status="Pending", approved=False),
+            message="MyDeal response: Complete.",
+            status=200,
+            response_status="Complete",
+        )
+        mock_client_cls.return_value = mock_client
+
+        result = marketplace_lookup.lookup_sku(store, "SHD-10001-01-01")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["found"])
+        self.assertFalse(result["advertised"])
+        self.assertEqual(result["marketplace"], "mydeal")
+        self.assertEqual(result["environment"], "production")
+        self.assertEqual(result["results"][0]["status"], "Pending")
+        self.assertEqual(result["results"][0]["sku"], "SHD-10001-01-01")
+        self.assertEqual(result["results"][0]["product_key"], "SHD-10001-01")
+        self.assertIn("pending", result["message"].lower())
+        mock_client.get_product.assert_called_with("SHD-10001-01", by="sku")
+
+    @patch("listings.mydeal.client.MyDealClient")
+    def test_mydeal_lookup_found_live(self, mock_client_cls):
+        store = self._mydeal_store()
+        mock_client = MagicMock()
+        mock_client.environment = "production"
+        mock_client.get_product.return_value = MyDealResult(
+            ok=True,
+            data=self._mydeal_product(listing_status="Live", approved=True),
+            message="ok",
+            status=200,
+            response_status="Complete",
+        )
+        mock_client_cls.return_value = mock_client
+
+        result = marketplace_lookup.lookup_sku(store, "SHD-10001-01")
+        self.assertTrue(result["found"])
+        self.assertTrue(result["advertised"])
+        self.assertEqual(result["results"][0]["status"], "Live")
+        self.assertIn("live", result["message"].lower())
+
+    @patch("listings.mydeal.client.MyDealClient")
+    def test_mydeal_lookup_not_found(self, mock_client_cls):
+        store = self._mydeal_store()
+        mock_client = MagicMock()
+        mock_client.environment = "production"
+        mock_client.get_product.return_value = MyDealResult(
+            ok=False,
+            data={"ResponseStatus": "Failed", "Errors": [{"ID": "ProductNotFound", "Message": "Not found"}]},
+            message="Product not found",
+            status=200,
+            response_status="Failed",
+        )
+        mock_client_cls.return_value = mock_client
+
+        result = marketplace_lookup.lookup_sku(store, "MISSING-SKU")
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["found"])
+        self.assertEqual(result["results"], [])
+        self.assertIn("not found", result["message"].lower())
+
+    def test_mydeal_lookup_missing_credentials(self):
+        store = self._mydeal_store()
+        store.mydeal_production_client_id = ""
+        store.save(update_fields=["mydeal_production_client_id"])
+        with self.assertRaises(MarketplaceError) as ctx:
+            marketplace_lookup.lookup_sku(store, "SHD-10001-01")
+        self.assertIn("ClientID", str(ctx.exception))
+
+    def test_unsupported_kind_still_rejected(self):
+        etsy, _ = Marketplace.objects.get_or_create(code="etsy", defaults={"name": "Etsy"})
+        store = Store.objects.create(
+            user=self.user,
+            name="Etsy Lookup",
+            region="USA",
+            api_token="tok",
+            marketplace=etsy,
+            management_mode="full_store",
+        )
+        with self.assertRaises(MarketplaceError) as ctx:
+            marketplace_lookup.lookup_sku(store, "SKU-1")
+        self.assertIn("not supported", str(ctx.exception).lower())

@@ -1,4 +1,4 @@
-"""Live marketplace SKU lookup for managed stores (Lasoo + Reverb + Bunnings)."""
+"""Live marketplace SKU lookup for managed stores (Lasoo + Reverb + Bunnings + MyDeal)."""
 from __future__ import annotations
 
 import logging
@@ -16,6 +16,8 @@ from .lasoo.response import lookup_message
 from .models import StoreListing
 
 logger = logging.getLogger("listings")
+
+LOOKUP_KINDS = ("lasoo", "reverb", "bunnings", "mydeal")
 
 
 def _normalize_reverb_hit(row: dict) -> dict:
@@ -183,6 +185,187 @@ def _lookup_bunnings(store, sku: str) -> dict:
     }
 
 
+def _norm_id(value) -> str:
+    return str(value or "").strip()
+
+
+def _mydeal_groups(payload) -> list[dict]:
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if not isinstance(payload, dict):
+        return []
+    inner = payload.get("Data")
+    if inner is None:
+        inner = payload.get("data")
+    if isinstance(inner, list):
+        return [row for row in inner if isinstance(row, dict)]
+    if isinstance(inner, dict):
+        return [inner]
+    if payload.get("ProductSKU") or payload.get("BuyableProducts") or payload.get("ExternalProductId"):
+        return [payload]
+    return []
+
+
+def _mydeal_is_not_found(result) -> bool:
+    if getattr(result, "status", 0) == 404:
+        return True
+    parts = [getattr(result, "message", "") or "", getattr(result, "response_status", "") or ""]
+    data = getattr(result, "data", None)
+    if isinstance(data, dict):
+        parts.append(str(data.get("ResponseStatus") or ""))
+        errors = data.get("Errors") or data.get("errors") or []
+        if isinstance(errors, list):
+            for err in errors:
+                if isinstance(err, dict):
+                    parts.append(str(err.get("ID") or err.get("Id") or err.get("Code") or ""))
+                    parts.append(str(err.get("Message") or err.get("message") or ""))
+                else:
+                    parts.append(str(err))
+    blob = " ".join(parts).lower()
+    compact = blob.replace(" ", "")
+    return "productnotfound" in compact or "not found" in blob or "5000" in blob
+
+
+def _mydeal_buyable_ids(buyable: dict) -> set[str]:
+    return {
+        value
+        for value in (
+            _norm_id(buyable.get("SKU")),
+            _norm_id(buyable.get("ExternalBuyableProductID")),
+            _norm_id(buyable.get("ExternalBuyableProductId")),
+        )
+        if value
+    }
+
+
+def _mydeal_group_ids(group: dict) -> set[str]:
+    return {
+        value
+        for value in (
+            _norm_id(group.get("ProductSKU")),
+            _norm_id(group.get("ExternalProductId")),
+            _norm_id(group.get("ExternalProductID")),
+        )
+        if value
+    }
+
+
+def _mydeal_id_match(ids: set[str], needles: list[str]) -> bool:
+    wanted = {_norm_id(item) for item in needles if _norm_id(item)}
+    if not wanted or not ids:
+        return False
+    if ids & wanted:
+        return True
+    folded = {item.casefold() for item in ids}
+    return any(item.casefold() in folded for item in wanted)
+
+
+def _mydeal_pick_buyable(group: dict, needles: list[str]) -> dict | None:
+    buyables = [row for row in (group.get("BuyableProducts") or []) if isinstance(row, dict)]
+    for buyable in buyables:
+        if _mydeal_id_match(_mydeal_buyable_ids(buyable), needles):
+            return buyable
+    if buyables and _mydeal_id_match(_mydeal_group_ids(group), needles):
+        return buyables[0]
+    return buyables[0] if buyables else None
+
+
+def _mydeal_hit(group: dict, buyable: dict | None, sku: str) -> dict:
+    status = _norm_id((buyable or {}).get("ListingStatus")) or "unknown"
+    advertised = status.lower() == "live"
+    product_key = (
+        _norm_id(group.get("ProductSKU"))
+        or _norm_id(group.get("ExternalProductId"))
+        or sku
+    )
+    variant_key = (
+        _norm_id((buyable or {}).get("SKU"))
+        or _norm_id((buyable or {}).get("ExternalBuyableProductID"))
+        or sku
+    )
+    return {
+        "product_key": product_key,
+        "variant_key": variant_key,
+        "sku": variant_key,
+        "title": _norm_id(group.get("Title")),
+        "status": status,
+        "advertised": advertised,
+        "approved": (buyable or {}).get("Approved"),
+        "created_at": None,
+        "updated_at": None,
+        "published_at": None,
+        "marketplace_id": variant_key or product_key,
+        "url": None,
+    }
+
+
+def _mydeal_message(*, found: bool, advertised, status: str) -> str:
+    if not found:
+        return "Not found on MyDeal for this SKU."
+    if advertised is True:
+        return "Found on MyDeal and live."
+    if (status or "").lower() == "pending":
+        return (
+            "Found on MyDeal but still pending WMP review — "
+            "not live on the website yet."
+        )
+    return "Found on MyDeal in the seller catalog — not live on the website."
+
+
+def _lookup_mydeal(store, sku: str) -> dict:
+    from .mydeal.client import MyDealClient
+    from .mydeal.products import listing_sku, parent_product_id
+
+    listing = (
+        StoreListing.objects.filter(store=store)
+        .filter(Q(sku=sku) | Q(external_variant_key=sku) | Q(external_product_key=sku))
+        .first()
+    )
+    parent_key = parent_product_id(listing) if listing else sku
+    variant_key = listing_sku(listing) if listing else sku
+    keys = []
+    for key in (parent_key, sku, variant_key):
+        text = _norm_id(key)
+        if text and text not in keys:
+            keys.append(text)
+
+    client = MyDealClient(store)
+
+    group = None
+    for key in keys:
+        result = client.get_product(key, by="sku")
+        if result.ok:
+            groups = _mydeal_groups(result.data)
+            if groups:
+                group = groups[0]
+                break
+            continue
+        if _mydeal_is_not_found(result):
+            continue
+        raise MarketplaceError(result.message or "Could not search MyDeal for this SKU.")
+
+    found = group is not None
+    buyable = _mydeal_pick_buyable(group, [sku, variant_key, parent_key]) if group else None
+    hit = _mydeal_hit(group, buyable, sku) if group else None
+    advertised = hit.get("advertised") if hit else None
+    status = (hit or {}).get("status") or ""
+    return {
+        "ok": True,
+        "found": found,
+        "advertised": advertised,
+        "marketplace": "mydeal",
+        "environment": client.environment,
+        "query": {
+            "sku": sku,
+            "product_key": parent_key,
+            "variant_key": variant_key,
+        },
+        "message": _mydeal_message(found=found, advertised=advertised, status=status),
+        "results": [hit] if hit else [],
+        "local_listing": _local_listing_summary(store, sku),
+    }
+
+
 def lookup_sku(store, sku: str) -> dict:
     """Search the store's marketplace for a SKU / variant key."""
     text = (sku or "").strip()
@@ -198,6 +381,8 @@ def lookup_sku(store, sku: str) -> dict:
         return _lookup_reverb(store, text)
     if kind == "bunnings":
         return _lookup_bunnings(store, text)
+    if kind == "mydeal":
+        return _lookup_mydeal(store, text)
     raise MarketplaceError(
         f'Marketplace SKU check is not supported for "{kind or "this marketplace"}" yet.'
     )
@@ -348,7 +533,7 @@ def lookup_skus_bulk(store, skus: list[str]) -> dict:
         )
 
     kind = marketplace_kind(store.marketplace)
-    if kind not in ("lasoo", "reverb", "bunnings"):
+    if kind not in LOOKUP_KINDS:
         raise MarketplaceError(
             f'Marketplace SKU check is not supported for "{kind or "this marketplace"}" yet.'
         )
@@ -500,7 +685,7 @@ def start_marketplace_lookup_async(store, skus) -> dict:
         )
 
     kind = marketplace_kind(store.marketplace)
-    if kind not in ("lasoo", "reverb", "bunnings"):
+    if kind not in LOOKUP_KINDS:
         raise MarketplaceError(
             f'Marketplace SKU check is not supported for "{kind or "this marketplace"}" yet.'
         )
