@@ -350,6 +350,29 @@ class BunningsProductsUnitTests(SimpleTestCase):
         self.assertIn("30", text)
 
 
+class BunningsCatalogProductUnitTests(SimpleTestCase):
+    def test_payload_has_product_matches_ids_and_empty_list(self):
+        from listings.bunnings.client import _payload_has_product
+
+        self.assertTrue(_payload_has_product({"product_id": "SHD-1"}, "SHD-1"))
+        self.assertTrue(_payload_has_product({"products": [{"sku": "SHD-1"}]}, "SHD-1"))
+        self.assertTrue(_payload_has_product({"products": [{"id": "x"}]}, "SHD-1"))
+        self.assertFalse(_payload_has_product({"products": []}, "SHD-1"))
+        self.assertFalse(_payload_has_product({"message": "not found"}, "SHD-1"))
+
+    def test_offer_product_missing_detects_mirakl_message(self):
+        missing = BunningsResult(
+            ok=False,
+            message="Bunnings offer import 11592476 COMPLETE with errors. SHD-06459-10: The product does not exist",
+        )
+        self.assertTrue(bunnings_products._offer_product_missing(missing))
+        self.assertFalse(
+            bunnings_products._offer_product_missing(
+                BunningsResult(ok=False, message="Invalid price")
+            )
+        )
+
+
 class BunningsOrdersUnitTests(SimpleTestCase):
     def test_map_order_status(self):
         self.assertEqual(bunnings_orders.map_order_status("WAITING_ACCEPTANCE"), OrderStatus.NEW)
@@ -659,6 +682,94 @@ class BunningsListingServiceTests(TestCase):
         self.assertTrue(listing.validation_errors_json)
         self.assertIn("1004", listing.validation_errors_json[0])
         client.import_offers.assert_not_called()
+
+    @patch("listings.bunnings.products.time.sleep", return_value=None)
+    @patch("listings.bunnings.products.BunningsClient")
+    def test_publish_retries_offer_when_product_missing(self, mock_cls, _sleep):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        client = mock_cls.return_value
+        client.environment = "production"
+        client.product_exists.return_value = False
+        client.import_products.return_value = BunningsResult(ok=True, data={"import_id": "p1"})
+        client.import_offers.return_value = BunningsResult(ok=True, data={"import_id": "o1"})
+        p41_ok = BunningsResult(ok=True, data={"import_status": "COMPLETE"}, message="COMPLETE")
+        offer_missing = BunningsResult(
+            ok=False,
+            data={
+                "import_status": "COMPLETE",
+                "lines_in_error": 1,
+                "line_errors": [{"sku": "BN-1", "errors": "The product does not exist"}],
+            },
+            message=(
+                "Bunnings offer import o1 COMPLETE with errors. 1 line(s) rejected. "
+                "BN-1: The product does not exist"
+            ),
+        )
+        offer_ok = BunningsResult(ok=True, data={"import_status": "COMPLETE"}, message="COMPLETE")
+        client.poll_import.side_effect = [p41_ok, offer_missing, offer_ok]
+        result = listing_service.publish(self.user, self.store)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["published"], 1)
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.UPLOADED_PRODUCTION)
+        self.assertEqual(client.import_offers.call_count, 2)
+
+    @patch("listings.bunnings.products.time.sleep", return_value=None)
+    @patch("listings.bunnings.products.BunningsClient")
+    def test_publish_keeps_ready_when_product_still_in_review(self, mock_cls, _sleep):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        client = mock_cls.return_value
+        client.environment = "production"
+        client.product_exists.return_value = False
+        client.import_products.return_value = BunningsResult(ok=True, data={"import_id": "p1"})
+        client.import_offers.return_value = BunningsResult(ok=True, data={"import_id": "o1"})
+        p41_ok = BunningsResult(ok=True, data={"import_status": "COMPLETE"}, message="COMPLETE")
+        offer_missing = BunningsResult(
+            ok=False,
+            data={
+                "import_status": "COMPLETE",
+                "lines_in_error": 1,
+                "line_errors": [{"sku": "BN-1", "errors": "The product does not exist"}],
+            },
+            message=(
+                "Bunnings offer import o1 COMPLETE with errors. 1 line(s) rejected. "
+                "BN-1: The product does not exist"
+            ),
+        )
+        client.poll_import.side_effect = [p41_ok] + [offer_missing] * 8
+        result = listing_service.publish(self.user, self.store)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result.get("pending"), 1)
+        self.assertIn("waiting for review", result["message"].lower())
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.READY)
+        self.assertFalse(listing.validation_errors_json)
+
+    @patch("listings.bunnings.products.time.sleep", return_value=None)
+    @patch("listings.bunnings.products.BunningsClient")
+    def test_publish_mapped_product_missing_is_failed(self, mock_cls, _sleep):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        listing.action = "mapped"
+        listing.status = ListingStatus.READY
+        listing.save(update_fields=["action", "status"])
+        client = mock_cls.return_value
+        client.environment = "production"
+        client.product_exists.return_value = False
+        client.import_offers.return_value = BunningsResult(ok=True, data={"import_id": "o1"})
+        client.poll_import.return_value = BunningsResult(
+            ok=False,
+            data={
+                "import_status": "COMPLETE",
+                "lines_in_error": 1,
+                "line_errors": [{"sku": "BN-1", "errors": "The product does not exist"}],
+            },
+            message="Bunnings offer import o1 COMPLETE with errors. BN-1: The product does not exist",
+        )
+        result = listing_service.publish(self.user, self.store)
+        self.assertFalse(result["ok"])
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.FAILED)
+        client.import_products.assert_not_called()
 
     @patch("listings.bunnings.products.BunningsClient")
     def test_lookup_offer_raises_on_api_error(self, mock_cls):

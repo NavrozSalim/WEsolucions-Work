@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import logging
+import time
 from decimal import Decimal, InvalidOperation
 
 from django.utils import timezone
@@ -14,6 +15,22 @@ from ..models import ListingAction, ListingStatus, StoreListing
 from .client import BunningsClient, extract_import_id, line_errors_by_sku
 
 logger = logging.getLogger("listings.bunnings")
+
+PRODUCT_WAIT_ATTEMPTS = 6
+PRODUCT_WAIT_SECONDS = 2.0
+OFFER_RETRY_ATTEMPTS = 4
+OFFER_RETRY_SECONDS = 3.0
+_PRODUCT_MISSING_MARKERS = (
+    "product does not exist",
+    "the product does not exist",
+    "unknown product",
+    "product not found",
+    "product is not found",
+)
+PENDING_OFFER_MESSAGE = (
+    "Product was sent to Bunnings and is waiting for review. "
+    "Publish again after Bunnings accepts it to create the offer."
+)
 
 OFFER_STATE_NEW = "11"
 PRODUCT_ID_TYPE_SHOP_SKU = "SHOP_SKU"
@@ -682,6 +699,80 @@ def flatten_logistic_classes(payload) -> list[dict]:
     return out
 
 
+def _catalog_product_known(client, sku: str):
+    """True/False when the client can answer; None skips the wait (tests / mocks)."""
+    fn = getattr(client, "product_exists", None)
+    if not callable(fn):
+        return None
+    try:
+        found = fn(sku)
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(found, bool):
+        return found
+    return None
+
+
+def wait_for_catalog_products(client, skus, *, attempts: int | None = None, interval: float | None = None) -> list[str]:
+    """Poll until shop product-ids exist. Returns SKUs still missing."""
+    remaining = [str(sku or "").strip() for sku in skus if str(sku or "").strip()]
+    tries = attempts if attempts is not None else PRODUCT_WAIT_ATTEMPTS
+    wait = interval if interval is not None else PRODUCT_WAIT_SECONDS
+    for i in range(max(1, tries)):
+        still = []
+        unknown = False
+        for sku in remaining:
+            known = _catalog_product_known(client, sku)
+            if known is None:
+                unknown = True
+                break
+            if not known:
+                still.append(sku)
+        if unknown:
+            return []
+        remaining = still
+        if not remaining:
+            return []
+        if i < tries - 1 and wait:
+            time.sleep(wait)
+    return remaining
+
+
+def _offer_product_missing(result) -> bool:
+    text = f"{getattr(result, 'message', None) or ''}".lower()
+    if any(marker in text for marker in _PRODUCT_MISSING_MARKERS):
+        return True
+    data = getattr(result, "data", None)
+    if not isinstance(data, dict):
+        return False
+    for row in data.get("line_errors") or []:
+        if not isinstance(row, dict):
+            continue
+        err = str(row.get("errors") or "").lower()
+        if any(marker in err for marker in _PRODUCT_MISSING_MARKERS):
+            return True
+    return False
+
+
+def import_offers_waiting_for_products(client, listings, *, attempts: int | None = None, interval: float | None = None):
+    """OF01 + poll. Retry when Mirakl says the product is not in the catalog yet."""
+    tries = attempts if attempts is not None else OFFER_RETRY_ATTEMPTS
+    wait = interval if interval is not None else OFFER_RETRY_SECONDS
+    last = None
+    for i in range(max(1, tries)):
+        offer_text = offers_csv(listings)
+        last = client.import_offers(offer_text)
+        import_id = extract_import_id(getattr(last, "data", None))
+        if last.ok and import_id:
+            last = client.poll_import("offer", import_id)
+        last.offer_csv = offer_text
+        if last.ok or not _offer_product_missing(last):
+            return last
+        if i < tries - 1 and wait:
+            time.sleep(wait)
+    return last
+
+
 def _mark_listing(listing: StoreListing, *, status: str, request: dict, response, errors=None):
     listing.status = status
     listing.marketplace_request_json = request
@@ -770,6 +861,8 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
                         "message": polled.message or "Bunnings product import failed.",
                         "environment": client.environment,
                     }
+        if product_result and product_result.ok:
+            wait_for_catalog_products(client, [listing_sku(l) for l in creates])
 
     offer_targets = [l for l in listings if l.status != ListingStatus.FAILED]
     if not offer_targets:
@@ -781,11 +874,57 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
             "environment": client.environment,
         }
 
-    offer_text = offers_csv(offer_targets)
-    offer_result = client.import_offers(offer_text)
-    offer_import_id = extract_import_id(offer_result.data)
-    if offer_result.ok and offer_import_id:
-        offer_result = client.poll_import("offer", offer_import_id)
+    offer_result = import_offers_waiting_for_products(client, offer_targets)
+    offer_import_id = extract_import_id(getattr(offer_result, "data", None))
+    offer_text = getattr(offer_result, "offer_csv", "") or offers_csv(offer_targets)
+
+    create_ids = {id(l) for l in creates}
+    if (
+        not offer_result.ok
+        and _offer_product_missing(offer_result)
+        and product_import_id
+        and product_result
+        and product_result.ok
+    ):
+        waiting = [l for l in offer_targets if id(l) in create_ids]
+        hard_fail = [l for l in offer_targets if id(l) not in create_ids]
+        for listing in waiting:
+            _mark_listing(
+                listing,
+                status=ListingStatus.READY,
+                request={"p41_import_id": product_import_id, "of01_import_id": offer_import_id},
+                response={
+                    "product_import": None if product_result is None else product_result.data,
+                    "offer_import": offer_result.data,
+                    "waiting_for_product": True,
+                },
+                errors=None,
+            )
+        for listing in hard_fail:
+            _mark_listing(
+                listing,
+                status=ListingStatus.FAILED,
+                request={"p41_import_id": product_import_id, "of01": offer_text[:4000]},
+                response={"error": offer_result.message, "data": offer_result.data},
+                errors=[offer_result.message or "OF01 offer import failed."],
+            )
+        if waiting and not hard_fail:
+            return {
+                "ok": True,
+                "published": 0,
+                "failed": 0,
+                "pending": len(waiting),
+                "message": PENDING_OFFER_MESSAGE,
+                "environment": client.environment,
+            }
+        return {
+            "ok": False,
+            "published": 0,
+            "failed": len(hard_fail),
+            "pending": len(waiting),
+            "message": offer_result.message or PENDING_OFFER_MESSAGE,
+            "environment": client.environment,
+        }
 
     published = 0
     failed = 0

@@ -9,6 +9,8 @@ Key operations:
   P41  POST /api/products/imports
   P42  GET  /api/products/imports/{import}
   P44  GET  /api/products/imports/{import}/error_report
+  P11  GET  /api/products/{product_id}
+  P31  GET  /api/products
   OF01 POST /api/offers/imports
   OF02 GET  /api/offers/imports/{import}
   OF03 GET  /api/offers/imports/{import}/error_report
@@ -265,6 +267,37 @@ class BunningsClient:
             params["sku"] = sku
         return self.get("/api/offers", params=params)
 
+    def get_product(self, product_id: str) -> BunningsResult:
+        """P11 / P31 / MCM — whether Bunnings has accepted this product-id."""
+        pid = (product_id or "").strip()
+        if not pid:
+            return BunningsResult(ok=False, message="Product id missing.", status=0)
+        last = BunningsResult(ok=False, message="Product not found.", status=404)
+        lookups = (
+            (f"/api/products/{pid}", None),
+            ("/api/products", {"product_ids": pid}),
+            (f"/api/mcm/products/{pid}", None),
+        )
+        for path, params in lookups:
+            result = self.get(path, params=params)
+            last = result
+            if result.status == 401:
+                return result
+            if result.ok and _payload_has_product(result.data, pid):
+                return result
+            if result.status not in (0, 404, 405):
+                continue
+        return BunningsResult(
+            ok=False,
+            data=last.data,
+            message=last.message or "Product not found.",
+            status=last.status or 404,
+        )
+
+    def product_exists(self, product_id: str) -> bool:
+        result = self.get_product(product_id)
+        return bool(result.ok and _payload_has_product(result.data, product_id))
+
     def poll_import(
         self,
         kind: str,
@@ -430,6 +463,61 @@ def extract_import_id(data) -> str:
             if val not in (None, ""):
                 return str(val)
     return ""
+
+
+def _payload_has_product(data, product_id: str) -> bool:
+    """True when a Mirakl product payload includes this shop product-id."""
+    needle = (product_id or "").strip().lower()
+    if not needle:
+        return False
+    if isinstance(data, list):
+        items = data
+        wrapped = True
+    elif isinstance(data, dict):
+        nested = data.get("products") or data.get("data") or data.get("mcm_products")
+        if isinstance(nested, list):
+            items = nested
+            wrapped = True
+        else:
+            items = [data]
+            wrapped = False
+    else:
+        return False
+    if wrapped:
+        if not items:
+            return False
+        for item in items:
+            if _item_matches_product(item, needle):
+                return True
+        return True
+    return any(_item_matches_product(item, needle) for item in items) or _looks_like_product_body(data)
+
+
+def _item_matches_product(item, needle: str) -> bool:
+    if not isinstance(item, dict):
+        return False
+    for key in (
+        "product_id",
+        "product-id",
+        "shop_sku",
+        "sku",
+        "code",
+        "id",
+        "mirakl_product_id",
+    ):
+        val = str(item.get(key) or "").strip().lower()
+        if val and val == needle:
+            return True
+    return False
+
+
+def _looks_like_product_body(data) -> bool:
+    if not isinstance(data, dict) or not data:
+        return False
+    if data.get("products") == []:
+        return False
+    skip = {"message", "status", "errors", "error", "ok"}
+    return any(str(k) not in skip for k in data.keys())
 
 
 def _import_status(data) -> str:
