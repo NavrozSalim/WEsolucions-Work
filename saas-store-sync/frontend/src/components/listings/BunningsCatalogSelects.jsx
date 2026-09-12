@@ -137,32 +137,27 @@ const MAX_BULK_CATEGORIES = 12;
 
 /** Pick one or more leaf categories for a category-specific bulk CSV template. */
 export function BunningsCategoryMultiSelect({ storeId, values = [], onChange, required = false }) {
-    const [open, setOpen] = useState(false);
     const [query, setQuery] = useState('');
     const [options, setOptions] = useState([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
-    const rootRef = useRef(null);
     const debounceRef = useRef(null);
     const selected = Array.isArray(values) ? values : [];
     const selectedCodes = new Set(selected.map((c) => c.code));
+    const search = query.trim();
 
     useEffect(() => {
-        if (!open) return;
-        const onDoc = (e) => {
-            if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
-        };
-        document.addEventListener('mousedown', onDoc);
-        return () => document.removeEventListener('mousedown', onDoc);
-    }, [open]);
-
-    useEffect(() => {
-        if (!storeId || !open) return;
+        if (!storeId || search.length < 2) {
+            setOptions([]);
+            setLoading(false);
+            setError('');
+            return;
+        }
         clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
             setLoading(true);
             setError('');
-            getBunningsCategories(storeId, query)
+            getBunningsCategories(storeId, search)
                 .then((res) => {
                     const list = Array.isArray(res.data?.categories) ? res.data.categories : [];
                     setOptions(list);
@@ -174,21 +169,24 @@ export function BunningsCategoryMultiSelect({ storeId, values = [], onChange, re
                 .finally(() => setLoading(false));
         }, 250);
         return () => clearTimeout(debounceRef.current);
-    }, [storeId, open, query]);
+    }, [storeId, search]);
 
     const addCategory = (opt) => {
         if (!opt?.code || opt.leaf === false || selectedCodes.has(opt.code)) return;
         if (selected.length >= MAX_BULK_CATEGORIES) return;
         onChange?.([...selected, { code: opt.code, name: opt.name || opt.code }]);
         setQuery('');
+        setOptions([]);
     };
 
     const removeCategory = (code) => {
         onChange?.(selected.filter((c) => c.code !== code));
     };
 
+    const showResults = search.length >= 2;
+
     return (
-        <div ref={rootRef} className="relative">
+        <div>
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
                 Categories for this file {required ? <span className="text-rose-500">*</span> : null}
             </label>
@@ -212,63 +210,48 @@ export function BunningsCategoryMultiSelect({ storeId, values = [], onChange, re
                     ))}
                 </div>
             )}
-            <button
-                type="button"
-                onClick={() => setOpen((o) => !o)}
-                className="flex w-full items-center justify-between rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-left text-sm text-slate-900 dark:text-slate-100"
-            >
-                <span className="text-slate-400">
-                    {selected.length
-                        ? 'Add another leaf category…'
-                        : 'Search and add leaf categories…'}
-                </span>
-                <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
-            </button>
-            {open && (
-                <div className="mt-1 w-full overflow-hidden rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 shadow-sm">
-                    <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-700 px-3 py-2">
-                        <Search className="h-4 w-4 text-slate-400" />
-                        <input
-                            autoFocus
-                            value={query}
-                            onChange={(e) => setQuery(e.target.value)}
-                            placeholder="Type a category name or code"
-                            className="w-full bg-transparent text-sm outline-none text-slate-900 dark:text-slate-100"
-                        />
-                        {loading && <Loader2 className="h-4 w-4 animate-spin text-slate-400" />}
-                    </div>
-                    <div className="max-h-40 overflow-y-auto">
-                        {error && (
-                            <p className="px-3 py-2 text-xs text-rose-600 dark:text-rose-400">{error}</p>
-                        )}
-                        {!error && !loading && options.length === 0 && (
-                            <p className="px-3 py-2 text-xs text-slate-500">No categories match.</p>
-                        )}
-                        {options.map((opt) => (
-                            <button
-                                key={opt.code}
-                                type="button"
-                                disabled={opt.leaf === false || selectedCodes.has(opt.code)}
-                                className={`block w-full px-3 py-2 text-left text-sm ${
-                                    opt.leaf === false || selectedCodes.has(opt.code)
-                                        ? 'cursor-not-allowed text-slate-400'
-                                        : 'text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
-                                }`}
-                                onClick={() => addCategory(opt)}
-                            >
-                                {opt.name}
-                                {opt.leaf === false ? (
-                                    <span className="ml-1 text-xs text-slate-400">(parent — pick a leaf)</span>
-                                ) : selectedCodes.has(opt.code) ? (
-                                    <span className="ml-1 text-xs text-slate-400">(added)</span>
-                                ) : null}
-                            </button>
-                        ))}
-                    </div>
+            <div className="flex items-center gap-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2">
+                <Search className="h-4 w-4 shrink-0 text-slate-400" />
+                <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Type a category name or code"
+                    className="w-full bg-transparent text-sm outline-none text-slate-900 dark:text-slate-100"
+                />
+                {loading && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" />}
+            </div>
+            {showResults && (
+                <div className="mt-1 max-h-36 overflow-y-auto overscroll-contain rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900">
+                    {error && (
+                        <p className="px-3 py-2 text-xs text-rose-600 dark:text-rose-400">{error}</p>
+                    )}
+                    {!error && !loading && options.length === 0 && (
+                        <p className="px-3 py-2 text-xs text-slate-500">No categories match.</p>
+                    )}
+                    {options.map((opt) => (
+                        <button
+                            key={opt.code}
+                            type="button"
+                            disabled={opt.leaf === false || selectedCodes.has(opt.code)}
+                            className={`block w-full px-3 py-2 text-left text-sm ${
+                                opt.leaf === false || selectedCodes.has(opt.code)
+                                    ? 'cursor-not-allowed text-slate-400'
+                                    : 'text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
+                            }`}
+                            onClick={() => addCategory(opt)}
+                        >
+                            {opt.name}
+                            {opt.leaf === false ? (
+                                <span className="ml-1 text-xs text-slate-400">(parent — pick a leaf)</span>
+                            ) : selectedCodes.has(opt.code) ? (
+                                <span className="ml-1 text-xs text-slate-400">(added)</span>
+                            ) : null}
+                        </button>
+                    ))}
                 </div>
             )}
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                The Excel template includes required fields for these categories. Up to {MAX_BULK_CATEGORIES} per file.
+                Type to find a leaf category. Up to {MAX_BULK_CATEGORIES} per file.
             </p>
         </div>
     );

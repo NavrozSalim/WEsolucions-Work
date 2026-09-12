@@ -103,14 +103,20 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                 className="relative flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl"
                 onClick={(e) => e.stopPropagation()}
             >
-                <div className="flex shrink-0 items-center justify-between border-b border-slate-200 dark:border-slate-700 px-6 py-4">
+                <div className="flex shrink-0 items-center justify-between border-b border-slate-200 dark:border-slate-700 px-6 py-3">
                     <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Bulk listing upload</h2>
                     <button type="button" className="rounded-md p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={handleClose}>
                         <X className="h-5 w-5" />
                     </button>
                 </div>
 
-                <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+                <div className={isBunnings ? 'px-6 py-4' : 'min-h-0 flex-1 overflow-y-auto px-6 py-4'}>
+                    {isBunnings ? (
+                        <p className="text-sm text-slate-600 dark:text-slate-400">
+                            Pick leaf categories, download the Excel template, fill rows, then upload.
+                            Keep row 1 (labels) and row 2 (codes). Use the same VARIANT_GROUP_CODE for size/colour variants.
+                        </p>
+                    ) : (
                     <p className="text-sm text-slate-600 dark:text-slate-400">
                         Choose one action for the whole file, download the matching{' '}
                         {templateLabel} template, fill rows, then upload.
@@ -124,8 +130,6 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                                 and a unique <strong>SKU</strong> per size/colour.
                                 {isMydeal ? (
                                     <> Fill <strong>Option 1 Name/Value</strong> (e.g. Size / Small). Same Parent SKU is sent as one MyDeal product with multiple buyables.</>
-                                ) : isBunnings ? (
-                                    <> Fill <strong>Option Name/Value</strong> (e.g. Size / M). <strong>variant-group-code</strong> groups sizes/colours.</>
                                 ) : (
                                     <> Fill <strong>Option 1–4 Name/Value</strong> (e.g. Size / XL), and a <strong>Variation Img URL</strong> on every variant row.</>
                                 )}
@@ -138,10 +142,8 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                         {isMydeal && (
                             <> MyDeal columns include Parent SKU, Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
                         )}
-                        {isBunnings && (
-                            <> Pick leaf categories, then use <strong>Download template</strong> for a colored Excel file. Keep row 1 (labels) and row 2 (codes). Use VARIANT_GROUP_CODE plus Option Name/Value for variants.</>
-                        )}
                     </p>
+                    )}
 
                     <div className="mt-4">
                         <Select
@@ -182,7 +184,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                                 {invalidRows.length > 0 && ` ${invalidRows.length} row(s) had errors.`}
                             </div>
                             {invalidRows.length > 0 && (
-                                <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
+                                <div className="max-h-40 overflow-auto rounded-lg border border-slate-200 dark:border-slate-700">
                                     <table className="w-full text-left text-xs">
                                         <thead className="bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-400">
                                             <tr>
