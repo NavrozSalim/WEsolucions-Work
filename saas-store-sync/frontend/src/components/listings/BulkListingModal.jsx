@@ -139,7 +139,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                             <> MyDeal columns include Parent SKU, Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
                         )}
                         {isBunnings && (
-                            <> Bunnings downloads an Excel file: orange Hub columns, green required product fields, darker green category fields, then blue offer fields. Row 1 is labels, row 2 is codes — keep both. Use the dropdowns where they appear. Fill CATEGORY, DISPLAY_NAME, BRAND, GTIN, PRIMARY_IMAGE, sku, price, quantity, logistic-class, and any extra category columns. Use VARIANT_GROUP_CODE plus Option Name/Value for variants.</>
+                            <> Pick leaf categories, then use <strong>Download template</strong> for a colored Excel file. Keep row 1 (labels) and row 2 (codes). Use VARIANT_GROUP_CODE plus Option Name/Value for variants.</>
                         )}
                     </p>
 
@@ -168,25 +168,6 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                             />
                         </div>
                     )}
-
-                    <div className="mt-4 flex flex-wrap items-center gap-2">
-                        <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={handleTemplate}
-                            disabled={isBunnings && (action === 'create' || action === 'mapped') && bunningsCategories.length === 0}
-                        >
-                            <Download className="mr-1.5 h-4 w-4" />
-                            Download template
-                        </Button>
-                        <input
-                            ref={fileRef}
-                            type="file"
-                            accept=".csv,.xlsx"
-                            onChange={(e) => setFile(e.target.files?.[0] || null)}
-                            className="text-sm text-slate-600 dark:text-slate-400 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 dark:file:bg-slate-800 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 dark:file:text-slate-300"
-                        />
-                    </div>
 
                     {error && (
                         <div className="mt-4 rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-900/20 px-4 py-3 text-sm text-rose-700 dark:text-rose-300">
@@ -226,14 +207,34 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                     )}
                 </div>
 
-                <div className="flex shrink-0 items-center justify-end gap-2 border-t border-slate-200 dark:border-slate-700 px-6 py-4">
-                    <Button variant="secondary" onClick={handleClose} disabled={uploading}>
-                        Close
-                    </Button>
-                    <Button variant="primary" onClick={handleUpload} disabled={uploading || !file}>
-                        <UploadCloud className="mr-1.5 h-4 w-4" />
-                        {uploading ? 'Uploading…' : 'Upload & import'}
-                    </Button>
+                <div className="flex shrink-0 flex-col gap-3 border-t border-slate-200 dark:border-slate-700 px-6 py-4 sm:flex-row sm:flex-wrap sm:items-center">
+                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                        <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={handleTemplate}
+                            disabled={isBunnings && (action === 'create' || action === 'mapped') && bunningsCategories.length === 0}
+                        >
+                            <Download className="mr-1.5 h-4 w-4" />
+                            Download template
+                        </Button>
+                        <input
+                            ref={fileRef}
+                            type="file"
+                            accept=".csv,.xlsx"
+                            onChange={(e) => setFile(e.target.files?.[0] || null)}
+                            className="min-w-0 text-sm text-slate-600 dark:text-slate-400 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 dark:file:bg-slate-800 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 dark:file:text-slate-300"
+                        />
+                    </div>
+                    <div className="flex shrink-0 items-center justify-end gap-2">
+                        <Button variant="secondary" onClick={handleClose} disabled={uploading}>
+                            Close
+                        </Button>
+                        <Button variant="primary" onClick={handleUpload} disabled={uploading || !file}>
+                            <UploadCloud className="mr-1.5 h-4 w-4" />
+                            {uploading ? 'Uploading…' : 'Upload & import'}
+                        </Button>
+                    </div>
                 </div>
             </div>
         </div>

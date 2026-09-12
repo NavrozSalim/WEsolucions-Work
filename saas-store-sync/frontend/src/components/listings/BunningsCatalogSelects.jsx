@@ -225,7 +225,7 @@ export function BunningsCategoryMultiSelect({ storeId, values = [], onChange, re
                 <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
             </button>
             {open && (
-                <div className="absolute z-40 mt-1 w-full overflow-hidden rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 shadow-lg">
+                <div className="mt-1 w-full overflow-hidden rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 shadow-sm">
                     <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-700 px-3 py-2">
                         <Search className="h-4 w-4 text-slate-400" />
                         <input
@@ -237,7 +237,7 @@ export function BunningsCategoryMultiSelect({ storeId, values = [], onChange, re
                         />
                         {loading && <Loader2 className="h-4 w-4 animate-spin text-slate-400" />}
                     </div>
-                    <div className="max-h-56 overflow-y-auto">
+                    <div className="max-h-40 overflow-y-auto">
                         {error && (
                             <p className="px-3 py-2 text-xs text-rose-600 dark:text-rose-400">{error}</p>
                         )}
@@ -268,7 +268,7 @@ export function BunningsCategoryMultiSelect({ storeId, values = [], onChange, re
                 </div>
             )}
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Extra CSV columns use Bunnings attribute codes for these categories (DISPLAY_NAME, BRAND, GTIN, KEY_SELLING_POINT_1, …). Up to {MAX_BULK_CATEGORIES} categories per file.
+                The Excel template includes required fields for these categories. Up to {MAX_BULK_CATEGORIES} per file.
             </p>
         </div>
     );
