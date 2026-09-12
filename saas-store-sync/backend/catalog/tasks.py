@@ -95,6 +95,26 @@ def _is_ingest_only_product(product) -> bool:
     return False
 
 
+def _load_wallkoala_store_feed(store):
+    """SKU → {price, inventory} plus Wallkoala inventory-settings vendor pk."""
+    feed = None
+    vendor_pk = None
+    try:
+        from stores.wallkoala import get_wallkoala_inventory_settings, load_store_wallkoala_feed
+        feed = load_store_wallkoala_feed(store)
+        inv = get_wallkoala_inventory_settings(store)
+        if inv is not None:
+            vendor_pk = inv.vendor_id
+    except Exception as err:
+        logger.warning(
+            'Wallkoala feed unavailable for store %s: %s',
+            getattr(store, 'id', None),
+            err,
+        )
+        feed = None
+    return feed, vendor_pk
+
+
 def _ingest_only_vendor_ids() -> list:
     """Primary keys for vendors handled by feed/desktop ingest (not browser scrape).
 
@@ -814,6 +834,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
         except Exception as nora_err:
             logger.warning('Nora inventory map unavailable for store %s: %s', store.id, nora_err)
             nora_map = None
+        wallkoala_feed, wallkoala_vendor_pk = _load_wallkoala_store_feed(store)
 
         for row in rows:
             if should_abort_celery_scrape(str(store.id)):
@@ -867,9 +888,41 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
 
             url = resolve_vendor_scrape_url(product, store, row)
             from stores.nora import override_stock_from_nora, product_uses_nora_inventory
+            from stores.wallkoala import product_uses_wallkoala, wallkoala_price_stock
 
-            uses_nora = nora_map is not None and product_uses_nora_inventory(product, row)
-            if not url:
+            uses_wallkoala = product_uses_wallkoala(product, row)
+            uses_nora = (
+                (not uses_wallkoala)
+                and nora_map is not None
+                and product_uses_nora_inventory(product, row)
+            )
+            vendor_price = None
+            vendor_stock = 0
+            result = {}
+            scrape_title = ''
+
+            if uses_wallkoala:
+                if wallkoala_feed is None:
+                    _fail_mapping(
+                        pm,
+                        'no_wallkoala_file',
+                        'Upload a Wallkoala Excel file in Store Settings '
+                        '(SKU, Vendor Price, Vendor Inventory).',
+                        store=store,
+                    )
+                    failed += 1
+                    last_progress_at = timezone.now()
+                    continue
+                try:
+                    vendor_price, vendor_stock = wallkoala_price_stock(
+                        wallkoala_feed, product, row,
+                    )
+                except ValueError as wk_err:
+                    _fail_mapping(pm, 'wallkoala_sku_missing', str(wk_err), store=store)
+                    failed += 1
+                    last_progress_at = timezone.now()
+                    continue
+            elif not url:
                 if uses_nora:
                     # Inventory from Nora; no eBay URL — zero/keep price path below.
                     logger.info(
@@ -888,51 +941,47 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                     last_progress_at = timezone.now()
                     continue
 
-            scrape_title = ''
-            logger.info(
-                "Scraping row %d: sku=%s vendor=%s region=%s url=%s",
-                row_counter,
-                product.vendor_sku,
-                (product.vendor.code if product.vendor else '?'),
-                store.region or 'USA',
-                (url or '')[:120],
-            )
+            if not uses_wallkoala:
+                logger.info(
+                    "Scraping row %d: sku=%s vendor=%s region=%s url=%s",
+                    row_counter,
+                    product.vendor_sku,
+                    (product.vendor.code if product.vendor else '?'),
+                    store.region or 'USA',
+                    (url or '')[:120],
+                )
+                try:
+                    if url:
+                        result = get_price_and_stock(
+                            url,
+                            store.region or '',
+                            session,
+                            vendor_code=product.vendor.code if product.vendor else None,
+                        )
+                        vendor_price = result.get('price')
+                        inv = _inventory_from_scrape_result(result)
+                        vendor_stock = 0 if inv is None or inv < 0 else inv
+                        if isinstance(result, dict):
+                            scrape_title = (result.get('title') or '').strip()[:500]
+                except Exception as scrape_err:
+                    if uses_nora:
+                        logger.warning(
+                            "Scrape failed for Nora product %s (url=%s): %s — applying Nora stock anyway",
+                            product.vendor_sku, url, scrape_err,
+                        )
+                        vendor_price = None
+                        vendor_stock = 0
+                    else:
+                        logger.exception(
+                            "Scrape failed for %s (url=%s): %s",
+                            product.vendor_sku, url, scrape_err,
+                        )
+                        _fail_mapping(pm, 'scrape_exception', str(scrape_err), store=store)
+                        failed += 1
+                        last_progress_at = timezone.now()
+                        continue
 
-            vendor_price = None
-            vendor_stock = 0
-            result = {}
-            try:
-                if url:
-                    result = get_price_and_stock(
-                        url,
-                        store.region or '',
-                        session,
-                        vendor_code=product.vendor.code if product.vendor else None,
-                    )
-                    vendor_price = result.get('price')
-                    inv = _inventory_from_scrape_result(result)
-                    vendor_stock = 0 if inv is None or inv < 0 else inv
-                    if isinstance(result, dict):
-                        scrape_title = (result.get('title') or '').strip()[:500]
-            except Exception as scrape_err:
-                if uses_nora:
-                    logger.warning(
-                        "Scrape failed for Nora product %s (url=%s): %s — applying Nora stock anyway",
-                        product.vendor_sku, url, scrape_err,
-                    )
-                    vendor_price = None
-                    vendor_stock = 0
-                else:
-                    logger.exception(
-                        "Scrape failed for %s (url=%s): %s",
-                        product.vendor_sku, url, scrape_err,
-                    )
-                    _fail_mapping(pm, 'scrape_exception', str(scrape_err), store=store)
-                    failed += 1
-                    last_progress_at = timezone.now()
-                    continue
-
-            vendor_stock = override_stock_from_nora(nora_map, product, vendor_stock, row)
+                vendor_stock = override_stock_from_nora(nora_map, product, vendor_stock, row)
 
             if vendor_price is None:
                 if uses_nora:
@@ -991,11 +1040,16 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
 
             try:
                 pricing = _get_pricing_for_vendor_from_cache(product.vendor_id, price_by_vid, price_fb)
-                inventory = (
-                    _get_inventory_for_vendor_from_cache(nora_vendor_pk, inv_by_vid, inv_fb)
-                    if (uses_nora and nora_vendor_pk)
-                    else _get_inventory_for_vendor_from_cache(product.vendor_id, inv_by_vid, inv_fb)
-                )
+                if uses_nora and nora_vendor_pk:
+                    inventory = _get_inventory_for_vendor_from_cache(nora_vendor_pk, inv_by_vid, inv_fb)
+                elif uses_wallkoala and wallkoala_vendor_pk:
+                    inventory = _get_inventory_for_vendor_from_cache(
+                        wallkoala_vendor_pk, inv_by_vid, inv_fb,
+                    )
+                else:
+                    inventory = _get_inventory_for_vendor_from_cache(
+                        product.vendor_id, inv_by_vid, inv_fb,
+                    )
 
                 if _has_fixed_tier(pricing):
                     tier_now = resolve_margin_tier_for_raw_cost(pricing, vendor_price)
@@ -1470,6 +1524,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
         except Exception as nora_err:
             logger.warning('Nora inventory map unavailable for store %s: %s', store.id, nora_err)
             nora_map = None
+        wallkoala_feed, wallkoala_vendor_pk = _load_wallkoala_store_feed(store)
 
         for pm in mappings:
             if should_abort_celery_scrape(str(store.id)):
@@ -1514,55 +1569,88 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
 
             pricing = _get_pricing_for_vendor_from_cache(product.vendor_id, price_by_vid, price_fb)
             from stores.nora import override_stock_from_nora, product_uses_nora_inventory
-            uses_nora = nora_map is not None and product_uses_nora_inventory(product)
-            inventory = (
-                _get_inventory_for_vendor_from_cache(nora_vendor_pk, inv_by_vid, inv_fb)
-                if (uses_nora and nora_vendor_pk)
-                else _get_inventory_for_vendor_from_cache(product.vendor_id, inv_by_vid, inv_fb)
+            from stores.wallkoala import product_uses_wallkoala, wallkoala_price_stock
+            uses_wallkoala = product_uses_wallkoala(product)
+            uses_nora = (
+                (not uses_wallkoala)
+                and nora_map is not None
+                and product_uses_nora_inventory(product)
             )
+            if uses_nora and nora_vendor_pk:
+                inventory = _get_inventory_for_vendor_from_cache(nora_vendor_pk, inv_by_vid, inv_fb)
+            elif uses_wallkoala and wallkoala_vendor_pk:
+                inventory = _get_inventory_for_vendor_from_cache(
+                    wallkoala_vendor_pk, inv_by_vid, inv_fb,
+                )
+            else:
+                inventory = _get_inventory_for_vendor_from_cache(
+                    product.vendor_id, inv_by_vid, inv_fb,
+                )
 
             url = resolve_vendor_scrape_url(product, store, None)
             vendor_price = None
             vendor_stock = 0
             scrape_title = ''
             result = {}
-            try:
-                if url:
-                    result = get_price_and_stock(
-                        url,
-                        store.region or '',
-                        session,
-                        vendor_code=product.vendor.code if product.vendor else None,
+            if uses_wallkoala:
+                if wallkoala_feed is None:
+                    _fail_mapping(
+                        pm,
+                        'no_wallkoala_file',
+                        'Upload a Wallkoala Excel file in Store Settings '
+                        '(SKU, Vendor Price, Vendor Inventory).',
+                        store=store,
                     )
-                    vendor_price = result.get('price')
-                    vendor_stock = _inventory_from_scrape_result(result)
-                    scrape_title = (result.get('title') or '').strip()[:500]
-                elif not uses_nora:
-                    raise ValueError('Product has no vendor_url or resolvable SKU')
-            except Exception as e:
-                if uses_nora:
-                    logger.warning(
-                        'Store scrape failed for Nora product %s (url=%s): %s — applying Nora stock',
-                        product.vendor_sku,
-                        (url or '')[:120],
-                        e,
-                    )
-                    vendor_price = None
-                    vendor_stock = 0
-                else:
-                    logger.exception(
-                        'Store scrape failed for %s (url=%s): %s',
-                        product.vendor_sku,
-                        url[:120] if url else '',
-                        e,
-                    )
-                    _fail_mapping(pm, 'scrape_exception', str(e), store=store)
                     failed += 1
-                    error_summary = str(e) if not error_summary else error_summary
+                    error_summary = 'no_wallkoala_file' if not error_summary else error_summary
                     last_progress_at = timezone.now()
                     continue
+                try:
+                    vendor_price, vendor_stock = wallkoala_price_stock(wallkoala_feed, product)
+                except ValueError as wk_err:
+                    _fail_mapping(pm, 'wallkoala_sku_missing', str(wk_err), store=store)
+                    failed += 1
+                    error_summary = str(wk_err) if not error_summary else error_summary
+                    last_progress_at = timezone.now()
+                    continue
+            else:
+                try:
+                    if url:
+                        result = get_price_and_stock(
+                            url,
+                            store.region or '',
+                            session,
+                            vendor_code=product.vendor.code if product.vendor else None,
+                        )
+                        vendor_price = result.get('price')
+                        vendor_stock = _inventory_from_scrape_result(result)
+                        scrape_title = (result.get('title') or '').strip()[:500]
+                    elif not uses_nora:
+                        raise ValueError('Product has no vendor_url or resolvable SKU')
+                except Exception as e:
+                    if uses_nora:
+                        logger.warning(
+                            'Store scrape failed for Nora product %s (url=%s): %s — applying Nora stock',
+                            product.vendor_sku,
+                            (url or '')[:120],
+                            e,
+                        )
+                        vendor_price = None
+                        vendor_stock = 0
+                    else:
+                        logger.exception(
+                            'Store scrape failed for %s (url=%s): %s',
+                            product.vendor_sku,
+                            url[:120] if url else '',
+                            e,
+                        )
+                        _fail_mapping(pm, 'scrape_exception', str(e), store=store)
+                        failed += 1
+                        error_summary = str(e) if not error_summary else error_summary
+                        last_progress_at = timezone.now()
+                        continue
 
-            vendor_stock = override_stock_from_nora(nora_map, product, vendor_stock)
+                vendor_stock = override_stock_from_nora(nora_map, product, vendor_stock)
 
             if vendor_price is None:
                 if uses_nora:

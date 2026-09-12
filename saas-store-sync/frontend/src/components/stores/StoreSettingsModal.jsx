@@ -9,7 +9,7 @@ import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
 import LasooConnectionFields from './LasooConnectionFields';
 import BunningsConnectionFields from './BunningsConnectionFields';
-import NoraInventoryUploadField, { isNoraVendor } from './NoraInventoryUploadField';
+import NoraInventoryUploadField, { isNoraVendor, isWallkoalaVendor } from './NoraInventoryUploadField';
 import ShopifyConnectFields, {
     buildShopifyPayload,
     shopifyFieldsFromStore,
@@ -1078,8 +1078,15 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                             <Trash2 className="h-4 w-4 mr-1.5 inline" aria-hidden /> Delete vendor
                                         </Button>
                                     </div>
-                                    {isNoraVendor(vendors.find((v) => String(v.id) === String(vi.vendor_id))) && (
+                                    {(() => {
+                                        const selected = vendors.find((v) => String(v.id) === String(vi.vendor_id));
+                                        const showNora = isNoraVendor(selected);
+                                        const showWallkoala = isWallkoalaVendor(selected);
+                                        if (!showNora && !showWallkoala) return null;
+                                        return (
                                         <NoraInventoryUploadField
+                                            kind={showWallkoala ? 'wallkoala' : 'nora'}
+                                            vendorId={vi.vendor_id}
                                             storeId={store?.id}
                                             fileName={vi.nora_inventory_file_name || ''}
                                             uploadedAt={vi.nora_inventory_uploaded_at}
@@ -1097,7 +1104,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                             }}
                                             onError={(msg) => setError(msg)}
                                         />
-                                    )}
+                                        );
+                                    })()}
                                     <div className="text-sm font-medium text-slate-700 dark:text-slate-300">Inventory ranges</div>
                                     <div className="space-y-3">
                                     {(vi.range_multipliers || []).map((r, ri) => (

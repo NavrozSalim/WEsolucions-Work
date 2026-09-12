@@ -31,6 +31,10 @@ VENDOR_NAME_ALIASES: dict[str, str] = {
     "costcoau": "costcoau",
     "heb": "heb",
     "aliexpress": "aliexpress",
+    "wallkoala": "wallkoala",
+    "wall koala": "wallkoala",
+    "wallkoala au": "wallkoala",
+    "wallkoalaau": "wallkoala",
 }
 
 # Marketplace labels users may type (including the common "Lesso" misspelling).
@@ -173,6 +177,12 @@ def validate_vendor_name_row(row: dict) -> tuple[str, list[str]]:
                 "Vendor ID is required when Vendor Name is Nora Inventory "
                 "(supplier barcode)."
             )
+    elif is_wallkoala_like(code):
+        if not vendor_id:
+            errors.append(
+                "Vendor ID is required when Vendor Name is Wallkoala "
+                "(SKU from the Excel file)."
+            )
     elif code in ("amazonus", "amazon") or (
         code.startswith("amazon") and "au" not in code
     ):
@@ -213,6 +223,11 @@ def store_price_vendor_codes(store) -> set[str]:
 def is_nora_like(code: str | None) -> bool:
     c = (code or "").strip().lower()
     return "nora" in c
+
+
+def is_wallkoala_like(code: str | None) -> bool:
+    c = (code or "").strip().lower().replace("-", "").replace("_", "").replace(" ", "")
+    return c.startswith("wallkoala")
 
 
 def is_feed_vendor_like(code: str | None) -> bool:
@@ -276,6 +291,12 @@ def validate_source_vendor_for_store(store, data: dict) -> list[str]:
             errors.append(
                 "Vendor ID is required when Vendor is Nora Inventory "
                 "(supplier barcode)."
+            )
+    elif is_wallkoala_like(code):
+        if not (data.get("vendor_id") or "").strip():
+            errors.append(
+                "Vendor ID is required when Vendor is Wallkoala "
+                "(SKU from the Excel file)."
             )
     elif is_feed_vendor_like(code):
         # SKU / Vendor ID is enough; Price and QTY come from the vendor CSV/XLSX feed.

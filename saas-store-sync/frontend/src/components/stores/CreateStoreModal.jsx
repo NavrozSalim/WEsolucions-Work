@@ -3,13 +3,13 @@ import { X, Plus, Clock, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
-import { createStore, getMarketplaces, getVendors, testEtsyConnection, testSearsConnection, testWalmartConnection, uploadNoraInventory } from '../../services/storeService';
+import { createStore, getMarketplaces, getVendors, testEtsyConnection, testSearsConnection, testWalmartConnection, uploadNoraInventory, uploadWallkoalaInventory } from '../../services/storeService';
 import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
 import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
 import LasooConnectionFields from './LasooConnectionFields';
 import BunningsConnectionFields from './BunningsConnectionFields';
-import NoraInventoryUploadField, { isNoraVendor } from './NoraInventoryUploadField';
+import NoraInventoryUploadField, { isNoraVendor, isWallkoalaVendor } from './NoraInventoryUploadField';
 import ShopifyConnectFields, {
     buildShopifyPayload,
     emptyShopifyFields,
@@ -740,9 +740,14 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     const id = res.data?.id;
                     const pending = Object.entries(noraPendingByVendorId).filter(([, f]) => f);
                     if (id && pending.length) {
-                        for (const [, file] of pending) {
+                        for (const [vendorId, file] of pending) {
                             try {
-                                await uploadNoraInventory(id, file);
+                                const vendor = vendors.find((v) => String(v.id) === String(vendorId));
+                                if (isWallkoalaVendor(vendor)) {
+                                    await uploadWallkoalaInventory(id, file, vendorId);
+                                } else {
+                                    await uploadNoraInventory(id, file);
+                                }
                             } catch {
                                 /* non-fatal; user can re-upload in settings */
                             }
@@ -809,9 +814,14 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 const id = res.data?.id;
                 const pending = Object.entries(noraPendingByVendorId).filter(([, f]) => f);
                 if (id && pending.length) {
-                    for (const [, file] of pending) {
+                    for (const [vendorId, file] of pending) {
                         try {
-                            await uploadNoraInventory(id, file);
+                            const vendor = vendors.find((v) => String(v.id) === String(vendorId));
+                            if (isWallkoalaVendor(vendor)) {
+                                await uploadWallkoalaInventory(id, file, vendorId);
+                            } else {
+                                await uploadNoraInventory(id, file);
+                            }
                         } catch {
                             /* non-fatal */
                         }
@@ -1460,10 +1470,13 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                         </div>
                                         {(() => {
                                             const selected = vendors.find((v) => String(v.id) === String(vi.vendor_id));
-                                            const showNora = isNoraVendor(selected) || isNoraVendor(selected?.name);
-                                            if (!showNora) return null;
+                                            const showNora = isNoraVendor(selected);
+                                            const showWallkoala = isWallkoalaVendor(selected);
+                                            if (!showNora && !showWallkoala) return null;
                                             return (
                                             <NoraInventoryUploadField
+                                                kind={showWallkoala ? 'wallkoala' : 'nora'}
+                                                vendorId={vi.vendor_id}
                                                 pendingFile={noraPendingByVendorId[vi.vendor_id] || null}
                                                 onPendingFile={(file) => {
                                                     setNoraPendingByVendorId((prev) => ({

@@ -507,3 +507,5 @@ class AliExpressVendorAliasTests(SimpleTestCase):
         self.assertEqual(resolve_canonical_vendor_code('Costway'), 'costwayau')
         self.assertEqual(resolve_canonical_vendor_code('CostwayAU'), 'costwayau')
         self.assertEqual(resolve_canonical_vendor_code('costco'), 'costcoau')
+        self.assertEqual(resolve_canonical_vendor_code('Wallkoala'), 'wallkoala')
+        self.assertEqual(resolve_canonical_vendor_code('wall koala'), 'wallkoala')

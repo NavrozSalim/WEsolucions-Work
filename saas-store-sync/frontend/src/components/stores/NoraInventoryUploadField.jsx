@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { UploadCloud } from 'lucide-react';
 import Button from '../ui/Button';
-import { uploadNoraInventory } from '../../services/storeService';
+import { uploadNoraInventory, uploadWallkoalaInventory } from '../../services/storeService';
 
 /** True when vendor row is Nora Inventory (by code or name). */
 export function isNoraVendor(vendor) {
@@ -21,12 +21,23 @@ export function isNoraVendor(vendor) {
     );
 }
 
+/** True when vendor row is Wallkoala (by code or name). */
+export function isWallkoalaVendor(vendor) {
+    if (!vendor) return false;
+    const s = typeof vendor === 'string'
+        ? vendor
+        : `${vendor.code || ''} ${vendor.name || ''} ${vendor.label || ''}`;
+    return /wall\s*koala|wallkoala/i.test(s);
+}
+
 /**
- * Excel upload for Nora Inventory vendor settings.
+ * Excel upload for Nora Inventory or Wallkoala vendor settings.
  * When storeId is set, uploads immediately. Otherwise keeps the File for
  * the parent to upload after store create.
  */
 export default function NoraInventoryUploadField({
+    kind = 'nora',
+    vendorId = null,
     storeId = null,
     fileName = '',
     uploadedAt = null,
@@ -38,6 +49,7 @@ export default function NoraInventoryUploadField({
     const inputRef = useRef(null);
     const [uploading, setUploading] = useState(false);
     const [localMsg, setLocalMsg] = useState('');
+    const isWallkoala = kind === 'wallkoala';
 
     const handlePick = (e) => {
         const file = e.target.files?.[0] || null;
@@ -52,14 +64,18 @@ export default function NoraInventoryUploadField({
 
         setUploading(true);
         setLocalMsg('');
-        uploadNoraInventory(storeId, file)
+        const upload = isWallkoala
+            ? uploadWallkoalaInventory(storeId, file, vendorId)
+            : uploadNoraInventory(storeId, file);
+        upload
             .then((res) => {
                 const msg = res.data?.message || `Uploaded ${file.name}`;
                 setLocalMsg(msg);
                 onUploaded?.(res.data);
             })
             .catch((err) => {
-                const detail = err.response?.data?.detail || 'Nora upload failed.';
+                const detail = err.response?.data?.detail
+                    || (isWallkoala ? 'Wallkoala upload failed.' : 'Nora upload failed.');
                 setLocalMsg(detail);
                 onError?.(detail);
             })
@@ -71,13 +87,25 @@ export default function NoraInventoryUploadField({
     return (
         <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-950/20 p-3 space-y-2">
             <p className="text-sm font-medium text-slate-800 dark:text-slate-200">
-                Nora Inventory Excel
+                {isWallkoala ? 'Wallkoala Excel' : 'Nora Inventory Excel'}
             </p>
             <p className="text-xs text-slate-600 dark:text-slate-400">
-                Upload the Australian inventory file. System reads sheet &quot;Export inventory&quot;,
-                columns BarCode + Available inventory, then cleans -G1/-G2/-G3/-V1/-V2/-V3
-                with pivot sum. Stock is applied on Start Scraping; price comes from each
-                product&apos;s Vendor URL (eBay AU).
+                {isWallkoala ? (
+                    <>
+                        Upload the vendor file. System reads <strong>SKU</strong>,{' '}
+                        <strong>Vendor Price</strong>, and <strong>Vendor Inventory</strong>.
+                        Shipping Price is ignored and is not added to cost. Price and stock
+                        are applied on Start Scraping using this store&apos;s Price margins
+                        and Inventory ranges.
+                    </>
+                ) : (
+                    <>
+                        Upload the Australian inventory file. System reads sheet &quot;Export inventory&quot;,
+                        columns BarCode + Available inventory, then cleans -G1/-G2/-G3/-V1/-V2/-V3
+                        with pivot sum. Stock is applied on Start Scraping; price comes from each
+                        product&apos;s Vendor URL (eBay AU).
+                    </>
+                )}
             </p>
             <div className="flex flex-wrap items-center gap-2">
                 <Button
@@ -93,7 +121,7 @@ export default function NoraInventoryUploadField({
                 <input
                     ref={inputRef}
                     type="file"
-                    accept=".xlsx,.xlsm,.xls"
+                    accept={isWallkoala ? '.xlsx,.xlsm,.xls,.csv' : '.xlsx,.xlsm,.xls'}
                     className="hidden"
                     onChange={handlePick}
                 />

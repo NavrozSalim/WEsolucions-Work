@@ -102,6 +102,10 @@ function isCostwayCode(code) {
     return /costway/i.test(String(code || ''));
 }
 
+function isWallkoalaCode(code) {
+    return /wall\s*koala|wallkoala/i.test(String(code || ''));
+}
+
 function isFeedVendorCode(code) {
     return isVevorCode(code) || isCostwayCode(code);
 }
@@ -119,6 +123,9 @@ function vendorUrlPlaceholder(code) {
     if (c.includes('costco')) return 'https://www.costco.com.au/…';
     if (c.includes('costway')) return 'https://au.costway.com/…';
     if (c.includes('vevor')) return 'https://www.vevor.com.au/…';
+    if (c.includes('wallkoala') || c.includes('wall koala')) {
+        return '(optional — not used for scrape)';
+    }
     if (c.includes('heb')) return 'https://www.heb.com/…';
     return 'https://… (product page used for price & stock scrape)';
 }
@@ -133,6 +140,7 @@ function VendorSourceFields({
     urlRequired = false,
 }) {
     const feedSelected = vevorSelected || costwaySelected;
+    const wallkoalaSelected = isWallkoalaCode(selectedVendor);
     return (
         <>
             <div className="sm:col-span-2">
@@ -142,11 +150,16 @@ function VendorSourceFields({
                     value={form.vendor_url}
                     onChange={set('vendor_url')}
                     type="url"
-                    required={!!urlRequired && !noraSelected && !feedSelected}
+                    required={!!urlRequired && !noraSelected && !feedSelected && !wallkoalaSelected}
                 />
                 {noraSelected ? (
                     <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
                         Price is scraped from this link. Inventory comes from the Nora Excel file.
+                    </p>
+                ) : null}
+                {wallkoalaSelected ? (
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                        Optional. Price and stock come from the Wallkoala Excel file (SKU, Vendor Price, Vendor Inventory). Shipping Price is ignored.
                     </p>
                 ) : null}
                 {vevorSelected ? (
@@ -160,20 +173,22 @@ function VendorSourceFields({
                     </p>
                 ) : null}
             </div>
-            {(noraSelected || feedSelected) ? (
+            {(noraSelected || wallkoalaSelected || feedSelected) ? (
                 <div className="sm:col-span-2">
                     <Input
                         label="Vendor ID (Optional)"
                         placeholder={
                             noraSelected
                                 ? 'Nora BarCode after cleaning, e.g. 8FNZ100-DL-G1'
-                                : costwaySelected
-                                    ? 'Costway SKU from the feed, if different from listing SKU'
-                                    : 'Vevor SKU from the feed, if different from listing SKU'
+                                : wallkoalaSelected
+                                    ? 'Wallkoala SKU from Excel, e.g. WK022-ST-40X30CM'
+                                    : costwaySelected
+                                        ? 'Costway SKU from the feed, if different from listing SKU'
+                                        : 'Vevor SKU from the feed, if different from listing SKU'
                         }
                         value={form.vendor_id}
                         onChange={set('vendor_id')}
-                        required={noraSelected}
+                        required={noraSelected || wallkoalaSelected}
                     />
                 </div>
             ) : null}
@@ -579,6 +594,7 @@ export default function ListingFormModal({
     const noraSelected = isNoraCode(selectedVendor);
     const vevorSelected = isVevorCode(selectedVendor);
     const costwaySelected = isCostwayCode(selectedVendor);
+    const wallkoalaSelected = isWallkoalaCode(selectedVendor);
     const selectedVendorName =
         storeVendors.find((v) => v.code === selectedVendor)?.name || form.vendor_name || '';
 
@@ -592,7 +608,7 @@ export default function ListingFormModal({
     const setVendor = (e) => {
         const code = e.target.value;
         const name = storeVendors.find((v) => v.code === code)?.name || '';
-        const keepVendorId = isNoraCode(code) || isFeedVendorCode(code);
+        const keepVendorId = isNoraCode(code) || isFeedVendorCode(code) || isWallkoalaCode(code);
         setForm((f) => ({
             ...f,
             source_vendor_code: code,
@@ -600,7 +616,7 @@ export default function ListingFormModal({
             ...(keepVendorId
                 ? { vendor_url: f.vendor_url }
                 : {
-                    vendor_id: (isNoraCode(f.source_vendor_code) || isFeedVendorCode(f.source_vendor_code))
+                    vendor_id: (isNoraCode(f.source_vendor_code) || isFeedVendorCode(f.source_vendor_code) || isWallkoalaCode(f.source_vendor_code))
                         ? ''
                         : f.vendor_id,
                 }),
@@ -630,7 +646,12 @@ export default function ListingFormModal({
             setSaving(false);
             return;
         }
-        if (selectedVendor && !noraSelected && !String(form.vendor_url || '').trim()) {
+        if (wallkoalaSelected && !String(form.vendor_id || '').trim()) {
+            setError('Vendor ID is required for Wallkoala (SKU from Excel).');
+            setSaving(false);
+            return;
+        }
+        if (selectedVendor && !noraSelected && !wallkoalaSelected && !String(form.vendor_url || '').trim()) {
             setError('Vendor URL is required for the selected vendor.');
             setSaving(false);
             return;

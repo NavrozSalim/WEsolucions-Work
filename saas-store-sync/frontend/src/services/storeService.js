@@ -32,6 +32,16 @@ export const uploadNoraInventory = (storeId, file) => {
     });
 };
 
+/** Upload / overwrite Wallkoala Excel (SKU, Vendor Price, Vendor Inventory). */
+export const uploadWallkoalaInventory = (storeId, file, vendorId) => {
+    const form = new FormData();
+    form.append('file', file);
+    if (vendorId) form.append('vendor_id', vendorId);
+    return api.post(`/stores/${storeId}/wallkoala-inventory/`, form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+    });
+};
+
 export const getSyncSchedule = (storeId) => api.get(`/stores/${storeId}/sync/schedule/`);
 export const updateSyncSchedule = (storeId, data) => api.put(`/stores/${storeId}/sync/schedule/`, data);
 export const createSyncSchedule = (storeId, data) => api.post(`/stores/${storeId}/sync/schedule/`, data);

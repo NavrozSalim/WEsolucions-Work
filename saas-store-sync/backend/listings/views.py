@@ -140,7 +140,11 @@ class StoreListingListCreateView(APIView):
             empty_url = Q(vendor_url__isnull=True) | Q(vendor_url='')
             empty_vid = Q(vendor_id__isnull=True) | Q(vendor_id='')
             feed_with_sku = (
-                (Q(source_vendor_code__icontains='vevor') | Q(source_vendor_code__icontains='costway'))
+                (
+                    Q(source_vendor_code__icontains='vevor')
+                    | Q(source_vendor_code__icontains='costway')
+                    | Q(source_vendor_code__icontains='wallkoala')
+                )
                 & ~Q(sku='')
             )
             scrapeable_count = inv_qs.exclude(

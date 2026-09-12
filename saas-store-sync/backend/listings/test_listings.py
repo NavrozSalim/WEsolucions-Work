@@ -1333,6 +1333,40 @@ class ListingServiceVendorSelectTests(TestCase):
         self.assertEqual(listing.vendor_id, "8FNZ100-DL-G1")
         self.assertEqual(listing.status, ListingStatus.READY)
 
+    def test_create_wallkoala_requires_vendor_id_not_url(self):
+        from vendor.models import Vendor
+        from stores.models import StoreVendorPriceSettings
+
+        wk, _ = Vendor.objects.get_or_create(code="wallkoala", defaults={"name": "Wallkoala"})
+        StoreVendorPriceSettings.objects.create(
+            store=self.store,
+            vendor=wk,
+            purchase_tax_percentage=10,
+            marketplace_fees_percentage=15,
+        )
+        listing = listing_service.create(self.user, self.store, {
+            **VALID_DATA,
+            "source_vendor_code": "wallkoala",
+            "vendor_id": "WK022-ST-40X30CM",
+            "vendor_url": "",
+        })
+        self.assertEqual(listing.source_vendor_code, "wallkoala")
+        self.assertEqual(listing.vendor_id, "WK022-ST-40X30CM")
+        self.assertEqual(listing.status, ListingStatus.READY)
+
+        missing = listing_service.create(self.user, self.store, {
+            **VALID_DATA,
+            "sku": "WK-NO-ID",
+            "product_key": "WK-NO-ID",
+            "variant_key": "WK-NO-ID",
+            "source_vendor_code": "wallkoala",
+            "vendor_id": "",
+            "vendor_url": "",
+        })
+        self.assertEqual(missing.status, ListingStatus.VALIDATION_FAILED)
+        joined = " ".join(missing.validation_errors_json or [])
+        self.assertIn("Vendor ID is required", joined)
+
     def test_create_rejects_vendor_not_on_store(self):
         data = {
             **VALID_DATA,

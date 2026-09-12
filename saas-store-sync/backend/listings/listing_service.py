@@ -205,6 +205,12 @@ def _is_costway_listing(listing) -> bool:
     )
 
 
+def _is_wallkoala_listing(listing) -> bool:
+    from scrapers.wallkoala_ingest import is_wallkoala_vendor_code
+
+    return is_wallkoala_vendor_code(getattr(listing, "source_vendor_code", None))
+
+
 def _listing_is_scrapeable(listing, nora_map) -> bool:
     """True when a managed listing can be scraped (URL, Nora ID, or feed SKU)."""
     has_url = bool((listing.vendor_url or "").strip())
@@ -212,7 +218,7 @@ def _listing_is_scrapeable(listing, nora_map) -> bool:
         return True
     if nora_map is not None and bool((listing.vendor_id or "").strip()):
         return True
-    if _is_vevor_listing(listing) or _is_costway_listing(listing):
+    if _is_vevor_listing(listing) or _is_costway_listing(listing) or _is_wallkoala_listing(listing):
         return bool(
             (listing.vendor_id or "").strip()
             or (listing.sku or "").strip()
@@ -1633,11 +1639,11 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
     if not batch:
         if store_wide:
             raise MarketplaceError(
-                "No Pending listings with a Vendor URL, Nora Vendor ID, Vevor SKU, or Costway SKU to scrape. "
+                "No Pending listings with a Vendor URL, Nora Vendor ID, Vevor SKU, Costway SKU, or Wallkoala SKU to scrape. "
                 "Use Reset status to move Scraped or Failed rows back to Pending first."
             )
         raise MarketplaceError(
-            "No listings with a Vendor URL, Nora Vendor ID, Vevor SKU, or Costway SKU to scrape. "
+            "No listings with a Vendor URL, Nora Vendor ID, Vevor SKU, Costway SKU, or Wallkoala SKU to scrape. "
             "Add a vendor link / Vendor ID on each listing first."
         )
 
@@ -1782,11 +1788,13 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
         load_vevor_feed_lookups,
         lookup_vevor_price_stock,
     )
+    from scrapers.wallkoala_ingest import is_wallkoala_vendor_code, lookup_wallkoala_entry
     from stores.nora import (
         get_nora_inventory_settings,
         load_store_nora_stock_map,
         lookup_nora_stock,
     )
+    from stores.wallkoala import get_wallkoala_inventory_settings, load_store_wallkoala_feed
     from sync.tasks import (
         _apply_inventory,
         _apply_pricing,
@@ -1813,9 +1821,25 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
 
     listings = [listing for listing in qs if _listing_is_scrapeable(listing, nora_map)]
 
+    wallkoala_feed = None
+    wallkoala_vendor_pk = None
+    if any(_is_wallkoala_listing(listing) for listing in listings):
+        try:
+            wallkoala_feed = load_store_wallkoala_feed(store)
+            wk_inv = get_wallkoala_inventory_settings(store)
+            if wk_inv is not None:
+                wallkoala_vendor_pk = wk_inv.vendor_id
+        except Exception as wk_err:
+            logger.warning(
+                "Wallkoala feed unavailable for managed scrape store=%s: %s",
+                store.id,
+                wk_err,
+            )
+            wallkoala_feed = None
+
     if not listings:
         raise MarketplaceError(
-            "No listings with a Vendor URL, Nora Vendor ID, Vevor SKU, or Costway SKU to scrape. "
+            "No listings with a Vendor URL, Nora Vendor ID, Vevor SKU, Costway SKU, or Wallkoala SKU to scrape. "
             "Add a vendor link / Vendor ID on each listing first."
         )
 
@@ -2027,6 +2051,9 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                 uses_costway = (not explicit_nora) and (not uses_vevor) and (
                     is_costway_vendor_code(src_code) or is_costway_product_url(url)
                 )
+                uses_wallkoala = (not explicit_nora) and (not uses_vevor) and (not uses_costway) and (
+                    is_wallkoala_vendor_code(src_code)
+                )
                 row = {
                     "id": str(listing.id),
                     "sku": listing.sku or listing.external_variant_key,
@@ -2120,6 +2147,37 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     except (TypeError, ValueError):
                         stock = 0
                     result = {"price": price, "inventory": stock}
+                elif uses_wallkoala:
+                    if wallkoala_feed is None:
+                        _fail_row(
+                            "Upload a Wallkoala Excel file in Store Settings "
+                            "(SKU, Vendor Price, Vendor Inventory)."
+                        )
+                        continue
+                    entry = lookup_wallkoala_entry(
+                        wallkoala_feed,
+                        listing.vendor_id or "",
+                        listing.sku or "",
+                        listing.external_variant_key or "",
+                        listing.external_product_key or "",
+                    )
+                    if not entry:
+                        _fail_row("SKU not in Wallkoala Excel")
+                        continue
+                    price = entry.get("price")
+                    if price is None:
+                        _fail_row("No Vendor Price in Wallkoala Excel for this SKU")
+                        continue
+                    try:
+                        price = float(price)
+                    except (TypeError, ValueError):
+                        _fail_row("No Vendor Price in Wallkoala Excel for this SKU")
+                        continue
+                    try:
+                        stock = int(entry.get("inventory") or 0)
+                    except (TypeError, ValueError):
+                        stock = 0
+                    result = {"price": price, "inventory": stock}
                 elif url:
                     try:
                         result = get_price_and_stock(
@@ -2160,11 +2218,18 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     or _vendor_id_from_url(url, price_by_vid, inv_by_vid)
                 )
                 pricing = _get_pricing_for_vendor_from_cache(vendor_id, price_by_vid, price_fb)
-                inventory_settings = (
-                    _get_inventory_for_vendor_from_cache(nora_vendor_pk, inv_by_vid, inv_fb)
-                    if (uses_nora and nora_vendor_pk)
-                    else _get_inventory_for_vendor_from_cache(vendor_id, inv_by_vid, inv_fb)
-                )
+                if uses_nora and nora_vendor_pk:
+                    inventory_settings = _get_inventory_for_vendor_from_cache(
+                        nora_vendor_pk, inv_by_vid, inv_fb,
+                    )
+                elif uses_wallkoala and wallkoala_vendor_pk:
+                    inventory_settings = _get_inventory_for_vendor_from_cache(
+                        wallkoala_vendor_pk, inv_by_vid, inv_fb,
+                    )
+                else:
+                    inventory_settings = _get_inventory_for_vendor_from_cache(
+                        vendor_id, inv_by_vid, inv_fb,
+                    )
 
                 update_fields = [
                     "updated_at",
