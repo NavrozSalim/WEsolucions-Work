@@ -27,7 +27,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
 
-    client_max_body_size 10M;
+    client_max_body_size 100M;
 
     # API and admin
     location /api/ {

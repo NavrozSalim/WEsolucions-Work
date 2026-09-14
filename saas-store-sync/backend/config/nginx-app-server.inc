@@ -1,5 +1,5 @@
 # Included inside both :80 and :443 server blocks (paths are container paths).
-client_max_body_size 10M;
+client_max_body_size 100M;
 
 location ^~ /api/ {
     proxy_pass http://django_backend;
