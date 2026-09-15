@@ -511,3 +511,26 @@ class AliExpressVendorAliasTests(SimpleTestCase):
         self.assertEqual(resolve_canonical_vendor_code('costco'), 'costcoau')
         self.assertEqual(resolve_canonical_vendor_code('Wallkoala'), 'wallkoala')
         self.assertEqual(resolve_canonical_vendor_code('wall koala'), 'wallkoala')
+
+
+class SearsListingSkuFallbackTests(SimpleTestCase):
+    def test_copies_parent_when_child_is_na(self):
+        from catalog.services import _sears_listing_skus
+
+        parent, child = _sears_listing_skus('UTXY-1', 'N/A')
+        self.assertEqual(parent, 'UTXY-1')
+        self.assertEqual(child, 'UTXY-1')
+
+    def test_keeps_variation_parent_and_child(self):
+        from catalog.services import _sears_listing_skus
+
+        parent, child = _sears_listing_skus('PARENT-1', 'CHILD-1')
+        self.assertEqual(parent, 'PARENT-1')
+        self.assertEqual(child, 'CHILD-1')
+
+    def test_leaves_empty_when_both_missing(self):
+        from catalog.services import _sears_listing_skus
+
+        parent, child = _sears_listing_skus('N/A', '')
+        self.assertEqual(parent, 'N/A')
+        self.assertEqual(child, '')

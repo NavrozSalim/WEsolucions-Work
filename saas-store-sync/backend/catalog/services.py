@@ -116,6 +116,17 @@ def _normalize(val: Any) -> str | None:
     return s
 
 
+def _sears_listing_skus(parent_raw: str, child_raw: str) -> tuple[str, str]:
+    """Sears Child SKU is never stored empty.
+
+    Simple listing: SKU in Child, or in Parent with Child N/A (copied to Child).
+    Variation: Parent SKU and Child SKU both filled.
+    """
+    if _normalize(child_raw) is None and _normalize(parent_raw) is not None:
+        return parent_raw, parent_raw
+    return parent_raw, child_raw
+
+
 def get_catalog_upload_chunk_size() -> int:
     try:
         return max(200, int(getattr(settings, 'CATALOG_UPLOAD_CHUNK_SIZE', 1000)))
@@ -227,9 +238,21 @@ def build_catalog_row_instance(
         )
     is_ebay_v = vendor_is_ebay(vendor, vendor_name_raw)
 
+    if store_is_sears(store) and action_norm in ('add', 'update'):
+        marketplace_parent_sku_raw, marketplace_child_sku_raw = _sears_listing_skus(
+            marketplace_parent_sku_raw,
+            marketplace_child_sku_raw,
+        )
+        if _normalize(marketplace_child_sku_raw) is None:
+            return None, (
+                f"Row {row_num}: Sears stores require Marketplace Child SKU for {action_norm.title()} "
+                f"(cannot be N/A or empty). Put the Sears SKU in Child SKU, or in Parent SKU "
+                f"for a simple listing. Variations must include both Parent SKU and Child SKU."
+            )
+
     if action_norm == 'add':
         if is_ebay_v:
-            if _normalize(marketplace_parent_sku_raw) is None:
+            if not store_is_sears(store) and _normalize(marketplace_parent_sku_raw) is None:
                 return None, (
                     f"Row {row_num}: eBay vendor rows require Marketplace Parent SKU for Add "
                     f"(for marketplace listing / push; Child SKU, Marketplace ID, Vendor SKU may be N/A)"
@@ -244,12 +267,6 @@ def build_catalog_row_instance(
                 return None, (
                     f"Row {row_num}: Reverb stores require SKU (or Marketplace Parent SKU) for Add "
                     f"(Reverb listing SKU; other marketplace columns may be N/A)"
-                )
-        elif store_is_sears(store):
-            if _normalize(marketplace_child_sku_raw) is None:
-                return None, (
-                    f"Row {row_num}: Sears stores require Marketplace Child SKU for Add "
-                    f"(price and inventory updates use the child SKU on Sears)"
                 )
         elif store_is_walmart(store):
             if _normalize(marketplace_child_sku_raw) is None and _normalize(marketplace_parent_sku_raw) is None:

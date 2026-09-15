@@ -32,7 +32,7 @@ function templateCopy(kind) {
                 catalogTitle: 'Sears catalog template',
                 deleteTitle: 'Sears delete template',
                 catalogHint:
-                    'Sears: Vendor Name, Store Name, Marketplace Child SKU, Vendor URL, and Action (no Vendor SKU column). Optional: Parent SKU, Vendor ID.',
+                    'Sears: Child SKU is required (never N/A). Simple listing: Child SKU, or Parent SKU with Child N/A (copied to Child). Variation: both Parent SKU and Child SKU. Also Vendor Name, Store Name, Vendor URL, Action.',
                 deleteHint:
                     'Delete only the SKUs in this file. Same Sears columns; set Action to Delete. Leave Replace store catalog unchecked.',
             };
