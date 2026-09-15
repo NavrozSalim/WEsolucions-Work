@@ -200,6 +200,7 @@ class MyDealClient:
         data: Any = None,
         auth_seller: bool = True,
         retry_on_401: bool = True,
+        timeout: int | None = None,
     ) -> MyDealResult:
         """Authenticated HTTP call. Does not log secrets."""
         try:
@@ -232,7 +233,7 @@ class MyDealClient:
                 json=json_body,
                 data=data,
                 headers=headers,
-                timeout=REQUEST_TIMEOUT,
+                timeout=timeout if timeout is not None else REQUEST_TIMEOUT,
             )
         except requests.RequestException as exc:
             logger.error("MyDeal connection error path=%s: %s", path, exc)
@@ -258,6 +259,7 @@ class MyDealClient:
                 data=data,
                 auth_seller=auth_seller,
                 retry_on_401=False,
+                timeout=timeout,
             )
 
         response_status = ""
@@ -386,7 +388,12 @@ class MyDealClient:
         """Create or update products via POST /products (async pending-responses)."""
         if not product_groups:
             return MyDealResult(ok=False, message="No products to send.")
-        return self.request("POST", "/products", json_body=product_groups)
+        return self.request(
+            "POST",
+            "/products",
+            json_body=product_groups,
+            timeout=90,
+        )
 
     def update_price_quantity(self, product_groups: list[dict]) -> MyDealResult:
         """Update price/qty via POST /products/priceandquantity (doc §0.5.4)."""

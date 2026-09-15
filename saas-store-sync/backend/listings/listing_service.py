@@ -1743,6 +1743,52 @@ def publish(user, store, listing_ids=None) -> dict:
         return _publish_lasoo(user, store, publishable)
 
 
+MYDEAL_PUBLISH_ASYNC_MIN = 15
+
+
+def start_publish_async(user, store, listing_ids=None) -> dict:
+    """Queue MyDeal publish on the ingest worker so Gunicorn is not killed at 120s."""
+    from .tasks import publish_store_listings
+
+    kind = marketplace_kind(store.marketplace)
+    if kind != "mydeal":
+        raise MarketplaceError("Background publish is only used for MyDeal.")
+
+    statuses = [ListingStatus.READY, ListingStatus.FAILED]
+    qs = StoreListing.objects.filter(user=user, store=store, status__in=statuses)
+    if listing_ids:
+        qs = qs.filter(id__in=listing_ids)
+    listings = list(qs)
+    if not listings:
+        raise MarketplaceError("No valid listings to publish. Fix validation errors first.")
+    publishable = _collect_publishable(store, listings)
+    if not publishable:
+        raise MarketplaceError("All selected listings failed validation. Fix the errors and retry.")
+
+    id_strs = [str(item.id) for item in publishable]
+    try:
+        async_res = publish_store_listings.apply_async(
+            args=[user.id, str(store.id), id_strs],
+            queue="ingest",
+        )
+    except Exception as exc:
+        logger.exception("Failed to enqueue MyDeal publish store=%s", store.id)
+        raise MarketplaceError(
+            "Could not start the publish worker. Try again in a moment."
+        ) from exc
+
+    return {
+        "ok": True,
+        "async": True,
+        "job_id": str(getattr(async_res, "id", "") or ""),
+        "queued": len(id_strs),
+        "message": (
+            f"Publishing {len(id_strs)} listing(s) to MyDeal in the background "
+            "in small batches. Keep this page open until it finishes."
+        ),
+    }
+
+
 def _scrapeable_listings_qs(user, store, listing_ids=None):
     """Base queryset for managed inventory scrapes."""
     qs = StoreListing.objects.filter(user=user, store=store)

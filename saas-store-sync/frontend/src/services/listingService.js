@@ -67,9 +67,51 @@ export const getListing = (storeId, listingId) => api.get(`/stores/${storeId}/li
 export const updateListing = (storeId, listingId, data) => api.put(`/stores/${storeId}/listings/${listingId}/`, data);
 export const deleteListing = (storeId, listingId) => api.delete(`/stores/${storeId}/listings/${listingId}/`);
 
+function pollListingPublishJob(storeId, jobId) {
+    const start = Date.now();
+    const maxWaitMs = 6 * 60 * 60 * 1000;
+    return new Promise((resolve, reject) => {
+        const poll = () => {
+            api.get(`/stores/${storeId}/listings/publish/jobs/${jobId}/`)
+                .then((res) => {
+                    const d = res.data || {};
+                    if (d.ready) {
+                        if (d.successful) {
+                            const result = d.result || {};
+                            if (result.ok === false) {
+                                const err = new Error(result.message || result.error || 'Publish failed.');
+                                err.response = { data: result, status: 502 };
+                                return reject(err);
+                            }
+                            return resolve({ data: result, status: 200 });
+                        }
+                        return reject(new Error(d.error || 'Publish failed.'));
+                    }
+                    if (Date.now() - start > maxWaitMs) {
+                        return reject(new Error(
+                            'Publish is still running on the server. Refresh Created products — do not start another Publish all.',
+                        ));
+                    }
+                    setTimeout(poll, 3500);
+                })
+                .catch(reject);
+        };
+        poll();
+    });
+}
+
 /** Push READY/FAILED created listings to the marketplace; optionally only specific ids. */
 export const publishListings = (storeId, listingIds = null) =>
-    api.post(`/stores/${storeId}/listings/publish/`, listingIds ? { listing_ids: listingIds } : {});
+    api.post(
+        `/stores/${storeId}/listings/publish/`,
+        listingIds ? { listing_ids: listingIds } : {},
+        { timeout: 180_000 },
+    ).then((res) => {
+        if (res.data?.job_id) {
+            return pollListingPublishJob(storeId, res.data.job_id);
+        }
+        return res;
+    });
 
 export const bulkUploadListings = (storeId, file, action = 'create') => {
     const fd = new FormData();

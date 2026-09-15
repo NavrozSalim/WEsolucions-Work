@@ -1,8 +1,11 @@
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase
 
+from listings.models import ListingStatus
 from listings.mydeal import products as mydeal_products
+from listings.mydeal.client import MyDealResult
 
 
 def _listing(**overrides):
@@ -100,3 +103,91 @@ class MyDealProductGroupTests(SimpleTestCase):
         b = _listing(external_product_key="B", sku="B-1", external_variant_key="B-1")
         packed = mydeal_products.listings_to_product_groups([a, b])
         self.assertEqual(len(packed), 2)
+
+
+def _saveable_listing(**overrides):
+    listing = _listing(**overrides)
+    listing.status = ListingStatus.READY
+    listing.validation_errors_json = None
+    listing.marketplace_request_json = None
+    listing.marketplace_response_json = None
+    listing.last_uploaded_at = None
+    listing.updated_at = None
+    listing.save = MagicMock()
+    return listing
+
+
+class MyDealPublishTests(SimpleTestCase):
+    def _store(self):
+        return SimpleNamespace(name="Shemaya", mydeal_setup_method="api")
+
+    def _listings(self, n):
+        rows = []
+        for i in range(n):
+            sku = f"SKU-{i}"
+            rows.append(
+                _saveable_listing(
+                    sku=sku,
+                    external_product_key="",
+                    external_variant_key=sku,
+                    option_1_name="",
+                    option_1_value="",
+                )
+            )
+        return rows
+
+    @patch("listings.mydeal.products.MyDealClient")
+    def test_publish_chunks_product_groups(self, mock_client_cls):
+        client = mock_client_cls.return_value
+        client.environment = "sandbox"
+        client.upsert_products.return_value = MyDealResult(ok=True, data={"ResponseStatus": "Success"})
+        store = self._store()
+        listings = self._listings(5)
+        with patch.object(mydeal_products, "PUBLISH_GROUP_CHUNK", 2):
+            out = mydeal_products.publish_listings(None, store, listings)
+        self.assertEqual(client.upsert_products.call_count, 3)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["uploaded"], 5)
+        self.assertEqual(out["failed"], 0)
+        self.assertEqual(listings[0].status, ListingStatus.UPLOADED_STAGING)
+
+    @patch("listings.mydeal.products.MyDealClient")
+    def test_publish_failure_sets_visible_error(self, mock_client_cls):
+        client = mock_client_cls.return_value
+        client.environment = "sandbox"
+        client.upsert_products.return_value = MyDealResult(
+            ok=False,
+            message="Could not reach MyDeal. Please try again.",
+            data=None,
+            status=0,
+        )
+        listings = self._listings(2)
+        out = mydeal_products.publish_listings(None, self._store(), listings)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["failed"], 2)
+        self.assertEqual(listings[0].status, ListingStatus.FAILED)
+        self.assertEqual(
+            listings[0].validation_errors_json,
+            ["Could not reach MyDeal. Please try again."],
+        )
+        self.assertEqual(
+            listings[0].marketplace_response_json["error"],
+            "Could not reach MyDeal. Please try again.",
+        )
+
+    @patch("listings.mydeal.products.MyDealClient")
+    def test_auth_failure_stops_remaining_chunks(self, mock_client_cls):
+        client = mock_client_cls.return_value
+        client.environment = "sandbox"
+        client.upsert_products.return_value = MyDealResult(
+            ok=False,
+            message="No production MyDeal ClientID configured for store 'Shemaya'.",
+            data=None,
+            status=0,
+        )
+        listings = self._listings(5)
+        with patch.object(mydeal_products, "PUBLISH_GROUP_CHUNK", 2):
+            out = mydeal_products.publish_listings(None, self._store(), listings)
+        self.assertEqual(client.upsert_products.call_count, 1)
+        self.assertEqual(out["failed"], 5)
+        self.assertTrue(all(row.status == ListingStatus.FAILED for row in listings))

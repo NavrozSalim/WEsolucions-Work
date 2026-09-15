@@ -929,22 +929,57 @@ class StoreListingPublishView(APIView):
     def post(self, request, store_pk):
         store = _get_store(request, store_pk)
         listing_ids = request.data.get('listing_ids') or None
+        if listing_ids is not None and not isinstance(listing_ids, list):
+            listing_ids = None
+        kind = marketplace_kind(store.marketplace)
+        publish_all = not listing_ids
+        use_async = kind == 'mydeal' and (
+            publish_all or len(listing_ids) >= listing_service.MYDEAL_PUBLISH_ASYNC_MIN
+        )
         try:
+            if use_async:
+                result = listing_service.start_publish_async(request.user, store, listing_ids)
+                return Response(result, status=status.HTTP_202_ACCEPTED)
             result = listing_service.publish(request.user, store, listing_ids)
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        published = result.get('published') or result.get('uploaded') or 0
         code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY
-        if result.get('published'):
+        if published:
             listing_service.record_activity(
                 request.user, store,
                 action=ListingAction.CREATE,
                 source=ListingUpload.Source.SINGLE,
                 filename='Publish to marketplace',
-                total=result.get('published', 0),
-                success=result.get('published', 0),
+                total=published,
+                success=published,
                 message=result.get('message') or '',
             )
         return Response(result, status=code)
+
+
+class StoreListingPublishJobView(APIView):
+    """Poll Celery MyDeal publish status."""
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ProgressReadRateThrottle]
+
+    def get(self, request, store_pk, job_id):
+        from celery.result import AsyncResult
+
+        _get_store(request, store_pk)
+        result = AsyncResult(job_id)
+        data = {
+            'job_id': job_id,
+            'status': result.status.lower() if result.status else 'unknown',
+            'ready': result.ready(),
+            'successful': result.successful() if result.ready() else None,
+        }
+        if result.ready():
+            if result.successful():
+                data['result'] = result.result
+            else:
+                data['error'] = str(result.result) if result.result else 'Publish failed'
+        return Response(data)
 
 
 class StoreListingScrapeView(APIView):

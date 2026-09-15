@@ -830,11 +830,21 @@ export default function ListingFormModal({
                                 ? ' Saving pushes to Lasoo Connect only if this SKU already exists in seller inventory. A live lasoo.com.au page with a different SKU will not change.'
                                 : ''}
                         </p>
-                        {isEdit && Array.isArray(listing?.validation_errors_json) && listing.validation_errors_json.length > 0 && (
+                        {isEdit && (() => {
+                            const errs = Array.isArray(listing?.validation_errors_json)
+                                ? listing.validation_errors_json.filter((x) => typeof x === 'string' && x.trim())
+                                : [];
+                            const respErr = listing?.marketplace_response_json?.error;
+                            const text = errs.length
+                                ? errs.join(' ')
+                                : (typeof respErr === 'string' ? respErr : '');
+                            if (!text) return null;
+                            return (
                             <div className="mb-4 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3 text-xs text-amber-700 dark:text-amber-300">
-                                {listing.validation_errors_json.join(' ')}
+                                {text}
                             </div>
-                        )}
+                            );
+                        })()}
 
                         {isReverb ? (
                             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

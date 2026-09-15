@@ -23,6 +23,19 @@ const ACTION_LABELS = {
     mapped: 'Mapped',
 };
 
+function listingErrorText(listing) {
+    const errs = Array.isArray(listing?.validation_errors_json)
+        ? listing.validation_errors_json.filter((x) => typeof x === 'string' && x.trim())
+        : [];
+    if (errs.length) return errs.join(' ');
+    const resp = listing?.marketplace_response_json;
+    if (resp && typeof resp === 'object') {
+        if (typeof resp.error === 'string' && resp.error.trim()) return resp.error.trim();
+        if (typeof resp.message === 'string' && resp.message.trim()) return resp.message.trim();
+    }
+    return '';
+}
+
 const PAGE_SIZE = 10;
 
 const FILTER_OPTIONS = [
@@ -184,7 +197,9 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                             </tr>
                         </thead>
                         <tbody>
-                            {listings.map((l) => (
+                            {listings.map((l) => {
+                                const errorText = listingErrorText(l);
+                                return (
                                 <tr key={l.id} className="border-t border-slate-100 dark:border-slate-800">
                                     <td className="px-4 py-2.5">
                                         <p className="font-medium text-slate-900 dark:text-slate-100">{l.sku || l.external_variant_key}</p>
@@ -204,10 +219,15 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                                     <td className="px-4 py-2.5">
                                         <span
                                             className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[l.status] || STATUS_STYLES.draft}`}
-                                            title={Array.isArray(l.validation_errors_json) ? l.validation_errors_json.join(' ') : undefined}
+                                            title={errorText || undefined}
                                         >
                                             {STATUS_LABELS[l.status] || l.status}
                                         </span>
+                                        {errorText && (l.status === 'failed' || l.status === 'validation_failed') && (
+                                            <p className="mt-1 max-w-[220px] text-xs text-rose-600 dark:text-rose-400" title={errorText}>
+                                                {errorText}
+                                            </p>
+                                        )}
                                     </td>
                                     <td className="px-4 py-2.5">
                                         <div className="flex items-center justify-end gap-1">
@@ -241,7 +261,8 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                                         </div>
                                     </td>
                                 </tr>
-                            ))}
+                                );
+                            })}
                         </tbody>
                     </table>
                 )}

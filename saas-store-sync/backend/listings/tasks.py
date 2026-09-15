@@ -226,3 +226,46 @@ def fetch_all_store_tickets():
 def fetch_all_reverb_orders():
     """Legacy Reverb-only all-regions order sync. Prefer fetch_us/au_store_orders in prod."""
     return sync_store_orders(region=None, marketplace_codes=["reverb"])
+
+
+@shared_task(
+    name="listings.publish_store_listings",
+    bind=True,
+    ignore_result=False,
+    soft_time_limit=7200,
+    time_limit=7500,
+)
+def publish_store_listings(self, user_id, store_id, listing_ids=None):
+    """Background MyDeal (and future) listing publish on the ingest queue."""
+    from . import listing_service
+    from .models import ListingAction, ListingUpload
+
+    User = get_user_model()
+    try:
+        user = User.objects.get(pk=user_id)
+        store = Store.objects.select_related("marketplace", "user").get(pk=store_id)
+    except (User.DoesNotExist, Store.DoesNotExist):
+        return {"ok": False, "error": "not_found", "message": "Store or user not found."}
+
+    try:
+        result = listing_service.publish(user, store, listing_ids)
+    except MarketplaceError as exc:
+        return {"ok": False, "error": str(exc), "message": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Listing publish task failed store=%s", store_id)
+        return {"ok": False, "error": str(exc), "message": str(exc) or "Publish failed."}
+
+    uploaded = int(result.get("uploaded") or result.get("published") or 0)
+    failed = int(result.get("failed") or 0)
+    listing_service.record_activity(
+        user,
+        store,
+        action=ListingAction.CREATE,
+        source=ListingUpload.Source.SINGLE,
+        filename="Publish to marketplace",
+        total=uploaded + failed,
+        success=uploaded,
+        errors=failed,
+        message=result.get("message") or "",
+    )
+    return result

@@ -6,7 +6,6 @@ import logging
 from collections import OrderedDict
 from decimal import Decimal, InvalidOperation
 
-from django.db import transaction
 from django.utils import timezone
 
 from ..errors import MarketplaceError
@@ -333,8 +332,111 @@ def listings_to_product_groups(
     return packed
 
 
+# Product groups per POST /products. Publish-all of thousands of SKUs in one
+# body times out (30s) and marks every row Push failed.
+PUBLISH_GROUP_CHUNK = 25
+# Auth / connectivity failures will repeat on every chunk — stop early.
+_FATAL_PUBLISH_MARKERS = (
+    "configured",
+    "credential",
+    "access_token",
+    "rejected client",
+    "401",
+)
+
+
+def _is_fatal_publish_error(result) -> bool:
+    if result is None or result.ok:
+        return False
+    if int(getattr(result, "status", 0) or 0) in (401, 403):
+        return True
+    msg = (getattr(result, "message", None) or "").lower()
+    return any(marker in msg for marker in _FATAL_PUBLISH_MARKERS)
+
+
+def _mark_listing(listing: StoreListing, *, status: str, request=None, response=None, errors=None):
+    listing.status = status
+    if request is not None:
+        listing.marketplace_request_json = request
+    if response is not None:
+        listing.marketplace_response_json = response
+    listing.validation_errors_json = errors
+    listing.last_uploaded_at = timezone.now()
+    listing.save(
+        update_fields=[
+            "status",
+            "marketplace_request_json",
+            "marketplace_response_json",
+            "last_uploaded_at",
+            "validation_errors_json",
+            "updated_at",
+        ]
+    )
+
+
+def _apply_upsert_result(client, packed_chunk, result) -> tuple[int, int, str]:
+    """Mark listings in this chunk from one MyDeal upsert. Returns uploaded, failed, message."""
+    groups = [group for group, _members in packed_chunk]
+    members = [listing for _group, members in packed_chunk for listing in members]
+    chunk_meta = {"product_group_count": len(groups)}
+    response_payload = result.data if isinstance(result.data, (dict, list)) else {"raw": result.data}
+
+    pending_uri = ""
+    work_id = ""
+    if isinstance(result.data, dict):
+        pending_uri = str(result.data.get("PendingUri") or result.data.get("pendingUri") or "")
+        work_id = str(result.data.get("WorkItemId") or result.data.get("workItemId") or "")
+
+    target = (
+        ListingStatus.UPLOADED_PRODUCTION
+        if client.environment == "production"
+        else ListingStatus.UPLOADED_STAGING
+    )
+
+    if result.response_status == "AsyncResponsePending" or (
+        result.ok and pending_uri and not (isinstance(result.data, dict) and result.data.get("Data"))
+    ):
+        for listing in members:
+            _mark_listing(
+                listing,
+                status=target,
+                request=chunk_meta,
+                response=response_payload if isinstance(response_payload, dict) else {"raw": result.data},
+                errors=None,
+            )
+        msg = (
+            f"Submitted {len(members)} product(s) to MyDeal (async). "
+            f"Pending work item: {work_id or pending_uri or 'see response'}."
+        )
+        return len(members), 0, msg
+
+    if not result.ok:
+        err = (result.message or "MyDeal publish failed.")[:400]
+        payload = {"error": err, "data": result.data, "status": getattr(result, "status", 0)}
+        for listing in members:
+            _mark_listing(
+                listing,
+                status=ListingStatus.FAILED,
+                request=chunk_meta,
+                response=payload,
+                errors=[err],
+            )
+        return 0, len(members), err
+
+    for group, group_members in packed_chunk:
+        for listing in group_members:
+            _mark_listing(
+                listing,
+                status=target,
+                request={"product_sku": group.get("ProductSKU")},
+                response=response_payload,
+                errors=None,
+            )
+    return len(members), 0, f"Published {len(members)} product(s) to MyDeal."
+
+
 def publish_listings(user, store, listings: list[StoreListing]) -> dict:
-    """POST /products for managed listings; poll pending-responses when async."""
+    """POST /products in chunks so a large catalog cannot fail as one request."""
     method = (getattr(store, "mydeal_setup_method", None) or "upload").strip().lower()
     if method != "api":
         raise MarketplaceError("MyDeal publish requires API connection mode.")
@@ -352,102 +454,53 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
         prepared.append(listing)
 
     packed = listings_to_product_groups(prepared)
-    groups = [group for group, _members in packed]
-    members_flat = [listing for _group, members in packed for listing in members]
-
-    if not groups:
+    if not packed:
         raise MarketplaceError("No valid listings to publish to MyDeal. Fix validation errors first.")
 
-    result = client.upsert_products(groups)
     uploaded = 0
     failed = 0
+    chunk_messages: list[str] = []
+    chunk = max(1, int(PUBLISH_GROUP_CHUNK or 25))
 
-    def _mark(listing: StoreListing, *, status: str, request=None, response=None, errors=None):
-        listing.status = status
-        if request is not None:
-            listing.marketplace_request_json = request
-        if response is not None:
-            listing.marketplace_response_json = response
-        if errors is None:
-            listing.validation_errors_json = None
-        listing.last_uploaded_at = timezone.now()
-        listing.save(
-            update_fields=[
-                "status",
-                "marketplace_request_json",
-                "marketplace_response_json",
-                "last_uploaded_at",
-                "validation_errors_json",
-                "updated_at",
-            ]
-        )
+    for start in range(0, len(packed), chunk):
+        packed_chunk = packed[start : start + chunk]
+        result = client.upsert_products([group for group, _members in packed_chunk])
+        up, fail, msg = _apply_upsert_result(client, packed_chunk, result)
+        uploaded += up
+        failed += fail
+        if msg:
+            chunk_messages.append(msg)
+        if fail and _is_fatal_publish_error(result):
+            remaining = packed[start + chunk :]
+            leftover = [listing for _g, members in remaining for listing in members]
+            if leftover:
+                err = (result.message or "MyDeal publish failed.")[:400]
+                payload = {"error": err, "data": result.data, "status": getattr(result, "status", 0)}
+                for listing in leftover:
+                    _mark_listing(
+                        listing,
+                        status=ListingStatus.FAILED,
+                        request={"skipped": True},
+                        response=payload,
+                        errors=[err],
+                    )
+                failed += len(leftover)
+            break
 
-    pending_uri = ""
-    work_id = ""
-    if isinstance(result.data, dict):
-        pending_uri = str(result.data.get("PendingUri") or result.data.get("pendingUri") or "")
-        work_id = str(result.data.get("WorkItemId") or result.data.get("workItemId") or "")
-    if result.response_status == "AsyncResponsePending" or (result.ok and pending_uri and not result.data.get("Data")):
-        target = (
-            ListingStatus.UPLOADED_PRODUCTION
-            if client.environment == "production"
-            else ListingStatus.UPLOADED_STAGING
-        )
-        for listing in members_flat:
-            _mark(
-                listing,
-                status=target,
-                request={"product_groups": groups},
-                response=result.data if isinstance(result.data, dict) else {"raw": result.data},
-            )
-            uploaded += 1
-        return {
-            "ok": True,
-            "uploaded": uploaded,
-            "failed": failed,
-            "message": (
-                f"Submitted {uploaded} product(s) to MyDeal (async). "
-                f"Pending work item: {work_id or pending_uri or 'see response'}."
-            ),
-        }
-
-    if not result.ok:
-        for listing in members_flat:
-            listing.status = ListingStatus.FAILED
-            listing.marketplace_response_json = {
-                "error": result.message,
-                "data": result.data,
-            }
-            listing.save(update_fields=["status", "marketplace_response_json", "updated_at"])
-            failed += 1
-        return {
-            "ok": False,
-            "uploaded": 0,
-            "failed": failed,
-            "message": result.message or "MyDeal publish failed.",
-        }
-
-    target_status = (
-        ListingStatus.UPLOADED_PRODUCTION
-        if client.environment == "production"
-        else ListingStatus.UPLOADED_STAGING
-    )
-    with transaction.atomic():
-        for group, members in packed:
-            for listing in members:
-                _mark(
-                    listing,
-                    status=target_status,
-                    request={"product_groups": [group]},
-                    response=result.data if isinstance(result.data, (dict, list)) else {"raw": result.data},
-                )
-                uploaded += 1
+    ok = uploaded > 0 and failed == 0
+    if uploaded and failed:
+        message = f"Published {uploaded} listing(s) to MyDeal; {failed} failed."
+    elif uploaded:
+        message = chunk_messages[-1] if len(chunk_messages) == 1 else f"Published {uploaded} product(s) to MyDeal."
+    else:
+        message = chunk_messages[-1] if chunk_messages else "MyDeal publish failed."
 
     return {
-        "ok": True,
+        "ok": ok,
         "uploaded": uploaded,
+        "published": uploaded,
         "failed": failed,
-        "message": f"Published {uploaded} product(s) to MyDeal.",
+        "message": message,
     }
 
 
