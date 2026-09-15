@@ -817,6 +817,66 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
     return rows
 
 
+def _upload_kind(filename: str) -> str:
+    name = (filename or "").lower().strip()
+    if name.endswith(".xlsx") or name.endswith(".xlsm"):
+        return "xlsx"
+    if name.endswith(".csv"):
+        return "csv"
+    if name.endswith(".xls"):
+        return "xls"
+    return ""
+
+
+def inspect_upload(filename: str, content: bytes) -> dict:
+    """Validate listing-template shape without importing rows.
+
+    Returns ``data_rows`` and the set of Action-column values. Raises
+    ``ValueError`` when the file is empty, unreadable, or not a listing template.
+    """
+    kind = _upload_kind(filename)
+    if kind == "xls":
+        raise ValueError("Excel 97-2003 (.xls) is not supported. Save the file as .xlsx or CSV and try again.")
+    if kind not in ("csv", "xlsx"):
+        raise ValueError("Upload a CSV or Excel (.xlsx) file that matches the listing template.")
+    if not content:
+        raise ValueError("File is empty.")
+    try:
+        rows = parse_upload(filename, content)
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(
+            "Could not read this file. Download the listing template, keep the header row, and try again."
+        ) from exc
+    if not rows:
+        raise ValueError("No data rows found in the uploaded file.")
+
+    header_cells = []
+    first = rows[0]
+    if isinstance(first.get("fields"), dict):
+        header_cells = list(first["fields"].keys())
+    header_cells = header_cells or [k for k in first.keys() if k != "row_number"]
+    # parse_upload already mapped columns; require at least one identity field.
+    keyed = 0
+    actions = set()
+    for row in rows:
+        if row.get("action"):
+            actions.add(row["action"])
+        if (row.get("sku") or row.get("variant_key") or row.get("product_key")):
+            keyed += 1
+    if keyed == 0:
+        raise ValueError(
+            "This file has no SKU / Parent SKU values. Download the listing template, fill rows, and try again."
+        )
+    return {
+        "data_rows": len(rows),
+        "actions": actions,
+        "keyed_rows": keyed,
+        "headers": header_cells,
+    }
+
+
 def _marketplace_label(store) -> str:
     mp = getattr(store, "marketplace", None)
     return (getattr(mp, "name", None) or getattr(mp, "code", None) or "").strip()

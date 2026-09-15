@@ -2,7 +2,7 @@ from rest_framework.pagination import PageNumberPagination
 
 
 class ListingPagination(PageNumberPagination):
-    """Default 10 rows per page for managed Inventory (Created products stays unpaginated)."""
+    """Default 10 rows per page for managed Inventory and Created products."""
 
     page_size = 10
     page_size_query_param = 'page_size'

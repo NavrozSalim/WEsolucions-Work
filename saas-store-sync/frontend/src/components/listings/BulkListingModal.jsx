@@ -72,10 +72,14 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
         bulkUploadListings(storeId, file, action)
             .then((res) => {
                 const data = res.data || {};
+                onImported?.(data);
+                if (data.async || res.status === 202 || data.status === 'pending') {
+                    reset();
+                    onClose();
+                    return;
+                }
                 const failed = (data.rows || []).filter((r) => !r.valid);
                 const imported = Number(data.imported) || 0;
-                onImported?.(data);
-                // Full success: leave the choose-file modal; keep it open when any row failed.
                 if (imported > 0 && failed.length === 0) {
                     reset();
                     onClose();
@@ -120,7 +124,10 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                     <p className="text-sm text-slate-600 dark:text-slate-400">
                         Choose one action for the whole file, download the matching{' '}
                         {templateLabel} template, fill rows, then upload.
-                        Rows with errors appear under the <strong>Errors</strong> filter on Created products.
+                        A valid file is accepted immediately — Upload history shows{' '}
+                        <strong>Pending</strong> while the server processes Create, Mapped, or Delete.
+                        If rows fail, download the Excel error file from that history row.
+                        Rows with errors also appear under the <strong>Errors</strong> filter on Created products.
                         Headers marked <strong>(Optional)</strong> can be left blank.
                         Optional columns <strong>Vendor Name</strong>, <strong>Marketplace Name</strong>, and{' '}
                         <strong>Store Name</strong> must match a source vendor and your store (or route to another of your stores).

@@ -294,7 +294,7 @@ class ListingUploadSerializer(serializers.ModelSerializer):
         model = ListingUpload
         fields = [
             'id', 'store', 'filename', 'source', 'action', 'status',
-            'total_rows', 'success_rows', 'error_rows', 'rows_json',
+            'total_rows', 'processed_rows', 'success_rows', 'error_rows',
             'message', 'user_name', 'created_at',
         ]
 

@@ -142,11 +142,13 @@ class CeleryStaticTaskRoutesTests(SimpleTestCase):
         from django.conf import settings
 
         from catalog import tasks as catalog_tasks
+        from listings import tasks as listing_tasks
         from sync import tasks as sync_tasks
 
         static = next(r for r in settings.CELERY_TASK_ROUTES if isinstance(r, dict))
         bindings = [
             (catalog_tasks.catalog_ingest_upload_file_task, 'ingest'),
+            (listing_tasks.ingest_listing_bulk_upload, 'ingest'),
             (catalog_tasks.catalog_sync_task, 'ingest'),
             (catalog_tasks.catalog_update_task, 'ingest'),
             (catalog_tasks.resume_catalog_scrape_after_stop, 'light'),

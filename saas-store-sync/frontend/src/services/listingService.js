@@ -34,6 +34,34 @@ export const getInventoryListings = async (storeId, options = {}) => {
     };
 };
 
+/** Paginated Created products list (default 10 per page). */
+export const getCreatedListings = async (storeId, options = {}) => {
+    const page = Math.max(1, options.page || 1);
+    const pageSize = Math.max(1, Math.min(100, options.pageSize || 10));
+    const params = {
+        view: 'created',
+        page,
+        page_size: pageSize,
+    };
+    if (options.status === 'ready') params.status = 'ready';
+    if (options.errors) params.errors = '1';
+
+    const res = await api.get(`/stores/${storeId}/listings/`, { params });
+    const d = res.data;
+    const results = Array.isArray(d?.results) ? d.results : Array.isArray(d) ? d : [];
+    const count = Number.isFinite(d?.count) ? d.count : results.length;
+    return {
+        data: results,
+        count,
+        page,
+        pageSize,
+        totalPages: Math.max(1, Math.ceil(count / pageSize) || 1),
+        publishableCount: Number.isFinite(d?.publishable_count) ? d.publishable_count : null,
+        next: d?.next || null,
+        previous: d?.previous || null,
+    };
+};
+
 export const createListing = (storeId, data) => api.post(`/stores/${storeId}/listings/`, data);
 export const getListing = (storeId, listingId) => api.get(`/stores/${storeId}/listings/${listingId}/`);
 export const updateListing = (storeId, listingId, data) => api.put(`/stores/${storeId}/listings/${listingId}/`, data);
@@ -49,6 +77,7 @@ export const bulkUploadListings = (storeId, file, action = 'create') => {
     fd.append('action', action);
     return api.post(`/stores/${storeId}/listings/bulk-upload/`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 180_000,
     });
 };
 
@@ -188,21 +217,21 @@ export async function bulkLookupListingsOnMarketplace(storeId, payload = {}) {
     return startMarketplaceLookupJob(storeId, payload);
 }
 
-/** Download failed rows from a managed Upload history entry as CSV. */
+/** Download failed rows from a managed Upload history entry as Excel. */
 export const downloadListingUploadErrors = (storeId, uploadId, filename = '') => {
     const base = (filename || 'upload').replace(/\.[^.]+$/, '') || 'upload';
     return apiDownload(api, `/stores/${storeId}/listings/uploads/${uploadId}/errors/`, {
-        fallbackFilename: `${base}_errors.csv`,
-        mimeType: 'text/csv',
+        fallbackFilename: `${base}_errors.xlsx`,
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
 };
 
-/** Export all rows from a managed Upload history entry as CSV. */
+/** Export all rows from a managed Upload history entry as Excel. */
 export const exportListingUpload = (storeId, uploadId, filename = '') => {
     const base = (filename || 'upload').replace(/\.[^.]+$/, '') || 'upload';
     return apiDownload(api, `/stores/${storeId}/listings/uploads/${uploadId}/export/`, {
-        fallbackFilename: `${base}_export.csv`,
-        mimeType: 'text/csv',
+        fallbackFilename: `${base}_export.xlsx`,
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
 };
 

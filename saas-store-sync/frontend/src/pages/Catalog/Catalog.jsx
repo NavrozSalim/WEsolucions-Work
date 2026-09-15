@@ -93,6 +93,12 @@ const uploadStatusLabel = {
 };
 /** Managed-store Upload history status badge text. */
 function managedUploadStatusText(u) {
+    if (u.status === 'pending' || u.status === 'processing') {
+        const done = Number(u.processed_rows) || 0;
+        const total = Number(u.total_rows) || 0;
+        if (total > 0 && done > 0) return `Pending (${done}/${total})`;
+        return 'Pending';
+    }
     if (u.status === 'partial' || u.status === 'failed') return 'Error';
     if (u.action === 'delete') return 'Deleted';
     if (u.action === 'mapped') return 'Mapped';
@@ -560,16 +566,18 @@ function ManagedUploadActionsDropdown({
     }, [open]);
 
     const u = upload;
-    const hasErrors = (u.error_rows ?? 0) > 0 || u.status === 'failed' || u.status === 'partial';
+    const inflight = u.status === 'pending' || u.status === 'processing';
+    const hasErrors = !inflight && ((u.error_rows ?? 0) > 0 || u.status === 'failed' || u.status === 'partial');
     const busy = deletingId === u.id;
-    const items = [
-        {
+    const items = [];
+    if (!inflight) {
+        items.push({
             label: 'Export',
             icon: <FileDown className="h-4 w-4 shrink-0" />,
             onClick: () => onExport(storeId, u.id, u.filename),
             className: 'text-slate-700 dark:text-slate-300',
-        },
-    ];
+        });
+    }
     if (hasErrors) {
         items.push({
             label: u.error_rows ? `Download Errors (${u.error_rows})` : 'Download Errors',
@@ -578,12 +586,14 @@ function ManagedUploadActionsDropdown({
             className: 'text-amber-600 dark:text-amber-400',
         });
     }
-    items.push({ divider: true });
+    if (items.length) {
+        items.push({ divider: true });
+    }
     items.push({
         label: 'Delete (app + marketplace)',
         icon: <Trash2 className="h-4 w-4 shrink-0" />,
         onClick: () => onDelete(u),
-        disabled: busy,
+        disabled: busy || inflight,
         className: 'text-rose-600 dark:text-rose-400',
     });
 
@@ -1329,12 +1339,14 @@ export default function Catalog() {
         }
     }, [selectedStore, selectedMarketplace, viewMode, refreshProducts, refreshActivityLogs, storeList]);
 
-    const fetchUploadHistory = useCallback((storeId, signal) => {
+    const fetchUploadHistory = useCallback((storeId, signal, { silent = false } = {}) => {
         const id = ++uploadsFetchGenRef.current;
         const storeData = storeList.find((s) => s.id === storeId);
         const managed = storeData?.management_mode === 'full_store';
-        setUploadsLoading(true);
-        setUploadsError('');
+        if (!silent) {
+            setUploadsLoading(true);
+            setUploadsError('');
+        }
         const req = managed
             ? getListingUploads(storeId, { scope: 'history' })
             : getCatalogUploads(storeId, { signal });
@@ -1342,6 +1354,7 @@ export default function Catalog() {
             .then((res) => {
                 if (id !== uploadsFetchGenRef.current) return;
                 setUploads(Array.isArray(res.data) ? res.data : []);
+                if (silent) setUploadsError('');
             })
             .catch((err) => {
                 if (err.code === 'ERR_CANCELED' || err.name === 'CanceledError' || err.name === 'AbortError') return;
@@ -1351,12 +1364,13 @@ export default function Catalog() {
                     setUploadsError(formatCatalogError(err));
                     return;
                 }
+                if (silent) return;
                 setUploads([]);
                 setUploadsError(formatCatalogError(err) || 'Could not load upload history.');
             })
             .finally(() => {
                 if (id !== uploadsFetchGenRef.current) return;
-                setUploadsLoading(false);
+                if (!silent) setUploadsLoading(false);
             });
     }, [storeList]);
 
@@ -1400,6 +1414,21 @@ export default function Catalog() {
         fetchUploadHistory(selectedStore, ac.signal);
         return () => ac.abort();
     }, [selectedStore, viewMode, uploadsReloadNonce, fetchUploadHistory]);
+
+    const listingUploadPending = Boolean(
+        isManagedStore
+        && uploads.some((u) => u.status === 'pending' || u.status === 'processing'),
+    );
+
+    useEffect(() => {
+        if (!selectedStore || !listingUploadPending) return undefined;
+        const tick = () => {
+            fetchUploadHistory(selectedStore, undefined, { silent: true });
+            setCreatedReloadNonce((n) => n + 1);
+        };
+        const id = setInterval(tick, 3000);
+        return () => clearInterval(id);
+    }, [selectedStore, listingUploadPending, fetchUploadHistory]);
 
     // Debounce the search box so typing doesn't fire a request per keystroke.
     useEffect(() => {
@@ -3624,6 +3653,16 @@ export default function Catalog() {
                 onImported={(data) => {
                     setCreatedReloadNonce((n) => n + 1);
                     setUploadsReloadNonce((n) => n + 1);
+                    const asyncImport = Boolean(data?.async || data?.status === 'pending');
+                    if (asyncImport) {
+                        setViewMode('history');
+                        setFlowStatus('success');
+                        setMessage(
+                            data?.message
+                            || 'File received. Upload history shows Pending while the file is processed.',
+                        );
+                        return;
+                    }
                     setViewMode('created');
                     const imported = Number(data?.imported) || 0;
                     const failed = (data?.rows || []).filter((r) => !r.valid).length;

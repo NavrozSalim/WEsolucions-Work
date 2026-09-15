@@ -696,6 +696,128 @@ class ListingServiceTests(TestCase):
         self.assertEqual(upload.status, ListingUpload.Status.COMPLETED)
         self.assertEqual(upload.error_rows, 0)
 
+    def test_inspect_rejects_wrong_format(self):
+        with self.assertRaises(ValueError):
+            csv_import.inspect_upload("notes.txt", b"hello")
+        with self.assertRaises(ValueError):
+            csv_import.inspect_upload("empty.csv", b"")
+        with self.assertRaises(ValueError):
+            csv_import.inspect_upload("bad.csv", b"foo,bar\n1,2\n")
+
+    def test_inspect_accepts_listing_template(self):
+        content = csv_import.build_template_csv("create").encode()
+        info = csv_import.inspect_upload("ok.csv", content)
+        self.assertGreaterEqual(info["data_rows"], 1)
+        self.assertGreaterEqual(info["keyed_rows"], 1)
+
+    @patch("listings.tasks.ingest_listing_bulk_upload.delay")
+    def test_queue_bulk_import_creates_pending(self, mock_delay):
+        content = csv_import.build_template_csv("create").encode()
+        result = listing_service.queue_bulk_import(
+            self.user, self.store, "wall.csv", content, action="create",
+        )
+        mock_delay.assert_called_once()
+        self.assertTrue(result["async"])
+        self.assertEqual(result["status"], ListingUpload.Status.PENDING)
+        upload = ListingUpload.objects.get(pk=result["upload_id"])
+        self.assertEqual(upload.status, ListingUpload.Status.PENDING)
+        self.assertTrue(upload.source_file)
+        self.assertGreaterEqual(upload.total_rows, 1)
+
+    @patch("listings.tasks.ingest_listing_bulk_upload.delay")
+    def test_run_queued_bulk_import_completes_without_duplicate_history(self, mock_delay):
+        content = csv_import.build_template_csv("create").encode()
+        queued = listing_service.queue_bulk_import(
+            self.user, self.store, "ok-async.csv", content, action="create",
+        )
+        result = listing_service.run_queued_bulk_import(queued["upload_id"], "create")
+        self.assertTrue(result["ok"])
+        upload = ListingUpload.objects.get(pk=queued["upload_id"])
+        self.assertEqual(upload.status, ListingUpload.Status.COMPLETED)
+        self.assertEqual(upload.success_rows, 2)
+        self.assertEqual(StoreListing.objects.filter(store=self.store).count(), 2)
+        self.assertEqual(
+            ListingUpload.objects.filter(store=self.store, filename="ok-async.csv").count(),
+            1,
+        )
+
+    def test_queue_rejects_garbage_without_history_row(self):
+        with self.assertRaises(MarketplaceError):
+            listing_service.queue_bulk_import(
+                self.user, self.store, "nope.csv", b"not,a,listing\n1,2,3\n", action="create",
+            )
+        self.assertFalse(ListingUpload.objects.filter(store=self.store, filename="nope.csv").exists())
+
+    def test_upload_error_xlsx_contains_failed_rows(self):
+        from openpyxl import load_workbook
+
+        from .views import _listing_upload_xlsx_response
+
+        upload = ListingUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            filename="bad.csv",
+            source=ListingUpload.Source.FILE,
+            action="create",
+            status=ListingUpload.Status.FAILED,
+            total_rows=2,
+            success_rows=1,
+            error_rows=1,
+            rows_json=[
+                {"row_number": 2, "sku": "OK-1", "valid": True, "imported": True, "errors": []},
+                {"row_number": 3, "sku": "BAD-1", "valid": False, "imported": False, "errors": ["Missing title"]},
+            ],
+        )
+        resp = _listing_upload_xlsx_response(upload, errors_only=True)
+        self.assertIn("spreadsheetml", resp["Content-Type"])
+        wb = load_workbook(io.BytesIO(resp.content))
+        values = [str(c or "") for row in wb.active.iter_rows(values_only=True) for c in row]
+        blob = " ".join(values)
+        self.assertIn("BAD-1", blob)
+        self.assertIn("Missing title", blob)
+        self.assertNotIn("OK-1", blob)
+        self.assertIn("Error", blob)
+
+    def test_created_products_pagination_and_publishable_count(self):
+        from rest_framework.test import APIClient
+
+        for i in range(12):
+            sku = f"PAGE-{i}"
+            listing_service.create(
+                self.user, self.store,
+                {**VALID_DATA, "sku": sku, "variant_key": sku, "product_key": sku},
+            )
+        api = APIClient()
+        api.force_authenticate(user=self.user)
+        res = api.get(
+            f"/api/v1/stores/{self.store.id}/listings/",
+            {"view": "created", "page": 1, "page_size": 10},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["count"], 12)
+        self.assertEqual(len(res.data["results"]), 10)
+        self.assertEqual(res.data["publishable_count"], 12)
+
+    @patch("listings.tasks.ingest_listing_bulk_upload.delay")
+    def test_bulk_upload_http_returns_pending(self, mock_delay):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from rest_framework.test import APIClient
+
+        content = csv_import.build_template_csv("create").encode()
+        api = APIClient()
+        api.force_authenticate(user=self.user)
+        res = api.post(
+            f"/api/v1/stores/{self.store.id}/listings/bulk-upload/",
+            {
+                "action": "create",
+                "file": SimpleUploadedFile("l.csv", content, content_type="text/csv"),
+            },
+            format="multipart",
+        )
+        self.assertEqual(res.status_code, 202)
+        self.assertEqual(res.data["status"], "pending")
+        mock_delay.assert_called_once()
+
     def test_upload_error_csv_contains_failed_rows(self):
         upload = ListingUpload.objects.create(
             user=self.user,

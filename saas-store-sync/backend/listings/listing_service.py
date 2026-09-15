@@ -6,6 +6,7 @@ Lasoo, Reverb, MyDeal, Etsy, and Bunnings managed stores are supported. Dispatch
 import logging
 from decimal import Decimal, InvalidOperation
 
+from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -110,11 +111,64 @@ def record_activity(
         action=action,
         status=status,
         total_rows=total,
+        processed_rows=total,
         success_rows=success,
         error_rows=errors,
         rows_json=rows,
         message=message,
     )
+
+
+def _touch_upload_progress(upload: ListingUpload | None, *, processed: int, success: int, errors: int, total: int | None = None):
+    if upload is None:
+        return
+    upload.processed_rows = processed
+    upload.success_rows = success
+    upload.error_rows = errors
+    fields = ["processed_rows", "success_rows", "error_rows"]
+    if total is not None:
+        upload.total_rows = total
+        fields.append("total_rows")
+    upload.save(update_fields=fields)
+
+
+def _finish_file_upload(
+    upload: ListingUpload | None,
+    *,
+    user,
+    store,
+    action: str,
+    filename: str,
+    total: int,
+    success: int,
+    errors: int,
+    rows,
+    message: str,
+) -> ListingUpload:
+    """Write the final report onto a queued upload, or create a history row."""
+    if upload is None:
+        return record_activity(
+            user, store,
+            action=action,
+            source=ListingUpload.Source.FILE,
+            filename=filename,
+            total=total, success=success, errors=errors,
+            rows=rows, message=message,
+        )
+    if errors:
+        status = ListingUpload.Status.FAILED
+    else:
+        status = ListingUpload.Status.COMPLETED
+    upload.action = action
+    upload.status = status
+    upload.total_rows = total
+    upload.processed_rows = total
+    upload.success_rows = success
+    upload.error_rows = errors
+    upload.rows_json = rows
+    upload.message = message or ""
+    upload.save()
+    return upload
 
 
 def _safe_decimal(value) -> Decimal:
@@ -902,6 +956,11 @@ def delete_upload(
             listing.delete()
 
     upload_id = str(upload.id)
+    if upload.source_file:
+        try:
+            upload.source_file.delete(save=False)
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not delete listing upload file for %s", upload_id)
     upload.delete()
     return {
         "ok": True,
@@ -1038,7 +1097,7 @@ def _resolve_file_action(rows: list[dict], requested: str) -> str:
     return action
 
 
-def _bulk_delete(user, store, filename: str, rows: list[dict]) -> dict:
+def _bulk_delete(user, store, filename: str, rows: list[dict], upload: ListingUpload | None = None) -> dict:
     """Delete listings by SKU: end on marketplace when present, then locally."""
     preview, deleted = [], 0
     to_delete = []
@@ -1079,12 +1138,20 @@ def _bulk_delete(user, store, filename: str, rows: list[dict]) -> dict:
             continue
         row_result["imported"] = True
         deleted += 1
+        if upload is not None and deleted % 50 == 0:
+            _touch_upload_progress(
+                upload,
+                processed=len(preview),
+                success=deleted,
+                errors=sum(1 for r in preview if not r["valid"]),
+                total=len(rows),
+            )
 
     error_rows = sum(1 for r in preview if not r["valid"])
-    record_activity(
-        user, store,
+    _finish_file_upload(
+        upload,
+        user=user, store=store,
         action=ListingAction.DELETE,
-        source=ListingUpload.Source.FILE,
         filename=filename,
         total=len(rows), success=deleted, errors=error_rows,
         rows=preview,
@@ -1093,7 +1160,10 @@ def _bulk_delete(user, store, filename: str, rows: list[dict]) -> dict:
     return {"total_rows": len(rows), "imported": deleted, "action": ListingAction.DELETE, "rows": preview}
 
 
-def bulk_import(user, store, filename: str, content: bytes, action: str = "") -> dict:
+def bulk_import(
+    user, store, filename: str, content: bytes, action: str = "",
+    upload: ListingUpload | None = None,
+) -> dict:
     """Import listings from a CSV/XLSX template. One action per file:
     Create (new listings), Mapped (already on the store), Delete (SKU only).
     Invalid Create/Mapped rows are saved with validation_failed status so they
@@ -1109,7 +1179,7 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
 
     file_action = _resolve_file_action(rows, action)
     if file_action == ListingAction.DELETE:
-        return _bulk_delete(user, store, filename, rows)
+        return _bulk_delete(user, store, filename, rows, upload=upload)
 
     preview, imported, error_rows = [], 0, 0
     # Activity is recorded against the UI store; rows may land on other stores.
@@ -1187,17 +1257,136 @@ def bulk_import(user, store, filename: str, content: bytes, action: str = "") ->
             imported += 1
             row_result["imported"] = True
         preview.append(row_result)
+        if upload is not None and len(preview) % 50 == 0:
+            _touch_upload_progress(
+                upload,
+                processed=len(preview),
+                success=imported,
+                errors=error_rows,
+                total=len(rows),
+            )
 
-    record_activity(
-        user, activity_store,
+    _finish_file_upload(
+        upload,
+        user=user, store=activity_store,
         action=file_action,
-        source=ListingUpload.Source.FILE,
         filename=filename,
         total=len(rows), success=imported, errors=error_rows,
         rows=preview,
         message=f"Imported {imported} of {len(rows)} row(s).",
     )
     return {"total_rows": len(rows), "imported": imported, "action": file_action, "rows": preview}
+
+
+def queue_bulk_import(user, store, filename: str, content: bytes, action: str = "") -> dict:
+    """Accept a listing template, show it as Pending, process on the ingest worker."""
+    try:
+        info = csv_import.inspect_upload(filename, content)
+    except ValueError as exc:
+        raise MarketplaceError(str(exc)) from exc
+
+    requested = (action or "").strip().lower()
+    row_actions = info.get("actions") or set()
+    if len(row_actions) > 1:
+        raise MarketplaceError(
+            "Use one action per file. This file mixes: "
+            + ", ".join(sorted(row_actions)) + "."
+        )
+    file_action = next(iter(row_actions), "") or requested or ListingAction.CREATE
+    if file_action not in (ListingAction.CREATE, ListingAction.MAPPED, ListingAction.DELETE):
+        file_action = ListingAction.CREATE
+    if requested and row_actions and file_action != requested:
+        raise MarketplaceError(
+            f'You selected the "{requested}" action but the file\'s Action column says "{file_action}". '
+            "Use one action per file."
+        )
+    if requested in (ListingAction.CREATE, ListingAction.MAPPED, ListingAction.DELETE) and not row_actions:
+        file_action = requested
+
+    upload = ListingUpload.objects.create(
+        user=user,
+        store=store,
+        filename=(filename or "upload.csv")[:500],
+        source=ListingUpload.Source.FILE,
+        action=file_action,
+        status=ListingUpload.Status.PENDING,
+        total_rows=int(info.get("data_rows") or 0),
+        processed_rows=0,
+        message="File received. Processing in the background.",
+    )
+    safe_name = (filename or "upload.csv").replace("\\", "/").split("/")[-1][:200] or "upload.csv"
+    upload.source_file.save(safe_name, ContentFile(content), save=True)
+
+    from .tasks import ingest_listing_bulk_upload
+
+    try:
+        ingest_listing_bulk_upload.delay(str(upload.id), file_action)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to enqueue listing bulk import upload=%s", upload.id)
+        upload.status = ListingUpload.Status.FAILED
+        upload.message = (
+            f"Could not queue file processing ({exc!s}). "
+            "Confirm Celery workers listen to the ingest queue and Redis is reachable, then retry."
+        )[:2000]
+        upload.save(update_fields=["status", "message"])
+        raise MarketplaceError(upload.message) from exc
+
+    return {
+        "async": True,
+        "status": upload.status,
+        "upload_id": str(upload.id),
+        "total_rows": upload.total_rows,
+        "imported": 0,
+        "action": file_action,
+        "message": (
+            "File received. Upload history shows Pending while the file is processed. "
+            "If any rows fail, download the Excel error file from that row."
+        ),
+        "rows": [],
+    }
+
+
+def run_queued_bulk_import(upload_id: str, action: str = "") -> dict:
+    """Worker entry: import a previously queued listing file."""
+    upload = (
+        ListingUpload.objects.select_related("store", "store__marketplace", "user")
+        .filter(pk=upload_id)
+        .first()
+    )
+    if upload is None:
+        return {"ok": False, "error": "not_found"}
+    if upload.status not in (ListingUpload.Status.PENDING, ListingUpload.Status.PROCESSING):
+        return {"ok": True, "status": upload.status, "skipped": True}
+
+    upload.status = ListingUpload.Status.PENDING
+    upload.message = "Processing…"
+    upload.save(update_fields=["status", "message"])
+
+    try:
+        if not upload.source_file:
+            raise MarketplaceError("Uploaded file is missing. Upload the file again.")
+        with upload.source_file.open("rb") as fh:
+            content = fh.read()
+        user = upload.user
+        if user is None:
+            raise MarketplaceError("Upload user is missing.")
+        result = bulk_import(
+            user, upload.store, upload.filename, content,
+            action=action or upload.action, upload=upload,
+        )
+        return {"ok": True, **result}
+    except MarketplaceError as exc:
+        upload.status = ListingUpload.Status.FAILED
+        upload.message = str(exc)
+        upload.error_rows = max(int(upload.error_rows or 0), 1)
+        upload.save(update_fields=["status", "message", "error_rows"])
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Queued listing bulk import failed upload=%s", upload_id)
+        upload.status = ListingUpload.Status.FAILED
+        upload.message = (str(exc) or "Import failed unexpectedly.")[:2000]
+        upload.save(update_fields=["status", "message"])
+        return {"ok": False, "error": str(exc)}
 
 
 def _collect_publishable(store, listings: list) -> list:

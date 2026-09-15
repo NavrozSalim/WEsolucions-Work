@@ -406,6 +406,7 @@ CELERY_TASK_ROUTES = (
     CatalogScrapeTaskRouter(),
     {
         'catalog.ingest_upload_file': {'queue': 'ingest'},
+        'listings.ingest_bulk_upload': {'queue': 'ingest'},
         # DB-heavy row loop + chunked pending reset; keep off default/light queues.
         'catalog.tasks.catalog_sync_task': {'queue': 'ingest'},
         'catalog.tasks.catalog_update_task': {'queue': 'ingest'},

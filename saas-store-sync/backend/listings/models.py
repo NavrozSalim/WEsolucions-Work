@@ -163,6 +163,8 @@ class ListingUpload(models.Model):
         SINGLE = 'single', 'Single'
 
     class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        PROCESSING = 'processing', 'Processing'
         COMPLETED = 'completed', 'Completed'
         PARTIAL = 'partial', 'Partial'
         FAILED = 'failed', 'Failed'
@@ -181,7 +183,14 @@ class ListingUpload(models.Model):
     source = models.CharField(max_length=20, choices=Source.choices, default=Source.FILE)
     action = models.CharField(max_length=20, choices=ListingAction.choices, default=ListingAction.CREATE)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.COMPLETED)
+    source_file = models.FileField(
+        upload_to='listing_uploads/%Y/%m/',
+        max_length=500,
+        null=True,
+        blank=True,
+    )
     total_rows = models.IntegerField(default=0)
+    processed_rows = models.IntegerField(default=0)
     success_rows = models.IntegerField(default=0)
     error_rows = models.IntegerField(default=0)
     rows_json = models.JSONField(null=True, blank=True)  # per-row results incl. errors

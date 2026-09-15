@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Pencil, RefreshCw, Send, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
-import { deleteListing, getListings, publishListings } from '../../services/listingService';
+import { deleteListing, getCreatedListings, publishListings } from '../../services/listingService';
 import ListingFormModal from './ListingFormModal';
 
 const STATUS_STYLES = {
@@ -23,6 +23,8 @@ const ACTION_LABELS = {
     mapped: 'Mapped',
 };
 
+const PAGE_SIZE = 10;
+
 const FILTER_OPTIONS = [
     { id: 'all', label: 'All' },
     { id: 'ready', label: 'Create status' },
@@ -32,23 +34,53 @@ const FILTER_OPTIONS = [
 /** Staging queue: new/mapped listings before or after publish attempt. */
 export default function CreatedProductsPanel({ storeId, marketplaceCode = '', reloadNonce = 0, onMessage }) {
     const [listings, setListings] = useState([]);
+    const [totalCount, setTotalCount] = useState(0);
+    const [publishableCount, setPublishableCount] = useState(0);
+    const [page, setPage] = useState(1);
     const [loading, setLoading] = useState(false);
     const [publishing, setPublishing] = useState(false);
     const [editListing, setEditListing] = useState(null);
     const [editOpen, setEditOpen] = useState(false);
     const [filter, setFilter] = useState('all');
 
+    useEffect(() => {
+        setPage(1);
+    }, [filter, storeId]);
+
     const load = useCallback(() => {
         if (!storeId) return;
         setLoading(true);
-        const params = { view: 'created' };
-        if (filter === 'ready') params.status = 'ready';
-        if (filter === 'errors') params.errors = '1';
-        getListings(storeId, params)
-            .then((res) => setListings(Array.isArray(res.data) ? res.data : []))
-            .catch(() => onMessage?.('Failed to load created products.', 'error'))
+        getCreatedListings(storeId, {
+            page,
+            pageSize: PAGE_SIZE,
+            status: filter === 'ready' ? 'ready' : undefined,
+            errors: filter === 'errors',
+        })
+            .then((res) => {
+                setListings(Array.isArray(res.data) ? res.data : []);
+                setTotalCount(Number.isFinite(res.count) ? res.count : 0);
+                if (Number.isFinite(res.publishableCount)) {
+                    setPublishableCount(res.publishableCount);
+                } else {
+                    setPublishableCount(
+                        (Array.isArray(res.data) ? res.data : []).filter(
+                            (l) => l.status === 'ready' || l.status === 'failed',
+                        ).length,
+                    );
+                }
+                if (res.page > res.totalPages && res.totalPages >= 1) {
+                    setPage(res.totalPages);
+                }
+            })
+            .catch((err) => {
+                if (err.response?.status === 404 && page > 1) {
+                    setPage(1);
+                    return;
+                }
+                onMessage?.('Failed to load created products.', 'error');
+            })
             .finally(() => setLoading(false));
-    }, [storeId, filter, onMessage]);
+    }, [storeId, page, filter, onMessage]);
 
     useEffect(() => {
         load();
@@ -84,10 +116,10 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
             });
     };
 
-    const publishableIds = listings
-        .filter((l) => l.status === 'ready' || l.status === 'failed')
-        .map((l) => l.id);
-    const publishableCount = publishableIds.length;
+    const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE) || 1);
+    const safePage = Math.min(Math.max(1, page), totalPages);
+    const rangeStart = totalCount === 0 ? 0 : (safePage - 1) * PAGE_SIZE + 1;
+    const rangeEnd = Math.min(safePage * PAGE_SIZE, totalCount);
 
     return (
         <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
@@ -122,7 +154,7 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                     <Button
                         variant="primary"
                         size="sm"
-                        onClick={() => handlePublish(publishableIds)}
+                        onClick={() => handlePublish(null)}
                         disabled={publishing || publishableCount === 0}
                     >
                         <Send className="mr-1.5 h-4 w-4" />
@@ -214,6 +246,64 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                     </table>
                 )}
             </div>
+
+            {totalCount > PAGE_SIZE && (
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 dark:border-slate-700 px-4 py-3">
+                    <p className="text-sm text-slate-500 dark:text-slate-400">
+                        Showing{' '}
+                        <span className="font-medium text-slate-700 dark:text-slate-300">{rangeStart}</span>
+                        –
+                        <span className="font-medium text-slate-700 dark:text-slate-300">{rangeEnd}</span>
+                        {' '}of{' '}
+                        <span className="font-medium text-slate-700 dark:text-slate-300">{totalCount.toLocaleString()}</span>
+                        {' '}listings
+                    </p>
+                    <div className="flex items-center gap-1">
+                        <button
+                            type="button"
+                            onClick={() => setPage((p) => Math.max(1, p - 1))}
+                            disabled={safePage <= 1 || loading}
+                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            Previous
+                        </button>
+                        {Array.from({ length: totalPages }, (_, i) => i + 1)
+                            .filter((pg) => pg === 1 || pg === totalPages || Math.abs(pg - safePage) <= 1)
+                            .reduce((acc, pg, idx, arr) => {
+                                if (idx > 0 && pg - arr[idx - 1] > 1) acc.push('...');
+                                acc.push(pg);
+                                return acc;
+                            }, [])
+                            .map((pg, i) =>
+                                pg === '...' ? (
+                                    <span key={`dot-${i}`} className="px-1 text-slate-400">…</span>
+                                ) : (
+                                    <button
+                                        key={pg}
+                                        type="button"
+                                        onClick={() => setPage(pg)}
+                                        disabled={loading}
+                                        className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                                            pg === safePage
+                                                ? 'bg-accent-600 text-white dark:bg-accent-500'
+                                                : 'border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
+                                        } disabled:opacity-40 disabled:cursor-not-allowed`}
+                                    >
+                                        {pg}
+                                    </button>
+                                )
+                            )}
+                        <button
+                            type="button"
+                            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                            disabled={safePage >= totalPages || loading}
+                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            Next
+                        </button>
+                    </div>
+                </div>
+            )}
 
             <ListingFormModal
                 open={editOpen}

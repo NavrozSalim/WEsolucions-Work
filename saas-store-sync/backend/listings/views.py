@@ -1,5 +1,6 @@
 """DRF endpoints for managed-store listings (created products) and orders."""
 import csv
+import io
 import logging
 
 from django.db.models import Q
@@ -114,8 +115,8 @@ class StoreListingListCreateView(APIView):
         )
         qs = _filter_listings(qs, request).order_by('-updated_at', '-id')
 
-        # Opt-in pagination (Inventory UI). Created products / legacy clients
-        # omit page params and still receive a plain array.
+        # Pagination is opt-in via page / page_size so Inventory and Created
+        # products can page; legacy clients still receive a plain array.
         wants_page = (
             request.query_params.get('page') is not None
             or request.query_params.get('page_size') is not None
@@ -123,12 +124,20 @@ class StoreListingListCreateView(APIView):
         if not wants_page:
             return Response(StoreListingSerializer(qs, many=True).data)
 
+        view = (request.query_params.get('view') or '').strip().lower()
+        publishable_count = None
+        if view == 'created':
+            publishable_count = qs.filter(
+                status__in=(ListingStatus.READY, ListingStatus.FAILED),
+            ).count()
+
         paginator = ListingPagination()
         page = paginator.paginate_queryset(qs, request)
         payload = StoreListingSerializer(page, many=True).data
         response = paginator.get_paginated_response(payload)
+        if publishable_count is not None:
+            response.data['publishable_count'] = publishable_count
 
-        view = (request.query_params.get('view') or '').strip().lower()
         if view == 'inventory':
             # Pending scrapeable count (not limited to current page/search)
             # so Start Scraping (N) matches what the scrape job will process.
@@ -448,12 +457,12 @@ class StoreListingBulkUploadView(APIView):
                             status=status.HTTP_400_BAD_REQUEST)
         action = (request.data.get('action') or request.POST.get('action') or '').strip().lower()
         try:
-            result = listing_service.bulk_import(
+            result = listing_service.queue_bulk_import(
                 request.user, store, upload.name, upload.read(), action=action,
             )
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(result)
+        return Response(result, status=status.HTTP_202_ACCEPTED)
 
 
 class StoreListingUploadHistoryView(APIView):
@@ -470,7 +479,7 @@ class StoreListingUploadHistoryView(APIView):
         store = _get_store(request, store_pk)
         scope = request.query_params.get('scope', 'history')
         qs = listing_service.filter_listing_uploads(
-            ListingUpload.objects.filter(store=store),
+            ListingUpload.objects.filter(store=store).select_related('user').defer('rows_json'),
             scope=scope,
         )
         return Response(ListingUploadSerializer(qs, many=True).data)
@@ -524,26 +533,11 @@ def _listing_upload_has_template_fields(rows: list) -> bool:
     return any(isinstance(r.get('fields'), dict) and r.get('fields') for r in rows)
 
 
-def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) -> HttpResponse:
-    """Export upload rows.
-
-    Preferred format (Create/Mapped/Delete file uploads that stored full input):
-      <same columns as input template> + Status
-
-    Status values:
-      Created | Mapped | Deleted | Error: <reason>
-
-    Legacy / non-file activities fall back to Row, SKU, Status, Error Logs.
-    """
+def _listing_upload_write_rows(upload: ListingUpload, writer, *, errors_only: bool) -> None:
+    """Write upload rows to a csv-like writer (writerow)."""
     rows = upload.rows_json if isinstance(upload.rows_json, list) else []
     if errors_only:
         rows = [r for r in rows if not r.get('valid', True) or r.get('errors')]
-
-    response = HttpResponse(content_type='text/csv')
-    suffix = '_errors' if errors_only else '_export'
-    safe = _listing_upload_safe_name(upload)
-    response['Content-Disposition'] = f'attachment; filename="{safe}{suffix}.csv"'
-    writer = csv.writer(response)
 
     if not rows:
         msg = (upload.message or '').replace('\n', ' ')
@@ -556,9 +550,8 @@ def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) ->
                 else 'Created'
             )
             writer.writerow(['', upload.filename or '', label, msg])
-        return response
+        return
 
-    # Batch-load current listings so Status can show Uploaded vs Created.
     keys = set()
     for r in rows:
         for field in ('sku', 'variant_key'):
@@ -634,7 +627,6 @@ def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) ->
             cells.append(status_text)
             writer.writerow(cells)
         else:
-            # Legacy summary format for older uploads / non-file activities.
             short = status_text
             if short.startswith('Error: '):
                 short_status, short_err = 'Error', short[7:]
@@ -646,27 +638,81 @@ def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) ->
                 short_status,
                 short_err or err_text,
             ])
+
+
+def _listing_upload_csv_response(upload: ListingUpload, *, errors_only: bool) -> HttpResponse:
+    """Export upload rows as CSV (tests + fallback)."""
+    response = HttpResponse(content_type='text/csv')
+    suffix = '_errors' if errors_only else '_export'
+    safe = _listing_upload_safe_name(upload)
+    response['Content-Disposition'] = f'attachment; filename="{safe}{suffix}.csv"'
+    writer = csv.writer(response)
+    _listing_upload_write_rows(upload, writer, errors_only=errors_only)
     return response
 
 
+def _listing_upload_xlsx_response(upload: ListingUpload, *, errors_only: bool) -> HttpResponse:
+    """Excel download: original template columns plus Status / error description."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    class _ListWriter:
+        def __init__(self):
+            self.rows = []
+
+        def writerow(self, row):
+            self.rows.append(['' if c is None else str(c) for c in row])
+
+    table = _ListWriter()
+    _listing_upload_write_rows(upload, table, errors_only=errors_only)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Errors' if errors_only else 'Export'
+    bold = Font(bold=True)
+    for r_i, row in enumerate(table.rows, start=1):
+        for c_i, val in enumerate(row, start=1):
+            cell = ws.cell(r_i, c_i, val)
+            if r_i == 1:
+                cell.font = bold
+    buf = io.BytesIO()
+    wb.save(buf)
+    response = HttpResponse(
+        buf.getvalue(),
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    suffix = '_errors.xlsx' if errors_only else '_export.xlsx'
+    safe = _listing_upload_safe_name(upload)
+    response['Content-Disposition'] = f'attachment; filename="{safe}{suffix}"'
+    return response
+
+
+def _listing_upload_file_or_pending(upload: ListingUpload, *, errors_only: bool):
+    if upload.status in (ListingUpload.Status.PENDING, ListingUpload.Status.PROCESSING) and not upload.rows_json:
+        return Response(
+            {'detail': 'This file is still being processed. Try again when status is no longer Pending.'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    return _listing_upload_xlsx_response(upload, errors_only=errors_only)
+
+
 class StoreListingUploadErrorFileView(APIView):
-    """Download failed rows from a managed Upload history entry as CSV."""
+    """Download failed rows from a managed Upload history entry as Excel."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk, upload_id):
         store = _get_store(request, store_pk)
         upload = get_object_or_404(ListingUpload, id=upload_id, store=store)
-        return _listing_upload_csv_response(upload, errors_only=True)
+        return _listing_upload_file_or_pending(upload, errors_only=True)
 
 
 class StoreListingUploadExportView(APIView):
-    """Export all rows from a managed Upload history entry as CSV."""
+    """Export all rows from a managed Upload history entry as Excel."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk, upload_id):
         store = _get_store(request, store_pk)
         upload = get_object_or_404(ListingUpload, id=upload_id, store=store)
-        return _listing_upload_csv_response(upload, errors_only=False)
+        return _listing_upload_file_or_pending(upload, errors_only=False)
 
 
 class StoreListingUploadDeleteView(APIView):
