@@ -416,3 +416,83 @@ class MyDealPublishTests(SimpleTestCase):
         }
         listing.marketplace_request_json = {"product_sku": "X", "confirmed": True}
         self.assertFalse(mydeal_products.is_unconfirmed_upload(listing))
+
+    @patch("listings.mydeal.products.time.sleep")
+    @patch("listings.mydeal.products.MyDealClient")
+    def test_async_pending_without_work_item_retries_get_confirm(self, mock_client_cls, _sleep):
+        client = mock_client_cls.return_value
+        client.environment = "sandbox"
+        client.upsert_products.return_value = MyDealResult(
+            ok=True,
+            data={"ResponseStatus": "AsyncResponsePending", "Data": None},
+            response_status="AsyncResponsePending",
+        )
+        miss = MyDealResult(
+            ok=False,
+            data={"ResponseStatus": "Complete", "Errors": [{"ID": "ProductNotFound", "Code": "302"}]},
+            response_status="Complete",
+        )
+        hit = MyDealResult(
+            ok=True,
+            data={"ResponseStatus": "Complete", "Data": {"ProductSKU": "SKU-0"}},
+            response_status="Complete",
+        )
+        client.get_product.side_effect = [miss, hit]
+        listings = self._listings(1)
+        with patch.object(mydeal_products, "PENDING_POLL_ATTEMPTS", 3):
+            with patch.object(mydeal_products, "PENDING_POLL_SECONDS", 0):
+                out = mydeal_products.publish_listings(None, self._store(), listings)
+        client.get_pending_response.assert_not_called()
+        self.assertEqual(client.get_product.call_count, 2)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["uploaded"], 1)
+        self.assertEqual(listings[0].status, ListingStatus.UPLOADED_STAGING)
+        self.assertEqual(listings[0].marketplace_request_json.get("confirmed"), True)
+
+    def test_pending_false_fail_detects_work_item_error(self):
+        listing = _listing()
+        listing.status = ListingStatus.FAILED
+        listing.validation_errors_json = [
+            "MyDeal accepted the batch but did not return a work item to confirm."
+        ]
+        listing.marketplace_response_json = {"error": listing.validation_errors_json[0]}
+        self.assertTrue(mydeal_products.is_pending_false_fail(listing))
+        listing.validation_errors_json = ["Title is required."]
+        listing.marketplace_response_json = {"error": "Title is required."}
+        self.assertFalse(mydeal_products.is_pending_false_fail(listing))
+        listing.status = ListingStatus.READY
+        listing.validation_errors_json = [
+            "MyDeal accepted the batch but did not return a work item to confirm."
+        ]
+        self.assertFalse(mydeal_products.is_pending_false_fail(listing))
+
+    @patch("listings.mydeal.products.MyDealClient")
+    @patch("listings.mydeal.products.StoreListing.objects")
+    def test_confirm_false_failed_uploads_marks_when_parent_exists(self, mock_objects, mock_client_cls):
+        client = mock_client_cls.return_value
+        client.environment = "production"
+        client.get_product.return_value = MyDealResult(
+            ok=True,
+            data={"ResponseStatus": "Complete", "Data": {"ProductSKU": "WK014"}},
+            response_status="Complete",
+        )
+        listing = _saveable_listing(
+            sku="WK014-50X50",
+            external_product_key="WK014",
+            external_variant_key="WK014-50X50",
+        )
+        listing.id = 1
+        listing.status = ListingStatus.FAILED
+        listing.validation_errors_json = [
+            "MyDeal accepted the batch but did not return a work item to confirm."
+        ]
+        listing.marketplace_response_json = {"error": listing.validation_errors_json[0]}
+        qs = MagicMock()
+        qs.only.return_value = qs
+        qs.iterator.return_value = iter([listing])
+        mock_objects.filter.return_value = qs
+        n = mydeal_products.confirm_false_failed_uploads(self._store())
+        self.assertEqual(n, 1)
+        self.assertEqual(listing.status, ListingStatus.UPLOADED_PRODUCTION)
+        self.assertEqual(listing.marketplace_request_json.get("confirmed"), True)
+        client.get_product.assert_called_with("WK014", by="sku")

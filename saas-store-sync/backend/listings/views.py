@@ -109,6 +109,10 @@ class StoreListingListCreateView(APIView):
         if marketplace_kind(store.marketplace) == "mydeal":
             from .mydeal import products as mydeal_products
 
+            try:
+                mydeal_products.confirm_false_failed_uploads(store)
+            except Exception:
+                logger.exception("MyDeal confirm-on-load failed store=%s", store.id)
             mydeal_products.requeue_unconfirmed_uploads(store)
         qs = (
             StoreListing.objects.filter(store=store)

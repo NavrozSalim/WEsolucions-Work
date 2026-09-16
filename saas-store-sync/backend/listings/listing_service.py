@@ -1721,9 +1721,14 @@ def publish(user, store, listing_ids=None) -> dict:
             "Currently Lasoo, Reverb, MyDeal, Etsy, and Bunnings stores can publish."
         )
 
+    confirmed_existing = 0
     if kind == "mydeal":
         from .mydeal import products as mydeal_products
 
+        try:
+            confirmed_existing = mydeal_products.confirm_false_failed_uploads(store)
+        except Exception:
+            logger.exception("MyDeal confirm-before-publish failed store=%s", store.id)
         mydeal_products.requeue_unconfirmed_uploads(store)
 
     statuses = [ListingStatus.READY, ListingStatus.FAILED]
@@ -1736,6 +1741,14 @@ def publish(user, store, listing_ids=None) -> dict:
         qs = qs.filter(id__in=listing_ids)
     listings = list(qs)
     if not listings:
+        if confirmed_existing:
+            return {
+                "ok": True,
+                "uploaded": confirmed_existing,
+                "published": confirmed_existing,
+                "failed": 0,
+                "message": f"Confirmed {confirmed_existing} listing(s) already on MyDeal.",
+            }
         raise MarketplaceError("No valid listings to publish. Fix validation errors first.")
 
     publishable = _collect_publishable(store, listings)
@@ -1771,6 +1784,11 @@ def start_publish_async(user, store, listing_ids=None) -> dict:
 
     from .mydeal import products as mydeal_products
 
+    confirmed_existing = 0
+    try:
+        confirmed_existing = mydeal_products.confirm_false_failed_uploads(store)
+    except Exception:
+        logger.exception("MyDeal confirm-before-publish failed store=%s", store.id)
     mydeal_products.requeue_unconfirmed_uploads(store)
 
     statuses = [ListingStatus.READY, ListingStatus.FAILED]
@@ -1779,6 +1797,16 @@ def start_publish_async(user, store, listing_ids=None) -> dict:
         qs = qs.filter(id__in=listing_ids)
     listings = list(qs)
     if not listings:
+        if confirmed_existing:
+            return {
+                "ok": True,
+                "async": False,
+                "job_id": "",
+                "queued": 0,
+                "uploaded": confirmed_existing,
+                "published": confirmed_existing,
+                "message": f"Confirmed {confirmed_existing} listing(s) already on MyDeal.",
+            }
         raise MarketplaceError("No valid listings to publish. Fix validation errors first.")
     publishable = _collect_publishable(store, listings)
     if not publishable:

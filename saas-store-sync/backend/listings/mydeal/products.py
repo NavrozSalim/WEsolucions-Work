@@ -542,6 +542,13 @@ PUBLISH_GROUP_CHUNK = 250
 # Celery ingest can wait; 40 × 15s ≈ 10 minutes per batch.
 PENDING_POLL_ATTEMPTS = 40
 PENDING_POLL_SECONDS = 15
+# Created-products GET heals a limited number of parents so the page stays fast.
+CONFIRM_ON_LOAD_PARENT_LIMIT = 15
+_FALSE_FAIL_MARKERS = (
+    "did not return a work item",
+    "still creating this batch",
+    "still processing",
+)
 # Auth / connectivity failures will repeat on every chunk — stop early.
 _FATAL_PUBLISH_MARKERS = (
     "configured",
@@ -632,13 +639,22 @@ def _product_on_mydeal(client, product_sku: str) -> bool:
     return False
 
 
-def _confirm_groups_on_mydeal(client, packed_chunk) -> dict[str, bool]:
+def _confirm_groups_on_mydeal(client, packed_chunk, *, attempts=1, wait=0) -> dict[str, bool]:
     found: dict[str, bool] = {}
     for group, _members in packed_chunk:
         sku = str((group or {}).get("ProductSKU") or "").strip()
-        if not sku or sku in found:
-            continue
-        found[sku] = _product_on_mydeal(client, sku)
+        if sku and sku not in found:
+            found[sku] = False
+    tries = max(1, int(attempts or 1))
+    delay = max(0, float(wait or 0))
+    for attempt in range(tries):
+        remaining = [sku for sku, ok in found.items() if not ok]
+        if not remaining:
+            break
+        if attempt and delay:
+            time.sleep(delay)
+        for sku in remaining:
+            found[sku] = _product_on_mydeal(client, sku)
     return found
 
 
@@ -680,20 +696,94 @@ def requeue_unconfirmed_uploads(store) -> int:
     )
 
 
+def is_pending_false_fail(listing) -> bool:
+    """True when Hub marked Push failed because MyDeal was still creating the batch."""
+    if (getattr(listing, "status", "") or "") != ListingStatus.FAILED:
+        return False
+    parts = []
+    errors = getattr(listing, "validation_errors_json", None)
+    if isinstance(errors, list):
+        parts.extend(str(item) for item in errors if item)
+    elif errors:
+        parts.append(str(errors))
+    payload = getattr(listing, "marketplace_response_json", None)
+    if isinstance(payload, dict):
+        parts.append(str(payload.get("error") or ""))
+        parts.append(str(payload.get("message") or ""))
+    blob = " ".join(parts).lower()
+    return any(marker in blob for marker in _FALSE_FAIL_MARKERS)
+
+
+def _mark_confirmed_on_mydeal(listing, *, sku: str, status: str):
+    _mark_listing(
+        listing,
+        status=status,
+        request={"product_sku": sku, "confirmed": True},
+        response={
+            "ResponseStatus": "Complete",
+            "Data": {"ProductSKU": sku},
+            "confirmed": True,
+        },
+        errors=None,
+    )
+
+
+def confirm_false_failed_uploads(store) -> int:
+    """If Push-failed rows already exist on MyDeal, move them to Inventory without a second POST."""
+    qs = StoreListing.objects.filter(store=store, status=ListingStatus.FAILED).only(
+        "id",
+        "sku",
+        "external_product_key",
+        "external_variant_key",
+        "status",
+        "validation_errors_json",
+        "marketplace_request_json",
+        "marketplace_response_json",
+        "last_uploaded_at",
+        "updated_at",
+    )
+    grouped: OrderedDict[str, list] = OrderedDict()
+    for row in qs.iterator():
+        if not is_pending_false_fail(row):
+            continue
+        sku = parent_product_id(row)
+        if not sku:
+            continue
+        grouped.setdefault(sku, []).append(row)
+    if not grouped:
+        return 0
+
+    client = MyDealClient(store)
+    target = (
+        ListingStatus.UPLOADED_PRODUCTION
+        if client.environment == "production"
+        else ListingStatus.UPLOADED_STAGING
+    )
+    limit = max(1, int(CONFIRM_ON_LOAD_PARENT_LIMIT or 1))
+    marked = 0
+    for sku, members in list(grouped.items())[:limit]:
+        if not _product_on_mydeal(client, sku):
+            continue
+        for listing in members:
+            _mark_confirmed_on_mydeal(listing, sku=sku, status=target)
+            marked += 1
+        logger.info(
+            "MyDeal confirmed %s listing(s) for parent %s store=%s without republishing",
+            len(members),
+            sku,
+            getattr(store, "name", store),
+        )
+    return marked
+
+
 def _resolve_pending_upsert(client, result):
     """Poll GET /pending-responses until MyDeal finishes (or we time out)."""
     if not _is_async_pending(result):
         return result
     work_id = _work_item_id(result)
     if not work_id:
-        return MyDealResult(
-            ok=False,
-            data=getattr(result, "data", None),
-            error=getattr(result, "error", None),
-            message="MyDeal accepted the batch but did not return a work item to confirm.",
-            status=int(getattr(result, "status", 0) or 0),
-            response_status=str(getattr(result, "response_status", "") or ""),
-        )
+        # Async accepted with no poll handle — confirm via GET /products/{parent} instead.
+        return result
     last = result
     attempts = max(1, int(PENDING_POLL_ATTEMPTS or 1))
     wait = max(0, float(PENDING_POLL_SECONDS or 0))
@@ -714,7 +804,7 @@ def _resolve_pending_upsert(client, result):
         ok=False,
         data=getattr(last, "data", None),
         error=getattr(last, "error", None),
-        message="MyDeal is still creating this batch. Wait a few minutes, then click Publish all once.",
+        message="MyDeal is still creating this batch. Wait a few minutes, then refresh Created products.",
         status=int(getattr(last, "status", 0) or 0),
         response_status=str(getattr(last, "response_status", "") or "AsyncResponsePending"),
     )
@@ -756,27 +846,31 @@ def _apply_upsert_result(client, packed_chunk, result) -> tuple[int, int, str]:
     if _is_async_pending(result) or (
         not result.ok and "still creating this batch" in (result.message or "").lower()
     ):
-        confirmed = _confirm_groups_on_mydeal(client, packed_chunk)
+        confirm_attempts = 1
+        confirm_wait = 0
+        if _is_async_pending(result) and not _work_item_id(result):
+            confirm_attempts = max(1, int(PENDING_POLL_ATTEMPTS or 1))
+            confirm_wait = max(0, float(PENDING_POLL_SECONDS or 0))
+        confirmed = _confirm_groups_on_mydeal(
+            client,
+            packed_chunk,
+            attempts=confirm_attempts,
+            wait=confirm_wait,
+        )
         uploaded = 0
         failed = 0
         timeout_err = (
-            (result.message or "MyDeal is still creating this batch. Wait a few minutes, then click Publish all once.")
+            (result.message or "MyDeal is still creating this batch. Wait a few minutes, then refresh Created products.")
         )[:400]
+        if _is_async_pending(result) and not _work_item_id(result) and not any(confirmed.values()):
+            timeout_err = (
+                "MyDeal is still creating this batch. Wait a few minutes, then refresh Created products."
+            )
         for group, group_members in packed_chunk:
             sku = str(group.get("ProductSKU") or "").strip()
             if sku and confirmed.get(sku):
                 for listing in group_members:
-                    _mark_listing(
-                        listing,
-                        status=target,
-                        request={"product_sku": sku, "confirmed": True},
-                        response={
-                            "ResponseStatus": "Complete",
-                            "Data": {"ProductSKU": sku},
-                            "confirmed": True,
-                        },
-                        errors=None,
-                    )
+                    _mark_confirmed_on_mydeal(listing, sku=sku, status=target)
                 uploaded += len(group_members)
                 continue
             payload = {"error": timeout_err, "data": result.data, "status": getattr(result, "status", 0)}
