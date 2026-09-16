@@ -395,6 +395,8 @@ class MyDealPublishTests(SimpleTestCase):
         self.assertEqual(out["uploaded"], 1)
         self.assertEqual(listings[0].status, ListingStatus.UPLOADED_STAGING)
         client.get_product.assert_called_with("SKU-0", by="sku")
+        self.assertFalse(mydeal_products.is_unconfirmed_upload(listings[0]))
+        self.assertEqual(listings[0].marketplace_request_json.get("confirmed"), True)
 
     def test_unconfirmed_upload_detects_async_pending(self):
         listing = _listing()
@@ -406,4 +408,11 @@ class MyDealPublishTests(SimpleTestCase):
         }
         self.assertTrue(mydeal_products.is_unconfirmed_upload(listing))
         listing.marketplace_response_json = {"ResponseStatus": "Success", "Data": [{"ProductSKU": "X"}]}
+        self.assertFalse(mydeal_products.is_unconfirmed_upload(listing))
+        listing.marketplace_response_json = {
+            "ResponseStatus": "AsyncResponsePending",
+            "WorkItemId": "1",
+            "Data": None,
+        }
+        listing.marketplace_request_json = {"product_sku": "X", "confirmed": True}
         self.assertFalse(mydeal_products.is_unconfirmed_upload(listing))

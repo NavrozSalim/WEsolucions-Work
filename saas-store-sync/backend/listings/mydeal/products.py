@@ -647,6 +647,9 @@ def is_unconfirmed_upload(listing) -> bool:
     status = getattr(listing, "status", "") or ""
     if status not in (ListingStatus.UPLOADED_PRODUCTION, ListingStatus.UPLOADED_STAGING):
         return False
+    request = getattr(listing, "marketplace_request_json", None)
+    if isinstance(request, dict) and request.get("confirmed"):
+        return False
     payload = getattr(listing, "marketplace_response_json", None)
     if not isinstance(payload, dict):
         return False
@@ -666,7 +669,7 @@ def requeue_unconfirmed_uploads(store) -> int:
     )
     ids = [
         row.id
-        for row in qs.only("id", "status", "marketplace_response_json").iterator()
+        for row in qs.only("id", "status", "marketplace_response_json", "marketplace_request_json").iterator()
         if is_unconfirmed_upload(row)
     ]
     if not ids:
@@ -767,7 +770,11 @@ def _apply_upsert_result(client, packed_chunk, result) -> tuple[int, int, str]:
                         listing,
                         status=target,
                         request={"product_sku": sku, "confirmed": True},
-                        response=response_payload,
+                        response={
+                            "ResponseStatus": "Complete",
+                            "Data": {"ProductSKU": sku},
+                            "confirmed": True,
+                        },
                         errors=None,
                     )
                 uploaded += len(group_members)
