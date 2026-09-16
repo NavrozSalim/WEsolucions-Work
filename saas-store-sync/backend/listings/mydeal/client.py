@@ -268,7 +268,10 @@ class MyDealClient:
 
         if resp.ok:
             # MyDeal often returns HTTP 200 even for business failures.
-            if response_status.lower() in ("failed", "fail"):
+            errors = body.get("Errors") or body.get("errors") if isinstance(body, dict) else None
+            if response_status.lower() in ("failed", "fail") or (
+                isinstance(errors, list) and errors
+            ):
                 return MyDealResult(
                     ok=False,
                     data=body,

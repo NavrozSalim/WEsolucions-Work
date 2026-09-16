@@ -1802,8 +1802,8 @@ def start_publish_async(user, store, listing_ids=None) -> dict:
         "job_id": str(getattr(async_res, "id", "") or ""),
         "queued": len(id_strs),
         "message": (
-            f"Publishing {len(id_strs)} listing(s) to MyDeal in the background "
-            "in small batches. Keep this page open until it finishes."
+            f"Creating {len(id_strs)} listing(s) on MyDeal. "
+            "This can take several minutes. Keep this page open and do not click Publish again."
         ),
     }
 

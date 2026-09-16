@@ -370,6 +370,32 @@ class MyDealPublishTests(SimpleTestCase):
         self.assertEqual(listings[0].status, ListingStatus.FAILED)
         self.assertNotEqual(listings[0].status, ListingStatus.UPLOADED_STAGING)
 
+    @patch("listings.mydeal.products.time.sleep")
+    @patch("listings.mydeal.products.MyDealClient")
+    def test_async_pending_timeout_confirms_if_product_exists(self, mock_client_cls, _sleep):
+        client = mock_client_cls.return_value
+        client.environment = "sandbox"
+        pending = MyDealResult(
+            ok=True,
+            data={"ResponseStatus": "AsyncResponsePending", "WorkItemId": "77", "Data": None},
+            response_status="AsyncResponsePending",
+        )
+        client.upsert_products.return_value = pending
+        client.get_pending_response.return_value = pending
+        client.get_product.return_value = MyDealResult(
+            ok=True,
+            data={"ResponseStatus": "Complete", "Data": {"ProductSKU": "SKU-0", "Title": "On MyDeal"}},
+            response_status="Complete",
+        )
+        listings = self._listings(1)
+        with patch.object(mydeal_products, "PENDING_POLL_ATTEMPTS", 2):
+            with patch.object(mydeal_products, "PENDING_POLL_SECONDS", 0):
+                out = mydeal_products.publish_listings(None, self._store(), listings)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["uploaded"], 1)
+        self.assertEqual(listings[0].status, ListingStatus.UPLOADED_STAGING)
+        client.get_product.assert_called_with("SKU-0", by="sku")
+
     def test_unconfirmed_upload_detects_async_pending(self):
         listing = _listing()
         listing.status = ListingStatus.UPLOADED_PRODUCTION

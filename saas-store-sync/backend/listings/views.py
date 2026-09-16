@@ -936,10 +936,7 @@ class StoreListingPublishView(APIView):
         if listing_ids is not None and not isinstance(listing_ids, list):
             listing_ids = None
         kind = marketplace_kind(store.marketplace)
-        publish_all = not listing_ids
-        use_async = kind == 'mydeal' and (
-            publish_all or len(listing_ids) >= listing_service.MYDEAL_PUBLISH_ASYNC_MIN
-        )
+        use_async = kind == "mydeal"
         try:
             if use_async:
                 result = listing_service.start_publish_async(request.user, store, listing_ids)

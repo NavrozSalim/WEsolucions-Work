@@ -539,8 +539,9 @@ def listings_to_product_groups(
 
 # Product groups per POST /products. MyDeal accepts at most 250 ProductGroups.
 PUBLISH_GROUP_CHUNK = 250
-PENDING_POLL_ATTEMPTS = 20
-PENDING_POLL_SECONDS = 3
+# Celery ingest can wait; 40 × 15s ≈ 10 minutes per batch.
+PENDING_POLL_ATTEMPTS = 40
+PENDING_POLL_SECONDS = 15
 # Auth / connectivity failures will repeat on every chunk — stop early.
 _FATAL_PUBLISH_MARKERS = (
     "configured",
@@ -583,17 +584,62 @@ def _work_item_id(result) -> str:
 
 
 def _is_async_pending(result) -> bool:
-    status = str(getattr(result, "response_status", "") or "").strip().lower()
+    """True while MyDeal has not returned a final product payload."""
+    status = str(getattr(result, "response_status", "") or "").strip().lower().replace(" ", "")
     data = _result_data(result)
     if not status:
-        status = str(data.get("ResponseStatus") or data.get("responseStatus") or "").strip().lower()
-    if status in ("asyncresponsepending", "pending"):
+        status = str(data.get("ResponseStatus") or data.get("responseStatus") or "").strip().lower().replace(" ", "")
+    if status in ("failed", "fail"):
+        return False
+    if data.get("Errors") or data.get("errors"):
+        return False
+    if status == "asyncresponsepending":
         return True
     pending_uri = str(data.get("PendingUri") or data.get("pendingUri") or "").strip()
     work_id = _work_item_id(result)
-    if getattr(result, "ok", False) and (pending_uri or work_id) and data.get("Data") in (None, "", [], {}):
+    empty_data = data.get("Data") in (None, "", [], {})
+    # Complete with a work item and no Data is still working.
+    if empty_data and (pending_uri or work_id):
         return True
     return False
+
+
+def _product_on_mydeal(client, product_sku: str) -> bool:
+    """True when GET /products/{sku} returns that ProductSKU (parent), not a buyable size code."""
+    sku = str(product_sku or "").strip()
+    if not sku:
+        return False
+    result = client.get_product(sku, by="sku")
+    if not getattr(result, "ok", False):
+        return False
+    payload = getattr(result, "data", None)
+    rows = []
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict):
+        inner = payload.get("Data")
+        if inner is None:
+            inner = payload.get("data")
+        if isinstance(inner, list):
+            rows = inner
+        elif isinstance(inner, dict):
+            rows = [inner]
+        elif payload.get("ProductSKU"):
+            rows = [payload]
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("ProductSKU") or "").strip() == sku:
+            return True
+    return False
+
+
+def _confirm_groups_on_mydeal(client, packed_chunk) -> dict[str, bool]:
+    found: dict[str, bool] = {}
+    for group, _members in packed_chunk:
+        sku = str((group or {}).get("ProductSKU") or "").strip()
+        if not sku or sku in found:
+            continue
+        found[sku] = _product_on_mydeal(client, sku)
+    return found
 
 
 def is_unconfirmed_upload(listing) -> bool:
@@ -649,6 +695,8 @@ def _resolve_pending_upsert(client, result):
     attempts = max(1, int(PENDING_POLL_ATTEMPTS or 1))
     wait = max(0, float(PENDING_POLL_SECONDS or 0))
     for attempt in range(attempts):
+        if wait:
+            time.sleep(wait)
         last = client.get_pending_response(work_id)
         if not _is_async_pending(last):
             logger.info(
@@ -658,14 +706,12 @@ def _resolve_pending_upsert(client, result):
                 getattr(last, "response_status", "") or "",
             )
             return last
-        if attempt + 1 < attempts and wait:
-            time.sleep(wait)
     logger.warning("MyDeal pending work item %s still processing after %s polls", work_id, attempts)
     return MyDealResult(
         ok=False,
         data=getattr(last, "data", None),
         error=getattr(last, "error", None),
-        message="MyDeal is still processing this batch. Try publish again in a few minutes.",
+        message="MyDeal is still creating this batch. Wait a few minutes, then click Publish all once.",
         status=int(getattr(last, "status", 0) or 0),
         response_status=str(getattr(last, "response_status", "") or "AsyncResponsePending"),
     )
@@ -704,18 +750,43 @@ def _apply_upsert_result(client, packed_chunk, result) -> tuple[int, int, str]:
         else ListingStatus.UPLOADED_STAGING
     )
 
-    if _is_async_pending(result):
-        err = "MyDeal is still processing this batch. Try publish again in a few minutes."
-        payload = {"error": err, "data": result.data, "status": getattr(result, "status", 0)}
-        for listing in members:
-            _mark_listing(
-                listing,
-                status=ListingStatus.FAILED,
-                request=chunk_meta,
-                response=payload,
-                errors=[err],
-            )
-        return 0, len(members), err
+    if _is_async_pending(result) or (
+        not result.ok and "still creating this batch" in (result.message or "").lower()
+    ):
+        confirmed = _confirm_groups_on_mydeal(client, packed_chunk)
+        uploaded = 0
+        failed = 0
+        timeout_err = (
+            (result.message or "MyDeal is still creating this batch. Wait a few minutes, then click Publish all once.")
+        )[:400]
+        for group, group_members in packed_chunk:
+            sku = str(group.get("ProductSKU") or "").strip()
+            if sku and confirmed.get(sku):
+                for listing in group_members:
+                    _mark_listing(
+                        listing,
+                        status=target,
+                        request={"product_sku": sku, "confirmed": True},
+                        response=response_payload,
+                        errors=None,
+                    )
+                uploaded += len(group_members)
+                continue
+            payload = {"error": timeout_err, "data": result.data, "status": getattr(result, "status", 0)}
+            for listing in group_members:
+                _mark_listing(
+                    listing,
+                    status=ListingStatus.FAILED,
+                    request=chunk_meta,
+                    response=payload,
+                    errors=[timeout_err],
+                )
+            failed += len(group_members)
+        if uploaded and not failed:
+            return uploaded, 0, f"Published {uploaded} product(s) to MyDeal."
+        if uploaded:
+            return uploaded, failed, f"Published {uploaded} listing(s) to MyDeal; {failed} still creating."
+        return 0, failed, timeout_err
 
     if not result.ok:
         err = (result.message or "MyDeal publish failed.")[:400]

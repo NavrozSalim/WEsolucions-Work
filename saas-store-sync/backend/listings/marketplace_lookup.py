@@ -198,9 +198,24 @@ def _mydeal_groups(payload) -> list[dict]:
     if inner is None:
         inner = payload.get("data")
     if isinstance(inner, list):
-        return [row for row in inner if isinstance(row, dict)]
+        return [
+            row
+            for row in inner
+            if isinstance(row, dict)
+            and (row.get("ProductSKU") or row.get("BuyableProducts") or row.get("ExternalProductId") or row.get("ExternalProductID"))
+        ]
     if isinstance(inner, dict):
-        return [inner]
+        nested = inner.get("Items") or inner.get("items")
+        if isinstance(nested, list):
+            return [
+                row
+                for row in nested
+                if isinstance(row, dict)
+                and (row.get("ProductSKU") or row.get("BuyableProducts"))
+            ]
+        if inner.get("ProductSKU") or inner.get("BuyableProducts") or inner.get("ExternalProductId") or inner.get("ExternalProductID"):
+            return [inner]
+        return []
     if payload.get("ProductSKU") or payload.get("BuyableProducts") or payload.get("ExternalProductId"):
         return [payload]
     return []

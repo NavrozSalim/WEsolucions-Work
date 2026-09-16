@@ -494,6 +494,42 @@ class MarketplaceLookupTests(TestCase):
         self.assertEqual(result["results"], [])
         self.assertIn("not found", result["message"].lower())
 
+    @patch("listings.mydeal.client.MyDealClient")
+    def test_mydeal_lookup_complete_with_product_not_found_errors(self, mock_client_cls):
+        store = self._mydeal_store()
+        mock_client = MagicMock()
+        mock_client.environment = "production"
+        mock_client.get_product.return_value = MyDealResult(
+            ok=False,
+            data={
+                "ResponseStatus": "Complete",
+                "Errors": [{"ID": "ProductNotFound", "Code": "302", "Message": "Product(s) not found in marketplace. "}],
+            },
+            message="Product(s) not found in marketplace.",
+            status=200,
+            response_status="Complete",
+        )
+        mock_client_cls.return_value = mock_client
+        result = marketplace_lookup.lookup_sku(store, "PD1-50X50")
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["found"])
+
+    def test_mydeal_groups_from_data_list(self):
+        groups = marketplace_lookup._mydeal_groups(
+            {
+                "ResponseStatus": "Complete",
+                "Data": [{"ProductSKU": "WK002", "Title": "Midnight Horizon"}],
+            }
+        )
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["ProductSKU"], "WK002")
+
+    def test_mydeal_groups_ignores_empty_data_dict(self):
+        self.assertEqual(
+            marketplace_lookup._mydeal_groups({"ResponseStatus": "Complete", "Data": {}}),
+            [],
+        )
+
     def test_mydeal_lookup_missing_credentials(self):
         store = self._mydeal_store()
         store.mydeal_production_client_id = ""

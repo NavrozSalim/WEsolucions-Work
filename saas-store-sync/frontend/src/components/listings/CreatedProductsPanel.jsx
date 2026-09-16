@@ -175,6 +175,12 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                     </Button>
                 </div>
             </div>
+            {publishing && (
+                <div className="flex items-center gap-2 border-b border-sky-200 bg-sky-50 px-4 py-2.5 text-sm text-sky-800 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200">
+                    <RefreshCw className="h-4 w-4 shrink-0 animate-spin" />
+                    Creating products on MyDeal. This can take several minutes. Do not click Publish again.
+                </div>
+            )}
 
             <div className="overflow-x-auto">
                 {loading && listings.length === 0 ? (
