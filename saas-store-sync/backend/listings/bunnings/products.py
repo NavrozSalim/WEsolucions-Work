@@ -139,6 +139,13 @@ CORE_PRODUCT_CODES = frozenset({
     "image-6",
 })
 _ATTR_CACHE: dict[tuple, list] = {}
+_VALUE_LIST_CACHE: dict[str, dict[str, list[dict]]] = {}
+# Mirakl LIST attributes must be sent as value-list codes, not labels.
+DEFAULT_ATTR_VALUE_LISTS = {
+    "BRAND": "BRAND_LIST",
+    "PRIMARY_UOM": "UNITS_OF_MEASURE",
+}
+MAX_INLINE_LIST_VALUES = 400
 _DIM_FALLBACKS = {
     "weight": ("weight", "product-weight", "gross-weight"),
     "length": ("length", "product-length", "package-length"),
@@ -436,6 +443,7 @@ def flatten_product_attributes(payload) -> list[dict]:
             "recommended": recommended,
             "type": str(raw.get("type") or "TEXT").strip(),
             "values": values,
+            "values_list": _values_list_code(raw),
             "variant": bool(raw.get("variant")),
         })
     out.sort(key=lambda r: (not r["required"], r["label"].lower()))
@@ -481,8 +489,127 @@ def load_category_attributes(store, hierarchy_code: str) -> list[dict]:
         logger.warning("Bunnings PM11 rejected hierarchy=%s: %s", code, result.message)
         return []
     rows = flatten_product_attributes(result.data)
+    attach_list_values(store, rows)
     _ATTR_CACHE[cache_key] = rows
     return rows
+
+
+def _values_list_code(raw: dict) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    skip = {"", "LIST", "TEXT", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "MEDIA", "LONG_TEXT"}
+    for key in ("values_list", "values_list_code", "type_parameter"):
+        val = raw.get(key)
+        if isinstance(val, dict):
+            val = val.get("value") or val.get("code")
+        code = str(val or "").strip()
+        if code and code.upper() not in skip:
+            return code
+    for item in raw.get("type_parameters") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name") or "").strip().upper() in ("LIST_CODE", "VALUES_LIST"):
+            return str(item.get("value") or item.get("code") or "").strip()
+    return ""
+
+
+def load_value_lists(store) -> dict[str, list[dict]]:
+    """code → [{code, label}, ...] from Mirakl VL11."""
+    if store is None:
+        return {}
+    cache_key = str(getattr(store, "id", "") or "")
+    if cache_key and cache_key in _VALUE_LIST_CACHE:
+        return _VALUE_LIST_CACHE[cache_key]
+    out: dict[str, list[dict]] = {}
+    try:
+        client = BunningsClient(store)
+        result = client.get("/api/values_lists", params={"max": 10000})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Bunnings value lists failed store=%s: %s", getattr(store, "id", None), exc)
+        return {}
+    data = getattr(result, "data", None)
+    if getattr(result, "ok", False) is not True or not isinstance(data, dict):
+        if getattr(result, "ok", None) is False:
+            logger.warning(
+                "Bunnings value lists rejected store=%s: %s",
+                getattr(store, "id", None),
+                getattr(result, "message", None),
+            )
+        return {}
+    for lst in data.get("values_lists") or []:
+        if not isinstance(lst, dict):
+            continue
+        list_code = str(lst.get("code") or "").strip()
+        if not list_code:
+            continue
+        entries = []
+        for val in lst.get("values") or []:
+            if not isinstance(val, dict):
+                continue
+            vcode = str(val.get("code") or "").strip()
+            if not vcode:
+                continue
+            entries.append({
+                "code": vcode,
+                "label": str(val.get("label") or vcode).strip() or vcode,
+            })
+        out[list_code] = entries
+    if cache_key and out:
+        _VALUE_LIST_CACHE[cache_key] = out
+    return out
+
+
+def attach_list_values(store, attributes: list[dict]) -> list[dict]:
+    """Fill attribute.values from VL11 when PM11 left values empty."""
+    if not attributes:
+        return attributes
+    lists = load_value_lists(store)
+    if not lists:
+        return attributes
+    for attr in attributes:
+        if not isinstance(attr, dict):
+            continue
+        if attr.get("values"):
+            continue
+        list_code = str(attr.get("values_list") or "").strip() or DEFAULT_ATTR_VALUE_LISTS.get(
+            str(attr.get("code") or "").strip().upper(),
+            "",
+        )
+        entries = lists.get(list_code) or []
+        if entries and len(entries) <= MAX_INLINE_LIST_VALUES:
+            attr["values"] = entries
+    return attributes
+
+
+def resolve_list_value(value_lists: dict | None, list_code: str, raw) -> str:
+    """Map a typed label (Shemaya / Each) to the Mirakl list code (684010 / EA)."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    entries = (value_lists or {}).get(str(list_code or "").strip()) or []
+    if not entries:
+        return text
+    for item in entries:
+        if str(item.get("code") or "").strip() == text:
+            return str(item["code"]).strip()
+    low = text.lower()
+    for item in entries:
+        code = str(item.get("code") or "").strip()
+        label = str(item.get("label") or "").strip()
+        if code.lower() == low or label.lower() == low:
+            return code
+    return text
+
+
+def _list_code_for_attr(attr_name: str, list_by_attr: dict | None) -> str:
+    key = str(attr_name or "").strip()
+    mapping = list_by_attr or {}
+    return (
+        mapping.get(key)
+        or mapping.get(key.upper())
+        or mapping.get(key.lower())
+        or DEFAULT_ATTR_VALUE_LISTS.get(key.upper(), "")
+    )
 
 
 def _attr_lookup(attrs: dict, code: str) -> str:
@@ -542,7 +669,7 @@ def _write_csv(headers: list[str], rows: list[dict]) -> str:
     return buf.getvalue()
 
 
-def product_row(listing: StoreListing) -> dict:
+def product_row(listing: StoreListing, value_lists: dict | None = None, list_by_attr: dict | None = None) -> dict:
     extras = parse_extras(listing)
     sku = listing_sku(listing)
     photos = _photo_urls(listing)
@@ -556,6 +683,8 @@ def product_row(listing: StoreListing) -> dict:
     brand = (listing.brand or "").strip()
     category = (listing.category or "").strip()
     extras_attrs = extras.get("attributes") if isinstance(extras.get("attributes"), dict) else {}
+    value_lists = value_lists or {}
+    list_by_attr = list_by_attr or {}
     row = {
         "category": category,
         "product-id": sku,
@@ -598,6 +727,10 @@ def product_row(listing: StoreListing) -> dict:
             continue
         if not any(row.get(alias) for alias in aliases):
             row[aliases[0]] = val
+    for key, value in list(row.items()):
+        list_code = _list_code_for_attr(key, list_by_attr)
+        if list_code:
+            row[key] = resolve_list_value(value_lists, list_code, value)
     return row
 
 
@@ -622,7 +755,23 @@ def offer_row(listing: StoreListing, *, delete: bool = False) -> dict:
 
 
 def products_csv(listings: list[StoreListing]) -> str:
-    rows = [product_row(l) for l in listings]
+    store = getattr(listings[0], "store", None) if listings else None
+    value_lists = load_value_lists(store) if store is not None else {}
+    list_by_attr = dict(DEFAULT_ATTR_VALUE_LISTS)
+    categories = {
+        str(getattr(listing, "category", None) or parse_extras(listing).get("category") or "").strip()
+        for listing in listings
+    }
+    if store is not None:
+        for category in categories:
+            if not category:
+                continue
+            for item in load_category_attributes(store, category):
+                list_code = str(item.get("values_list") or "").strip()
+                attr = str(item.get("code") or "").strip()
+                if list_code and attr:
+                    list_by_attr[attr.upper()] = list_code
+    rows = [product_row(l, value_lists=value_lists, list_by_attr=list_by_attr) for l in listings]
     extra: list[str] = []
     known = set(PRODUCT_CSV_HEADERS)
     for row in rows:

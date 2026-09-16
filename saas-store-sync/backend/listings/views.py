@@ -356,9 +356,11 @@ class StoreBunningsAttributesView(APIView):
                 {'detail': result.message or 'Could not load Bunnings category attributes.'},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
+        attributes = bunnings_products.flatten_product_attributes(result.data)
+        bunnings_products.attach_list_values(store, attributes)
         return Response({
             'hierarchy': hierarchy,
-            'attributes': bunnings_products.flatten_product_attributes(result.data),
+            'attributes': attributes,
         })
 
 

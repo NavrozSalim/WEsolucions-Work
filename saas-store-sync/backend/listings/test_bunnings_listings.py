@@ -126,6 +126,34 @@ class BunningsProductsUnitTests(SimpleTestCase):
         )
         self.assertFalse(import_has_line_errors({"import_status": "SENT"}))
 
+    def test_import_has_line_errors_on_transform_errors(self):
+        self.assertTrue(
+            import_has_line_errors(
+                {
+                    "import_status": "COMPLETE",
+                    "lines_in_error": 0,
+                    "has_error_report": False,
+                    "transform_lines_in_error": 1,
+                    "transform_lines_in_success": 0,
+                    "has_transformation_error_report": True,
+                }
+            )
+        )
+
+    def test_parse_transformation_error_report_maps_brand_2006(self):
+        csv_text = (
+            "error-code;error-message;attribute-code;attribute-value\n"
+            "2006;The value is not in the list of accepted values;BRAND;Shemaya\n"
+            "2006;The value is not in the list of accepted values;PRIMARY_UOM;Each\n"
+        )
+        rows = parse_mirakl_error_report(csv_text)
+        self.assertEqual(len(rows), 2)
+        self.assertIn("2006", rows[0]["errors"])
+        self.assertIn("BRAND", rows[0]["errors"])
+        self.assertIn("Shemaya", rows[0]["errors"])
+        self.assertIn("PRIMARY_UOM", rows[1]["errors"])
+        self.assertIn("Each", rows[1]["errors"])
+
     def test_poll_import_fails_complete_with_line_errors(self):
         store = SimpleNamespace(
             name="t",
@@ -169,6 +197,37 @@ class BunningsProductsUnitTests(SimpleTestCase):
         result = client.poll_import("product", "9", attempts=2, interval=0)
         self.assertFalse(result.ok)
         self.assertIn("still", result.message.lower())
+
+    def test_poll_import_fails_complete_with_transform_errors(self):
+        store = SimpleNamespace(
+            name="t",
+            bunnings_environment="production",
+            bunnings_production_base_url="https://bunnings-prod.mirakl.net",
+            bunnings_production_shop_key="key",
+        )
+        client = BunningsClient(store)
+        client.product_import_status = lambda _id: BunningsResult(
+            ok=True,
+            data={
+                "import_status": "COMPLETE",
+                "lines_in_error": 0,
+                "has_error_report": False,
+                "transform_lines_in_error": 1,
+                "transform_lines_in_success": 0,
+                "has_transformation_error_report": True,
+            },
+        )
+        client.import_error_report = lambda _kind, _id: BunningsResult(
+            ok=True,
+            data=(
+                "error-code;error-message;attribute-code;attribute-value\n"
+                "2006;The value is not in the list of accepted values;BRAND;Shemaya\n"
+            ),
+        )
+        result = client.poll_import("product", "1664882", attempts=1, interval=0)
+        self.assertFalse(result.ok)
+        self.assertIn("2006", result.message)
+        self.assertIn("BRAND", result.message)
 
     def test_validate_variations_require_shared_product_key(self):
         data = {
@@ -281,6 +340,22 @@ class BunningsProductsUnitTests(SimpleTestCase):
         assembly = next(r for r in rows if r["code"] == "attribute_pdb_assembly")
         self.assertTrue(assembly["required"])
 
+    def test_flatten_product_attributes_keeps_values_list_code(self):
+        rows = bunnings_products.flatten_product_attributes({
+            "attributes": [
+                {
+                    "code": "PRIMARY_UOM",
+                    "label": "Primary unit of measure",
+                    "requirement_level": "REQUIRED",
+                    "type": "LIST",
+                    "type_parameters": [{"name": "LIST_CODE", "value": "UNITS_OF_MEASURE"}],
+                    "values": None,
+                },
+            ]
+        })
+        self.assertEqual(rows[0]["values_list"], "UNITS_OF_MEASURE")
+        self.assertEqual(rows[0]["values"], [])
+
     def test_template_attribute_columns_skips_core_and_formats_header(self):
         store = SimpleNamespace(id="s1")
         with patch(
@@ -348,6 +423,83 @@ class BunningsProductsUnitTests(SimpleTestCase):
         self.assertIn("Yes", text)
         self.assertIn("2.5", text)
         self.assertIn("30", text)
+
+    def test_resolve_list_value_maps_label_and_code(self):
+        lists = {
+            "BRAND_LIST": [{"code": "684010", "label": "Shemaya"}],
+            "UNITS_OF_MEASURE": [{"code": "EA", "label": "Each"}],
+        }
+        self.assertEqual(
+            bunnings_products.resolve_list_value(lists, "BRAND_LIST", "Shemaya"),
+            "684010",
+        )
+        self.assertEqual(
+            bunnings_products.resolve_list_value(lists, "BRAND_LIST", "684010"),
+            "684010",
+        )
+        self.assertEqual(
+            bunnings_products.resolve_list_value(lists, "UNITS_OF_MEASURE", "Each"),
+            "EA",
+        )
+        self.assertEqual(
+            bunnings_products.resolve_list_value(lists, "BRAND_LIST", "UnknownBrand"),
+            "UnknownBrand",
+        )
+
+    def test_product_row_maps_brand_and_uom_labels_to_codes(self):
+        listing = _listing_ns(
+            brand="Shemaya",
+            attributes={"PRIMARY_UOM": "Each"},
+        )
+        value_lists = {
+            "BRAND_LIST": [{"code": "684010", "label": "Shemaya"}],
+            "UNITS_OF_MEASURE": [{"code": "EA", "label": "Each"}],
+        }
+        row = bunnings_products.product_row(listing, value_lists=value_lists)
+        self.assertEqual(row["BRAND"], "684010")
+        self.assertEqual(row["brand"], "684010")
+        self.assertEqual(row["PRIMARY_UOM"], "EA")
+
+    def test_products_csv_maps_list_labels_when_store_has_value_lists(self):
+        listing = _listing_ns(
+            brand="Shemaya",
+            attributes={"PRIMARY_UOM": "Each"},
+        )
+        listing.store = SimpleNamespace(id="store-vl")
+        value_lists = {
+            "BRAND_LIST": [{"code": "684010", "label": "Shemaya"}],
+            "UNITS_OF_MEASURE": [{"code": "EA", "label": "Each"}],
+        }
+        with patch(
+            "listings.bunnings.products.load_value_lists",
+            return_value=value_lists,
+        ), patch(
+            "listings.bunnings.products.load_category_attributes",
+            return_value=[{
+                "code": "PRIMARY_UOM",
+                "values_list": "UNITS_OF_MEASURE",
+            }],
+        ):
+            text = bunnings_products.products_csv([listing])
+        self.assertIn("684010", text)
+        self.assertIn(";EA;", text.replace("\n", ";"))
+        self.assertNotIn("Shemaya", text)
+        self.assertNotIn(";Each;", f";{text.splitlines()[-1]};")
+
+    def test_attach_list_values_inlines_small_lists_only(self):
+        attrs = [
+            {"code": "PRIMARY_UOM", "values": [], "values_list": "UNITS_OF_MEASURE"},
+            {"code": "BRAND", "values": [], "values_list": "BRAND_LIST"},
+        ]
+        small = [{"code": "EA", "label": "Each"}]
+        huge = [{"code": str(i), "label": f"Brand {i}"} for i in range(401)]
+        with patch(
+            "listings.bunnings.products.load_value_lists",
+            return_value={"UNITS_OF_MEASURE": small, "BRAND_LIST": huge},
+        ):
+            bunnings_products.attach_list_values(SimpleNamespace(id="s1"), attrs)
+        self.assertEqual(attrs[0]["values"], small)
+        self.assertEqual(attrs[1]["values"], [])
 
 
 class BunningsCatalogProductUnitTests(SimpleTestCase):
@@ -851,6 +1003,38 @@ class BunningsListingServiceTests(TestCase):
         self.assertEqual(listing.status, ListingStatus.FAILED)
         self.assertTrue(listing.validation_errors_json)
         self.assertIn("1004", listing.validation_errors_json[0])
+        client.import_offers.assert_not_called()
+
+    @patch("listings.bunnings.products.BunningsClient")
+    def test_publish_fails_when_p41_has_transform_errors(self, mock_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        client = mock_cls.return_value
+        client.environment = "production"
+        client.import_products.return_value = BunningsResult(ok=True, data={"import_id": "p1"})
+        client.poll_import.return_value = BunningsResult(
+            ok=False,
+            data={
+                "import_status": "COMPLETE",
+                "transform_lines_in_error": 1,
+                "transform_lines_in_success": 0,
+                "has_transformation_error_report": True,
+                "line_errors": [
+                    {
+                        "sku": "BN-1",
+                        "errors": "2006|BRAND=Shemaya: The value is not in the list of accepted values",
+                    }
+                ],
+            },
+            message=(
+                "Bunnings product import p1 COMPLETE with errors. 1 line(s) rejected. "
+                "BN-1: 2006|BRAND=Shemaya: The value is not in the list of accepted values"
+            ),
+        )
+        result = listing_service.publish(self.user, self.store)
+        self.assertFalse(result["ok"])
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.FAILED)
+        self.assertIn("2006", listing.validation_errors_json[0])
         client.import_offers.assert_not_called()
 
     @patch("listings.bunnings.products.time.sleep", return_value=None)

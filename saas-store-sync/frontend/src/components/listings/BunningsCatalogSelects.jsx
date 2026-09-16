@@ -536,11 +536,17 @@ export function BunningsAttributeFields({ storeId, hierarchy, value, onChange })
                         </>
                     );
                     if (kind === 'select' && listValues.length > 0) {
+                        const rawVal = current[field.code] || '';
+                        const selectedCode = listValues.some((opt) => opt.code === rawVal)
+                            ? rawVal
+                            : (listValues.find(
+                                (opt) => String(opt.label || '').toLowerCase() === String(rawVal).toLowerCase(),
+                            )?.code || rawVal);
                         return (
                             <div key={field.code}>
                                 {nameEl}
                                 <select
-                                    value={current[field.code] || ''}
+                                    value={selectedCode}
                                     required={!!field.required}
                                     onChange={(e) => setCode(field.code, e.target.value)}
                                     className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-sm focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-none"

@@ -246,20 +246,23 @@ class BunningsClient:
         return self.get(f"/api/offers/imports/{import_id}")
 
     def import_error_report(self, kind: str, import_id) -> BunningsResult:
-        """P44 / OF03 — CSV of rejected rows (errors column)."""
+        """P44 / OF03, then P47 transformation errors when P44 is empty."""
         if kind == "product":
             path = f"/api/products/imports/{import_id}/error_report"
         else:
             path = f"/api/offers/imports/{import_id}/error_report"
         result = self.get(path, accept="*/*")
-        if result.ok or result.status not in (404, 405):
-            return result
         if kind != "product":
             return result
-        return self.get(
+        if result.ok and parse_mirakl_error_report(result.data):
+            return result
+        transform = self.get(
             f"/api/products/imports/{import_id}/transformation_error_report",
             accept="*/*",
         )
+        if transform.ok and parse_mirakl_error_report(transform.data):
+            return transform
+        return result if result.ok else transform
 
     def list_offers(self, *, sku: str = "", max_results: int = 10) -> BunningsResult:
         params = {"max": max(1, min(int(max_results or 10), 100))}
@@ -546,7 +549,10 @@ def _int_field(data, *keys) -> int:
 
 
 def line_error_count(data) -> int:
-    return _int_field(data, "lines_in_error", "linesInError", "error_lines", "nb_error")
+    return max(
+        _int_field(data, "lines_in_error", "linesInError", "error_lines", "nb_error"),
+        _int_field(data, "transform_lines_in_error", "transformLinesInError"),
+    )
 
 
 def import_has_line_errors(data) -> bool:
@@ -558,6 +564,13 @@ def import_has_line_errors(data) -> bool:
     errors = line_error_count(data)
     if errors > 0:
         return True
+    has_transform_report = data.get(
+        "has_transformation_error_report", data.get("hasTransformationErrorReport")
+    )
+    if has_transform_report in (True, "true", "True", 1, "1"):
+        transform_ok = _int_field(data, "transform_lines_in_success", "transformLinesInSuccess")
+        if transform_ok == 0:
+            return True
     has_report = data.get("has_error_report", data.get("hasErrorReport"))
     if has_report in (True, "true", "True", 1, "1"):
         success = _int_field(data, "lines_in_success", "linesInSuccess")
@@ -608,9 +621,36 @@ def parse_mirakl_error_report(payload) -> list[dict]:
             or mapped.get("product_id")
             or mapped.get("sku")
             or mapped.get("shop_sku")
+            or mapped.get("product-sku")
             or ""
         )
-        err = mapped.get("errors") or mapped.get("error") or mapped.get("error-message") or ""
+        err = (
+            mapped.get("errors")
+            or mapped.get("error")
+            or mapped.get("error-message")
+            or mapped.get("error_message")
+            or mapped.get("message")
+            or ""
+        )
+        attr = (
+            mapped.get("attribute-code")
+            or mapped.get("attribute_code")
+            or mapped.get("attribute")
+            or ""
+        )
+        val = (
+            mapped.get("attribute-value")
+            or mapped.get("attribute_value")
+            or mapped.get("value")
+            or ""
+        )
+        code = mapped.get("error-code") or mapped.get("error_code") or ""
+        if attr and err:
+            err = f"{attr}={val}: {err}" if val else f"{attr}: {err}"
+        elif not err and (attr or val):
+            err = f"{attr}={val}".strip("=")
+        if code and err and code not in err:
+            err = f"{code}|{err}"
         if err:
             rows.append({"sku": sku, "errors": err})
     return rows
