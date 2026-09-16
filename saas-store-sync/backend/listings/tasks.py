@@ -232,34 +232,66 @@ def fetch_all_reverb_orders():
 def publish_store_listings(self, user_id, store_id, listing_ids=None):
     """Background MyDeal (and future) listing publish on the ingest queue."""
     from . import listing_service
+    from . import publish_progress as pub_prog
     from .models import ListingAction, ListingUpload
 
+    my_id = str(getattr(getattr(self, "request", None), "id", "") or "")
     User = get_user_model()
     try:
         user = User.objects.get(pk=user_id)
         store = Store.objects.select_related("marketplace", "user").get(pk=store_id)
     except (User.DoesNotExist, Store.DoesNotExist):
+        pub_prog.finish_publish_progress(
+            store_id,
+            job_id=my_id,
+            error="not_found",
+            message="Store or user not found.",
+        )
         return {"ok": False, "error": "not_found", "message": "Store or user not found."}
 
     try:
-        result = listing_service.publish(user, store, listing_ids)
-    except MarketplaceError as exc:
-        return {"ok": False, "error": str(exc), "message": str(exc)}
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Listing publish task failed store=%s", store_id)
-        return {"ok": False, "error": str(exc), "message": str(exc) or "Publish failed."}
+        try:
+            result = listing_service.publish(user, store, listing_ids)
+        except MarketplaceError as exc:
+            pub_prog.finish_publish_progress(
+                store_id, job_id=my_id, error=str(exc), message=str(exc),
+            )
+            return {"ok": False, "error": str(exc), "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Listing publish task failed store=%s", store_id)
+            msg = str(exc) or "Publish failed."
+            pub_prog.finish_publish_progress(
+                store_id, job_id=my_id, error=msg, message=msg,
+            )
+            return {"ok": False, "error": str(exc), "message": msg}
 
-    uploaded = int(result.get("uploaded") or result.get("published") or 0)
-    failed = int(result.get("failed") or 0)
-    listing_service.record_activity(
-        user,
-        store,
-        action=ListingAction.CREATE,
-        source=ListingUpload.Source.SINGLE,
-        filename="Publish to marketplace",
-        total=uploaded + failed,
-        success=uploaded,
-        errors=failed,
-        message=result.get("message") or "",
-    )
-    return result
+        uploaded = int(result.get("uploaded") or result.get("published") or 0)
+        failed = int(result.get("failed") or 0)
+        listing_service.record_activity(
+            user,
+            store,
+            action=ListingAction.CREATE,
+            source=ListingUpload.Source.SINGLE,
+            filename="Publish to marketplace",
+            total=uploaded + failed,
+            success=uploaded,
+            errors=failed,
+            message=result.get("message") or "",
+        )
+        pub_prog.finish_publish_progress(
+            store_id,
+            job_id=my_id,
+            message=result.get("message") or "",
+            result={
+                "ok": result.get("ok"),
+                "published": uploaded,
+                "uploaded": uploaded,
+                "failed": failed,
+                "message": result.get("message") or "",
+            },
+        )
+        return result
+    finally:
+        live = pub_prog.get_publish_progress(store_id)
+        if live.get("active") and (not my_id or live.get("job_id") == my_id):
+            pub_prog.finish_publish_progress(store_id, job_id=my_id)

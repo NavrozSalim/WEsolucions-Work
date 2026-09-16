@@ -145,6 +145,8 @@ class StoreListingListCreateView(APIView):
         response = paginator.get_paginated_response(payload)
         if publishable_count is not None:
             response.data['publishable_count'] = publishable_count
+            from . import publish_progress as pub_prog
+            response.data['publish_job'] = pub_prog.enrich_publish_progress(store.id)
 
         if view == 'inventory':
             # Pending scrapeable count (not limited to current page/search)
@@ -973,7 +975,7 @@ class StoreListingPublishJobView(APIView):
     def get(self, request, store_pk, job_id):
         from celery.result import AsyncResult
 
-        _get_store(request, store_pk)
+        store = _get_store(request, store_pk)
         result = AsyncResult(job_id)
         data = {
             'job_id': job_id,
@@ -986,6 +988,30 @@ class StoreListingPublishJobView(APIView):
                 data['result'] = result.result
             else:
                 data['error'] = str(result.result) if result.result else 'Publish failed'
+            from . import publish_progress as pub_prog
+            live = pub_prog.get_publish_progress(store.id)
+            if live.get('active') and live.get('job_id') == str(job_id):
+                payload = data.get('result') if isinstance(data.get('result'), dict) else None
+                pub_prog.finish_publish_progress(
+                    store.id,
+                    job_id=str(job_id),
+                    message=(payload or {}).get('message') or data.get('error') or '',
+                    error=data.get('error') or '',
+                    result=payload,
+                )
+        return Response(data)
+
+
+class StoreListingPublishProgressView(APIView):
+    """Live Created-products publish banner (survives reload and leaving the page)."""
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ProgressReadRateThrottle]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        from . import publish_progress as pub_prog
+        data = pub_prog.enrich_publish_progress(store.id)
+        data['store_id'] = str(store.id)
         return Response(data)
 
 

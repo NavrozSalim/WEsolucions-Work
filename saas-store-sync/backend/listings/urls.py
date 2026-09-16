@@ -7,6 +7,7 @@ from .views import (
     StoreListingPhotoUploadView,
     StoreListingPublishView,
     StoreListingPublishJobView,
+    StoreListingPublishProgressView,
     StoreListingPushInventoryView,
     StoreListingResetInventoryView,
     StoreListingCriticalInventoryView,
@@ -68,6 +69,11 @@ urlpatterns = [
         name='store-listings-upload-delete',
     ),
     path('stores/<uuid:store_pk>/listings/publish/', StoreListingPublishView.as_view(), name='store-listings-publish'),
+    path(
+        'stores/<uuid:store_pk>/listings/publish/progress/',
+        StoreListingPublishProgressView.as_view(),
+        name='store-listings-publish-progress',
+    ),
     path(
         'stores/<uuid:store_pk>/listings/publish/jobs/<str:job_id>/',
         StoreListingPublishJobView.as_view(),

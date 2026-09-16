@@ -57,6 +57,7 @@ export const getCreatedListings = async (storeId, options = {}) => {
         pageSize,
         totalPages: Math.max(1, Math.ceil(count / pageSize) || 1),
         publishableCount: Number.isFinite(d?.publishable_count) ? d.publishable_count : null,
+        publishJob: d?.publish_job && typeof d.publish_job === 'object' ? d.publish_job : null,
         next: d?.next || null,
         previous: d?.previous || null,
     };
@@ -67,38 +68,28 @@ export const getListing = (storeId, listingId) => api.get(`/stores/${storeId}/li
 export const updateListing = (storeId, listingId, data) => api.put(`/stores/${storeId}/listings/${listingId}/`, data);
 export const deleteListing = (storeId, listingId) => api.delete(`/stores/${storeId}/listings/${listingId}/`);
 
-function pollListingPublishJob(storeId, jobId) {
-    const start = Date.now();
-    const maxWaitMs = 6 * 60 * 60 * 1000;
-    return new Promise((resolve, reject) => {
-        const poll = () => {
-            api.get(`/stores/${storeId}/listings/publish/jobs/${jobId}/`)
-                .then((res) => {
-                    const d = res.data || {};
-                    if (d.ready) {
-                        if (d.successful) {
-                            const result = d.result || {};
-                            if (result.ok === false) {
-                                const err = new Error(result.message || result.error || 'Publish failed.');
-                                err.response = { data: result, status: 502 };
-                                return reject(err);
-                            }
-                            return resolve({ data: result, status: 200 });
-                        }
-                        return reject(new Error(d.error || 'Publish failed.'));
-                    }
-                    if (Date.now() - start > maxWaitMs) {
-                        return reject(new Error(
-                            'Publish is still running on the server. Refresh Created products — do not start another Publish all.',
-                        ));
-                    }
-                    setTimeout(poll, 3500);
-                })
-                .catch(reject);
-        };
-        poll();
-    });
+const publishJobStorageKey = (storeId) => `listing-publish-job:${storeId}`;
+
+export function persistListingPublishJob(storeId, jobId) {
+    try {
+        if (jobId) sessionStorage.setItem(publishJobStorageKey(storeId), String(jobId));
+        else sessionStorage.removeItem(publishJobStorageKey(storeId));
+    } catch {
+        /* private mode / disabled storage */
+    }
 }
+
+export function readListingPublishJob(storeId) {
+    try {
+        return sessionStorage.getItem(publishJobStorageKey(storeId)) || '';
+    } catch {
+        return '';
+    }
+}
+
+/** Live Created-products publish banner (survives reload and leaving the page). */
+export const getListingPublishProgress = (storeId) =>
+    api.get(`/stores/${storeId}/listings/publish/progress/`);
 
 /** Push READY/FAILED created listings to the marketplace; optionally only specific ids. */
 export const publishListings = (storeId, listingIds = null) =>
@@ -107,9 +98,8 @@ export const publishListings = (storeId, listingIds = null) =>
         listingIds ? { listing_ids: listingIds } : {},
         { timeout: 180_000 },
     ).then((res) => {
-        if (res.data?.job_id) {
-            return pollListingPublishJob(storeId, res.data.job_id);
-        }
+        const jobId = res.data?.job_id;
+        if (jobId) persistListingPublishJob(storeId, jobId);
         return res;
     });
 

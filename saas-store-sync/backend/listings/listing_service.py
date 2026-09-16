@@ -1849,11 +1849,19 @@ MYDEAL_PUBLISH_ASYNC_MIN = 15
 
 def start_publish_async(user, store, listing_ids=None) -> dict:
     """Queue MyDeal publish on the ingest worker so Gunicorn is not killed at 120s."""
+    from . import publish_progress as pub_prog
     from .tasks import publish_store_listings
 
     kind = marketplace_kind(store.marketplace)
     if kind != "mydeal":
         raise MarketplaceError("Background publish is only used for MyDeal.")
+
+    live = pub_prog.enrich_publish_progress(store.id)
+    if live.get("active"):
+        raise MarketplaceError(
+            "A publish is already running for this store. Wait for it to finish — "
+            "the Created products banner stays visible if you leave and come back."
+        )
 
     from .mydeal import products as mydeal_products
 
@@ -1897,15 +1905,24 @@ def start_publish_async(user, store, listing_ids=None) -> dict:
             "Could not start the publish worker. Try again in a moment."
         ) from exc
 
+    job_id = str(getattr(async_res, "id", "") or "")
+    queued = len(id_strs)
+    message = (
+        f"Creating {queued} listing(s) on MyDeal. This can take several minutes. "
+        "You can leave this page — progress stays on Created products."
+    )
+    pub_prog.begin_publish_progress(
+        store.id,
+        job_id=job_id,
+        queued=queued,
+        message=message,
+    )
     return {
         "ok": True,
         "async": True,
-        "job_id": str(getattr(async_res, "id", "") or ""),
-        "queued": len(id_strs),
-        "message": (
-            f"Creating {len(id_strs)} listing(s) on MyDeal. "
-            "This can take several minutes. Keep this page open and do not click Publish again."
-        ),
+        "job_id": job_id,
+        "queued": queued,
+        "message": message,
     }
 
 

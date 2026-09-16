@@ -845,6 +845,7 @@ class ListingServiceTests(TestCase):
         self.assertEqual(res.data["count"], 12)
         self.assertEqual(len(res.data["results"]), 10)
         self.assertEqual(res.data["publishable_count"], 12)
+        self.assertFalse(res.data["publish_job"]["active"])
 
     @patch("listings.tasks.ingest_listing_bulk_upload.delay")
     def test_bulk_upload_http_returns_pending(self, mock_delay):

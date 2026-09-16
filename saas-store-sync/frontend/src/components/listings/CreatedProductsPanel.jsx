@@ -1,7 +1,14 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pencil, RefreshCw, Send, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
-import { deleteListing, getCreatedListings, publishListings } from '../../services/listingService';
+import {
+    deleteListing,
+    getCreatedListings,
+    getListingPublishProgress,
+    persistListingPublishJob,
+    publishListings,
+    readListingPublishJob,
+} from '../../services/listingService';
 import ListingFormModal from './ListingFormModal';
 
 const STATUS_STYLES = {
@@ -62,9 +69,15 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
     const [page, setPage] = useState(1);
     const [loading, setLoading] = useState(false);
     const [publishing, setPublishing] = useState(false);
+    const [publishQueued, setPublishQueued] = useState(0);
     const [editListing, setEditListing] = useState(null);
     const [editOpen, setEditOpen] = useState(false);
     const [filter, setFilter] = useState('all');
+    const publishWasActiveRef = useRef(false);
+    const publishStartingRef = useRef(false);
+    const loadRef = useRef(() => {});
+    const onMessageRef = useRef(onMessage);
+    onMessageRef.current = onMessage;
 
     useEffect(() => {
         setPage(1);
@@ -91,6 +104,11 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                         ).length,
                     );
                 }
+                if (res.publishJob?.active) {
+                    setPublishing(true);
+                    setPublishQueued(Number(res.publishJob.queued) || 0);
+                    if (res.publishJob.job_id) persistListingPublishJob(storeId, res.publishJob.job_id);
+                }
                 if (res.page > res.totalPages && res.totalPages >= 1) {
                     setPage(res.totalPages);
                 }
@@ -109,18 +127,90 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
         load();
     }, [load, reloadNonce]);
 
+    useEffect(() => {
+        loadRef.current = load;
+    }, [load]);
+
+    useEffect(() => {
+        if (storeId && readListingPublishJob(storeId)) {
+            setPublishing(true);
+        }
+    }, [storeId]);
+
+    // Poll server publish progress so the banner survives reload and tab switches.
+    useEffect(() => {
+        if (!storeId) return undefined;
+        let cancelled = false;
+        let refreshTick = 0;
+        publishWasActiveRef.current = false;
+        const tick = () => {
+            getListingPublishProgress(storeId)
+                .then((res) => {
+                    if (cancelled) return;
+                    const data = res.data || {};
+                    const active = Boolean(data.active);
+                    if (publishStartingRef.current && !active) return;
+                    if (publishStartingRef.current && active) publishStartingRef.current = false;
+                    if (active && data.job_id) persistListingPublishJob(storeId, data.job_id);
+                    const wasActive = publishWasActiveRef.current;
+                    if (wasActive && !active) {
+                        persistListingPublishJob(storeId, '');
+                        const result = data.result && typeof data.result === 'object' ? data.result : {};
+                        const ok = result.ok !== false && !data.error;
+                        const msg = data.message
+                            || result.message
+                            || data.error
+                            || (ok ? 'Published to marketplace.' : 'Publish failed.');
+                        onMessageRef.current?.(msg, ok ? 'success' : 'error');
+                        setPublishing(false);
+                        setPublishQueued(0);
+                        loadRef.current();
+                    } else if (!active) {
+                        persistListingPublishJob(storeId, '');
+                        setPublishing(false);
+                        setPublishQueued(0);
+                    }
+                    publishWasActiveRef.current = active;
+                    if (active) {
+                        setPublishing(true);
+                        setPublishQueued(Number(data.queued) || 0);
+                        refreshTick += 1;
+                        if (refreshTick % 3 === 0) loadRef.current();
+                    }
+                })
+                .catch(() => {
+                    if (cancelled) return;
+                    if (!readListingPublishJob(storeId) && !publishStartingRef.current) return;
+                });
+        };
+        tick();
+        const id = setInterval(tick, 3500);
+        return () => {
+            cancelled = true;
+            clearInterval(id);
+        };
+    }, [storeId]);
+
     const handlePublish = (ids = null) => {
         setPublishing(true);
+        publishStartingRef.current = true;
         publishListings(storeId, ids)
             .then((res) => {
+                if (res.data?.job_id || res.data?.async) {
+                    setPublishQueued(Number(res.data?.queued) || 0);
+                    return;
+                }
+                publishStartingRef.current = false;
                 onMessage?.(res.data?.message || 'Published to marketplace.', 'success');
+                setPublishing(false);
                 load();
             })
             .catch((err) => {
+                publishStartingRef.current = false;
                 onMessage?.(err.response?.data?.detail || err.response?.data?.message || 'Publish failed.', 'error');
+                setPublishing(false);
                 load();
-            })
-            .finally(() => setPublishing(false));
+            });
     };
 
     const handleDelete = (listing) => {
@@ -188,7 +278,10 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
             {publishing && (
                 <div className="flex items-center gap-2 border-b border-sky-200 bg-sky-50 px-4 py-2.5 text-sm text-sky-800 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200">
                     <RefreshCw className="h-4 w-4 shrink-0 animate-spin" />
-                    Creating products on {marketplaceLabel}. This can take several minutes. Do not click Publish again.
+                    {publishQueued > 0
+                        ? `Creating ${publishQueued} product${publishQueued === 1 ? '' : 's'} on ${marketplaceLabel}.`
+                        : `Creating products on ${marketplaceLabel}.`}
+                    {' '}This can take several minutes. You can leave this page — the banner will still be here when you come back.
                 </div>
             )}
 
