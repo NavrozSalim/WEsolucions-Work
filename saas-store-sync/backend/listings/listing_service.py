@@ -41,6 +41,37 @@ from .reverb import listings as reverb_listings
 
 logger = logging.getLogger("listings")
 
+
+def ensure_db_connection() -> None:
+    """Drop a dead Postgres handle so the next query opens a new connection."""
+    from django.db import close_old_connections, connections
+
+    close_old_connections()
+    for alias in connections:
+        conn = connections[alias]
+        try:
+            conn.close_if_unusable_or_obsolete()
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def mark_listing_upload_failed(upload_id, message: str) -> bool:
+    """Mark a queued listing file Failed even if the worker's DB connection died."""
+    ensure_db_connection()
+    upload = ListingUpload.objects.filter(pk=upload_id).first()
+    if upload is None:
+        return False
+    if upload.status not in (ListingUpload.Status.PENDING, ListingUpload.Status.PROCESSING):
+        return False
+    upload.status = ListingUpload.Status.FAILED
+    upload.message = (message or "Import failed unexpectedly.")[:2000]
+    upload.error_rows = max(int(upload.error_rows or 0), 1)
+    upload.save(update_fields=["status", "message", "error_rows"])
+    return True
+
 # Listings in these statuses exist on the marketplace and need an API call to remove.
 ON_MARKETPLACE_STATUSES = (
     ListingStatus.UPLOADED_STAGING,
@@ -57,7 +88,10 @@ HISTORY_ACTIONS = (
     ListingAction.CREATE,
     ListingAction.MAPPED,
     ListingAction.DELETE,
+    ListingAction.DELETE_SYSTEM,
 )
+FILE_ACTIONS = HISTORY_ACTIONS
+DELETE_FILE_ACTIONS = (ListingAction.DELETE, ListingAction.DELETE_SYSTEM)
 
 
 def listing_upload_history_q() -> Q:
@@ -122,6 +156,7 @@ def record_activity(
 def _touch_upload_progress(upload: ListingUpload | None, *, processed: int, success: int, errors: int, total: int | None = None):
     if upload is None:
         return
+    ensure_db_connection()
     upload.processed_rows = processed
     upload.success_rows = success
     upload.error_rows = errors
@@ -610,8 +645,8 @@ def update(listing: StoreListing, data: dict) -> StoreListing:
                 msg = NOT_IN_CONNECT_PUSH.format(sku=sku)
                 listing.status = ListingStatus.FAILED
                 listing.validation_errors_json = [msg]
-            listing.save(update_fields=["status", "validation_errors_json", "updated_at"])
-            raise MarketplaceError(msg)
+                listing.save(update_fields=["status", "validation_errors_json", "updated_at"])
+                raise MarketplaceError(msg)
         pub = _publish_lasoo(listing.user, listing.store, [listing])
         listing.refresh_from_db()
         if not pub.get("ok"):
@@ -1089,26 +1124,49 @@ def _resolve_file_action(rows: list[dict], requested: str) -> str:
     """A file must use exactly one action: from the Action column or the
     action chosen in the UI. Mixed-action files are rejected."""
     row_actions = {r.get("action") for r in rows if r.get("action")}
-    if len(row_actions) > 1:
+    return _coerce_file_action(requested, row_actions)
+
+
+def _coerce_file_action(requested: str, row_actions) -> str:
+    """UI Delete from system vs marketplace wins when the file is also a delete."""
+    requested = (requested or "").strip().lower()
+    cleaned = {a for a in (row_actions or set()) if a}
+    if len(cleaned) > 1:
         raise MarketplaceError(
             "Use one action per file. This file mixes: "
-            + ", ".join(sorted(row_actions)) + "."
+            + ", ".join(sorted(cleaned)) + "."
         )
-    action = next(iter(row_actions), "") or (requested or "").strip().lower()
-    if action not in (ListingAction.CREATE, ListingAction.MAPPED, ListingAction.DELETE):
+    from_file = next(iter(cleaned), "")
+    if from_file and from_file not in FILE_ACTIONS:
+        from_file = ""
+    if requested and requested not in FILE_ACTIONS:
+        requested = ""
+    if requested in DELETE_FILE_ACTIONS and (not from_file or from_file in DELETE_FILE_ACTIONS):
+        return requested
+    action = from_file or requested or ListingAction.CREATE
+    if action not in FILE_ACTIONS:
         action = ListingAction.CREATE
-    if requested and row_actions and action != requested.strip().lower():
+    if requested and from_file and action != requested:
         raise MarketplaceError(
-            f'You selected the "{requested}" action but the file\'s Action column says "{action}". '
+            f'You selected the "{requested}" action but the file\'s Action column says "{from_file}". '
             "Use one action per file."
         )
     return action
 
 
-def _bulk_delete(user, store, filename: str, rows: list[dict], upload: ListingUpload | None = None) -> dict:
-    """Delete listings by SKU: end on marketplace when present, then locally."""
+def _bulk_delete(
+    user,
+    store,
+    filename: str,
+    rows: list[dict],
+    upload: ListingUpload | None = None,
+    *,
+    on_marketplace: bool = True,
+) -> dict:
+    """Delete listings by SKU. Marketplace delete is one batched call, then Hub rows are removed."""
     preview, deleted = [], 0
     to_delete = []
+    action = ListingAction.DELETE if on_marketplace else ListingAction.DELETE_SYSTEM
     for row in rows:
         sku = (row.get("sku") or "").strip()
         row_result = {
@@ -1137,13 +1195,29 @@ def _bulk_delete(user, store, filename: str, rows: list[dict], upload: ListingUp
         to_delete.append((listing, row_result))
         preview.append(row_result)
 
-    for listing, row_result in to_delete:
+    listings = [listing for listing, _row in to_delete]
+    if on_marketplace and listings:
         try:
-            delete(user, store, listing)
+            _delete_listings_marketplace(store, listings)
         except MarketplaceError as exc:
-            row_result["errors"] = [str(exc)]
-            row_result["valid"] = False
-            continue
+            err = str(exc)
+            for _listing, row_result in to_delete:
+                row_result["errors"] = [err]
+                row_result["valid"] = False
+            error_rows = sum(1 for r in preview if not r["valid"])
+            _finish_file_upload(
+                upload,
+                user=user, store=store,
+                action=action,
+                filename=filename,
+                total=len(rows), success=0, errors=error_rows,
+                rows=preview,
+                message=err[:500],
+            )
+            return {"total_rows": len(rows), "imported": 0, "action": action, "rows": preview}
+
+    for listing, row_result in to_delete:
+        listing.delete()
         row_result["imported"] = True
         deleted += 1
         if upload is not None and deleted % 50 == 0:
@@ -1156,16 +1230,20 @@ def _bulk_delete(user, store, filename: str, rows: list[dict], upload: ListingUp
             )
 
     error_rows = sum(1 for r in preview if not r["valid"])
+    if on_marketplace:
+        message = f"Deleted {deleted} listing(s) from this app and the marketplace." if deleted else ""
+    else:
+        message = f"Deleted {deleted} listing(s) from this app." if deleted else ""
     _finish_file_upload(
         upload,
         user=user, store=store,
-        action=ListingAction.DELETE,
+        action=action,
         filename=filename,
         total=len(rows), success=deleted, errors=error_rows,
         rows=preview,
-        message=f"Deleted {deleted} listing(s)." if deleted else "",
+        message=message,
     )
-    return {"total_rows": len(rows), "imported": deleted, "action": ListingAction.DELETE, "rows": preview}
+    return {"total_rows": len(rows), "imported": deleted, "action": action, "rows": preview}
 
 
 def bulk_import(
@@ -1173,7 +1251,7 @@ def bulk_import(
     upload: ListingUpload | None = None,
 ) -> dict:
     """Import listings from a CSV/XLSX template. One action per file:
-    Create (new listings), Mapped (already on the store), Delete (SKU only).
+    Create, Mapped, Delete from marketplace, or Delete from system.
     Invalid Create/Mapped rows are saved with validation_failed status so they
     show under the Error filter on Created products.
 
@@ -1184,22 +1262,30 @@ def bulk_import(
     rows = csv_import.parse_upload(filename, content)
     if not rows:
         raise MarketplaceError("No data rows found in the uploaded file.")
+    duplicate_child = {}
     if _store_kind(store) == "mydeal":
         from .mydeal import products as mydeal_products
 
         rows = mydeal_products.prepare_import_rows(rows)
+        duplicate_child = mydeal_products.duplicate_child_sku_errors(rows)
 
     file_action = _resolve_file_action(rows, action)
-    if file_action == ListingAction.DELETE:
-        return _bulk_delete(user, store, filename, rows, upload=upload)
+    if file_action in DELETE_FILE_ACTIONS:
+        return _bulk_delete(
+            user, store, filename, rows, upload=upload,
+            on_marketplace=(file_action == ListingAction.DELETE),
+        )
 
     preview, imported, error_rows = [], 0, 0
     # Activity is recorded against the UI store; rows may land on other stores.
     activity_store = store
-    for row in rows:
+    for index, row in enumerate(rows):
         target_store, route_errors = template_routing.resolve_row_store(user, store, row)
         field_errors = _validate_listing(target_store, row)
         errors = list(route_errors) + list(field_errors)
+        dup = duplicate_child.get(index)
+        if dup:
+            errors.append(dup)
         row_result = {
             "row_number": row.get("row_number"),
             "sku": row.get("sku", ""),
@@ -1223,6 +1309,11 @@ def bulk_import(
         _, variant_key = _resolve_keys(target_store, row)
         if not variant_key:
             # Nothing to upsert by; keep the row purely in the upload report.
+            error_rows += 1
+            preview.append(row_result)
+            continue
+
+        if index in duplicate_child:
             error_rows += 1
             preview.append(row_result)
             continue
@@ -1299,21 +1390,7 @@ def queue_bulk_import(user, store, filename: str, content: bytes, action: str = 
 
     requested = (action or "").strip().lower()
     row_actions = info.get("actions") or set()
-    if len(row_actions) > 1:
-        raise MarketplaceError(
-            "Use one action per file. This file mixes: "
-            + ", ".join(sorted(row_actions)) + "."
-        )
-    file_action = next(iter(row_actions), "") or requested or ListingAction.CREATE
-    if file_action not in (ListingAction.CREATE, ListingAction.MAPPED, ListingAction.DELETE):
-        file_action = ListingAction.CREATE
-    if requested and row_actions and file_action != requested:
-        raise MarketplaceError(
-            f'You selected the "{requested}" action but the file\'s Action column says "{file_action}". '
-            "Use one action per file."
-        )
-    if requested in (ListingAction.CREATE, ListingAction.MAPPED, ListingAction.DELETE) and not row_actions:
-        file_action = requested
+    file_action = _coerce_file_action(requested, row_actions)
 
     upload = ListingUpload.objects.create(
         user=user,
@@ -1360,6 +1437,7 @@ def queue_bulk_import(user, store, filename: str, content: bytes, action: str = 
 
 def run_queued_bulk_import(upload_id: str, action: str = "") -> dict:
     """Worker entry: import a previously queued listing file."""
+    ensure_db_connection()
     upload = (
         ListingUpload.objects.select_related("store", "store__marketplace", "user")
         .filter(pk=upload_id)
@@ -1388,16 +1466,11 @@ def run_queued_bulk_import(upload_id: str, action: str = "") -> dict:
         )
         return {"ok": True, **result}
     except MarketplaceError as exc:
-        upload.status = ListingUpload.Status.FAILED
-        upload.message = str(exc)
-        upload.error_rows = max(int(upload.error_rows or 0), 1)
-        upload.save(update_fields=["status", "message", "error_rows"])
+        mark_listing_upload_failed(upload_id, str(exc))
         return {"ok": False, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
         logger.exception("Queued listing bulk import failed upload=%s", upload_id)
-        upload.status = ListingUpload.Status.FAILED
-        upload.message = (str(exc) or "Import failed unexpectedly.")[:2000]
-        upload.save(update_fields=["status", "message"])
+        mark_listing_upload_failed(upload_id, str(exc) or "Import failed unexpectedly.")
         return {"ok": False, "error": str(exc)}
 
 

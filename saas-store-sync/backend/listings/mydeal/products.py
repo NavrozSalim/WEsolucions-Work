@@ -173,26 +173,17 @@ def _parent_content_score(title, description, category, photos) -> int:
 
 
 def normalize_row_keys(data: dict) -> dict:
-    """WMP rules: standalone Parent SKU == SKU; variation Parent SKU != SKU."""
+    """Parent SKU may repeat; Child SKU is unique. Parent may equal Child when there is no variation."""
     row = dict(data or {})
     sku = (
         _clean_key(row.get("sku"))
         or _clean_key(row.get("variant_key"))
         or _clean_key(row.get("product_key"))
     )
-    parent = _clean_key(row.get("product_key"))
-    pairs = collect_option_pairs(row)
-    if not pairs and (not parent or parent == sku):
-        parent = sku
+    parent = _clean_key(row.get("product_key")) or sku
     row["sku"] = sku
-    if sku and not _clean_key(row.get("variant_key")):
-        row["variant_key"] = sku
-    elif sku:
-        row["variant_key"] = _clean_key(row.get("variant_key")) or sku
-    if parent or not pairs:
-        row["product_key"] = parent or sku
-    else:
-        row["product_key"] = parent
+    row["variant_key"] = _clean_key(row.get("variant_key")) or sku
+    row["product_key"] = parent
     return row
 
 
@@ -371,24 +362,32 @@ def validate_listing(data: dict) -> list[str]:
                 f"Option name and value must both be set for SKU {label} (e.g. Size / M)."
             )
             break
-    product_key = str(data.get("product_key") or "").strip()
-    is_variant = bool(product_key and product_key != sku)
-    if pairs:
-        if not product_key:
-            errors.append(
-                f"Parent SKU is required for variation listings (SKU {label}). "
-                "Use the same Parent SKU on every size/colour and a unique SKU per row."
-            )
-        elif product_key == sku:
-            errors.append(
-                f"Parent SKU must differ from SKU {label} so MyDeal can group "
-                "sizes/colours on one product page."
-            )
-    elif is_variant:
-        errors.append(
-            f"At least Option 1 Name and Option 1 Value are required for SKU {label} "
-            "when Parent SKU differs from SKU."
-        )
+    return errors
+
+
+def duplicate_child_sku_errors(rows: list[dict]) -> dict[int, str]:
+    """Map 0-based row index to an error when Child SKU appears more than once.
+
+    Parent SKU may be duplicated. Both duplicate Child SKU rows receive the same message.
+    """
+    by_sku: OrderedDict[str, list[int]] = OrderedDict()
+    for index, row in enumerate(rows or []):
+        sku = str((row or {}).get("sku") or (row or {}).get("variant_key") or "").strip()
+        if not sku:
+            continue
+        by_sku.setdefault(sku, []).append(index)
+    errors: dict[int, str] = {}
+    for sku, indexes in by_sku.items():
+        if len(indexes) < 2:
+            continue
+        labels = []
+        for i in indexes:
+            number = (rows[i] or {}).get("row_number")
+            labels.append(str(number if number not in (None, "") else i + 1))
+        joined = " and ".join(labels) if len(labels) == 2 else ", ".join(labels)
+        message = f'Child SKU "{sku}" is used on more than one row (rows {joined}).'
+        for i in indexes:
+            errors[i] = message
     return errors
 
 
@@ -504,7 +503,7 @@ def listings_to_product_groups(
         members = bucket["listings"]
         buyables = bucket["buyables"]
         has_variation = any(
-            collect_option_pairs(listing) and parent_product_id(listing) != listing_sku(listing)
+            parent_product_id(listing) != listing_sku(listing)
             for listing in members
         )
         if has_variation:
@@ -512,7 +511,7 @@ def listings_to_product_groups(
             for listing, buyable in zip(members, buyables):
                 sku = listing_sku(listing)
                 parent = parent_product_id(listing)
-                if sku == parent and not collect_option_pairs(listing):
+                if sku == parent:
                     continue
                 kept.append(buyable)
             if kept:

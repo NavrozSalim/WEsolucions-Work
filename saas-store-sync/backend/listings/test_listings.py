@@ -253,6 +253,17 @@ class CsvImportTests(TestCase):
         rows = csv_import.parse_upload("listings.csv", content)
         self.assertEqual(rows[0]["action"], "create")
 
+    def test_parse_delete_from_system_action(self):
+        content = (
+            "Action,SKU\n"
+            "Delete from system,ABC-1\n"
+        ).encode()
+        rows = csv_import.parse_upload("del.csv", content)
+        self.assertEqual(rows[0]["action"], "delete_system")
+        self.assertEqual(rows[0]["sku"], "ABC-1")
+        template = csv_import.build_template_csv("delete_system")
+        self.assertIn("Delete from system", template)
+
     def test_parse_xlsx_with_banner_header(self):
         from openpyxl import Workbook
 
@@ -740,6 +751,43 @@ class ListingServiceTests(TestCase):
             ListingUpload.objects.filter(store=self.store, filename="ok-async.csv").count(),
             1,
         )
+
+    def test_mark_listing_upload_failed_sets_error_status(self):
+        upload = ListingUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            filename="stuck.csv",
+            source=ListingUpload.Source.FILE,
+            action=ListingAction.CREATE,
+            status=ListingUpload.Status.PENDING,
+            total_rows=10,
+            processed_rows=5,
+        )
+        ok = listing_service.mark_listing_upload_failed(upload.id, "connection already closed")
+        self.assertTrue(ok)
+        upload.refresh_from_db()
+        self.assertEqual(upload.status, ListingUpload.Status.FAILED)
+        self.assertIn("connection already closed", upload.message)
+
+    @patch("listings.tasks.ingest_listing_bulk_upload.delay")
+    def test_ingest_task_marks_failed_when_import_raises(self, mock_delay):
+        from django.db.utils import InterfaceError
+
+        from .tasks import ingest_listing_bulk_upload
+
+        content = csv_import.build_template_csv("create").encode()
+        queued = listing_service.queue_bulk_import(
+            self.user, self.store, "boom.csv", content, action="create",
+        )
+        with patch(
+            "listings.listing_service.run_queued_bulk_import",
+            side_effect=InterfaceError("connection already closed"),
+        ):
+            result = ingest_listing_bulk_upload.run(queued["upload_id"], "create")
+        self.assertFalse(result["ok"])
+        upload = ListingUpload.objects.get(pk=queued["upload_id"])
+        self.assertEqual(upload.status, ListingUpload.Status.FAILED)
+        self.assertIn("connection already closed", upload.message)
 
     def test_queue_rejects_garbage_without_history_row(self):
         with self.assertRaises(MarketplaceError):
@@ -1423,6 +1471,58 @@ class ListingServiceTests(TestCase):
         rows = csv_import.parse_upload("mydeal.csv", csv_text.encode())
         self.assertEqual(rows[0]["product_key"], "WK0132")
         self.assertEqual(rows[0]["sku"], "WK0132-FF-BBE-4D26DCM")
+
+    def test_bulk_delete_from_system_skips_marketplace(self):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        content = (
+            "Action,SKU\n"
+            f"Delete from system,{listing.sku}\n"
+        ).encode()
+        with patch.object(listing_service, "_delete_listings_marketplace") as mock_md:
+            result = listing_service.bulk_import(
+                self.user, self.store, "del.csv", content, action="delete_system",
+            )
+        mock_md.assert_not_called()
+        self.assertEqual(result["imported"], 1)
+        self.assertEqual(result["action"], "delete_system")
+        self.assertFalse(StoreListing.objects.filter(pk=listing.pk).exists())
+
+    def test_bulk_delete_from_marketplace_is_one_call(self):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        content = (
+            "Action,SKU\n"
+            f"Delete,{listing.sku}\n"
+        ).encode()
+        with patch.object(listing_service, "_delete_listings_marketplace", return_value=1) as mock_md:
+            result = listing_service.bulk_import(
+                self.user, self.store, "del.csv", content, action="delete",
+            )
+        mock_md.assert_called_once()
+        self.assertEqual(result["imported"], 1)
+        self.assertEqual(result["action"], "delete")
+        self.assertFalse(StoreListing.objects.filter(pk=listing.pk).exists())
+
+    def test_mydeal_duplicate_child_sku_marks_both_rows(self):
+        mydeal, _ = Marketplace.objects.get_or_create(code="mydeal", defaults={"name": "MyDeal"})
+        store_md = Store.objects.create(
+            user=self.user, name="MyDeal Dup", region="AU",
+            api_token="tok", marketplace=mydeal, management_mode="full_store",
+        )
+        content = (
+            "Action,Parent SKU,SKU,Title,Description,Category,Image URLs,Sale Price\n"
+            "Create,BR276,BR276,Art,Desc,3213,https://example.com/a.jpg,10\n"
+            "Create,BR276,BR276,Art,Desc,3213,https://example.com/a.jpg,10\n"
+        ).encode()
+        result = listing_service.bulk_import(
+            self.user, store_md, "dup.csv", content, action="create",
+        )
+        self.assertEqual(result["imported"], 0)
+        self.assertEqual(len(result["rows"]), 2)
+        self.assertFalse(result["rows"][0]["valid"])
+        self.assertFalse(result["rows"][1]["valid"])
+        self.assertEqual(result["rows"][0]["errors"], result["rows"][1]["errors"])
+        self.assertIn("BR276", result["rows"][0]["errors"][0])
+        self.assertIn("more than one row", result["rows"][0]["errors"][0])
 
 
 class ListingServiceVendorSelectTests(TestCase):

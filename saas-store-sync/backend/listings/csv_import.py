@@ -520,7 +520,7 @@ BUNNINGS_EXPORT_FIELDS = [
 
 TEMPLATE_HEADERS = LASOO_TEMPLATE_HEADERS
 DELETE_TEMPLATE_HEADERS = ["Action", "SKU"]
-VALID_ACTIONS = {"create", "mapped", "delete"}
+VALID_ACTIONS = {"create", "mapped", "delete", "delete_system"}
 _TRUE_VALUES = {"true", "1", "yes", "y", "t"}
 
 _HEADER_MARKERS = {
@@ -619,12 +619,15 @@ def _cell_text(value) -> str:
 
 
 def _normalize_action(raw: str) -> str:
-    """Accept plain Create/Mapped/Delete or instructional cells like 'Create - …'."""
+    """Accept Create/Mapped/Delete, Delete from system, or instructional cells."""
     action = str(raw or "").strip().lower()
-    if action in VALID_ACTIONS:
-        return action
+    compact = " ".join(action.replace("_", " ").replace("-", " ").split())
+    if compact.startswith("delete") and "system" in compact:
+        return "delete_system"
+    if compact in VALID_ACTIONS:
+        return compact
     for valid in ("create", "mapped", "delete"):
-        if action.startswith(valid):
+        if compact.startswith(valid):
             return valid
     return ""
 
@@ -888,11 +891,12 @@ def _marketplace_label(store) -> str:
 def build_template_csv(action: str = "create", store=None, hierarchies=None) -> str:
     """Template CSV for the given action. Headers mark optional columns."""
     action = (action or "create").strip().lower()
-    if action == "delete":
+    if action in ("delete", "delete_system"):
         out = io.StringIO()
         writer = csv.DictWriter(out, fieldnames=DELETE_TEMPLATE_HEADERS, lineterminator="\n")
         writer.writeheader()
-        writer.writerow({"Action": "Delete", "SKU": "AMH-EXAMPLE-001"})
+        label = "Delete from system" if action == "delete_system" else "Delete"
+        writer.writerow({"Action": label, "SKU": "AMH-EXAMPLE-001"})
         return out.getvalue()
 
     store_name = (getattr(store, "name", None) or "").strip()
@@ -1184,7 +1188,9 @@ def snapshot_row_fields(row: dict) -> dict:
         else:
             out[key] = str(value).strip() if not isinstance(value, (int, float)) else value
     action = str(out.get("action") or "").strip().lower()
-    if action in VALID_ACTIONS:
+    if action == "delete_system":
+        out["action"] = "Delete from system"
+    elif action in VALID_ACTIONS:
         out["action"] = action.capitalize()
     return out
 

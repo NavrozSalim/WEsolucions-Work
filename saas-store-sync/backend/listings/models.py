@@ -40,7 +40,8 @@ class ListingAction(models.TextChoices):
     existing marketplace listing, or (for uploads) a delete request."""
     CREATE = 'create', 'Create'
     MAPPED = 'mapped', 'Mapped'
-    DELETE = 'delete', 'Delete'
+    DELETE = 'delete', 'Delete from marketplace'
+    DELETE_SYSTEM = 'delete_system', 'Delete from system'
 
 
 class OrderStatus(models.TextChoices):

@@ -60,9 +60,10 @@ class MyDealProductGroupTests(SimpleTestCase):
         self.assertEqual(len(group["BuyableProducts"]), 1)
         self.assertEqual(group["BuyableProducts"][0]["SKU"], "MIXER-1")
 
-    def test_validate_variations_require_shared_product_key(self):
+    def test_validate_parent_may_match_child_with_options(self):
         data = {
-            "sku": "POLO-SMALL",
+            "sku": "BR276",
+            "product_key": "BR276",
             "title": "Polo",
             "description": "Shirt",
             "category": "3213",
@@ -71,13 +72,24 @@ class MyDealProductGroupTests(SimpleTestCase):
             "option_1_name": "Size",
             "option_1_value": "Small",
         }
-        errors = " ".join(mydeal_products.validate_listing(data))
-        self.assertIn("Parent SKU", errors)
-        data["product_key"] = "POLO-SMALL"
-        errors = " ".join(mydeal_products.validate_listing(data))
-        self.assertIn("differ from SKU", errors)
-        data["product_key"] = "POLO-SHIRT"
         self.assertEqual(mydeal_products.validate_listing(data), [])
+        data["product_key"] = "POLO-SHIRT"
+        data["sku"] = "POLO-SMALL"
+        data["option_1_name"] = ""
+        data["option_1_value"] = ""
+        self.assertEqual(mydeal_products.validate_listing(data), [])
+
+    def test_duplicate_child_sku_errors_both_rows(self):
+        rows = [
+            {"row_number": 4, "sku": "BR276", "product_key": "BR276"},
+            {"row_number": 9, "sku": "BR276", "product_key": "BR276"},
+            {"row_number": 10, "sku": "BR277", "product_key": "BR276"},
+        ]
+        errors = mydeal_products.duplicate_child_sku_errors(rows)
+        self.assertEqual(errors[0], errors[1])
+        self.assertIn("BR276", errors[0])
+        self.assertIn("rows 4 and 9", errors[0])
+        self.assertNotIn(2, errors)
 
     def test_group_variants_share_one_product(self):
         small = _listing()

@@ -44,8 +44,18 @@ const FILTER_OPTIONS = [
     { id: 'errors', label: 'Errors' },
 ];
 
+const MARKETPLACE_LABELS = {
+    mydeal: 'MyDeal',
+    bunnings: 'Bunnings',
+    lasoo: 'Lasoo',
+    reverb: 'Reverb',
+    etsy: 'Etsy',
+};
+
 /** Staging queue: new/mapped listings before or after publish attempt. */
 export default function CreatedProductsPanel({ storeId, marketplaceCode = '', reloadNonce = 0, onMessage }) {
+    const marketplaceKey = String(marketplaceCode || '').trim().toLowerCase();
+    const marketplaceLabel = MARKETPLACE_LABELS[marketplaceKey] || String(marketplaceCode || '').trim() || 'the marketplace';
     const [listings, setListings] = useState([]);
     const [totalCount, setTotalCount] = useState(0);
     const [publishableCount, setPublishableCount] = useState(0);
@@ -178,7 +188,7 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
             {publishing && (
                 <div className="flex items-center gap-2 border-b border-sky-200 bg-sky-50 px-4 py-2.5 text-sm text-sky-800 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200">
                     <RefreshCw className="h-4 w-4 shrink-0 animate-spin" />
-                    Creating products on MyDeal. This can take several minutes. Do not click Publish again.
+                    Creating products on {marketplaceLabel}. This can take several minutes. Do not click Publish again.
                 </div>
             )}
 

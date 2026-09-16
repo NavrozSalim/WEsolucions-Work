@@ -148,24 +148,18 @@ def ingest_listing_bulk_upload(self, upload_id, action=""):
     """Background Create / Mapped / Delete file import (ingest queue)."""
     from . import listing_service
 
+    listing_service.ensure_db_connection()
     try:
         return listing_service.run_queued_bulk_import(upload_id, action or "")
     except Exception as exc:  # noqa: BLE001
         logger.exception("Listing bulk ingest task failed upload=%s", upload_id)
-        try:
-            from .models import ListingUpload
-
-            upload = ListingUpload.objects.filter(pk=upload_id).first()
-            if upload and upload.status in (
-                ListingUpload.Status.PENDING,
-                ListingUpload.Status.PROCESSING,
-            ):
-                upload.status = ListingUpload.Status.FAILED
-                upload.message = (str(exc) or "Import failed unexpectedly.")[:2000]
-                upload.save(update_fields=["status", "message"])
-        except Exception:  # noqa: BLE001
-            logger.exception("Could not mark listing upload failed id=%s", upload_id)
+        listing_service.mark_listing_upload_failed(
+            upload_id,
+            str(exc) or "Import failed unexpectedly.",
+        )
         return {"ok": False, "error": str(exc)}
+    finally:
+        listing_service.ensure_db_connection()
 
 
 @shared_task(name="listings.lookup_marketplace_skus", bind=True, ignore_result=True)

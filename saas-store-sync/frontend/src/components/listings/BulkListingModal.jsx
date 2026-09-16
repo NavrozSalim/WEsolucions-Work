@@ -8,7 +8,8 @@ import { BunningsCategoryMultiSelect } from './BunningsCatalogSelects';
 const ACTION_OPTIONS = [
     { value: 'create', label: 'Create — new listings' },
     { value: 'mapped', label: 'Mapped — already on the store' },
-    { value: 'delete', label: 'Delete — SKU only' },
+    { value: 'delete_system', label: 'Delete from the system' },
+    { value: 'delete', label: 'Delete from the marketplace' },
 ];
 
 /** Bulk listing upload: one action per file (Create, Mapped, or Delete). */
@@ -95,9 +96,10 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
 
     const invalidRows = (result?.rows || []).filter((r) => !r.valid);
     const actionHelp = {
-        create: 'Each row creates a new listing. Duplicate SKUs already in this app are rejected — use Mapped to update them.',
+        create: 'Each row creates a new listing. Duplicate Child SKUs in the file or already in this app are rejected — use Mapped to update them.',
         mapped: 'For products already live on the marketplace. Links them into this app by SKU. Also updates existing app rows.',
-        delete: 'Each row needs SKU — ends the listing on the marketplace and removes it from this app.',
+        delete_system: 'Each row needs SKU. Removes the listing from this app only. Does not call the marketplace.',
+        delete: 'Each row needs SKU. Ends the listing on the marketplace in one request, then removes it from this app.',
     };
 
     return (
@@ -134,13 +136,13 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                         {!isReverb && !isEtsy && (
                             <>
                                 {' '}For colour/size variants use the same <strong>Parent SKU</strong> on every row
-                                and a unique <strong>SKU</strong> per size/colour.
+                                and a unique <strong>Child SKU</strong> per size/colour. Parent SKU and Child SKU may be
+                                the same when there is no variation. Options can be left blank.
                                 {isMydeal ? (
-                                    <> Fill <strong>Option 1 Name/Value</strong> (e.g. Size / Small). Same Parent SKU is sent as one MyDeal product with multiple buyables.</>
+                                    <> Same Parent SKU is sent as one MyDeal product with multiple buyables.</>
                                 ) : (
                                     <> Fill <strong>Option 1–4 Name/Value</strong> (e.g. Size / XL), and a <strong>Variation Img URL</strong> on every variant row.</>
                                 )}
-                                {' '}Standalone rows can use Parent SKU only and leave SKU blank.
                             </>
                         )}
                         {isReverb && (

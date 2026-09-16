@@ -766,12 +766,7 @@ export default function ListingFormModal({
             }
             payload.sku = sku || parent;
             payload.variant_key = payload.sku;
-            const hasOption = [1, 2, 3, 4].some((i) => {
-                const name = String(payload[`option_${i}_name`] || '').trim();
-                const value = String(payload[`option_${i}_value`] || '').trim();
-                return Boolean(name && value);
-            });
-            payload.product_key = hasOption ? parent : payload.sku;
+            payload.product_key = parent || payload.sku;
         }
         const req = isEdit
             ? updateListing(storeId, listing.id, payload)
@@ -1111,9 +1106,8 @@ export default function ListingFormModal({
                                     onChange={set('sku')}
                                 />
                                 <div className="sm:col-span-2 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 px-3 py-2 text-xs text-slate-600 dark:text-slate-300">
-                                    Standalone: fill <span className="font-medium">Parent SKU</span> (SKU can be blank).
-                                    Variations: same Parent SKU on every size/colour, unique SKU per row, Option Name/Value
-                                    (e.g. Size / Small). MyDeal sends these as one product with multiple buyables.
+                                    Standalone: Parent SKU and SKU may be the same. Variations: same Parent SKU
+                                    on every size/colour, unique Child SKU per row. Options are optional.
                                 </div>
                                 <div className="sm:col-span-2">
                                     <Input label="Title" value={form.title} onChange={set('title')} required />

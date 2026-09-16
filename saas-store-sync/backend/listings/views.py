@@ -530,6 +530,8 @@ def _listing_upload_status_text(
     action = (upload_action or getattr(listing, 'action', '') or '').lower()
     if action == ListingAction.MAPPED:
         return 'Mapped'
+    if action == ListingAction.DELETE_SYSTEM:
+        return 'Deleted from system'
     if action == ListingAction.DELETE:
         return 'Deleted'
     if imported or row_ok:

@@ -100,6 +100,7 @@ function managedUploadStatusText(u) {
         return 'Pending';
     }
     if (u.status === 'partial' || u.status === 'failed') return 'Error';
+    if (u.action === 'delete_system') return 'Deleted from system';
     if (u.action === 'delete') return 'Deleted';
     if (u.action === 'mapped') return 'Mapped';
     return 'Created';
