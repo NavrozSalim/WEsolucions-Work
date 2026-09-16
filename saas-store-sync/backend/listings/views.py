@@ -106,6 +106,10 @@ class StoreListingListCreateView(APIView):
 
     def get(self, request, store_pk):
         store = _get_store(request, store_pk)
+        if marketplace_kind(store.marketplace) == "mydeal":
+            from .mydeal import products as mydeal_products
+
+            mydeal_products.requeue_unconfirmed_uploads(store)
         qs = (
             StoreListing.objects.filter(store=store)
             .select_related('store')

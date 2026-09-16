@@ -1414,6 +1414,16 @@ class ListingServiceTests(TestCase):
         self.assertFalse(rows[0]["is_direct_import"])
         self.assertEqual(rows[0]["shipping_cost_category"], "Flat")
 
+    def test_parse_marketplace_parent_child_sku_headers(self):
+        csv_text = (
+            "Marketplace Parent SKU,Marketplace Child SKU,Title,Description,"
+            "Category,Image URLs,Price,Option 1 Name,Option 1 Value\n"
+            "WK0132,WK0132-FF-BBE-4D26DCM,Coral,Art,3213,https://example.com/a.jpg,10,Colour,Beige\n"
+        )
+        rows = csv_import.parse_upload("mydeal.csv", csv_text.encode())
+        self.assertEqual(rows[0]["product_key"], "WK0132")
+        self.assertEqual(rows[0]["sku"], "WK0132-FF-BBE-4D26DCM")
+
 
 class ListingServiceVendorSelectTests(TestCase):
     def setUp(self):

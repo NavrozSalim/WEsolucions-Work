@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections import OrderedDict
 from decimal import Decimal, InvalidOperation
+from urllib.parse import parse_qs, urlparse
 
 from django.utils import timezone
 
 from ..errors import MarketplaceError
 from ..models import ListingStatus, StoreListing
-from .client import MyDealClient
+from .client import MyDealClient, MyDealResult
 
 logger = logging.getLogger("listings.mydeal")
 
@@ -100,6 +102,184 @@ def buyable_product_id(listing) -> str:
     return (getattr(listing, "external_variant_key", None) or sku).strip() or sku
 
 
+_PARENT_INHERIT_FIELDS = (
+    "title",
+    "description",
+    "brand",
+    "category",
+    "image_urls",
+    "tags",
+    "specifications",
+    "condition",
+    "shipping_cost_category",
+    "shipping_cost_standard",
+    "custom_freight_scheme_id",
+    "is_direct_import",
+    "max_days_for_delivery",
+    "delivery_time",
+    "has_48_hours_dispatch",
+    "weight",
+    "weight_unit",
+    "length",
+    "height",
+    "width",
+    "dimension_unit",
+    "gtin",
+    "mpn",
+)
+_BUYABLE_INHERIT_IF_BLANK = ("sale_price", "original_price", "inventory")
+
+
+def _clean_key(value) -> str:
+    from ..lasoo.mapper import clean_key
+
+    return clean_key(value)
+
+
+def _is_blank(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return False
+    return str(value).strip() == ""
+
+
+def _row_photos(data: dict) -> list[str]:
+    photos = []
+    variant_img = str(data.get("variation_image_url") or "").strip()
+    if variant_img.startswith("http"):
+        photos.append(variant_img)
+    raw_images = data.get("image_urls")
+    if isinstance(raw_images, str) and raw_images.strip():
+        photos.extend(
+            p.strip()
+            for p in raw_images.replace(";", "|").replace("\n", "|").replace(",", "|").split("|")
+            if p.strip().startswith("http")
+        )
+    return photos
+
+
+def _parent_content_score(title, description, category, photos) -> int:
+    score = 0
+    if str(title or "").strip():
+        score += 4
+    if str(description or "").strip():
+        score += 2
+    if str(category or "").strip().isdigit():
+        score += 2
+    if photos:
+        score += 2
+    return score
+
+
+def normalize_row_keys(data: dict) -> dict:
+    """WMP rules: standalone Parent SKU == SKU; variation Parent SKU != SKU."""
+    row = dict(data or {})
+    sku = (
+        _clean_key(row.get("sku"))
+        or _clean_key(row.get("variant_key"))
+        or _clean_key(row.get("product_key"))
+    )
+    parent = _clean_key(row.get("product_key"))
+    pairs = collect_option_pairs(row)
+    if not pairs and (not parent or parent == sku):
+        parent = sku
+    row["sku"] = sku
+    if sku and not _clean_key(row.get("variant_key")):
+        row["variant_key"] = sku
+    elif sku:
+        row["variant_key"] = _clean_key(row.get("variant_key")) or sku
+    if parent or not pairs:
+        row["product_key"] = parent or sku
+    else:
+        row["product_key"] = parent
+    return row
+
+
+def _best_parent_row(rows: list[dict]) -> dict | None:
+    if not rows:
+        return None
+    return max(
+        rows,
+        key=lambda row: _parent_content_score(
+            row.get("title"),
+            row.get("description"),
+            row.get("category"),
+            _row_photos(row),
+        ),
+    )
+
+
+def _copy_missing_parent_fields(row: dict, donor: dict) -> None:
+    if not donor or donor is row:
+        return
+    for key in _PARENT_INHERIT_FIELDS:
+        if _is_blank(row.get(key)) and not _is_blank(donor.get(key)):
+            row[key] = donor.get(key)
+    for key in _BUYABLE_INHERIT_IF_BLANK:
+        if _is_blank(row.get(key)) and not _is_blank(donor.get(key)):
+            row[key] = donor.get(key)
+
+
+def prepare_import_rows(rows: list[dict]) -> list[dict]:
+    """Copy ProductGroup fields onto variant rows that share a Parent SKU."""
+    prepared = [normalize_row_keys(row) for row in rows]
+    groups: OrderedDict[str, list[dict]] = OrderedDict()
+    for index, row in enumerate(prepared):
+        parent = str(row.get("product_key") or "").strip()
+        key = parent or f"__row__{index}"
+        groups.setdefault(key, []).append(row)
+    for members in groups.values():
+        donor = _best_parent_row(members)
+        if donor is None:
+            continue
+        for row in members:
+            _copy_missing_parent_fields(row, donor)
+    return prepared
+
+
+def listing_to_import_row(listing) -> dict:
+    extras = parse_extras(listing)
+    return {
+        "product_key": getattr(listing, "external_product_key", "") or "",
+        "variant_key": getattr(listing, "external_variant_key", "") or "",
+        "sku": getattr(listing, "sku", "") or getattr(listing, "external_variant_key", "") or "",
+        "title": getattr(listing, "title", "") or "",
+        "description": getattr(listing, "description", "") or "",
+        "brand": getattr(listing, "brand", "") or "",
+        "category": getattr(listing, "category", "") or "",
+        "image_urls": getattr(listing, "image_urls", "") or "",
+        "variation_image_url": getattr(listing, "variation_image_url", "") or "",
+        "sale_price": getattr(listing, "sale_price", None),
+        "original_price": getattr(listing, "original_price", None),
+        "inventory": getattr(listing, "inventory", None),
+        "option_1_name": getattr(listing, "option_1_name", "") or "",
+        "option_1_value": getattr(listing, "option_1_value", "") or "",
+        "option_2_name": getattr(listing, "option_2_name", "") or "",
+        "option_2_value": getattr(listing, "option_2_value", "") or "",
+        "option_3_name": getattr(listing, "option_3_name", "") or "",
+        "option_3_value": getattr(listing, "option_3_value", "") or "",
+        **extras,
+    }
+
+
+def prepare_single_row(data: dict, store=None) -> dict:
+    """Normalize keys and fill blank parent fields from siblings already in the store."""
+    row = normalize_row_keys(dict(data or {}))
+    parent = str(row.get("product_key") or "").strip()
+    sku = str(row.get("sku") or "").strip()
+    if not store or not getattr(store, "pk", None) or not parent:
+        return row
+    siblings = StoreListing.objects.filter(store=store, external_product_key=parent)
+    if sku:
+        siblings = siblings.exclude(sku=sku).exclude(external_variant_key=sku)
+    donor_rows = [listing_to_import_row(item) for item in siblings[:50]]
+    donor_rows.append(row)
+    donor = _best_parent_row(donor_rows)
+    _copy_missing_parent_fields(row, donor)
+    return row
+
+
 def collect_option_pairs(listing_or_data) -> list[tuple[str, str]]:
     data = listing_or_data if isinstance(listing_or_data, dict) else None
     pairs: list[tuple[str, str]] = []
@@ -153,6 +333,7 @@ def _listing_price(listing, sku: str) -> Decimal:
 
 def validate_listing(data: dict) -> list[str]:
     """Return human-readable errors for a MyDeal create/import row."""
+    data = normalize_row_keys(dict(data or {}))
     errors: list[str] = []
     sku = str(data.get("sku") or data.get("variant_key") or data.get("product_key") or "").strip()
     label = sku or "unknown"
@@ -321,20 +502,45 @@ def listings_to_product_groups(
     packed = []
     for bucket in buckets.values():
         members = bucket["listings"]
+        buyables = bucket["buyables"]
+        has_variation = any(
+            collect_option_pairs(listing) and parent_product_id(listing) != listing_sku(listing)
+            for listing in members
+        )
+        if has_variation:
+            kept = []
+            for listing, buyable in zip(members, buyables):
+                sku = listing_sku(listing)
+                parent = parent_product_id(listing)
+                if sku == parent and not collect_option_pairs(listing):
+                    continue
+                kept.append(buyable)
+            if kept:
+                buyables = kept
         photos: list[str] = []
         for listing in members:
             for url in _listing_photos(listing):
                 if url not in photos:
                     photos.append(url)
-        group = _parent_from_listing(members[0], photos=photos[:30])
-        group["BuyableProducts"] = bucket["buyables"]
+        source = max(
+            members,
+            key=lambda listing: _parent_content_score(
+                getattr(listing, "title", ""),
+                getattr(listing, "description", ""),
+                getattr(listing, "category", ""),
+                _listing_photos(listing),
+            ),
+        )
+        group = _parent_from_listing(source, photos=photos[:30])
+        group["BuyableProducts"] = buyables
         packed.append((group, members))
     return packed
 
 
-# Product groups per POST /products. Publish-all of thousands of SKUs in one
-# body times out (30s) and marks every row Push failed.
-PUBLISH_GROUP_CHUNK = 25
+# Product groups per POST /products. MyDeal accepts at most 250 ProductGroups.
+PUBLISH_GROUP_CHUNK = 250
+PENDING_POLL_ATTEMPTS = 20
+PENDING_POLL_SECONDS = 3
 # Auth / connectivity failures will repeat on every chunk — stop early.
 _FATAL_PUBLISH_MARKERS = (
     "configured",
@@ -352,6 +558,117 @@ def _is_fatal_publish_error(result) -> bool:
         return True
     msg = (getattr(result, "message", None) or "").lower()
     return any(marker in msg for marker in _FATAL_PUBLISH_MARKERS)
+
+
+def _result_data(result) -> dict:
+    data = getattr(result, "data", None)
+    return data if isinstance(data, dict) else {}
+
+
+def _work_item_id(result) -> str:
+    data = _result_data(result)
+    for key in ("WorkItemId", "workItemId", "WorkItemID"):
+        value = str(data.get(key) or "").strip()
+        if value:
+            return value
+    uri = str(data.get("PendingUri") or data.get("pendingUri") or "").strip()
+    if not uri:
+        return ""
+    query = parse_qs(urlparse(uri).query)
+    for key in ("workItemId", "WorkItemId", "workitemid"):
+        values = query.get(key) or []
+        if values and str(values[0]).strip():
+            return str(values[0]).strip()
+    return ""
+
+
+def _is_async_pending(result) -> bool:
+    status = str(getattr(result, "response_status", "") or "").strip().lower()
+    data = _result_data(result)
+    if not status:
+        status = str(data.get("ResponseStatus") or data.get("responseStatus") or "").strip().lower()
+    if status in ("asyncresponsepending", "pending"):
+        return True
+    pending_uri = str(data.get("PendingUri") or data.get("pendingUri") or "").strip()
+    work_id = _work_item_id(result)
+    if getattr(result, "ok", False) and (pending_uri or work_id) and data.get("Data") in (None, "", [], {}):
+        return True
+    return False
+
+
+def is_unconfirmed_upload(listing) -> bool:
+    """True when Hub marked uploaded from AsyncResponsePending without a final result."""
+    status = getattr(listing, "status", "") or ""
+    if status not in (ListingStatus.UPLOADED_PRODUCTION, ListingStatus.UPLOADED_STAGING):
+        return False
+    payload = getattr(listing, "marketplace_response_json", None)
+    if not isinstance(payload, dict):
+        return False
+    fake = MyDealResult(
+        ok=True,
+        data=payload,
+        response_status=str(payload.get("ResponseStatus") or payload.get("responseStatus") or ""),
+    )
+    return _is_async_pending(fake)
+
+
+def requeue_unconfirmed_uploads(store) -> int:
+    """Move false-success MyDeal rows back to Ready so they show in Created products."""
+    qs = StoreListing.objects.filter(
+        store=store,
+        status__in=[ListingStatus.UPLOADED_STAGING, ListingStatus.UPLOADED_PRODUCTION],
+    )
+    ids = [
+        row.id
+        for row in qs.only("id", "status", "marketplace_response_json").iterator()
+        if is_unconfirmed_upload(row)
+    ]
+    if not ids:
+        return 0
+    return StoreListing.objects.filter(id__in=ids).update(
+        status=ListingStatus.READY,
+        validation_errors_json=None,
+    )
+
+
+def _resolve_pending_upsert(client, result):
+    """Poll GET /pending-responses until MyDeal finishes (or we time out)."""
+    if not _is_async_pending(result):
+        return result
+    work_id = _work_item_id(result)
+    if not work_id:
+        return MyDealResult(
+            ok=False,
+            data=getattr(result, "data", None),
+            error=getattr(result, "error", None),
+            message="MyDeal accepted the batch but did not return a work item to confirm.",
+            status=int(getattr(result, "status", 0) or 0),
+            response_status=str(getattr(result, "response_status", "") or ""),
+        )
+    last = result
+    attempts = max(1, int(PENDING_POLL_ATTEMPTS or 1))
+    wait = max(0, float(PENDING_POLL_SECONDS or 0))
+    for attempt in range(attempts):
+        last = client.get_pending_response(work_id)
+        if not _is_async_pending(last):
+            logger.info(
+                "MyDeal pending work item %s finished on poll %s status=%s",
+                work_id,
+                attempt + 1,
+                getattr(last, "response_status", "") or "",
+            )
+            return last
+        if attempt + 1 < attempts and wait:
+            time.sleep(wait)
+    logger.warning("MyDeal pending work item %s still processing after %s polls", work_id, attempts)
+    return MyDealResult(
+        ok=False,
+        data=getattr(last, "data", None),
+        error=getattr(last, "error", None),
+        message="MyDeal is still processing this batch. Try publish again in a few minutes.",
+        status=int(getattr(last, "status", 0) or 0),
+        response_status=str(getattr(last, "response_status", "") or "AsyncResponsePending"),
+    )
 
 
 def _mark_listing(listing: StoreListing, *, status: str, request=None, response=None, errors=None):
@@ -381,34 +698,24 @@ def _apply_upsert_result(client, packed_chunk, result) -> tuple[int, int, str]:
     chunk_meta = {"product_group_count": len(groups)}
     response_payload = result.data if isinstance(result.data, (dict, list)) else {"raw": result.data}
 
-    pending_uri = ""
-    work_id = ""
-    if isinstance(result.data, dict):
-        pending_uri = str(result.data.get("PendingUri") or result.data.get("pendingUri") or "")
-        work_id = str(result.data.get("WorkItemId") or result.data.get("workItemId") or "")
-
     target = (
         ListingStatus.UPLOADED_PRODUCTION
         if client.environment == "production"
         else ListingStatus.UPLOADED_STAGING
     )
 
-    if result.response_status == "AsyncResponsePending" or (
-        result.ok and pending_uri and not (isinstance(result.data, dict) and result.data.get("Data"))
-    ):
+    if _is_async_pending(result):
+        err = "MyDeal is still processing this batch. Try publish again in a few minutes."
+        payload = {"error": err, "data": result.data, "status": getattr(result, "status", 0)}
         for listing in members:
             _mark_listing(
                 listing,
-                status=target,
+                status=ListingStatus.FAILED,
                 request=chunk_meta,
-                response=response_payload if isinstance(response_payload, dict) else {"raw": result.data},
-                errors=None,
+                response=payload,
+                errors=[err],
             )
-        msg = (
-            f"Submitted {len(members)} product(s) to MyDeal (async). "
-            f"Pending work item: {work_id or pending_uri or 'see response'}."
-        )
-        return len(members), 0, msg
+        return 0, len(members), err
 
     if not result.ok:
         err = (result.message or "MyDeal publish failed.")[:400]
@@ -460,11 +767,14 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
     uploaded = 0
     failed = 0
     chunk_messages: list[str] = []
-    chunk = max(1, int(PUBLISH_GROUP_CHUNK or 25))
+    chunk = max(1, int(PUBLISH_GROUP_CHUNK or 250))
 
     for start in range(0, len(packed), chunk):
         packed_chunk = packed[start : start + chunk]
-        result = client.upsert_products([group for group, _members in packed_chunk])
+        result = _resolve_pending_upsert(
+            client,
+            client.upsert_products([group for group, _members in packed_chunk]),
+        )
         up, fail, msg = _apply_upsert_result(client, packed_chunk, result)
         uploaded += up
         failed += fail

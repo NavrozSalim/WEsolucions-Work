@@ -509,6 +509,10 @@ def create(user, store, data: dict, action: str = ListingAction.CREATE) -> Store
     if route_errors:
         raise MarketplaceError(" ".join(route_errors))
     store = target_store
+    if _store_kind(store) == "mydeal":
+        from .mydeal import products as mydeal_products
+
+        data = mydeal_products.prepare_single_row(data, store)
     environment = _listing_env(store)
     listing = StoreListing(user=user, store=store, environment=environment, action=action)
     _apply_fields(listing, data)
@@ -570,6 +574,10 @@ def update(listing: StoreListing, data: dict) -> StoreListing:
     data = dict(data or {})
     if was_on_marketplace and _store_kind(listing.store) == "lasoo":
         _align_sale_original_prices(data)
+    if _store_kind(listing.store) == "mydeal":
+        from .mydeal import products as mydeal_products
+
+        data = mydeal_products.prepare_single_row(data, listing.store)
     _apply_fields(listing, data)
     if was_on_marketplace:
         errors = _validate_listing(listing.store, data)
@@ -1176,6 +1184,10 @@ def bulk_import(
     rows = csv_import.parse_upload(filename, content)
     if not rows:
         raise MarketplaceError("No data rows found in the uploaded file.")
+    if _store_kind(store) == "mydeal":
+        from .mydeal import products as mydeal_products
+
+        rows = mydeal_products.prepare_import_rows(rows)
 
     file_action = _resolve_file_action(rows, action)
     if file_action == ListingAction.DELETE:
@@ -1709,14 +1721,17 @@ def publish(user, store, listing_ids=None) -> dict:
             "Currently Lasoo, Reverb, MyDeal, Etsy, and Bunnings stores can publish."
         )
 
+    if kind == "mydeal":
+        from .mydeal import products as mydeal_products
+
+        mydeal_products.requeue_unconfirmed_uploads(store)
+
     statuses = [ListingStatus.READY, ListingStatus.FAILED]
     if kind == "bunnings" and listing_ids:
         statuses.extend([ListingStatus.UPLOADED_STAGING, ListingStatus.UPLOADED_PRODUCTION])
-    qs = StoreListing.objects.filter(
-        user=user,
-        store=store,
-        status__in=statuses,
-    )
+    qs = StoreListing.objects.filter(store=store, status__in=statuses)
+    if kind != "mydeal":
+        qs = qs.filter(user=user)
     if listing_ids:
         qs = qs.filter(id__in=listing_ids)
     listings = list(qs)
@@ -1754,8 +1769,12 @@ def start_publish_async(user, store, listing_ids=None) -> dict:
     if kind != "mydeal":
         raise MarketplaceError("Background publish is only used for MyDeal.")
 
+    from .mydeal import products as mydeal_products
+
+    mydeal_products.requeue_unconfirmed_uploads(store)
+
     statuses = [ListingStatus.READY, ListingStatus.FAILED]
-    qs = StoreListing.objects.filter(user=user, store=store, status__in=statuses)
+    qs = StoreListing.objects.filter(store=store, status__in=statuses)
     if listing_ids:
         qs = qs.filter(id__in=listing_ids)
     listings = list(qs)

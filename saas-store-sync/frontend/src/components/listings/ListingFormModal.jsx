@@ -766,7 +766,12 @@ export default function ListingFormModal({
             }
             payload.sku = sku || parent;
             payload.variant_key = payload.sku;
-            payload.product_key = parent || payload.sku;
+            const hasOption = [1, 2, 3, 4].some((i) => {
+                const name = String(payload[`option_${i}_name`] || '').trim();
+                const value = String(payload[`option_${i}_value`] || '').trim();
+                return Boolean(name && value);
+            });
+            payload.product_key = hasOption ? parent : payload.sku;
         }
         const req = isEdit
             ? updateListing(storeId, listing.id, payload)
