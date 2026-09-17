@@ -492,6 +492,70 @@ class MyDealConnectionTests(SimpleTestCase):
         self.assertEqual(kwargs['headers']['SellerID'], 'sid')
         self.assertEqual(kwargs['headers']['SellerToken'], 'stoken')
 
+    def _token_ok(self, mock_post):
+        token_resp = MagicMock()
+        token_resp.ok = True
+        token_resp.status_code = 200
+        token_resp.json.return_value = {'access_token': 'tok-1', 'expires_in': 3600}
+        mock_post.return_value = token_resp
+
+    @patch('listings.mydeal.client.requests.post')
+    @patch('listings.mydeal.client.requests.request')
+    def test_verify_connection_empty_catalog_is_ok(self, mock_request, mock_post):
+        from listings.mydeal.client import MyDealClient
+
+        self._token_ok(mock_post)
+        prod_resp = MagicMock()
+        prod_resp.ok = True
+        prod_resp.status_code = 200
+        prod_resp.json.return_value = {
+            'ResponseStatus': 'Complete',
+            'Data': None,
+            'Errors': [{
+                'ID': 'ProductNotFound',
+                'Code': '302',
+                'Message': 'Product(s) not found in marketplace. ',
+            }],
+        }
+        mock_request.return_value = prod_resp
+
+        result = MyDealClient(self._store()).verify_connection()
+        self.assertTrue(result.ok)
+        self.assertIn('no products', (result.message or '').lower())
+
+        ok, msg = verify_store_connection(self._store())
+        self.assertTrue(ok)
+        self.assertIn('no products', (msg or '').lower())
+
+    @patch('listings.mydeal.client.requests.post')
+    @patch('listings.mydeal.client.requests.request')
+    def test_verify_connection_invalid_seller_still_fails(self, mock_request, mock_post):
+        from listings.mydeal.client import MyDealClient
+
+        self._token_ok(mock_post)
+        prod_resp = MagicMock()
+        prod_resp.ok = False
+        prod_resp.status_code = 401
+        prod_resp.headers = {}
+        prod_resp.json.return_value = {
+            'ResponseStatus': 'Failed',
+            'Data': None,
+            'Errors': [{
+                'ID': 'AuthorizationFailure',
+                'Code': '801',
+                'Message': 'Authorization failed due to invalid Seller ID or Seller Token. ',
+            }],
+        }
+        mock_request.return_value = prod_resp
+
+        result = MyDealClient(self._store()).verify_connection()
+        self.assertFalse(result.ok)
+        self.assertIn('Seller', result.message or '')
+
+        ok, msg = verify_store_connection(self._store())
+        self.assertFalse(ok)
+        self.assertIn('Seller', msg or '')
+
     @patch('listings.mydeal.client.requests.post')
     def test_mydeal_production_token_uses_form_body(self, mock_post):
         from listings.mydeal.client import MyDealClient

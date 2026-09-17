@@ -177,6 +177,9 @@ def verify_mydeal_connection(store) -> tuple[bool, str | None]:
 
     result = client.verify_connection()
     if result.ok:
+        msg = (result.message or '').strip()
+        if 'connected' in msg.lower() and 'no products' in msg.lower():
+            return True, msg
         return True, f'MyDeal {client.environment} connection successful.'
     return False, result.message or 'MyDeal rejected these credentials.'
 

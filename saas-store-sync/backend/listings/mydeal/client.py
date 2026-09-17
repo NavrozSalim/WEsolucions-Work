@@ -298,14 +298,19 @@ class MyDealClient:
         )
 
     def verify_connection(self) -> MyDealResult:
-        """Smoke-test: obtain token, then list one product field."""
+        """Smoke-test: obtain token, then list one product.
+
+        An empty catalog (HTTP 200 + ProductNotFound 302) still means ClientID,
+        ClientSecret, SellerID, and SellerToken were accepted. Listing lookup
+        continues to treat 302 as not-found; only this smoke-test maps it to ok.
+        """
         try:
             self.get_access_token(force=True)
         except MarketplaceError as exc:
             return MyDealResult(ok=False, message=str(exc), status=0)
 
         # Fields is required by MyDeal — empty Fields yields an empty response.
-        return self.request(
+        result = self.request(
             "GET",
             "/products",
             params={
@@ -314,6 +319,17 @@ class MyDealClient:
                 "Fields": "ProductSKU,Title",
             },
         )
+        if result.ok:
+            return result
+        if _is_empty_catalog_error(result):
+            return MyDealResult(
+                ok=True,
+                data=result.data,
+                message=f"MyDeal {self.environment} connected (no products in catalog yet).",
+                status=result.status,
+                response_status=result.response_status or "Complete",
+            )
+        return result
 
     def end_listings(self, items: list[dict]) -> MyDealResult:
         """Discontinue products on MyDeal via POST /products/listingstatus (NotLive).
@@ -546,6 +562,30 @@ def _token_error_message(body, status: int) -> str:
             if isinstance(first, dict) and first.get("Message"):
                 return str(first["Message"])[:400]
     return f"MyDeal rejected client credentials (HTTP {status})."
+
+
+def _error_items(body) -> list:
+    if not isinstance(body, dict):
+        return []
+    errors = body.get("Errors") or body.get("errors") or []
+    return errors if isinstance(errors, list) else []
+
+
+def _is_product_not_found(err) -> bool:
+    if not isinstance(err, dict):
+        return False
+    eid = str(err.get("ID") or err.get("Id") or "").strip().lower()
+    code = str(err.get("Code") or "").strip()
+    msg = str(err.get("Message") or err.get("message") or "").lower()
+    return eid == "productnotfound" or code == "302" or "not found in marketplace" in msg
+
+
+def _is_empty_catalog_error(result: MyDealResult) -> bool:
+    """True when seller auth worked but GET /products has no matching items."""
+    if result.status and result.status not in (200, 204):
+        return False
+    errors = _error_items(result.data)
+    return bool(errors) and all(_is_product_not_found(err) for err in errors)
 
 
 def _action_error_message(body: dict) -> str:
