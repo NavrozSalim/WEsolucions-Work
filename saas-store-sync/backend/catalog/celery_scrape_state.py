@@ -81,11 +81,12 @@ def mark_celery_scrape_worker_started(store_id: str | None) -> None:
 
 
 def should_abort_celery_scrape(store_id: str | None) -> bool:
-    """True when workers must stop: scrape state was cleared (Stop) or cancel flag set.
+    """True when workers must stop after the current vendor URL.
 
-    Clearing ``StoreCatalogCeleryScrapeState`` immediately on cancel makes
-    ``/scrape/progress/`` drop the queued/running banner; workers cooperatively
-    exit on the next loop iteration when the row is missing.
+    Stop sets ``cancel_requested`` and keeps this row so the UI can show
+    ``phase=stopping`` until chunks drain. A missing row still means abort
+    (job finished, crashed, or an older Stop path that deleted state) so a
+    leftover worker does not keep going after finalize.
     """
     if not store_id:
         return False
@@ -96,6 +97,25 @@ def should_abort_celery_scrape(store_id: str | None) -> bool:
     except StoreCatalogCeleryScrapeState.DoesNotExist:
         return True
     return bool(st.cancel_requested)
+
+
+def request_celery_scrape_cancel(store_id: str | None) -> bool:
+    """Ask in-flight catalog scrape workers to stop after the current URL.
+
+    Keeps the state row so ``/scrape/progress/`` stays active with
+    ``phase=stopping`` until finalize clears it. Returns True when a row was updated.
+    """
+    if not store_id:
+        return False
+    from catalog.models import StoreCatalogCeleryScrapeState
+    from catalog.scrape_progress import invalidate_scrape_progress_cache
+
+    updated = StoreCatalogCeleryScrapeState.objects.filter(store_id=store_id).update(
+        cancel_requested=True,
+    )
+    if updated:
+        invalidate_scrape_progress_cache(str(store_id))
+    return bool(updated)
 
 
 def clear_celery_scrape_state(store_id: str | None) -> None:

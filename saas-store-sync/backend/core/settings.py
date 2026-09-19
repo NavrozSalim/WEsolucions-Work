@@ -59,13 +59,13 @@ except ValueError:
     CATALOG_SCRAPE_CHUNK_SIZE = 80
 
 # After user clicks Stop on a server-side catalog scrape, re-queue the same scrape after
-# this many seconds if listings are still Pending (0 = disabled).
+# this many seconds if listings are still Pending (0 = disabled). Default off so Stop stays stopped.
 try:
     CATALOG_SCRAPE_RESUME_AFTER_STOP_SECONDS = max(
-        0, int(os.getenv('CATALOG_SCRAPE_RESUME_AFTER_STOP_SECONDS', '600')),
+        0, int(os.getenv('CATALOG_SCRAPE_RESUME_AFTER_STOP_SECONDS', '0')),
     )
 except ValueError:
-    CATALOG_SCRAPE_RESUME_AFTER_STOP_SECONDS = 600
+    CATALOG_SCRAPE_RESUME_AFTER_STOP_SECONDS = 0
 
 # No server-scrapable listing leaves ``pending`` for this many minutes → stall (see ``catalog.tasks``).
 # Wider default reduces false stops on slow vendor pages; clamp 5–120 in code.
@@ -366,6 +366,17 @@ else:
 
 CELERY_BROKER_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+# Redis redelivers unacked tasks after this many seconds (default 3600). Catalog scrape
+# chunks can run longer than an hour; premature redelivery duplicates work and leaves
+# leftover Pending rows when the original worker finishes and the chord callback clears state.
+try:
+    CELERY_BROKER_TRANSPORT_OPTIONS = {
+        'visibility_timeout': max(
+            3600, int(os.getenv('CELERY_VISIBILITY_TIMEOUT', str(6 * 3600))),
+        ),
+    }
+except ValueError:
+    CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': 6 * 3600}
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 # So AsyncResult leaves PENDING while the task runs; frontend job poll can detect a live worker.

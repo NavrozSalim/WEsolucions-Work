@@ -284,18 +284,26 @@ def build_scrape_progress_payload(store) -> dict[str, Any]:
         'active': False,
         'store_id': str(store.id),
         'phase': None,
+        'cancel_requested': False,
     }
     try:
         st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
         if st:
+            if st.cancel_requested:
+                phase = 'stopping'
+            elif st.first_worker_started_at:
+                phase = 'running'
+            else:
+                phase = 'queued'
             server_celery_scrape = {
                 'active': True,
                 'store_id': str(store.id),
-                'phase': 'running',
+                'phase': phase,
                 'scope': st.scope,
                 'upload_id': str(st.upload_id) if st.upload_id else None,
                 'enqueued_at': st.enqueued_at.isoformat(),
                 'task_id': st.root_task_id or '',
+                'cancel_requested': bool(st.cancel_requested),
             }
     except Exception:
         pass

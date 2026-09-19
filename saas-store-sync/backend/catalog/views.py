@@ -27,6 +27,7 @@ from catalog.models import (
 from catalog.celery_scrape_state import (
     clear_celery_scrape_state,
     mark_celery_scrape_worker_started,
+    request_celery_scrape_cancel,
     set_celery_scrape_state,
 )
 from catalog.serializers import ProductMappingSerializer, CatalogActivityLogSerializer
@@ -896,6 +897,19 @@ class CatalogScrapeTriggerView(APIView):
         if st.first_worker_started_at is None and (now - st.enqueued_at) > timedelta(minutes=30):
             clear_celery_scrape_state(str(store.id))
             return None
+        if st.cancel_requested:
+            return Response(
+                {
+                    'error': 'catalog_scrape_already_running',
+                    'detail': (
+                        'Stop is in progress for this store. Wait until the current vendor page '
+                        'finishes, then Start Scraping again for remaining Pending listings.'
+                    ),
+                    'active_task_id': (st.root_task_id or '')[:128],
+                    'stopping': True,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
         return Response(
             {
                 'error': 'catalog_scrape_already_running',
@@ -1209,10 +1223,13 @@ class CatalogScrapeCancelView(APIView):
                 try:
                     from core.celery import app
 
-                    app.control.revoke(root_tid, terminate=True, signal='SIGTERM')
+                    # Do not SIGTERM: the root task is often already done after dispatching
+                    # chunks, and terminate can kill an unrelated prefork child. Queued root
+                    # tasks are discarded; running chunks stop cooperatively after the current URL.
+                    app.control.revoke(root_tid, terminate=False)
                 except Exception:
                     pass
-            clear_celery_scrape_state(str(store.id))
+            request_celery_scrape_cancel(str(store.id))
 
         resume_scheduled = False
         resume_after_sec = None
@@ -1259,6 +1276,8 @@ class CatalogScrapeCancelView(APIView):
             'job_id': cancelled_payload[0]['job_id'] if cancelled_payload else None,
             'status': cancelled_payload[0]['status'] if cancelled_payload else None,
         }
+        if server_stopped:
+            payload['server_scrape_stopping'] = True
         if resume_scheduled and resume_after_sec is not None:
             payload['server_resume_scheduled'] = True
             payload['server_resume_after_seconds'] = resume_after_sec

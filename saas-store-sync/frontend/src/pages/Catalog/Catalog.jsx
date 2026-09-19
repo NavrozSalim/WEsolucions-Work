@@ -1014,30 +1014,36 @@ function ServerCeleryScrapeStrip({ state, progressStoreId, selectedStoreId }) {
     if (progressStoreId && progressStoreId !== selectedStoreId) return null;
     if (state.store_id && state.store_id !== selectedStoreId) return null;
 
-    // Don't treat phase "queued" as a separate UX: older APIs used it while the job was still
-    // in flight (before worker started), which looked stuck. New API uses "running" when active.
-    const isQueued = false;
-    const headline = isQueued
-        ? 'Job is in queue, please wait...'
+    const isStopping = state.phase === 'stopping' || Boolean(state.cancel_requested);
+    const headline = isStopping
+        ? 'Stopping vendor scrape'
         : 'Live vendor scrape (server) running';
-    const pillClass = isQueued ? 'bg-amber-200 text-amber-950 dark:bg-amber-900/40 dark:text-amber-100' : 'bg-sky-200 text-sky-900 dark:bg-sky-800 dark:text-sky-200';
+    const pillClass = isStopping
+        ? 'bg-rose-200 text-rose-950 dark:bg-rose-900/40 dark:text-rose-100'
+        : 'bg-sky-200 text-sky-900 dark:bg-sky-800 dark:text-sky-200';
 
     return (
-        <div className="rounded-lg border border-sky-200 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/30 p-4 mb-4 shadow-sm">
+        <div className={`rounded-lg border p-4 mb-4 shadow-sm ${
+            isStopping
+                ? 'border-rose-200 dark:border-rose-800 bg-rose-50/80 dark:bg-rose-950/30'
+                : 'border-sky-200 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/30'
+        }`}>
             <div className="flex items-start gap-3">
-                <span className={`mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full ${isQueued ? 'bg-amber-500' : 'bg-sky-500 animate-pulse'}`} />
+                <span className={`mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full ${
+                    isStopping ? 'bg-rose-500' : 'bg-sky-500 animate-pulse'
+                }`} />
                 <div>
                     <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                         {headline}
                         <span className={`ml-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${pillClass}`}>
-                            {isQueued ? 'queued' : 'running'}
+                            {isStopping ? 'stopping' : 'running'}
                         </span>
                     </h3>
-                    {!isQueued && (
-                        <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
-                            You can leave this page; product rows update as each item finishes. Use “Stop Scraping” to cancel.
-                        </p>
-                    )}
+                    <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
+                        {isStopping
+                            ? 'The page currently being fetched may finish. Remaining listings stay Pending. This will not restart on its own.'
+                            : 'You can leave this page; product rows update as each item finishes. Use “Stop Scraping” to cancel.'}
+                    </p>
                 </div>
             </div>
         </div>
@@ -2337,30 +2343,35 @@ export default function Catalog() {
                 const hebStopped = Array.isArray(res?.data?.cancelled) && res.data.cancelled.length > 0;
                 const serverStopped = Boolean(res?.data?.server_scrape_stopped);
                 setTrackingScrape(false);
-                if (hebStopped || serverStopped) {
+                if (hebStopped && !serverStopped) {
                     setTrackingServerScrape(false);
                     trackingServerScrapeRef.current = false;
-                    if (serverStopped) {
-                        const sid = selectedStore;
-                        setScrapeProgress((prev) => {
-                            if (!prev || (prev.store_id && prev.store_id !== sid)) return prev;
-                            return {
-                                ...prev,
-                                server_celery_scrape: {
-                                    ...(prev.server_celery_scrape || {}),
-                                    active: false,
-                                    phase: null,
-                                    store_id: sid,
-                                },
-                            };
-                        });
-                    }
+                }
+                if (serverStopped) {
+                    trackingServerScrapeRef.current = true;
+                    setTrackingServerScrape(true);
+                    const sid = selectedStore;
+                    setScrapeProgress((prev) => {
+                        if (!prev || (prev.store_id && prev.store_id !== sid)) return prev;
+                        return {
+                            ...prev,
+                            server_celery_scrape: {
+                                ...(prev.server_celery_scrape || {}),
+                                active: true,
+                                phase: 'stopping',
+                                cancel_requested: true,
+                                store_id: sid,
+                            },
+                        };
+                    });
                 }
                 setFlowStatus(hebStopped || serverStopped ? 'success' : '');
                 setMessage(
-                    hebStopped || serverStopped
-                        ? 'Stop was sent. Running price checks should wind down in a few seconds.'
-                        : (res?.data?.detail || 'Nothing was running to stop.'),
+                    serverStopped
+                        ? 'Stop was sent. The item currently being fetched may finish, then remaining stay Pending. It will not restart on its own.'
+                        : hebStopped
+                            ? 'Stop was sent. Running price checks should wind down in a few seconds.'
+                            : (res?.data?.detail || 'Nothing was running to stop.'),
                 );
                 getScrapeProgress(selectedStore)
                     .then((p) => {
@@ -3199,6 +3210,8 @@ export default function Catalog() {
                                 const isClaimed = activeJobStatus === 'claimed'
                                     && vendorIngestIsRunning(activeVendor);
                                 const desktopRunnerBusy = isPending || isClaimed || trackingScrape;
+                                const serverStopping = scrapeProgress?.server_celery_scrape?.phase === 'stopping'
+                                    || Boolean(scrapeProgress?.server_celery_scrape?.cancel_requested);
                                 const isActive = desktopRunnerBusy || trackingServerScrape;
                                 const aheadCount = vendorIngestQueue(activeVendor)?.ahead_count || 0;
                                 const etaLabel = formatEtaShort(vendorIngestQueue(activeVendor)?.eta_seconds);
@@ -3212,6 +3225,8 @@ export default function Catalog() {
                                     label = `Scraping ${activeLabel}… ${activeVendor.scraped || 0}/${activeVendor.total || 0} (${activeVendor.pct || 0}%)`;
                                 } else if (isClaimed) {
                                     label = 'Scraping…';
+                                } else if (serverStopping) {
+                                    label = 'Stopping…';
                                 } else if (trackingServerScrape) {
                                     label = 'Fetching prices (website)…';
                                 }
@@ -3221,6 +3236,8 @@ export default function Catalog() {
                                     titleText = 'Another store is running first. Yours will start on its own when the line is clear.';
                                 } else if (desktopRunnerBusy) {
                                     titleText = 'Price check in progress — use Stop Scraping to cancel.';
+                                } else if (serverStopping) {
+                                    titleText = 'Stop was sent. The current vendor page may finish, then remaining stay Pending.';
                                 } else if (trackingServerScrape) {
                                     titleText = 'We are fetching vendor prices on our servers. You can leave this page. Use Stop Scraping to cancel.';
                                 } else if (vendorList.length > 0) {

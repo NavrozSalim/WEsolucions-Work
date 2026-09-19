@@ -136,11 +136,53 @@ def _ingest_only_vendor_ids() -> list:
 
 def store_has_scrapeable_pending_mappings(store) -> bool:
     """True when the store has pending listings that need live browser scraping."""
+    return _count_scrapeable_pending_mappings(store) > 0
+
+
+def _count_scrapeable_pending_mappings(store) -> int:
     ingest_ids = _ingest_only_vendor_ids()
     qs = ProductMapping.objects.filter(store=store, is_active=True, sync_status='pending')
     if ingest_ids:
         qs = qs.exclude(product__vendor_id__in=ingest_ids)
-    return qs.exists()
+    return qs.count()
+
+
+def _pending_left_scrape_note(store, *, user_cancelled: bool) -> tuple[str, int]:
+    """Activity-log suffix when live-scrape rows are still Pending after a run."""
+    if user_cancelled:
+        return '', 0
+    left = _count_scrapeable_pending_mappings(store)
+    if left <= 0:
+        return '', 0
+    return (
+        f' {left} live-scrape listing(s) still Pending — click Start Scraping to finish them.',
+        left,
+    )
+
+
+def _cancelled_upload_chunk_result() -> dict:
+    return {
+        'error': None,
+        'succeeded': 0,
+        'failed': 0,
+        'stalled_out': False,
+        'fatal_error': None,
+        'rows_visited': 0,
+        'user_cancelled': True,
+    }
+
+
+def _cancelled_store_chunk_result() -> dict:
+    return {
+        'error': None,
+        'rows_processed': 0,
+        'rows_succeeded': 0,
+        'failed': 0,
+        'error_summary': None,
+        'stalled': False,
+        'fatal_error': None,
+        'user_cancelled': True,
+    }
 
 
 def _fail_mapping(pm, code: str, message: str = '', *, store=None) -> None:
@@ -1190,6 +1232,16 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
     chunk_sz = int(getattr(settings, 'CATALOG_SCRAPE_CHUNK_SIZE', 0) or 0)
     use_parallel = bool(parallel and chunk_sz > 0 and len(row_ids) > chunk_sz)
 
+    if should_abort_celery_scrape(str(store.id)):
+        return {
+            'upload_id': str(upload_id),
+            'user_cancelled': True,
+            'status': 'cancelled',
+            'rows_processed': 0,
+            'rows_succeeded': 0,
+            'failed': 0,
+        }
+
     if use_parallel:
         run = ScrapeRun.objects.create(
             catalog_upload=upload,
@@ -1299,6 +1351,8 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
             metadata={'upload_id': str(upload_id), 'scope': 'upload'},
         )
         finish_msg += ' Stopped because you clicked Stop.'
+    left_note, left_n = _pending_left_scrape_note(store, user_cancelled=bool(user_cancelled))
+    finish_msg += left_note
     append_catalog_log(
         store.id,
         finish_msg,
@@ -1308,6 +1362,7 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
             'failed': failed,
             'upload_id': str(upload_id),
             'stalled': stalled_out,
+            **({'pending_left': left_n} if left_n else {}),
         },
     )
     sears_push = _bulk_push_sears_after_scrape_if_needed(store)
@@ -1340,6 +1395,8 @@ def catalog_scrape_upload_chunk_task(self, upload_id: str, scrape_run_id: str, r
         }
 
     store = upload.store
+    if should_abort_celery_scrape(str(store.id)):
+        return _cancelled_upload_chunk_result()
     session = {}
     if store.user_id:
         session['aliexpress_user_id'] = str(store.user_id)
@@ -1455,6 +1512,8 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
                 action_type='scrape_cancelled',
                 metadata={'upload_id': str(upload_id), 'scope': 'upload', 'parallel': True},
             )
+        left_note, left_n = _pending_left_scrape_note(store, user_cancelled=bool(user_cancelled))
+        finish_msg += left_note
         append_catalog_log(
             store.id,
             finish_msg,
@@ -1465,6 +1524,7 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
                 'upload_id': str(upload_id),
                 'stalled': stalled_out,
                 'parallel': True,
+                **({'pending_left': left_n} if left_n else {}),
             },
         )
         sears_push = _bulk_push_sears_after_scrape_if_needed(store)
@@ -1541,9 +1601,10 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
             if should_abort_celery_scrape(str(store.id)):
                 user_cancelled = True
                 break
-            processed += 1
             product = pm.product
             if not product:
+                continue
+            if pm.sync_status != 'pending':
                 continue
             if _is_ingest_only_product(product):
                 logger.info(
@@ -1552,6 +1613,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
                     (product.vendor.code if product.vendor else '?'),
                 )
                 continue
+            processed += 1
 
             now_ts = timezone.now()
             if last_progress_at is None:
@@ -1863,6 +1925,16 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> d
     chunk_sz = int(getattr(settings, 'CATALOG_SCRAPE_CHUNK_SIZE', 0) or 0)
     use_parallel = bool(parallel and chunk_sz > 0 and len(mapping_ids) > chunk_sz)
 
+    if should_abort_celery_scrape(str(store.id)):
+        return {
+            'store_id': str(store_id),
+            'scope': 'store',
+            'user_cancelled': True,
+            'rows_processed': 0,
+            'rows_succeeded': 0,
+            'failed': 0,
+        }
+
     if use_parallel:
         chunks = [mapping_ids[i : i + chunk_sz] for i in range(0, len(mapping_ids), chunk_sz)]
         sigs = [
@@ -1924,6 +1996,10 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> d
             metadata={'scope': 'store'},
         )
         end_msg += ' Stopped because you clicked Stop.'
+    left_note, left_n = _pending_left_scrape_note(store, user_cancelled=bool(user_cancelled))
+    end_msg += left_note
+    if left_n:
+        end_meta['pending_left'] = left_n
     append_catalog_log(
         store.id,
         end_msg,
@@ -1967,6 +2043,9 @@ def catalog_scrape_store_chunk_task(self, store_id: str, mapping_ids: list):
             'stalled': False,
             'user_cancelled': False,
         }
+
+    if should_abort_celery_scrape(str(store.id)):
+        return _cancelled_store_chunk_result()
 
     session: dict = {}
     if store.user_id:
@@ -2057,6 +2136,10 @@ def catalog_scrape_store_finalize(results, store_id: str):
                 action_type='scrape_cancelled',
                 metadata={'scope': 'store', 'parallel': True},
             )
+        left_note, left_n = _pending_left_scrape_note(store, user_cancelled=bool(user_cancelled))
+        end_msg += left_note
+        if left_n:
+            end_meta['pending_left'] = left_n
         append_catalog_log(
             store.id,
             end_msg,

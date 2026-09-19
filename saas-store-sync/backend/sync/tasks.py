@@ -822,7 +822,6 @@ def _run_browser_scrape_for_scheduled_update(store, source: str) -> dict:
         clear_celery_scrape_state,
         mark_celery_scrape_worker_started,
         set_celery_scrape_state,
-        should_abort_celery_scrape,
     )
     from catalog.models import StoreCatalogCeleryScrapeState
     from catalog.scrape_progress import invalidate_scrape_progress_cache
@@ -866,23 +865,17 @@ def _run_browser_scrape_for_scheduled_update(store, source: str) -> dict:
     poll_interval = max(2, int(getattr(settings, 'SCHEDULED_UPDATE_BROWSER_SCRAPE_POLL_SEC', 5) or 5))
     max_wait = max(60, int(getattr(settings, 'SCHEDULED_UPDATE_BROWSER_SCRAPE_MAX_WAIT_SEC', 7200) or 7200))
     started = time.monotonic()
+    saw_cancel = False
 
     while time.monotonic() - started < max_wait:
-        if should_abort_celery_scrape(str(store.id)):
-            try:
-                from core.celery import app
-
-                app.control.revoke(task_id, terminate=True, signal='SIGTERM')
-            except Exception:
-                logger.warning('Revoke catalog scrape task %s failed', task_id, exc_info=True)
-            clear_celery_scrape_state(str(store.id))
+        st = StoreCatalogCeleryScrapeState.objects.filter(store_id=store.id).first()
+        if st is None:
             invalidate_scrape_progress_cache(str(store.id))
-            return {'user_cancelled': True, 'task_id': task_id}
-
-        if not StoreCatalogCeleryScrapeState.objects.filter(store_id=store.id).exists():
-            invalidate_scrape_progress_cache(str(store.id))
+            if saw_cancel:
+                return {'user_cancelled': True, 'task_id': task_id}
             return {'completed': True, 'task_id': task_id}
-
+        if st.cancel_requested:
+            saw_cancel = True
         time.sleep(poll_interval)
 
     logger.warning(
@@ -893,7 +886,7 @@ def _run_browser_scrape_for_scheduled_update(store, source: str) -> dict:
     try:
         from core.celery import app
 
-        app.control.revoke(task_id, terminate=True, signal='SIGTERM')
+        app.control.revoke(task_id, terminate=False)
     except Exception:
         pass
     clear_celery_scrape_state(str(store.id))
