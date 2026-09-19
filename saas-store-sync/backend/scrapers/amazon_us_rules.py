@@ -34,7 +34,12 @@ class AmazonUSBusinessRules:
         """
         combined = f"{inventory_text or ''} {unavailable_text or ''}".lower()
 
-        if "unavailable" in combined or "out of stock" in combined or "sold out" in combined:
+        if (
+            "unavailable" in combined
+            or "out of stock" in combined
+            or "sold out" in combined
+            or "no featured offers" in combined
+        ):
             return 0
 
         only_match = re.search(r'only\s+(\d+)\s+left', combined)

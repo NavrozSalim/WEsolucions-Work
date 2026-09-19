@@ -305,5 +305,90 @@ class TestAmazonAUPriceMarkup(unittest.TestCase):
         self.assertEqual(AmazonParser.extract_price(soup, html, market="AU"), 34.06)
 
 
+NO_FEATURED_OFFER_HTML = """
+<html><body>
+<span id="productTitle">HAUTMEC Copper Pipe Cutter Bundle with Pipe Cutting Tool</span>
+<div id="desktop_buybox">
+  <div id="qualifiedBuybox" class="aok-hidden">
+    <form id="addToCart" action="/gp/product/handle-buy-box/ref=dp_start-bbf_1_glance">
+      <input id="add-to-cart-button" name="submit.add-to-cart" type="submit" value="Add to Cart">
+      <input type="hidden" name="items[0.base][customerVisiblePrice][amount]" value="12.99">
+    </form>
+  </div>
+  <div id="unqualifiedBuyBox">
+    <span class="a-size-medium a-color-secondary">No featured offers available</span>
+    <span class="a-declarative">Learn more</span>
+    <span id="buybox-see-all-buying-options" class="a-button a-button-span12">
+      <span class="a-button-inner">
+        <a id="buybox-see-all-buying-options-announce" class="a-button-text">See All Buying Options</a>
+      </span>
+    </span>
+    <span>Add to List</span>
+  </div>
+  <div class="a-section aok-hidden twister-plus-buying-options-price-data">
+    {"desktop_buybox_group_1":[{"priceAmount":12.99,"displayPrice":"$12.99"}]}
+  </div>
+</div>
+</body></html>
+"""
+
+
+IN_STOCK_WITH_SEE_ALL_HTML = """
+<html><body>
+<span id="productTitle">In stock widget</span>
+<div id="desktop_buybox">
+  <div id="corePrice_feature_div">
+    <span class="a-price"><span class="a-offscreen">$21.00</span></span>
+  </div>
+  <form id="addToCart">
+    <input id="add-to-cart-button" name="submit.add-to-cart" type="submit" value="Add to Cart">
+  </form>
+  <span id="buybox-see-all-buying-options" class="a-button">
+    <a>See All Buying Options</a>
+  </span>
+  <div id="availability"><span>In Stock</span></div>
+</div>
+</body></html>
+"""
+
+
+class TestAmazonUSNoFeaturedOffer(unittest.TestCase):
+    def test_no_featured_offer_is_stock_zero_and_ignores_leftover_price(self):
+        soup = BeautifulSoup(NO_FEATURED_OFFER_HTML, "html.parser")
+        self.assertTrue(AmazonParser.has_no_featured_offer(soup))
+        self.assertFalse(AmazonParser.has_visible_add_to_cart(soup))
+        self.assertIsNone(AmazonParser.extract_price(soup, NO_FEATURED_OFFER_HTML))
+        self.assertEqual(AmazonParser.extract_stock(soup), 0)
+        result = AmazonParser.oos_without_offer_result(soup)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.success)
+        self.assertIsNone(result.price)
+        self.assertEqual(result.stock, 0)
+        self.assertIn("HAUTMEC", result.title or "")
+
+    def test_in_stock_page_with_see_all_keeps_buybox(self):
+        soup = BeautifulSoup(IN_STOCK_WITH_SEE_ALL_HTML, "html.parser")
+        self.assertFalse(AmazonParser.has_no_featured_offer(soup))
+        self.assertTrue(AmazonParser.has_visible_add_to_cart(soup))
+        self.assertEqual(AmazonParser.extract_price(soup, IN_STOCK_WITH_SEE_ALL_HTML), 21.0)
+        self.assertEqual(AmazonParser.extract_stock(soup), 99)
+        self.assertIsNone(AmazonParser.oos_without_offer_result(soup))
+
+    def test_see_all_without_add_to_cart_is_oos(self):
+        html = """
+        <html><body>
+          <span id="productTitle">Pliers bundle</span>
+          <div id="desktop_buybox">
+            <span id="buybox-see-all-buying-options">See All Buying Options</span>
+            <span>Add to List</span>
+          </div>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        self.assertTrue(AmazonParser.has_no_featured_offer(soup))
+        self.assertEqual(AmazonParser.extract_stock(soup), 0)
+        self.assertIsNone(AmazonParser.extract_price(soup, html))
+
+
 if __name__ == "__main__":
     unittest.main()

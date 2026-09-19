@@ -797,6 +797,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
     from sync.tasks import (
         _apply_inventory,
         _apply_pricing,
+        _apply_successful_oos_without_price,
         _build_store_vendor_pricing_inventory_caches,
         _fail_mapping,
         _get_inventory_for_vendor_from_cache,
@@ -804,6 +805,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
         _has_fixed_tier,
         _inventory_from_scrape_result,
         _missing_fixed_inputs,
+        _scrape_is_oos_without_price,
         resolve_vendor_scrape_url,
     )
     from vendor.models import VendorPrice
@@ -1006,6 +1008,13 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                         logger.exception('Nora stock-only apply failed for %s: %s', product.vendor_sku, apply_err)
                         _fail_mapping(pm, 'pricing_apply_error', str(apply_err), store=store)
                         failed += 1
+                    last_progress_at = timezone.now()
+                    continue
+                if _scrape_is_oos_without_price(result):
+                    _apply_successful_oos_without_price(
+                        pm, now=now, scrape_title=scrape_title,
+                    )
+                    succeeded += 1
                     last_progress_at = timezone.now()
                     continue
                 err_code = (
@@ -1489,6 +1498,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
     from sync.tasks import (
         _apply_inventory,
         _apply_pricing,
+        _apply_successful_oos_without_price,
         _build_store_vendor_pricing_inventory_caches,
         _fail_mapping,
         _get_inventory_for_vendor_from_cache,
@@ -1496,6 +1506,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
         _has_fixed_tier,
         _inventory_from_scrape_result,
         _missing_fixed_inputs,
+        _scrape_is_oos_without_price,
         resolve_vendor_scrape_url,
     )
     from vendor.models import VendorPrice
@@ -1669,6 +1680,13 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
                     except Exception as apply_err:
                         _fail_mapping(pm, 'pricing_apply_error', str(apply_err), store=store)
                         failed += 1
+                    last_progress_at = timezone.now()
+                    continue
+                if _scrape_is_oos_without_price(result):
+                    _apply_successful_oos_without_price(
+                        pm, now=now, scrape_title=scrape_title,
+                    )
+                    succeeded += 1
                     last_progress_at = timezone.now()
                     continue
                 err_code = (

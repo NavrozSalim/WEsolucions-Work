@@ -6,7 +6,11 @@ from unittest.mock import MagicMock
 from django.test import SimpleTestCase
 
 from scrapers import core
-from sync.tasks import _inventory_from_scrape_result, resolve_vendor_scrape_url
+from sync.tasks import (
+    _inventory_from_scrape_result,
+    _scrape_is_oos_without_price,
+    resolve_vendor_scrape_url,
+)
 
 
 class ScraperDebugArtifactTests(SimpleTestCase):
@@ -27,6 +31,12 @@ class VendorScrapeUrlTests(SimpleTestCase):
         self.assertEqual(_inventory_from_scrape_result({'inventory': 3, 'stock': 9}), 3)
         self.assertEqual(_inventory_from_scrape_result({'stock': 2}), 2)
         self.assertIsNone(_inventory_from_scrape_result(None))
+
+    def test_oos_without_price_is_successful_scrape(self):
+        self.assertTrue(_scrape_is_oos_without_price({'price': None, 'stock': 0}))
+        self.assertFalse(_scrape_is_oos_without_price({'price': 12.99, 'stock': 0}))
+        self.assertFalse(_scrape_is_oos_without_price({'price': None, 'stock': 0, 'error_code': 'no_price'}))
+        self.assertFalse(_scrape_is_oos_without_price({'price': None, 'stock': None}))
 
     def test_resolve_uses_catalog_vendor_id_when_url_empty(self):
         row = MagicMock()

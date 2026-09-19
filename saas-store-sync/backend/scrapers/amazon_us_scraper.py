@@ -86,6 +86,23 @@ _BUYBOX_FORM_SELECTORS = (
     "form[action*='handle-buy-box']",
 )
 
+_NO_FEATURED_OFFER_PHRASE_RE = re.compile(r"no featured offers available", re.I)
+
+_ADD_TO_CART_SELECTORS = (
+    "#add-to-cart-button",
+    "input#add-to-cart-button",
+    "input[name='submit.add-to-cart']",
+    "#buy-now-button",
+    "input#buy-now-button",
+)
+
+_SEE_ALL_BUYING_OPTIONS_SELECTORS = (
+    "#buybox-see-all-buying-options",
+    "#buybox-see-all-buying-options-announce",
+    "span#buybox-see-all-buying-options",
+    "a#buybox-see-all-buying-options-announce",
+)
+
 _EMPTY_OFFSCREEN_VALUES = {"", "null", "none", "n/a"}
 _ALWAYS_FOREIGN_CURRENCY_PREFIXES = (
     "PKR", "INR", "AED", "EUR", "GBP", "CAD", "JPY", "CNY", "₹", "€", "£", "¥",
@@ -253,6 +270,49 @@ class AmazonParser:
         return roots[0] if roots else None
 
     @classmethod
+    def has_visible_add_to_cart(cls, soup: BeautifulSoup) -> bool:
+        """True when the featured offer can be added to cart (not a hidden leftover form)."""
+        if soup is None:
+            return False
+        for sel in _ADD_TO_CART_SELECTORS:
+            el = soup.select_one(sel)
+            if el is not None and not _amazon_node_hidden(el):
+                return True
+        return False
+
+    @classmethod
+    def has_no_featured_offer(cls, soup: BeautifulSoup) -> bool:
+        """True for PDPs with no buy box (See All Buying Options / Add to List only)."""
+        if soup is None:
+            return False
+
+        for text_node in soup.find_all(string=_NO_FEATURED_OFFER_PHRASE_RE):
+            parent = getattr(text_node, "parent", None)
+            name = getattr(parent, "name", None)
+            if name in ("script", "style", "noscript"):
+                continue
+            if parent is not None and _amazon_node_hidden(parent):
+                continue
+            return True
+
+        unq = soup.select_one("#unqualifiedBuyBox")
+        if unq is not None and not _amazon_node_hidden(unq) and not cls.has_visible_add_to_cart(soup):
+            return True
+
+        for sel in _SEE_ALL_BUYING_OPTIONS_SELECTORS:
+            el = soup.select_one(sel)
+            if el is not None and not _amazon_node_hidden(el) and not cls.has_visible_add_to_cart(soup):
+                return True
+        return False
+
+    @classmethod
+    def oos_without_offer_result(cls, soup: BeautifulSoup):
+        """Successful scrape: no featured offer, so stock 0 and no leftover 3P price."""
+        if not cls.has_no_featured_offer(soup):
+            return None
+        return ScrapeResult.ok(price=None, stock=0, title=cls.extract_title(soup))
+
+    @classmethod
     def is_map_price_page(cls, soup: BeautifulSoup, page_html: str = "") -> bool:
         """True when Amazon hides the advertised price (MAP / see-price-in-cart)."""
         if page_html:
@@ -392,6 +452,9 @@ class AmazonParser:
         ``market="AU"`` accepts AUD / A$ offscreen text. US still skips those so a
         mis-geolocated AU page is not stored as a USD price.
         """
+        if cls.has_no_featured_offer(soup):
+            return None
+
         form_price = cls.extract_buybox_form_price(soup)
         if form_price is not None:
             return form_price
@@ -441,6 +504,9 @@ class AmazonParser:
     @classmethod
     def _availability_stock(cls, soup: BeautifulSoup) -> Optional[int]:
         """Derive stock from availability text only (before delivery-day gate)."""
+        if cls.has_no_featured_offer(soup):
+            return 0
+
         texts = []
         for sel in cls.AVAILABILITY_SELECTORS:
             elem = soup.select_one(sel)
@@ -449,7 +515,16 @@ class AmazonParser:
 
         combined = " ".join(texts)
 
-        if any(kw in combined for kw in ("unavailable", "out of stock", "sold out", "not available")):
+        if any(
+            kw in combined
+            for kw in (
+                "unavailable",
+                "out of stock",
+                "sold out",
+                "not available",
+                "no featured offers",
+            )
+        ):
             return 0
 
         m = re.search(r"only\s+(\d+)\s+left", combined)
@@ -530,6 +605,25 @@ def _extract_asin(url: str, soup: BeautifulSoup = None) -> Optional[str]:
             if el and el.get("value"):
                 return str(el["value"]).upper()
     return None
+
+
+def _amazon_node_hidden(elem) -> bool:
+    """True when Amazon hides the node with aok-hidden / display:none."""
+    cur = elem
+    for _ in range(14):
+        if cur is None or not getattr(cur, "get", None):
+            break
+        classes = " ".join(_css_classes(cur)).lower()
+        if "aok-hidden" in classes:
+            return True
+        style = (cur.get("style") or "").lower().replace(" ", "")
+        if "display:none" in style or "visibility:hidden" in style:
+            return True
+        hidden_attr = cur.get("hidden")
+        if hidden_attr is not None and hidden_attr is not False:
+            return True
+        cur = getattr(cur, "parent", None)
+    return False
 
 
 def _css_classes(elem) -> tuple:
@@ -789,6 +883,10 @@ class AmazonHTTP:
 
         if not AmazonParser.is_valid_product_page(soup):
             return ScrapeResult.fail("not_product_page", "Not a product page", html, "amazon_us", url)
+
+        oos = AmazonParser.oos_without_offer_result(soup)
+        if oos is not None:
+            return oos
 
         price = AmazonParser.extract_price(soup, html)
         stock = AmazonParser.extract_stock(soup)
@@ -1078,6 +1176,10 @@ class AmazonScraper:
         if not AmazonParser.is_valid_product_page(soup):
             return ScrapeResult.fail("not_product_page", "Not a product page", html, "amazon_us", url)
 
+        oos = AmazonParser.oos_without_offer_result(soup)
+        if oos is not None:
+            return oos
+
         price = AmazonParser.extract_price(soup, html)
         stock = AmazonParser.extract_stock(soup)
         title = AmazonParser.extract_title(soup)
@@ -1329,6 +1431,9 @@ def scrape_amazon_us(vendor_url: str, region: str, session: dict = None) -> dict
                 html = driver.page_source
                 soup = BeautifulSoup(html, "html.parser")
                 if AmazonParser.is_valid_product_page(soup):
+                    oos = AmazonParser.oos_without_offer_result(soup)
+                    if oos is not None:
+                        return oos.to_legacy()
                     price = AmazonParser.extract_price(soup, html)
                     stock = AmazonParser.extract_stock(soup)
                     tit = AmazonParser.extract_title(soup)

@@ -189,6 +189,10 @@ class AmazonAUHTTP:
         except Exception:
             soup = BeautifulSoup(html, "html.parser")
 
+        oos = AmazonParser.oos_without_offer_result(soup)
+        if oos is not None:
+            return oos
+
         price = AmazonParser.extract_price(soup, html, market="AU")
         stock = AmazonParser.extract_stock(soup)
         title = AmazonParser.extract_title(soup)
@@ -335,6 +339,10 @@ def _selenium_scrape_page(url: str, driver) -> ScrapeResult:
             return ScrapeResult.fail(f"blocked_{reason}", f"Blocked: {reason}", html, "amazon_au", url)
 
         soup = BeautifulSoup(html, "html.parser")
+
+        oos = AmazonParser.oos_without_offer_result(soup)
+        if oos is not None:
+            return oos
 
         price = AmazonParser.extract_price(soup, html, market="AU")
         stock = AmazonParser.extract_stock(soup)

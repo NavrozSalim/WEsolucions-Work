@@ -268,6 +268,35 @@ def _inventory_from_scrape_result(result: dict | None) -> int | None:
     return None
 
 
+def _scrape_is_oos_without_price(result: dict | None) -> bool:
+    """True when the vendor page is unsellable and the scraper returned stock 0 with no price.
+
+    Amazon 'No featured offers' pages succeed this way so we zero stock without
+    treating the row as a no_price failure.
+    """
+    if not isinstance(result, dict):
+        return False
+    if result.get('error_code'):
+        return False
+    if result.get('price') is not None:
+        return False
+    inv = _inventory_from_scrape_result(result)
+    return inv is not None and inv <= 0
+
+
+def _apply_successful_oos_without_price(pm, *, now, scrape_title: str = '') -> None:
+    """Zero local stock, keep last store price, mark the scrape as successful."""
+    pm.store_stock = 0
+    pm.sync_status = 'scraped'
+    pm.last_scrape_time = now
+    pm.scrape_error = ''
+    fields = ['store_stock', 'sync_status', 'last_scrape_time', 'scrape_error']
+    if scrape_title:
+        pm.title = scrape_title[:500]
+        fields.append('title')
+    pm.save(update_fields=fields)
+
+
 def _get_pricing_for_vendor(store, vendor_id):
     try:
         return StoreVendorPriceSettings.objects.get(store=store, vendor_id=vendor_id)
@@ -560,6 +589,12 @@ def run_store_sync(self, store_id):
                 err_msg = (
                     result.get('error_message') if isinstance(result, dict) else ''
                 ) or ''
+                if _scrape_is_oos_without_price(result):
+                    _apply_successful_oos_without_price(
+                        pm, now=now, scrape_title=scrape_title,
+                    )
+                    updated += 1
+                    continue
                 _apply_no_vendor_price_fallback(
                     pm,
                     err_code,
