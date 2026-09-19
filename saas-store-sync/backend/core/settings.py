@@ -76,6 +76,14 @@ try:
 except ValueError:
     CATALOG_SCRAPE_STALL_MINUTES = 20
 
+# If Stop never gets a finalize (worker killed), allow Start Scraping again after this many minutes.
+try:
+    CATALOG_SCRAPE_STOP_STALE_MINUTES = max(
+        5, min(120, int(os.getenv('CATALOG_SCRAPE_STOP_STALE_MINUTES', '20'))),
+    )
+except ValueError:
+    CATALOG_SCRAPE_STOP_STALE_MINUTES = 20
+
 if DEBUG:
     ALLOWED_HOSTS = _env_list('ALLOWED_HOSTS', 'localhost,127.0.0.1,backend')
 else:

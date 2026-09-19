@@ -475,6 +475,11 @@ class StoreCatalogCeleryScrapeState(models.Model):
         default=False,
         help_text='User clicked Stop Scraping; worker loops should exit cooperatively.',
     )
+    cancel_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='When Stop was clicked; used to expire a stuck stopping state.',
+    )
     first_worker_started_at = models.DateTimeField(
         null=True,
         blank=True,

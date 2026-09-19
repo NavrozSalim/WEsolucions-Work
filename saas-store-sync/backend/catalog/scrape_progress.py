@@ -287,6 +287,9 @@ def build_scrape_progress_payload(store) -> dict[str, Any]:
         'cancel_requested': False,
     }
     try:
+        from catalog.celery_scrape_state import heal_stale_celery_scrape_state
+
+        heal_stale_celery_scrape_state(str(store.id))
         st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
         if st:
             if st.cancel_requested:

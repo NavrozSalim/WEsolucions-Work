@@ -2,16 +2,28 @@
 
 Desktop vendors (HEB, Costco) use ``HebScrapeJob``. Server-side store/upload
 scrapes use Celery task IDs; this table marks a store while a chord or
-single-task scrape is still running so ``/catalog/scrape/progress/`` can show
+single-task scrape is still running so ``/scrape/progress/`` can show
 \"in queue / running\" like desktop queue strips.
 """
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from catalog.models import CatalogUpload
     from stores.models import Store
+
+
+def _stop_stale_timedelta() -> timedelta:
+    from django.conf import settings
+
+    try:
+        m = int(getattr(settings, 'CATALOG_SCRAPE_STOP_STALE_MINUTES', 20) or 20)
+    except (TypeError, ValueError):
+        m = 20
+    m = max(5, min(120, m))
+    return timedelta(minutes=m)
 
 
 def set_celery_scrape_state(
@@ -31,6 +43,7 @@ def set_celery_scrape_state(
             'upload': upload,
             'root_task_id': tid,
             'cancel_requested': False,
+            'cancel_requested_at': None,
             'first_worker_started_at': None,
         },
     )
@@ -44,6 +57,7 @@ def set_celery_scrape_state(
     st.upload = upload
     st.root_task_id = tid
     st.cancel_requested = False
+    st.cancel_requested_at = None
     # update_or_create always reapplied None here, so a transient duplicate POST or
     # client retry cleared first_worker_started_at and the UI stuck on "queued".
     if prev_tid != tid:
@@ -54,6 +68,7 @@ def set_celery_scrape_state(
             'upload',
             'root_task_id',
             'cancel_requested',
+            'cancel_requested_at',
             'first_worker_started_at',
         ]
     )
@@ -107,15 +122,52 @@ def request_celery_scrape_cancel(store_id: str | None) -> bool:
     """
     if not store_id:
         return False
+    from django.utils import timezone
+
     from catalog.models import StoreCatalogCeleryScrapeState
     from catalog.scrape_progress import invalidate_scrape_progress_cache
 
     updated = StoreCatalogCeleryScrapeState.objects.filter(store_id=store_id).update(
         cancel_requested=True,
+        cancel_requested_at=timezone.now(),
     )
     if updated:
         invalidate_scrape_progress_cache(str(store_id))
     return bool(updated)
+
+
+def heal_stale_celery_scrape_state(store_id: str | None) -> bool:
+    """Clear leftover scrape-state rows that would block Start Scraping forever.
+
+    - Stop clicked but never finalized (worker killed / old leftover): expire after
+      ``CATALOG_SCRAPE_STOP_STALE_MINUTES`` (default 20). Legacy rows with no
+      ``cancel_requested_at`` use ``enqueued_at``.
+    - Queued and never started for 30+ minutes: same recovery as before.
+
+    Returns True when a row was deleted.
+    """
+    if not store_id:
+        return False
+    from django.utils import timezone
+
+    from catalog.models import StoreCatalogCeleryScrapeState
+
+    try:
+        st = StoreCatalogCeleryScrapeState.objects.get(store_id=store_id)
+    except StoreCatalogCeleryScrapeState.DoesNotExist:
+        return False
+
+    now = timezone.now()
+    if st.cancel_requested:
+        marked_at = st.cancel_requested_at or st.enqueued_at
+        if marked_at and (now - marked_at) >= _stop_stale_timedelta():
+            clear_celery_scrape_state(str(store_id))
+            return True
+        return False
+    if st.first_worker_started_at is None and (now - st.enqueued_at) > timedelta(minutes=30):
+        clear_celery_scrape_state(str(store_id))
+        return True
+    return False
 
 
 def clear_celery_scrape_state(store_id: str | None) -> None:

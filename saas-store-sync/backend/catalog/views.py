@@ -26,6 +26,7 @@ from catalog.models import (
 )
 from catalog.celery_scrape_state import (
     clear_celery_scrape_state,
+    heal_stale_celery_scrape_state,
     mark_celery_scrape_worker_started,
     request_celery_scrape_cancel,
     set_celery_scrape_state,
@@ -885,17 +886,12 @@ class CatalogScrapeTriggerView(APIView):
     def _reject_if_server_scrape_active(store) -> Response | None:
         """Block a second server-side catalog scrape while one is queued/running (same store).
 
-        If Celery state was left behind with no worker start for 30+ minutes, clear it
-        and allow a new scrape (recovery from crashed worker).
+        Stuck Stop flags and never-started queued rows are expired by
+        ``heal_stale_celery_scrape_state`` so Start Scraping is not blocked forever.
         """
-        from datetime import timedelta
-
+        heal_stale_celery_scrape_state(str(store.id))
         st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
         if not st:
-            return None
-        now = timezone.now()
-        if st.first_worker_started_at is None and (now - st.enqueued_at) > timedelta(minutes=30):
-            clear_celery_scrape_state(str(store.id))
             return None
         if st.cancel_requested:
             return Response(
