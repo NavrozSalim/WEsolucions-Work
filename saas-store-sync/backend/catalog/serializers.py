@@ -62,6 +62,7 @@ class ProductMappingSerializer(serializers.ModelSerializer):
                 return None
             from catalog.vendor_url_resolve import (
                 canonicalize_costco_pdp_url,
+                costco_id_hints_from_product,
                 is_costco_vendor_code,
                 is_heb_vendor_code,
                 latest_upload_vendor_url_for_mapping,
@@ -87,7 +88,10 @@ class ProductMappingSerializer(serializers.ModelSerializer):
                         vendor_url_raw=upload_url or product_url,
                     )
                     if url:
-                        return canonicalize_costco_pdp_url(url)
+                        child = obj.marketplace_child_sku or ''
+                        return canonicalize_costco_pdp_url(
+                            url, *costco_id_hints_from_product(obj.product), child,
+                        )
                 else:
                     url = resolve_heb_product_url(
                         obj.product,

@@ -352,6 +352,54 @@ _PDP_HTML_OUT_OF_STOCK = """
 </body></html>
 """
 
+_PDP_HTML_VARIANT_IN_STOCK = """
+<html><head><title>Burago Ferrari | Costco Australia</title></head>
+<body>
+  <div class="product-page-container">
+    <h1>Burago 1:43 Formula One Racing Deluxe Paddock Ferrari</h1>
+    <sip-add-to-cart-form>
+      <button data-cy="addtocart-button-1851433-FER" class="btn btn-primary">Add to cart</button>
+    </sip-add-to-cart-form>
+    <div class="price-original"><span class="notranslate">$34.98</span></div>
+  </div>
+</body></html>
+"""
+
+_PDP_HTML_VARIANT_PARENT_DISABLED = """
+<html><head><title>Burago | Costco Australia</title></head>
+<body>
+  <div class="product-page-container">
+    <h1>Burago 1:43 Formula One Racing Deluxe Paddock</h1>
+    <sip-add-to-cart-form>
+      <button data-cy="addtocart-button-1851433" class="btn btn-block btn-primary disabled" disabled>
+        Add to cart
+      </button>
+    </sip-add-to-cart-form>
+    <div class="price-original"><span class="notranslate">$34.98</span></div>
+  </div>
+</body></html>
+"""
+
+_PDP_HTML_VARIANT_HYDRATED_ATC = """
+<html><head><title>Burago Ferrari | Costco Australia</title></head>
+<body>
+  <div class="product-page-container">
+    <h1>Burago 1:43 Formula One Racing Deluxe Paddock Ferrari</h1>
+    <sip-add-to-cart-form>
+      <button data-cy="addtocart-button-1851433" class="btn btn-block btn-primary disabled" disabled>
+        Add to cart
+      </button>
+      <button id="add-to-cart-button" type="submit"
+              data-cy="addtocart-button-1851433-FER"
+              class="notranslate btn btn-primary add-to-cart__btn ng-star-inserted">
+        Add to cart
+      </button>
+    </sip-add-to-cart-form>
+    <div class="price-original"><span class="notranslate">$34.98</span></div>
+  </div>
+</body></html>
+"""
+
 _PDP_HTML_NO_PRICE = """
 <html><head><title>Product Without Price | Costco Australia</title></head>
 <body>
@@ -524,6 +572,34 @@ class ParseCostcoPdpTests(SimpleTestCase):
         self.assertEqual(result.stock, 0)
         self.assertEqual(result.price, 199.00)
 
+    def test_variant_option_url_is_in_stock(self):
+        url = "https://www.costco.com.au/p/1851433-FER"
+        result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_VARIANT_IN_STOCK)
+        self.assertTrue(result.success, msg=f"error_code={result.error_code}")
+        self.assertEqual(result.price, 34.98)
+        self.assertEqual(result.stock, 3)
+
+    def test_parent_selector_page_is_out_of_stock(self):
+        url = "https://www.costco.com.au/p/1851433"
+        result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_VARIANT_PARENT_DISABLED)
+        self.assertTrue(result.success, msg=f"error_code={result.error_code}")
+        self.assertEqual(result.price, 34.98)
+        self.assertEqual(result.stock, 0)
+
+    def test_variant_url_ignores_parent_disabled_atc(self):
+        url = "https://www.costco.com.au/p/1851433-FER"
+        result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_VARIANT_PARENT_DISABLED)
+        self.assertTrue(result.success, msg=f"error_code={result.error_code}")
+        self.assertEqual(result.price, 34.98)
+        self.assertEqual(result.stock, 3)
+
+    def test_variant_hydrated_add_to_cart_button(self):
+        url = "https://www.costco.com.au/p/1851433-FER"
+        result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_VARIANT_HYDRATED_ATC)
+        self.assertTrue(result.success, msg=f"error_code={result.error_code}")
+        self.assertEqual(result.price, 34.98)
+        self.assertEqual(result.stock, 3)
+
     def test_no_price_returns_fail(self):
         url = "https://www.costco.com.au/p/444555"
         result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_NO_PRICE)
@@ -560,6 +636,12 @@ class ParseCostcoPdpTests(SimpleTestCase):
                 "https://www.costco.com.au/p/TFS-CO-138511-New/slug"
             ),
             "138511",
+        )
+        self.assertEqual(
+            costco_au_scraper.product_id_from_url(
+                "https://www.costco.com.au/p/1851433-FER"
+            ),
+            "1851433-FER",
         )
         self.assertIsNone(
             costco_au_scraper.product_id_from_url("https://www.costco.com.au/category/x"),

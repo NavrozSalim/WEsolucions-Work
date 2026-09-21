@@ -19,6 +19,7 @@ from sync.models import StoreSyncRun
 from scrapers import get_price_and_stock, close_amazon_session
 from catalog.vendor_url_resolve import (
     canonicalize_costco_pdp_url,
+    costco_id_hints_from_product,
     costco_product_id_from_value as _costco_product_id_from_value,
     is_costco_vendor_code,
     resolve_costco_product_url,
@@ -227,7 +228,9 @@ def resolve_vendor_scrape_url(product, store, catalog_row=None):
                 vendor_id_raw=_normalize(getattr(catalog_row, 'vendor_id_raw', None)),
             )
             if url:
-                return canonicalize_costco_pdp_url(url)
+                return canonicalize_costco_pdp_url(
+                    url, *costco_id_hints_from_product(product, catalog_row),
+                )
         u = _normalize(getattr(catalog_row, 'vendor_url_raw', None))
         if u:
             return u
@@ -240,7 +243,7 @@ def resolve_vendor_scrape_url(product, store, catalog_row=None):
     if is_costco_au and product:
         url = resolve_costco_product_url(product)
         if url:
-            return canonicalize_costco_pdp_url(url)
+            return canonicalize_costco_pdp_url(url, *costco_id_hints_from_product(product))
 
     if product and product.vendor_url and not is_costco_au:
         u = str(product.vendor_url).strip()

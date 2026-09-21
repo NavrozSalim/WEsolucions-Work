@@ -121,10 +121,11 @@ def _parse_price_text(text: str) -> Optional[float]:
 
 
 def product_id_from_url(url: str) -> Optional[str]:
-    """Numeric Costco AU item id from ``/p/141624`` or ``/c/slug/p/141624``.
+    """Costco AU item id from ``/p/141624``, ``/p/1851433-FER``, or ``/c/slug/p/{id}``.
 
     Legacy alphanumeric tokens (``/p/TFCO-173734-New``) still yield the embedded
     item number so homepage-redirect detection and add-to-cart matching work.
+    Option codes (``1851433-FER``) are preserved so ATC buttons match the variant.
     """
     if not url or "/p/" not in url.lower():
         return None
@@ -288,30 +289,95 @@ def _button_disabled(el) -> bool:
     return "disabled" in classes or "outofstock" in classes
 
 
+def _atc_data_cy(el) -> str:
+    return (el.get("data-cy") or "").strip()
+
+
+def _is_add_to_cart_button(el) -> bool:
+    if el is None or (getattr(el, "name", "") or "").lower() != "button":
+        return False
+    cy = _atc_data_cy(el)
+    if cy.lower().startswith("addtocart-button-"):
+        return True
+    if (el.get("id") or "").strip().lower() == "add-to-cart-button":
+        return True
+    classes = " ".join(el.get("class") or []).lower()
+    if "add-to-cart__btn" in classes:
+        return True
+    label = (el.get_text(" ", strip=True) or "").lower()
+    return "add to cart" in label or "out of stock" in label
+
+
+def _is_parent_placeholder_atc(el, variant_pid: Optional[str], base_pid: Optional[str]) -> bool:
+    """True for the unselected parent ATC (``addtocart-button-1851433``) on a ``*-FER`` PDP."""
+    if not variant_pid or not base_pid:
+        return False
+    cy = _atc_data_cy(el)
+    if cy == f"addtocart-button-{variant_pid}":
+        return False
+    return cy == f"addtocart-button-{base_pid}"
+
+
 def _extract_inventory(soup: BeautifulSoup, url: str) -> int:
-    """3 = in stock, 0 = out of stock / unknown (matches desktop runner)."""
+    """3 = in stock, 0 = out of stock / unknown (matches desktop runner).
+
+    Variation PDPs use ``data-cy="addtocart-button-1851433-FER"`` and
+    ``#add-to-cart-button. add-to-cart__btn`` (often ``ng-star-inserted``). The
+    parent selector-page button ``addtocart-button-1851433`` stays disabled until
+    an option is chosen — ignore it when the scrape URL already has the option
+    code, or every variant would scrape as stock 0.
+    """
     pid = product_id_from_url(url)
-    if pid:
-        specific = soup.select_one(f"button[data-cy='addtocart-button-{pid}']")
-        if specific:
-            return 0 if _button_disabled(specific) else 3
+    variant_pid = pid if pid and "-" in pid else None
+    base_pid = pid.split("-", 1)[0] if variant_pid else pid
 
     form = soup.select_one(".product-page-container sip-add-to-cart-form")
     if form is None:
         form = soup.select_one("sip-add-to-cart-form")
+
+    buttons: list = []
+    search_roots = [form, soup] if form is not None else [soup]
+    seen: set[int] = set()
+    for root in search_roots:
+        if root is None:
+            continue
+        for el in root.select("button"):
+            marker = id(el)
+            if marker in seen or not _is_add_to_cart_button(el):
+                continue
+            seen.add(marker)
+            buttons.append(el)
+
+    usable = [
+        b for b in buttons
+        if not _is_parent_placeholder_atc(b, variant_pid, base_pid)
+    ]
+
+    for b in usable:
+        if not _button_disabled(b):
+            return 3
+
+    for b in usable:
+        label = (b.get_text(" ", strip=True) or "").lower()
+        classes = " ".join(b.get("class") or []).lower()
+        if "outofstock" in classes or "out of stock" in label or _button_disabled(b):
+            return 0
+
     if form is not None:
         oos = form.select_one(
             "button.btn.btn-block.btn-primary.disabled.outOfStock, "
             "button.disabled.outOfStock, button.outOfStock"
         )
-        if oos is not None:
+        if oos is not None and not _is_parent_placeholder_atc(oos, variant_pid, base_pid):
             return 0
-        for el in form.select("button"):
-            label = (el.get_text(" ", strip=True) or "").lower()
-            if "add to cart" not in label:
-                continue
-            return 0 if _button_disabled(el) else 3
-        return 3
+        # Hydrated variant ATC is often missing from HTTP SSR. A form with no
+        # usable ATC (or only the parent placeholder) is treated as in stock,
+        # same as a form with no button at all.
+        if variant_pid or not buttons:
+            availability = _extract_ldjson_availability(soup)
+            if availability == "oos":
+                return 0
+            return 3
 
     availability = _extract_ldjson_availability(soup)
     if availability == "instock":
@@ -521,6 +587,10 @@ def _looks_like_pdp(soup: BeautifulSoup, url: str) -> bool:
             compact += (script.string or script.get_text() or "")
         if f'"sku":"{pid}"' in compact.replace(" ", ""):
             return True
+        if '-' in pid:
+            base = pid.split('-', 1)[0]
+            if f'"sku":"{base}"' in compact.replace(" ", ""):
+                return True
     return False
 
 

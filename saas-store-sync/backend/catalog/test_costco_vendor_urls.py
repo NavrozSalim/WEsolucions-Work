@@ -36,6 +36,39 @@ class CostcoUrlResolveTests(SimpleTestCase):
     def test_costco_product_id_from_composite_sku(self):
         self.assertEqual(costco_product_id_from_value('TFCO-173734-New'), '173734')
 
+    def test_costco_product_id_keeps_option_code(self):
+        self.assertEqual(costco_product_id_from_value('1851433-FER'), '1851433-FER')
+        self.assertEqual(costco_product_id_from_value('COST-1851433-FER'), '1851433-FER')
+        self.assertEqual(
+            costco_product_id_from_value(
+                'https://www.costco.com.au/c/Burago-Paddock-Ferrari/p/1851433-FER'
+            ),
+            '1851433-FER',
+        )
+        self.assertEqual(
+            costco_product_id_from_value('https://www.costco.com.au/p/1851433-FER'),
+            '1851433-FER',
+        )
+        # Catalog junk suffix is not an option code.
+        self.assertEqual(costco_product_id_from_value('TFCO-173734-NEW'), '173734')
+
+    def test_canonicalize_keeps_option_code_and_merges_sku_hint(self):
+        variant = 'https://www.costco.com.au/p/1851433-FER'
+        self.assertEqual(canonicalize_costco_pdp_url(variant), variant)
+        self.assertEqual(
+            canonicalize_costco_pdp_url(
+                'https://www.costco.com.au/c/Burago/p/1851433-FER'
+            ),
+            'https://www.costco.com.au/c/Burago/p/1851433-FER',
+        )
+        self.assertEqual(
+            canonicalize_costco_pdp_url(
+                'https://www.costco.com.au/p/1851433',
+                'COST-1851433-FER',
+            ),
+            variant,
+        )
+
     def test_costco_product_id_from_full_url_path(self):
         self.assertEqual(
             costco_product_id_from_value('https://www.costco.com.au/p/TFCO-173734-New/slug'),
@@ -240,3 +273,20 @@ class CostcoIngestAndSerializerTests(TestCase):
 
         data = ProductMappingSerializer(pm).data
         self.assertEqual(data['vendor_url'], SHORT_COSTCO_URL)
+
+    def test_serializer_link_uses_variant_option_code_from_sku(self):
+        product = Product.objects.create(
+            vendor=self.vendor,
+            owner=self.user,
+            vendor_sku='COST-1851433-FER',
+            vendor_url='https://www.costco.com.au/p/1851433',
+        )
+        pm = ProductMapping.objects.create(
+            store=self.store,
+            product=product,
+            marketplace_parent_sku='COST-1851433',
+            marketplace_child_sku='COST-1851433-FER',
+            is_active=True,
+        )
+        data = ProductMappingSerializer(pm).data
+        self.assertEqual(data['vendor_url'], 'https://www.costco.com.au/p/1851433-FER')

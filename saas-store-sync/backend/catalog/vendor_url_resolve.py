@@ -100,6 +100,9 @@ def is_costco_vendor_code(code: str) -> bool:
 
 _COSTCO_P_TOKEN_RE = re.compile(r'/p/([^/?#]+)', re.I)
 _COSTCO_C0_ITEM_RE = re.compile(r'^[Cc]0*(\d{5,12})$')
+# ``1851433-FER`` (Costco option codes). Ignore catalog junk like ``173734-New``.
+_COSTCO_VARIANT_ITEM_RE = re.compile(r'(?<!\d)(\d{5,12})-([A-Za-z]{2,6})(?![A-Za-z0-9])')
+_COSTCO_VARIANT_JUNK_SUFFIXES = frozenset({'NEW'})
 
 
 def _normalize_costco_item_id(token: str) -> str | None:
@@ -107,10 +110,14 @@ def _normalize_costco_item_id(token: str) -> str | None:
 
     Catalog SKUs are often ``AU-C0141624`` / ``C0141624`` while Costco only serves
     ``/p/141624``. ``/p/0141624`` returns a barren SPA shell, not the PDP.
+    Variant tokens such as ``1851433-FER`` are returned intact (Costco option code).
     """
     token = (token or '').strip()
     if not token:
         return None
+    variant = _costco_variant_item_id(token)
+    if variant:
+        return variant
     if token.isdigit() and 5 <= len(token) <= 12:
         stripped = str(int(token))
         return stripped if 5 <= len(stripped) <= 12 else None
@@ -121,17 +128,45 @@ def _normalize_costco_item_id(token: str) -> str | None:
     return None
 
 
+def _costco_variant_item_id(text: str) -> str | None:
+    """Return ``1851433-FER`` from SKUs/URLs; skip catalog suffixes such as ``-New``."""
+    if not text:
+        return None
+    found = None
+    for m in _COSTCO_VARIANT_ITEM_RE.finditer(text.replace('_', '-')):
+        suffix = m.group(2).upper()
+        if suffix in _COSTCO_VARIANT_JUNK_SUFFIXES:
+            continue
+        digits = str(int(m.group(1)))
+        if 5 <= len(digits) <= 12:
+            found = f'{digits}-{suffix}'
+    return found
+
+
 def costco_product_id_from_value(value: str) -> str | None:
-    """Extract Costco AU numeric product id from mixed values (173734, TFCO-173734-New, URLs)."""
+    """Extract Costco AU item id from mixed values (173734, 1851433-FER, TFCO-173734-New, URLs).
+
+    Prefers option-coded ids (``1851433-FER``) so variation PDPs are not collapsed
+    to the parent ``/p/1851433`` selector page (Add to cart disabled → stock 0).
+    """
+    if not isinstance(value, str):
+        return None
     raw = (value or '').strip().replace('_', '-')
     if not raw:
         return None
     if 'costco.' in raw.lower() and '/p/' in raw.lower():
         path_after_p = raw.split('/p/', 1)[-1].rstrip('/')
-        raw = path_after_p.split('/')[0]
-        direct = _normalize_costco_item_id(raw)
+        token = path_after_p.split('/')[0]
+        variant = _costco_variant_item_id(token)
+        if variant:
+            return variant
+        direct = _normalize_costco_item_id(token)
         if direct:
             return direct
+        raw = token
+    variant = _costco_variant_item_id(raw)
+    if variant:
+        return variant
     direct = _normalize_costco_item_id(raw)
     if direct:
         return direct
@@ -147,17 +182,49 @@ def costco_product_id_from_value(value: str) -> str | None:
     return stripped if 5 <= len(stripped) <= 12 else None
 
 
-def canonicalize_costco_pdp_url(url: str) -> str:
+def costco_item_id_prefer_variant(*values: str) -> str | None:
+    """Prefer a Costco option id (``1851433-FER``) over a parent numeric id.
+
+    When a stored URL is the parent ``/p/1851433`` but the SKU is
+    ``COST-1851433-FER``, scrape the variant. If the URL item number does not
+    match the SKU variant base, trust the URL.
+    """
+    numeric = None
+    variant = None
+    for value in values:
+        if not value:
+            continue
+        pid = costco_product_id_from_value(value)
+        if not pid:
+            continue
+        if '-' in pid:
+            if variant is None:
+                variant = pid
+        elif numeric is None:
+            numeric = pid
+    if variant:
+        base = variant.split('-', 1)[0]
+        if numeric is None or base == numeric:
+            return variant
+        return numeric
+    return numeric
+
+
+def canonicalize_costco_pdp_url(url: str, *hints: str) -> str:
     """Rewrite legacy ``/p/TFCO-…`` and zero-padded ids to ``/p/{itemNumber}``.
 
     Costco AU now 404s alphanumeric Spartacus codes as an empty shell titled
     ``Costco``. ``/p/{itemNumber}`` still 302s to the current ``/c/{slug}/p/{id}``
-    PDP. Leave already-numeric ``/p/141624`` and ``/c/…/p/141624`` URLs alone.
+    PDP. Leave already-correct ``/p/141624``, ``/p/1851433-FER``, and
+    ``/c/…/p/{id}`` URLs alone.
+
+    ``hints`` (SKU, vendor id, variation id) supply the option code when ``url``
+    is only the parent item number.
     """
     raw = (url or '').strip()
-    if not raw:
+    if not raw and not hints:
         return raw
-    pid = costco_product_id_from_value(raw)
+    pid = costco_item_id_prefer_variant(raw, *hints)
     if not pid:
         return raw
     m = _COSTCO_P_TOKEN_RE.search(raw)
@@ -183,6 +250,26 @@ def costco_url_from_vendor_id(vendor_id: str) -> str | None:
     if pid:
         return f'{COSTCO_AU_PRODUCT_BASE}{pid}'
     return None
+
+
+def costco_id_hints_from_product(product, catalog_row=None) -> tuple[str, ...]:
+    """SKU / vendor-id / variation fields that may carry a Costco option code."""
+    def _hint(value) -> str:
+        return value if isinstance(value, str) else ''
+
+    hints: list[str] = []
+    if catalog_row is not None:
+        for attr in (
+            'vendor_sku_raw',
+            'vendor_id_raw',
+            'variation_id_raw',
+            'marketplace_child_sku_raw',
+        ):
+            hints.append(_hint(getattr(catalog_row, attr, None)))
+    if product is not None:
+        for attr in ('vendor_sku', 'variation_id'):
+            hints.append(_hint(getattr(product, attr, None)))
+    return tuple(hints)
 
 
 def resolve_costco_product_url(

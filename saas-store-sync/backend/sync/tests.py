@@ -68,3 +68,16 @@ class VendorScrapeUrlTests(SimpleTestCase):
         st.region = 'AU'
         url = resolve_vendor_scrape_url(p, st, row)
         self.assertEqual(url, 'https://www.costco.com.au/p/173734')
+
+    def test_costco_scrape_url_keeps_variant_option_code(self):
+        v = MagicMock()
+        v.code = 'costcoau'
+        p = MagicMock()
+        p.vendor = v
+        p.vendor_url = 'https://www.costco.com.au/p/1851433'
+        p.vendor_sku = 'COST-1851433-FER'
+        p.variation_id = ''
+        st = MagicMock()
+        st.region = 'AU'
+        url = resolve_vendor_scrape_url(p, st, None)
+        self.assertEqual(url, 'https://www.costco.com.au/p/1851433-FER')
