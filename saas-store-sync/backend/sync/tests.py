@@ -67,4 +67,4 @@ class VendorScrapeUrlTests(SimpleTestCase):
         st = MagicMock()
         st.region = 'AU'
         url = resolve_vendor_scrape_url(p, st, row)
-        self.assertEqual(url, full_url)
+        self.assertEqual(url, 'https://www.costco.com.au/p/173734')

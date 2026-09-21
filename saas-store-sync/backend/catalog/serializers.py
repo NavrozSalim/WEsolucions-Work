@@ -61,6 +61,7 @@ class ProductMappingSerializer(serializers.ModelSerializer):
             if not obj.product:
                 return None
             from catalog.vendor_url_resolve import (
+                canonicalize_costco_pdp_url,
                 is_costco_vendor_code,
                 is_heb_vendor_code,
                 latest_upload_vendor_url_for_mapping,
@@ -75,18 +76,18 @@ class ProductMappingSerializer(serializers.ModelSerializer):
             if product_url and not is_costco_vendor_code(vcode) and not is_heb_vendor_code(vcode):
                 return product_url
 
-            # Costco/HEB may need upload-row fallback — only when product URL missing.
+            # Costco/HEB may need the catalog-upload Vendor URL (legacy Spartacus
+            # slugs, HEB PDP ids). Always consult the latest upload row.
             upload_url = None
             if is_costco_vendor_code(vcode) or is_heb_vendor_code(vcode):
-                if not product_url:
-                    upload_url = latest_upload_vendor_url_for_mapping(obj)
+                upload_url = latest_upload_vendor_url_for_mapping(obj)
                 if is_costco_vendor_code(vcode):
                     url = resolve_costco_product_url(
                         obj.product,
                         vendor_url_raw=upload_url or product_url,
                     )
                     if url:
-                        return url
+                        return canonicalize_costco_pdp_url(url)
                 else:
                     url = resolve_heb_product_url(
                         obj.product,

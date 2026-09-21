@@ -121,8 +121,15 @@ def _parse_price_text(text: str) -> Optional[float]:
 
 
 def product_id_from_url(url: str) -> Optional[str]:
-    m = re.search(r"/p/(\d+)(?:[/?#]|$)", url or "")
-    return m.group(1) if m else None
+    """Numeric Costco AU item id from ``/p/141624`` or ``/c/slug/p/141624``.
+
+    Legacy alphanumeric tokens (``/p/TFCO-173734-New``) still yield the embedded
+    item number so homepage-redirect detection and add-to-cart matching work.
+    """
+    if not url or "/p/" not in url.lower():
+        return None
+    from catalog.vendor_url_resolve import costco_product_id_from_value
+    return costco_product_id_from_value(url)
 
 
 def _text_first(soup: BeautifulSoup, selector: str) -> Optional[str]:
@@ -148,12 +155,21 @@ def _extract_title(soup: BeautifulSoup) -> Optional[str]:
 
 
 def _extract_online_price(soup: BeautifulSoup) -> Optional[float]:
-    """Online Price from the DOM (``.price-original`` and fallbacks)."""
+    """Online Price from the PDP panel only — never homepage carousel tiles.
+
+    Costco AU 404/unknown-id pages still SSR recommended-product tiles that use
+    ``.original-price`` / ``span.product-price-amount``. Those are not the PDP.
+    """
     for sel in (
+        "sip-product-price-panel .price-original span.notranslate",
+        "sip-product-price-panel .price-original .price-value",
+        ".product-price-container .price-original span.notranslate",
+        ".product-price-container .price-original .price-value",
+        ".price-with-discount .price-original span.notranslate",
+        ".price-with-discount .price-original .price-value",
         ".price-original span.notranslate",
+        ".price-original .price-value",
         ".price-original",
-        ".original-price",
-        "span.product-price-amount",
     ):
         raw = _text_first(soup, sel)
         if raw:
@@ -223,6 +239,11 @@ def _extract_ldjson_price(soup: BeautifulSoup) -> Optional[float]:
 def _extract_your_price(soup: BeautifulSoup) -> Optional[float]:
     """Your Price: ``you-pay-value`` DOM, then meta tag, then JSON-LD."""
     for sel in (
+        ".price-after-discount .you-pay-value span.notranslate",
+        ".price-after-discount span.you-pay-value",
+        ".price-after-discount .you-pay-value",
+        "sip-product-price-panel .you-pay-value span.notranslate",
+        "sip-product-price-panel .you-pay-value",
         ".you-pay-value span.notranslate",
         ".you-pay-value",
         "span.you-pay-value",
@@ -275,21 +296,70 @@ def _extract_inventory(soup: BeautifulSoup, url: str) -> int:
         if specific:
             return 0 if _button_disabled(specific) else 3
 
-    oos = soup.select_one(
-        "sip-add-to-cart-form button.btn.btn-block.btn-primary.disabled.outOfStock"
-    )
-    if oos is not None:
-        return 0
+    form = soup.select_one(".product-page-container sip-add-to-cart-form")
+    if form is None:
+        form = soup.select_one("sip-add-to-cart-form")
+    if form is not None:
+        oos = form.select_one(
+            "button.btn.btn-block.btn-primary.disabled.outOfStock, "
+            "button.disabled.outOfStock, button.outOfStock"
+        )
+        if oos is not None:
+            return 0
+        for el in form.select("button"):
+            label = (el.get_text(" ", strip=True) or "").lower()
+            if "add to cart" not in label:
+                continue
+            return 0 if _button_disabled(el) else 3
+        return 3
 
-    for el in soup.select(
-        "button[data-cy^='addtocart-button-'], sip-add-to-cart-form button"
-    ):
-        label = (el.get_text(" ", strip=True) or "").lower()
-        if "add to cart" not in label:
-            continue
-        return 0 if _button_disabled(el) else 3
-
+    availability = _extract_ldjson_availability(soup)
+    if availability == "instock":
+        return 3
     return 0
+
+
+def _walk_ldjson_availability(node) -> Optional[str]:
+    if isinstance(node, dict):
+        offers = node.get("offers")
+        blobs: list[str] = []
+        if isinstance(offers, dict):
+            blobs.append(str(offers.get("availability") or ""))
+        elif isinstance(offers, list):
+            for offer in offers:
+                if isinstance(offer, dict):
+                    blobs.append(str(offer.get("availability") or ""))
+        for blob in blobs:
+            low = blob.lower()
+            if "outofstock" in low or "soldout" in low:
+                return "oos"
+            if "instock" in low:
+                return "instock"
+        for v in node.values():
+            got = _walk_ldjson_availability(v)
+            if got:
+                return got
+    elif isinstance(node, list):
+        for v in node:
+            got = _walk_ldjson_availability(v)
+            if got:
+                return got
+    return None
+
+
+def _extract_ldjson_availability(soup: BeautifulSoup) -> Optional[str]:
+    for script in soup.select("script[type='application/ld+json']"):
+        raw = (script.string or script.get_text() or "").strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        got = _walk_ldjson_availability(data)
+        if got:
+            return got
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +376,13 @@ _CF_STRICT_MARKERS = (
     "window._cf_chl_opt",
     'id="challenge-form"',
     "id='challenge-form'",
+)
+
+_QUEUEIT_MARKERS = (
+    "queue-it.net",
+    "queueittoken",
+    "queue-it_log",
+    "you are now in line",
 )
 
 _CF_TITLE_PHRASES = (
@@ -336,6 +413,10 @@ def html_is_challenge(html: str) -> tuple[bool, str]:
         return True, "truncated"
 
     low = html.lower()
+
+    for marker in _QUEUEIT_MARKERS:
+        if marker.lower() in low:
+            return True, "queueit"
 
     # A real PDP shouldn't have CF markers; if we see product-specific elements,
     # treat it as not challenged even if the page also has CF analytics.
@@ -418,6 +499,31 @@ def is_homepage_redirect(url: str, final_url: str, soup: BeautifulSoup) -> bool:
     return False
 
 
+def _looks_like_pdp(soup: BeautifulSoup, url: str) -> bool:
+    """True when HTML is a product detail page, not the empty SPA shell / carousel."""
+    if soup.select_one("sip-add-to-cart-form") is not None:
+        return True
+    if soup.select_one("button[data-cy^='addtocart-button-']") is not None:
+        return True
+    if soup.select_one("meta[property='product:price:amount']") is not None:
+        return True
+    if soup.select_one("sip-product-price-panel") is not None:
+        return True
+    h1 = soup.select_one("h1")
+    if h1 and h1.get_text(strip=True) and soup.select_one(
+        ".product-price-container, .price-original, .you-pay-value"
+    ):
+        return True
+    pid = product_id_from_url(url)
+    if pid:
+        compact = ""
+        for script in soup.select("script[type='application/ld+json']"):
+            compact += (script.string or script.get_text() or "")
+        if f'"sku":"{pid}"' in compact.replace(" ", ""):
+            return True
+    return False
+
+
 def parse_costco_pdp(url: str, html: str, final_url: str = "") -> ScrapeResult:
     """Parse a Costco AU product page HTML payload into a :class:`ScrapeResult`.
 
@@ -442,6 +548,12 @@ def parse_costco_pdp(url: str, html: str, final_url: str = "") -> ScrapeResult:
     if is_homepage_redirect(url, final_url or "", soup):
         return ScrapeResult.fail(
             "product_not_found", "Request redirected to Costco homepage", "",
+            VENDOR_TAG, url,
+        )
+
+    if not _looks_like_pdp(soup, url):
+        return ScrapeResult.fail(
+            "product_not_found", "Not a Costco AU product page", "",
             VENDOR_TAG, url,
         )
 
@@ -677,6 +789,12 @@ def scrape_costco_au(
     """
     if session is None:
         session = {}
+
+    try:
+        from catalog.vendor_url_resolve import canonicalize_costco_pdp_url
+        vendor_url = canonicalize_costco_pdp_url(vendor_url) or vendor_url
+    except Exception:
+        pass
 
     active_pool = pool if pool is not None else get_pool()
     if active_pool is None or active_pool.size == 0:

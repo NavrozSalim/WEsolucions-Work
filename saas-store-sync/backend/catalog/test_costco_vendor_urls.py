@@ -11,6 +11,7 @@ from catalog.models import CatalogUpload, CatalogUploadRow, ProductMapping
 from catalog.serializers import ProductMappingSerializer
 from catalog.tasks import _get_or_create_product, _update_product_mapping
 from catalog.vendor_url_resolve import (
+    canonicalize_costco_pdp_url,
     costco_product_id_from_value,
     normalize_costco_url,
     resolve_costco_product_url,
@@ -39,6 +40,40 @@ class CostcoUrlResolveTests(SimpleTestCase):
         self.assertEqual(
             costco_product_id_from_value('https://www.costco.com.au/p/TFCO-173734-New/slug'),
             '173734',
+        )
+
+    def test_costco_product_id_strips_c0_prefix_and_leading_zeros(self):
+        self.assertEqual(costco_product_id_from_value('AU-C0141624'), '141624')
+        self.assertEqual(costco_product_id_from_value('C0141624'), '141624')
+        self.assertEqual(costco_product_id_from_value('0141624'), '141624')
+        self.assertEqual(costco_product_id_from_value('UR-C01484024'), '1484024')
+        self.assertEqual(
+            costco_product_id_from_value('https://www.costco.com.au/p/0141624'),
+            '141624',
+        )
+        self.assertEqual(
+            costco_product_id_from_value(
+                'https://www.costco.com.au/c/Gillette-Fusion-5/p/141624'
+            ),
+            '141624',
+        )
+
+    def test_canonicalize_rewrites_legacy_and_padded_urls(self):
+        self.assertEqual(
+            canonicalize_costco_pdp_url(
+                'https://www.costco.com.au/p/TFS-CO-138511-New/everblue'
+            ),
+            'https://www.costco.com.au/p/138511',
+        )
+        self.assertEqual(
+            canonicalize_costco_pdp_url('https://www.costco.com.au/p/0141624'),
+            'https://www.costco.com.au/p/141624',
+        )
+        keep = 'https://www.costco.com.au/c/Gillette-Fusion-5/p/141624'
+        self.assertEqual(canonicalize_costco_pdp_url(keep), keep)
+        self.assertEqual(
+            canonicalize_costco_pdp_url(SHORT_COSTCO_URL),
+            SHORT_COSTCO_URL,
         )
 
     def test_normalize_costco_url_preserves_slug(self):
@@ -99,9 +134,9 @@ class CostcoUrlResolveTests(SimpleTestCase):
         store = MagicMock()
         store.region = 'AU'
         url = resolve_vendor_scrape_url(product, store, row)
-        self.assertEqual(url, FULL_COSTCO_URL)
+        self.assertEqual(url, SHORT_COSTCO_URL)
 
-    def test_scrape_url_keeps_full_stored_product_url(self):
+    def test_scrape_url_canonicalizes_stored_legacy_product_url(self):
         vendor = MagicMock()
         vendor.code = 'costcoau'
         product = MagicMock()
@@ -111,7 +146,7 @@ class CostcoUrlResolveTests(SimpleTestCase):
         store = MagicMock()
         store.region = 'AU'
         url = resolve_vendor_scrape_url(product, store, None)
-        self.assertEqual(url, FULL_COSTCO_URL)
+        self.assertEqual(url, SHORT_COSTCO_URL)
 
 
 @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
@@ -204,4 +239,4 @@ class CostcoIngestAndSerializerTests(TestCase):
         row.save()
 
         data = ProductMappingSerializer(pm).data
-        self.assertEqual(data['vendor_url'], FULL_COSTCO_URL)
+        self.assertEqual(data['vendor_url'], SHORT_COSTCO_URL)

@@ -379,6 +379,51 @@ _CLOUDFLARE_BLOCK_HTML = """
 </body></html>
 """
 
+_PDP_HTML_PRICE_VALUE = """
+<html><head><title>Gillette Fusion 5 | Costco Australia</title>
+  <meta property="product:price:amount" content="63.98">
+</head>
+<body>
+  <h1>Gillette Fusion 5 Manual Cartridges 20 Pack</h1>
+  <sip-add-to-cart-form>
+    <button data-cy="addtocart-button-141624" class="btn btn-primary">Add to cart</button>
+  </sip-add-to-cart-form>
+  <div class="product-price-container">
+    <div class="price-original"><span class="price-value"><span class="notranslate">$79.99</span></span></div>
+    <div class="price-after-discount"><span class="you-pay-value">$63.98</span></div>
+  </div>
+</body></html>
+"""
+
+_PDP_HTML_SSR_FORM_NO_BUTTON = """
+<html><head><title>Everblue Empower | Costco Australia</title>
+  <meta property="product:price:amount" content="19.97">
+</head>
+<body>
+  <h1>Everblue Empower Shampoo &amp; Conditioner Duo 2 x 800ml</h1>
+  <sip-add-to-cart-form></sip-add-to-cart-form>
+</body></html>
+"""
+
+_BARREN_SHELL_HTML = """
+<html><head><title>Costco</title></head>
+<body>
+  <div class="product-price ng-star-inserted">
+    <div class="original-price ng-star-inserted">
+      <span class="product-price-amount">$79.99</span>
+    </div>
+  </div>
+</body></html>
+"""
+
+_QUEUEIT_HTML = """
+<html><head><title>You are now in line</title></head>
+<body>
+  <script src="https://static.queue-it.net/script/queueclient.min.js"></script>
+  <p>You are now in line</p>
+</body></html>
+"""
+
 
 class HtmlChallengeDetectionTests(SimpleTestCase):
     def test_real_pdp_is_not_challenged(self):
@@ -399,6 +444,11 @@ class HtmlChallengeDetectionTests(SimpleTestCase):
         challenged, reason = costco_au_scraper.html_is_challenge("garbage")
         self.assertTrue(challenged)
         self.assertEqual(reason, "truncated")
+
+    def test_queueit_waiting_room_detected(self):
+        challenged, reason = costco_au_scraper.html_is_challenge(_QUEUEIT_HTML)
+        self.assertTrue(challenged)
+        self.assertEqual(reason, "queueit")
 
 
 class ParseCostcoPdpTests(SimpleTestCase):
@@ -499,9 +549,57 @@ class ParseCostcoPdpTests(SimpleTestCase):
             costco_au_scraper.product_id_from_url("https://www.costco.com.au/p/173734/foo"),
             "173734",
         )
+        self.assertEqual(
+            costco_au_scraper.product_id_from_url(
+                "https://www.costco.com.au/c/Gillette-Fusion-5/p/141624"
+            ),
+            "141624",
+        )
+        self.assertEqual(
+            costco_au_scraper.product_id_from_url(
+                "https://www.costco.com.au/p/TFS-CO-138511-New/slug"
+            ),
+            "138511",
+        )
         self.assertIsNone(
             costco_au_scraper.product_id_from_url("https://www.costco.com.au/category/x"),
         )
+
+    def test_new_price_value_markup_uses_your_price(self):
+        url = "https://www.costco.com.au/p/141624"
+        result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_PRICE_VALUE)
+        self.assertTrue(result.success, msg=f"error_code={result.error_code}")
+        self.assertEqual(result.price, 63.98)
+        self.assertEqual(result.stock, 3)
+
+    def test_ssr_add_to_cart_form_without_button_is_in_stock(self):
+        url = "https://www.costco.com.au/p/138511"
+        result = costco_au_scraper.parse_costco_pdp(url, _PDP_HTML_SSR_FORM_NO_BUTTON)
+        self.assertTrue(result.success, msg=f"error_code={result.error_code}")
+        self.assertEqual(result.price, 19.97)
+        self.assertEqual(result.stock, 3)
+
+    def test_ldjson_instock_without_add_to_cart_button(self):
+        html = """
+<html><head><title>Everblue | Costco Australia</title>
+  <meta property="product:price:amount" content="19.97">
+  <script type="application/ld+json">
+    {"@type":"Product","sku":"138511","offers":{"availability":"http://schema.org/InStock","price":"19.97"}}
+  </script>
+</head><body><h1>Everblue Empower</h1></body></html>
+"""
+        url = "https://www.costco.com.au/p/138511"
+        result = costco_au_scraper.parse_costco_pdp(url, html)
+        self.assertTrue(result.success, msg=f"error_code={result.error_code}")
+        self.assertEqual(result.price, 19.97)
+        self.assertEqual(result.stock, 3)
+
+    def test_barren_shell_does_not_use_carousel_price(self):
+        url = "https://www.costco.com.au/p/TFS-CO-138511-New"
+        result = costco_au_scraper.parse_costco_pdp(url, _BARREN_SHELL_HTML)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "product_not_found")
+        self.assertIsNone(result.price)
 
 
 # ============================================================================
@@ -515,6 +613,7 @@ class ScrapeCostcoAuOrchestrationTests(SimpleTestCase):
         self.pool = costco_au_proxies.CostcoAuProxyPool(
             ["http://u:p@a:1", "http://u:p@b:2"], min_gap_sec=0.0,
         )
+        self.pool._cursor = 0
         self.url = "https://www.costco.com.au/p/173734"
 
     def tearDown(self):
@@ -641,6 +740,22 @@ class ScrapeCostcoAuOrchestrationTests(SimpleTestCase):
         self.assertGreaterEqual(len(calls), 2)
         self.assertIn(0, calls)
         self.assertIn(1, calls)
+
+    def test_canonicalizes_legacy_sku_url_before_fetch(self):
+        seen = []
+
+        def fake_fetch(url, session, assignment):
+            seen.append(url)
+            return _PDP_HTML_NORMAL, url, ""
+
+        with patch.object(costco_au_scraper, "_http_fetch", side_effect=fake_fetch):
+            result = costco_au_scraper.scrape_costco_au(
+                "https://www.costco.com.au/p/TFCO-173734-New/slug",
+                "AU", session={}, pool=self.pool,
+            )
+
+        self.assertEqual(seen[0], "https://www.costco.com.au/p/173734")
+        self.assertEqual(result["price"], 1299.99)
 
 
 # ============================================================================

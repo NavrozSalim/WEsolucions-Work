@@ -98,22 +98,72 @@ def is_costco_vendor_code(code: str) -> bool:
     return c in ('costcoau', 'costco_au', 'costco-au') or c.startswith('costco_')
 
 
+_COSTCO_P_TOKEN_RE = re.compile(r'/p/([^/?#]+)', re.I)
+_COSTCO_C0_ITEM_RE = re.compile(r'^[Cc]0*(\d{5,12})$')
+
+
+def _normalize_costco_item_id(token: str) -> str | None:
+    """Return a Costco AU item number, stripping ``C0`` prefixes and leading zeros.
+
+    Catalog SKUs are often ``AU-C0141624`` / ``C0141624`` while Costco only serves
+    ``/p/141624``. ``/p/0141624`` returns a barren SPA shell, not the PDP.
+    """
+    token = (token or '').strip()
+    if not token:
+        return None
+    if token.isdigit() and 5 <= len(token) <= 12:
+        stripped = str(int(token))
+        return stripped if 5 <= len(stripped) <= 12 else None
+    m = _COSTCO_C0_ITEM_RE.fullmatch(token)
+    if m:
+        stripped = str(int(m.group(1)))
+        return stripped if 5 <= len(stripped) <= 12 else None
+    return None
+
+
 def costco_product_id_from_value(value: str) -> str | None:
     """Extract Costco AU numeric product id from mixed values (173734, TFCO-173734-New, URLs)."""
     raw = (value or '').strip().replace('_', '-')
     if not raw:
         return None
-    if raw.isdigit() and 5 <= len(raw) <= 12:
-        return raw
     if 'costco.' in raw.lower() and '/p/' in raw.lower():
         path_after_p = raw.split('/p/', 1)[-1].rstrip('/')
         raw = path_after_p.split('/')[0]
+        direct = _normalize_costco_item_id(raw)
+        if direct:
+            return direct
+    direct = _normalize_costco_item_id(raw)
+    if direct:
+        return direct
     parts = [p for p in re.split(r'[-/]+', raw) if p]
     for part in parts:
-        if part.isdigit() and 5 <= len(part) <= 12:
-            return part
+        got = _normalize_costco_item_id(part)
+        if got:
+            return got
     match = re.search(r'\d{5,12}', raw)
-    return match.group(0) if match else None
+    if not match:
+        return None
+    stripped = str(int(match.group(0)))
+    return stripped if 5 <= len(stripped) <= 12 else None
+
+
+def canonicalize_costco_pdp_url(url: str) -> str:
+    """Rewrite legacy ``/p/TFCO-…`` and zero-padded ids to ``/p/{itemNumber}``.
+
+    Costco AU now 404s alphanumeric Spartacus codes as an empty shell titled
+    ``Costco``. ``/p/{itemNumber}`` still 302s to the current ``/c/{slug}/p/{id}``
+    PDP. Leave already-numeric ``/p/141624`` and ``/c/…/p/141624`` URLs alone.
+    """
+    raw = (url or '').strip()
+    if not raw:
+        return raw
+    pid = costco_product_id_from_value(raw)
+    if not pid:
+        return raw
+    m = _COSTCO_P_TOKEN_RE.search(raw)
+    if m and m.group(1) == pid:
+        return raw
+    return f'{COSTCO_AU_PRODUCT_BASE}{pid}'
 
 
 def normalize_costco_url(url: str) -> str | None:
