@@ -14,6 +14,7 @@ MARKETPLACES = [
     ('kogan', 'Kogan'),
     ('lasoo', 'Lasoo'),
     ('bunnings', 'Bunnings'),
+    ('temu', 'Temu'),
 ]
 
 VENDORS = [

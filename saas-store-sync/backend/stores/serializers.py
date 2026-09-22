@@ -99,6 +99,7 @@ class StoreSerializer(serializers.ModelSerializer):
     sync_schedule = serializers.SerializerMethodField()
     shopify_connected = serializers.SerializerMethodField()
     shopify_has_credentials = serializers.SerializerMethodField()
+    temu_connected = serializers.SerializerMethodField()
 
     class Meta:
         model = Store
@@ -118,6 +119,9 @@ class StoreSerializer(serializers.ModelSerializer):
             'lasoo_staging_auth_key', 'lasoo_production_auth_key',
             'bunnings_environment', 'bunnings_staging_base_url', 'bunnings_production_base_url',
             'bunnings_staging_shop_key', 'bunnings_production_shop_key',
+            'temu_region', 'temu_base_url', 'temu_mall_id',
+            'temu_app_key', 'temu_app_secret', 'temu_access_token',
+            'temu_connected',
             'shopify_enabled', 'shopify_shop_domain', 'shopify_location_id',
             'shopify_client_id', 'shopify_client_secret',
             'shopify_connected', 'shopify_has_credentials',
@@ -135,6 +139,10 @@ class StoreSerializer(serializers.ModelSerializer):
             'lasoo_production_auth_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'bunnings_staging_shop_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'bunnings_production_shop_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'temu_app_key': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'temu_app_secret': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'temu_access_token': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
+            'temu_mall_id': {'required': False, 'allow_blank': True},
             'shopify_client_id': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'shopify_client_secret': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'mydeal_sandbox_client_id': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
@@ -162,6 +170,13 @@ class StoreSerializer(serializers.ModelSerializer):
         return bool(
             (getattr(obj, 'shopify_client_id', None) or '').strip()
             and (getattr(obj, 'shopify_client_secret', None) or '').strip()
+        )
+
+    def get_temu_connected(self, obj):
+        return bool(
+            (getattr(obj, 'temu_app_key', None) or '').strip()
+            and (getattr(obj, 'temu_app_secret', None) or '').strip()
+            and (getattr(obj, 'temu_access_token', None) or '').strip()
         )
 
     def _apply_shopify_fields(self, validated_data, *, instance=None, marketplace=None, management_mode=''):
@@ -202,7 +217,10 @@ class StoreSerializer(serializers.ModelSerializer):
                 })
             if kind not in SHOPIFY_ORDER_MARKETPLACES:
                 raise ValidationError({
-                    'shopify_enabled': 'Shopify order sync is only available for Reverb, Lasoo, MyDeal, Etsy, and Bunnings.',
+                    'shopify_enabled': (
+                        'Shopify order sync is only available for Reverb, Lasoo, MyDeal, Etsy, '
+                        'Bunnings, and Temu.'
+                    ),
                 })
 
         if 'shopify_shop_domain' in req:
@@ -292,6 +310,7 @@ class StoreSerializer(serializers.ModelSerializer):
         is_mydeal = bool(mkt and (str(mkt.code or '').strip().lower() == 'mydeal' or str(mkt.name or '').strip().lower() == 'mydeal'))
         is_lasoo = bool(mkt and (str(mkt.code or '').strip().lower() == 'lasoo' or str(mkt.name or '').strip().lower() == 'lasoo'))
         is_bunnings = bool(mkt and (str(mkt.code or '').strip().lower() == 'bunnings' or str(mkt.name or '').strip().lower() == 'bunnings'))
+        is_temu = bool(mkt and (str(mkt.code or '').strip().lower() == 'temu' or str(mkt.name or '').strip().lower() == 'temu'))
         is_structured = bool(mkt and requires_structured_credentials(mkt))
         management_mode = (req.get('management_mode') or validated_data.get('management_mode') or 'inventory_only').strip()
         if management_mode not in ('inventory_only', 'full_store'):
@@ -300,9 +319,12 @@ class StoreSerializer(serializers.ModelSerializer):
         if management_mode == 'full_store':
             from stores.credentials import marketplace_kind
             kind = marketplace_kind(mkt)
-            if kind not in ('reverb', 'lasoo', 'mydeal', 'etsy', 'bunnings'):
+            if kind not in ('reverb', 'lasoo', 'mydeal', 'etsy', 'bunnings', 'temu'):
                 raise ValidationError({
-                    'marketplace': 'Managed stores are only available for Reverb, Lasoo, MyDeal, Etsy, and Bunnings right now.',
+                    'marketplace': (
+                        'Managed stores are only available for Reverb, Lasoo, MyDeal, Etsy, '
+                        'Bunnings, and Temu right now.'
+                    ),
                 })
             if kind == 'mydeal':
                 method = (req.get('mydeal_setup_method') or validated_data.get('mydeal_setup_method') or 'upload').strip()
@@ -349,6 +371,54 @@ class StoreSerializer(serializers.ModelSerializer):
                 validated_data['bunnings_staging_base_url'] = base_url
                 validated_data['bunnings_staging_shop_key'] = shop_key
             validated_data.setdefault('api_token', '')
+        if is_temu:
+            region = (req.get('temu_region') or validated_data.get('temu_region') or 'au').strip().lower()
+            if region != 'au':
+                raise ValidationError({
+                    'temu_region': 'Temu is supported for the AU / Global router only.',
+                })
+            validated_data['temu_region'] = region
+            validated_data['temu_base_url'] = (
+                req.get('temu_base_url') or validated_data.get('temu_base_url') or ''
+            ).strip()
+            app_key = (req.get('temu_app_key') or validated_data.get('temu_app_key') or '').strip()
+            app_secret = (req.get('temu_app_secret') or validated_data.get('temu_app_secret') or '').strip()
+            if not app_key:
+                raise ValidationError({'temu_app_key': 'Temu App Key is required.'})
+            if not app_secret:
+                raise ValidationError({'temu_app_secret': 'Temu App Secret is required.'})
+            validated_data['temu_app_key'] = app_key
+            validated_data['temu_app_secret'] = app_secret
+
+            access_token = (
+                req.get('temu_access_token') or validated_data.get('temu_access_token') or ''
+            ).strip()
+            auth_code = (req.get('temu_auth_code') or '').strip()
+            mall_id = (req.get('temu_mall_id') or validated_data.get('temu_mall_id') or '').strip()
+            if not access_token and auth_code:
+                from stores.credentials import exchange_temu_code
+
+                ok, msg, tokens = exchange_temu_code(
+                    app_key,
+                    app_secret,
+                    auth_code,
+                    region=region,
+                    base_url=validated_data['temu_base_url'],
+                )
+                if not ok:
+                    raise ValidationError({'temu_auth_code': msg})
+                access_token = tokens.get('access_token') or ''
+                mall_id = mall_id or (tokens.get('mall_id') or '')
+            if not access_token:
+                raise ValidationError({
+                    'temu_access_token': (
+                        'Temu Access Token is required. Paste the token from AU Seller Center, '
+                        'or use Connect Temu to authorize the app.'
+                    ),
+                })
+            validated_data['temu_access_token'] = access_token
+            validated_data['temu_mall_id'] = mall_id
+            validated_data.setdefault('api_token', '')
         if is_mydeal:
             method = (req.get('mydeal_setup_method') or 'upload').strip()
             if method not in ('upload', 'api'):
@@ -383,7 +453,7 @@ class StoreSerializer(serializers.ModelSerializer):
             has_json = bool((req.get('kogan_service_account_json') or '').strip() or (validated_data.get('kogan_service_account_json') or '').strip())
             if not has_json and not (req.get('api_token') or '').strip():
                 raise ValidationError({'kogan_service_account_json': 'Upload service account JSON for Kogan (or paste it into API token).'})
-        elif is_mydeal or is_lasoo or is_bunnings:
+        elif is_mydeal or is_lasoo or is_bunnings or is_temu:
             pass
         else:
             token_raw = (req.get('api_token') or '').strip()
@@ -440,6 +510,13 @@ class StoreSerializer(serializers.ModelSerializer):
                 'bunnings_production_base_url',
                 'bunnings_staging_shop_key',
                 'bunnings_production_shop_key',
+                # Temu (managed stores)
+                'temu_region',
+                'temu_base_url',
+                'temu_app_key',
+                'temu_app_secret',
+                'temu_access_token',
+                'temu_mall_id',
                 'shopify_enabled',
                 'shopify_shop_domain',
                 'shopify_client_id',
@@ -473,7 +550,7 @@ class StoreSerializer(serializers.ModelSerializer):
             self._save_vendor_price_settings(store, price_settings_data, Vendor)
             self._save_vendor_inventory_settings(store, inventory_settings_data, Vendor)
             self._save_sync_schedule(store, req.get('sync_schedule'), SyncSchedule)
-            if is_structured or (is_mydeal and store.mydeal_setup_method == 'api') or is_lasoo or is_bunnings:
+            if is_structured or (is_mydeal and store.mydeal_setup_method == 'api') or is_lasoo or is_bunnings or is_temu:
                 ok, err_msg = verify_store_connection(store)
                 if not ok:
                     re_orphan_store(store)
@@ -483,6 +560,8 @@ class StoreSerializer(serializers.ModelSerializer):
                         field = 'bunnings_production_shop_key' if (store.bunnings_environment or 'production') == 'production' else 'bunnings_staging_shop_key'
                     elif is_lasoo:
                         field = 'lasoo_staging_auth_key'
+                    elif is_temu:
+                        field = 'temu_access_token'
                     else:
                         field = 'api_token'
                     raise ValidationError({
@@ -503,7 +582,7 @@ class StoreSerializer(serializers.ModelSerializer):
         self._save_vendor_inventory_settings(store, inventory_settings_data, Vendor)
         self._save_sync_schedule(store, req.get('sync_schedule'), SyncSchedule)
 
-        if is_structured or (is_mydeal and store.mydeal_setup_method == 'api') or is_lasoo or is_bunnings:
+        if is_structured or (is_mydeal and store.mydeal_setup_method == 'api') or is_lasoo or is_bunnings or is_temu:
             ok, err_msg = verify_store_connection(store)
             if not ok:
                 store.delete()
@@ -513,6 +592,8 @@ class StoreSerializer(serializers.ModelSerializer):
                     field = 'bunnings_production_shop_key' if (store.bunnings_environment or 'production') == 'production' else 'bunnings_staging_shop_key'
                 elif is_lasoo:
                     field = 'lasoo_staging_auth_key'
+                elif is_temu:
+                    field = 'temu_access_token'
                 else:
                     field = 'api_token'
                 raise ValidationError({
@@ -539,6 +620,11 @@ class StoreSerializer(serializers.ModelSerializer):
         BUNNINGS_SECRET_FIELDS = (
             'bunnings_staging_shop_key',
             'bunnings_production_shop_key',
+        )
+        TEMU_SECRET_FIELDS = (
+            'temu_app_key',
+            'temu_app_secret',
+            'temu_access_token',
         )
         self._apply_shopify_fields(
             validated_data,
@@ -580,6 +666,11 @@ class StoreSerializer(serializers.ModelSerializer):
                 'bunnings_production_base_url',
                 'bunnings_staging_shop_key',
                 'bunnings_production_shop_key',
+                # Temu (managed stores)
+                'temu_region',
+                'temu_base_url',
+                'temu_mall_id',
+                *TEMU_SECRET_FIELDS,
                 'shopify_enabled',
                 'shopify_shop_domain',
                 'shopify_client_id',
@@ -595,6 +686,7 @@ class StoreSerializer(serializers.ModelSerializer):
                     'shopify_client_secret',
                     *MYDEAL_SECRET_FIELDS,
                     *BUNNINGS_SECRET_FIELDS,
+                    *TEMU_SECRET_FIELDS,
                 ) and not (value or '').strip() and attr != 'shopify_access_token':
                     # Blank secret in a PATCH means "keep the existing value".
                     continue
@@ -612,6 +704,7 @@ class StoreSerializer(serializers.ModelSerializer):
         is_kogan = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'kogan' or str(mkt_now.name or '').strip().lower() == 'kogan'))
         is_mydeal = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'mydeal' or str(mkt_now.name or '').strip().lower() == 'mydeal'))
         is_bunnings = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'bunnings' or str(mkt_now.name or '').strip().lower() == 'bunnings'))
+        is_temu = bool(mkt_now and (str(mkt_now.code or '').strip().lower() == 'temu' or str(mkt_now.name or '').strip().lower() == 'temu'))
         is_structured = bool(mkt_now and requires_structured_credentials(mkt_now))
         token_in_request = 'api_token' in validated_data or bool((req.get('api_token') or '').strip())
         if is_mydeal and 'mydeal_setup_method' in req:
@@ -653,6 +746,30 @@ class StoreSerializer(serializers.ModelSerializer):
                 raise ValidationError({'kogan_tab_name': 'Tab name is required for Kogan.'})
         verify_new_credentials = False
         if is_bunnings and any(k in req for k in ('bunnings_environment', 'bunnings_staging_base_url', 'bunnings_production_base_url', *BUNNINGS_SECRET_FIELDS)):
+            verify_new_credentials = True
+        if is_temu and any(k in req for k in ('temu_base_url', 'temu_auth_code', *TEMU_SECRET_FIELDS)):
+            auth_code = (req.get('temu_auth_code') or '').strip()
+            if auth_code:
+                from stores.credentials import exchange_temu_code
+
+                app_key = (req.get('temu_app_key') or instance.temu_app_key or '').strip()
+                app_secret = (req.get('temu_app_secret') or instance.temu_app_secret or '').strip()
+                if not app_key or not app_secret:
+                    raise ValidationError({
+                        'temu_auth_code': 'Temu App Key and App Secret are required before authorizing.',
+                    })
+                ok, msg, tokens = exchange_temu_code(
+                    app_key,
+                    app_secret,
+                    auth_code,
+                    region=(req.get('temu_region') or instance.temu_region or 'au'),
+                    base_url=(req.get('temu_base_url') or instance.temu_base_url or ''),
+                )
+                if not ok:
+                    raise ValidationError({'temu_auth_code': msg})
+                instance.temu_access_token = tokens.get('access_token') or instance.temu_access_token
+                if tokens.get('mall_id'):
+                    instance.temu_mall_id = tokens['mall_id']
             verify_new_credentials = True
         if is_structured and token_in_request:
             token_raw = (validated_data.get('api_token') or req.get('api_token') or '').strip()
@@ -715,6 +832,8 @@ class StoreSerializer(serializers.ModelSerializer):
                     if is_bunnings:
                         env = instance.bunnings_environment or 'production'
                         field = 'bunnings_production_shop_key' if env == 'production' else 'bunnings_staging_shop_key'
+                    elif is_temu:
+                        field = 'temu_access_token'
                     else:
                         field = 'api_token'
                     raise ValidationError({

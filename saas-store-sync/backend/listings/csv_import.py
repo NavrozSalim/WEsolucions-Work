@@ -1,7 +1,7 @@
 """Parse uploaded CSV / Excel listing templates into normalized row dicts.
 
 Uses stdlib csv + openpyxl (no pandas dependency in this project).
-Supports Lasoo, Reverb, MyDeal, Etsy, and Bunnings templates (by store marketplace).
+Supports Lasoo, Reverb, MyDeal, Etsy, Bunnings, and Temu templates (by store marketplace).
 
 Optional columns are labeled with `` (Optional)`` in the template header.
 Import still accepts headers with or without that suffix.
@@ -119,6 +119,13 @@ COLUMN_MAP = {
     "dimension unit": "dimension_unit",
     "shipping cost category": "shipping_cost_category",
     "shipping cost standard": "shipping_cost_standard",
+    "warehouse id": "warehouse_id",
+    "warehouse_id": "warehouse_id",
+    "temu warehouse id": "warehouse_id",
+    "shipping template id": "shipping_template_id",
+    "shipping_template_id": "shipping_template_id",
+    "temu category id": "category",
+    "cat id": "category",
     "custom freight scheme id": "custom_freight_scheme_id",
     "is direct import": "is_direct_import",
     "max days for delivery": "max_days_for_delivery",
@@ -348,6 +355,78 @@ ETSY_TEMPLATE_HEADERS = [
     "Shipping Profile ID (Optional)",
     "Readiness State ID (Optional)",
     "status (Optional)",
+]
+
+TEMU_TEMPLATE_HEADERS = [
+    "Vendor Name (Optional)",
+    "Vendor URL (Optional)",
+    "Vendor ID (Optional)",
+    "Marketplace Name (Optional)",
+    "Store Name (Optional)",
+    "Action",
+    "Parent SKU",
+    "SKU",
+    "Title",
+    "Description",
+    "Brand (Optional)",
+    "Category",
+    "Warehouse ID",
+    "Image URLs",
+    "Variation Img URL (Optional)",
+    "Inventory",
+    "Price",
+    "Currency (Optional)",
+    "Barcode (Optional)",
+    "Shipping Template ID (Optional)",
+    "Weight (Optional)",
+    "Weight Unit (Optional)",
+    "Length (Optional)",
+    "Width (Optional)",
+    "Height (Optional)",
+    "Dimension Unit (Optional)",
+    "Option 1 Name (Optional)",
+    "Option 1 Value (Optional)",
+    "Option 2 Name (Optional)",
+    "Option 2 Value (Optional)",
+    "Option 3 Name (Optional)",
+    "Option 3 Value (Optional)",
+    "status (Optional)",
+]
+
+TEMU_EXPORT_FIELDS = [
+    ("vendor_name", "Vendor Name (Optional)"),
+    ("vendor_url", "Vendor URL (Optional)"),
+    ("vendor_id", "Vendor ID (Optional)"),
+    ("marketplace_name", "Marketplace Name (Optional)"),
+    ("store_name", "Store Name (Optional)"),
+    ("action", "Action"),
+    ("product_key", "Parent SKU"),
+    ("sku", "SKU"),
+    ("title", "Title"),
+    ("description", "Description"),
+    ("brand", "Brand (Optional)"),
+    ("category", "Category"),
+    ("warehouse_id", "Warehouse ID"),
+    ("image_urls", "Image URLs"),
+    ("variation_image_url", "Variation Img URL (Optional)"),
+    ("inventory", "Inventory"),
+    ("sale_price", "Price"),
+    ("currency", "Currency (Optional)"),
+    ("barcode", "Barcode (Optional)"),
+    ("shipping_template_id", "Shipping Template ID (Optional)"),
+    ("weight", "Weight (Optional)"),
+    ("weight_unit", "Weight Unit (Optional)"),
+    ("length", "Length (Optional)"),
+    ("width", "Width (Optional)"),
+    ("height", "Height (Optional)"),
+    ("dimension_unit", "Dimension Unit (Optional)"),
+    ("option_1_name", "Option 1 Name (Optional)"),
+    ("option_1_value", "Option 1 Value (Optional)"),
+    ("option_2_name", "Option 2 Name (Optional)"),
+    ("option_2_value", "Option 2 Value (Optional)"),
+    ("option_3_name", "Option 3 Name (Optional)"),
+    ("option_3_value", "Option 3 Value (Optional)"),
+    ("publish_status", "status (Optional)"),
 ]
 
 MYDEAL_TEMPLATE_HEADERS = [
@@ -602,6 +681,10 @@ def _is_etsy_store(store) -> bool:
 
 def _is_bunnings_store(store) -> bool:
     return marketplace_kind(getattr(store, "marketplace", None)) == "bunnings"
+
+
+def _is_temu_store(store) -> bool:
+    return marketplace_kind(getattr(store, "marketplace", None)) == "temu"
 
 
 def _coerce_bool(value) -> bool:
@@ -959,6 +1042,58 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
         writer.writerow(sample)
         return out.getvalue()
 
+    if _is_temu_store(store):
+        def _temu_row(*, sku, parent, option_value, title_suffix):
+            return {
+                "Vendor Name (Optional)": "Amazon AU",
+                "Vendor URL (Optional)": "https://www.amazon.com.au/dp/EXAMPLE",
+                "Vendor ID (Optional)": "",
+                "Marketplace Name (Optional)": marketplace_name or "Temu",
+                "Store Name (Optional)": store_name,
+                "Action": "Mapped" if action == "mapped" else "Create",
+                "Parent SKU": parent,
+                "SKU": sku,
+                "Title": f"Example Cotton Tee{title_suffix}",
+                "Description": (
+                    "Example Temu product description. Rows sharing a Parent SKU are sent "
+                    "as one Temu product with several SKUs."
+                ),
+                "Brand (Optional)": "ExampleBrand",
+                "Category": "30847",
+                "Warehouse ID": "WH-EXAMPLE-1",
+                "Image URLs": "https://example.com/photo1.jpg|https://example.com/photo2.jpg",
+                "Variation Img URL (Optional)": f"https://example.com/{sku.lower()}.jpg",
+                "Inventory": "10",
+                "Price": "24.99",
+                "Currency (Optional)": "AUD",
+                "Barcode (Optional)": "",
+                "Shipping Template ID (Optional)": "",
+                "Weight (Optional)": "0.4",
+                "Weight Unit (Optional)": "kg",
+                "Length (Optional)": "25",
+                "Width (Optional)": "20",
+                "Height (Optional)": "3",
+                "Dimension Unit (Optional)": "cm",
+                "Option 1 Name (Optional)": "Size",
+                "Option 1 Value (Optional)": option_value,
+                "Option 2 Name (Optional)": "",
+                "Option 2 Value (Optional)": "",
+                "Option 3 Name (Optional)": "",
+                "Option 3 Value (Optional)": "",
+                "status (Optional)": "draft",
+            }
+
+        out = io.StringIO()
+        writer = csv.DictWriter(out, fieldnames=TEMU_TEMPLATE_HEADERS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(
+            _temu_row(sku="TEMU-TEE-M", parent="TEMU-TEE", option_value="M", title_suffix=" — M")
+        )
+        writer.writerow(
+            _temu_row(sku="TEMU-TEE-L", parent="TEMU-TEE", option_value="L", title_suffix=" — L")
+        )
+        return out.getvalue()
+
     if _is_mydeal_store(store):
         def _row(*, sku, parent_sku, option_name, option_value, title_suffix=""):
             return {
@@ -1205,4 +1340,6 @@ def export_field_specs(store=None) -> list[tuple[str, str]]:
         return list(MYDEAL_EXPORT_FIELDS)
     if _is_bunnings_store(store):
         return list(BUNNINGS_EXPORT_FIELDS)
+    if _is_temu_store(store):
+        return list(TEMU_EXPORT_FIELDS)
     return list(LASOO_EXPORT_FIELDS)

@@ -57,6 +57,7 @@ const MARKETPLACE_LABELS = {
     lasoo: 'Lasoo',
     reverb: 'Reverb',
     etsy: 'Etsy',
+    temu: 'Temu',
 };
 
 /** Staging queue: new/mapped listings before or after publish attempt. */

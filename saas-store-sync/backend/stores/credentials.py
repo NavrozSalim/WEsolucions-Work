@@ -17,7 +17,7 @@ def marketplace_kind(marketplace) -> str:
         return ''
     code = (getattr(marketplace, 'code', None) or '').strip().lower()
     name = (getattr(marketplace, 'name', None) or '').strip().lower()
-    if code in ('sears', 'walmart', 'kogan', 'mydeal', 'reverb', 'lasoo', 'bunnings', 'etsy'):
+    if code in ('sears', 'walmart', 'kogan', 'mydeal', 'reverb', 'lasoo', 'bunnings', 'etsy', 'temu'):
         return code
     if 'walmart' in name:
         return 'walmart'
@@ -35,6 +35,8 @@ def marketplace_kind(marketplace) -> str:
         return 'bunnings'
     if 'etsy' in name:
         return 'etsy'
+    if 'temu' in name:
+        return 'temu'
     return code or name
 
 
@@ -161,6 +163,100 @@ def verify_bunnings_connection(store) -> tuple[bool, str | None]:
     return False, result.message or 'Bunnings rejected these credentials.'
 
 
+def verify_temu_connection(store) -> tuple[bool, str | None]:
+    """Verify Temu app key + secret + per-mall access token on the AU/Global router."""
+    from listings.errors import MarketplaceError
+    from listings.temu.client import TemuClient
+
+    try:
+        client = TemuClient(store)
+    except MarketplaceError as exc:
+        return False, str(exc)
+
+    result = client.verify_connection()
+    if result.ok:
+        if client.mall_id and not (getattr(store, 'temu_mall_id', None) or '').strip():
+            store.temu_mall_id = client.mall_id
+            if getattr(store, 'pk', None):
+                try:
+                    store.save(update_fields=['temu_mall_id'])
+                except Exception:  # noqa: BLE001
+                    pass
+        return True, result.message or 'Temu connection successful.'
+    return False, result.message or 'Temu rejected these credentials.'
+
+
+def verify_temu_credentials_from_token(
+    app_key: str,
+    app_secret: str,
+    access_token: str,
+    *,
+    region: str = 'au',
+    base_url: str = '',
+) -> tuple[bool, str | None]:
+    """Test Temu credentials before a store is saved (create flow)."""
+    from listings.errors import MarketplaceError
+    from listings.temu.client import TemuClient
+
+    store = SimpleNamespace(
+        name='Temu (unsaved)',
+        marketplace=SimpleNamespace(code='temu', name='Temu'),
+        temu_region=(region or 'au'),
+        temu_base_url=(base_url or ''),
+        temu_app_key=(app_key or ''),
+        temu_app_secret=(app_secret or ''),
+        temu_access_token=(access_token or ''),
+        temu_mall_id='',
+        id=None,
+        pk=None,
+    )
+    try:
+        client = TemuClient(store)
+    except MarketplaceError as exc:
+        return False, str(exc)
+    result = client.verify_connection()
+    if result.ok:
+        return True, result.message or 'Temu connection successful.'
+    return False, result.message or 'Temu rejected these credentials.'
+
+
+def exchange_temu_code(
+    app_key: str,
+    app_secret: str,
+    code: str,
+    *,
+    region: str = 'au',
+    base_url: str = '',
+) -> tuple[bool, str, dict]:
+    """Swap an authorization ``code`` for a per-mall access token + mall id."""
+    from listings.errors import MarketplaceError
+    from listings.temu.client import TemuClient, extract_access_token
+
+    store = SimpleNamespace(
+        name='Temu (authorizing)',
+        marketplace=SimpleNamespace(code='temu', name='Temu'),
+        temu_region=(region or 'au'),
+        temu_base_url=(base_url or ''),
+        temu_app_key=(app_key or ''),
+        temu_app_secret=(app_secret or ''),
+        temu_access_token=(code or ''),
+        temu_mall_id='',
+        id=None,
+        pk=None,
+    )
+    try:
+        client = TemuClient(store)
+    except MarketplaceError as exc:
+        return False, str(exc), {}
+    result = client.create_access_token(code)
+    if not result.ok:
+        return False, result.message or 'Temu rejected this authorization code.', {}
+    token, mall_id = extract_access_token(result.data)
+    if not token:
+        return False, 'Temu did not return an access token for this code.', {}
+    return True, 'Temu store authorized.', {'access_token': token, 'mall_id': mall_id}
+
+
 def verify_mydeal_connection(store) -> tuple[bool, str | None]:
     """Verify MyDeal (WMP) client + seller credentials via token + products list."""
     from listings.errors import MarketplaceError
@@ -196,6 +292,8 @@ def verify_store_connection(store) -> tuple[bool, str | None]:
         return verify_mydeal_connection(store)
     if kind == 'bunnings':
         return verify_bunnings_connection(store)
+    if kind == 'temu':
+        return verify_temu_connection(store)
 
     if requires_structured_credentials(marketplace):
         try:

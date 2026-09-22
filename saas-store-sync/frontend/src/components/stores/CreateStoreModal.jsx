@@ -3,12 +3,17 @@ import { X, Plus, Clock, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
-import { createStore, getMarketplaces, getVendors, testEtsyConnection, testSearsConnection, testWalmartConnection, uploadNoraInventory, uploadWallkoalaInventory } from '../../services/storeService';
+import { createStore, getMarketplaces, getVendors, testEtsyConnection, testSearsConnection, testTemuConnection, testWalmartConnection, uploadNoraInventory, uploadWallkoalaInventory } from '../../services/storeService';
 import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
 import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
 import LasooConnectionFields from './LasooConnectionFields';
 import BunningsConnectionFields from './BunningsConnectionFields';
+import TemuConnectionFields, {
+    buildTemuPayload,
+    emptyTemuFields,
+    validateTemuFields,
+} from './TemuConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor, isWallkoalaVendor } from './NoraInventoryUploadField';
 import ShopifyConnectFields, {
     buildShopifyPayload,
@@ -44,7 +49,7 @@ const FREQUENCY_OPTIONS = [
 const DEFAULT_TZ = { USA: 'America/New_York', AU: 'Australia/Sydney' };
 
 // Marketplaces where we can create listings + manage orders (managed store mode).
-const FULL_STORE_MARKETPLACES = ['reverb', 'lasoo', 'mydeal', 'etsy', 'bunnings'];
+const FULL_STORE_MARKETPLACES = ['reverb', 'lasoo', 'mydeal', 'etsy', 'bunnings', 'temu'];
 const LASOO_DEFAULT_STAGING_URL = 'https://stage.api.lasoo.com.au';
 const LASOO_DEFAULT_PRODUCTION_URL = 'https://api.lasoo.com.au';
 const BUNNINGS_DEFAULT_PRODUCTION_URL = 'https://bunnings-prod.mirakl.net';
@@ -89,6 +94,9 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const [etsyTestLoading, setEtsyTestLoading] = useState(false);
     const [etsyTestMessage, setEtsyTestMessage] = useState('');
     const [etsyTestOk, setEtsyTestOk] = useState(null);
+    const [temuTestLoading, setTemuTestLoading] = useState(false);
+    const [temuTestMessage, setTemuTestMessage] = useState('');
+    const [temuTestOk, setTemuTestOk] = useState(null);
     const [selectedVendorPrice, setSelectedVendorPrice] = useState('');
     const [selectedVendorInventory, setSelectedVendorInventory] = useState('');
     const [mydealUploadOpen, setMydealUploadOpen] = useState(false);
@@ -115,6 +123,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         bunnings_staging_shop_key: '',
         bunnings_production_base_url: BUNNINGS_DEFAULT_PRODUCTION_URL,
         bunnings_production_shop_key: '',
+        ...emptyTemuFields(),
         ...emptyShopifyFields(),
         region: 'USA',
         vendor_price_settings: [],
@@ -153,6 +162,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 bunnings_staging_shop_key: '',
                 bunnings_production_base_url: BUNNINGS_DEFAULT_PRODUCTION_URL,
                 bunnings_production_shop_key: '',
+                ...emptyTemuFields(),
                 ...emptyShopifyFields(),
                 region,
                 vendor_price_settings: [],
@@ -175,6 +185,9 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             setEtsyTestLoading(false);
             setEtsyTestMessage('');
             setEtsyTestOk(null);
+            setTemuTestLoading(false);
+            setTemuTestMessage('');
+            setTemuTestOk(null);
         }
     }, [open, copyFromStore, isDuplicate, extMarketplaces.length]);
 
@@ -298,6 +311,34 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             .finally(() => setEtsyTestLoading(false));
     };
 
+    const handleTestTemuConnection = () => {
+        const errs = validateTemuFields(form);
+        if (errs.length) {
+            setTemuTestOk(false);
+            setTemuTestMessage(errs.join('. '));
+            return;
+        }
+        setTemuTestLoading(true);
+        setTemuTestMessage('');
+        setTemuTestOk(null);
+        testTemuConnection({
+            temu_app_key: form.temu_app_key.trim(),
+            temu_app_secret: form.temu_app_secret.trim(),
+            temu_access_token: form.temu_access_token.trim(),
+            temu_base_url: form.temu_base_url?.trim() || '',
+        })
+            .then((res) => {
+                setTemuTestOk(true);
+                setTemuTestMessage(res.data?.message || 'Temu connection successful.');
+            })
+            .catch((err) => {
+                setTemuTestOk(false);
+                const d = err.response?.data;
+                setTemuTestMessage(d?.message || d?.detail || 'Connection test failed.');
+            })
+            .finally(() => setTemuTestLoading(false));
+    };
+
     const regionTimezones = TIMEZONE_OPTIONS[form.region] || TIMEZONE_OPTIONS.USA;
     const isFullStore = form.management_mode === 'full_store';
     const marketplaceCode = (m) => (m?.code || m?.name || '').toString().trim().toLowerCase();
@@ -312,6 +353,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const isEtsy = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'etsy';
     const isLasoo = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'lasoo';
     const isBunnings = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'bunnings';
+    const isTemu = (selectedMarketplace?.code || selectedMarketplace?.name || '').toString().trim().toLowerCase() === 'temu';
     const showShopifyConnect = isFullStore && selectedMarketplace && FULL_STORE_MARKETPLACES.includes(marketplaceCode(selectedMarketplace));
     const showRrpDiscount = isMydeal || isSears || isKogan;
     const credentialsLabel = isSears
@@ -458,7 +500,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         if (!form.name?.trim()) errs.push('Store name is required');
         if (!form.marketplace_id) errs.push('Marketplace is required');
         if (isFullStore && selectedMarketplace && !FULL_STORE_MARKETPLACES.includes(marketplaceCode(selectedMarketplace))) {
-            errs.push('Managed stores are only available for Reverb, Lasoo, MyDeal, Etsy, and Bunnings right now');
+            errs.push('Managed stores are only available for Reverb, Lasoo, MyDeal, Etsy, Bunnings, and Temu right now');
         }
         if (showShopifyConnect) {
             errs.push(...validateShopifyFields(form, { requireSecrets: true }));
@@ -483,6 +525,10 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 if (!form.bunnings_production_base_url?.trim()) errs.push('Bunnings production base URL is required');
                 if (!form.bunnings_production_shop_key?.trim()) errs.push('Bunnings production SHOP_KEY is required');
             }
+            return errs;
+        }
+        if (isTemu) {
+            errs.push(...validateTemuFields(form));
             return errs;
         }
         if (isKogan) {
@@ -543,7 +589,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         const hasVendors = (form.vendor_price_settings || []).some((vp) => vp.vendor_id);
         // Managed Lasoo stores create listings with their own prices, so vendor
         // pricing is optional there; every other store needs at least one vendor.
-        if (!hasVendors && (isLasoo || isBunnings) && isFullStore) return errs;
+        if (!hasVendors && (isLasoo || isBunnings || isTemu) && isFullStore) return errs;
         if (!hasVendors) errs.push('Add at least one vendor with price settings');
         (form.vendor_price_settings || []).forEach((vp) => {
             if (!vp.vendor_id) return;
@@ -563,7 +609,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     const validateStep3 = () => {
         const errs = [];
         const hasVendors = (form.vendor_inventory_settings || []).some((vi) => vi.vendor_id);
-        if (!hasVendors && (isLasoo || isBunnings) && isFullStore) return errs;
+        if (!hasVendors && (isLasoo || isBunnings || isTemu) && isFullStore) return errs;
         if (!hasVendors) errs.push('Add at least one vendor with inventory ranges');
         return errs;
     };
@@ -698,6 +744,8 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                         ? buildLasooPayload()
                     : isBunnings
                         ? buildBunningsPayload()
+                    : isTemu
+                        ? buildTemuPayload(form)
                     : { api_token: form.api_token }),
                 region: form.region,
                 ...buildShopifyPayload(form),
@@ -802,6 +850,8 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     ? buildLasooPayload()
                 : isBunnings
                     ? buildBunningsPayload()
+                : isTemu
+                    ? buildTemuPayload(form)
                 : { api_token: form.api_token }),
             region: form.region,
             ...buildShopifyPayload(form),
@@ -933,7 +983,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                     {
                                                         value: 'full_store',
                                                         title: 'Managed store',
-                                                        desc: 'Create listings from here, push them to the marketplace, and manage orders & shipping. (Reverb, Lasoo, MyDeal)',
+                                                        desc: 'Create listings from here, push them to the marketplace, and manage orders & shipping. (Reverb, Lasoo, MyDeal, Etsy, Bunnings, Temu)',
                                                     },
                                                     {
                                                         value: 'inventory_only',
@@ -987,7 +1037,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                     if (f.management_mode === 'full_store' && sel && marketplaceCode(sel) === 'mydeal') {
                                                         next.mydeal_setup_method = 'api';
                                                     }
-                                                    if (sel && marketplaceCode(sel) === 'bunnings') {
+                                                    if (sel && ['bunnings', 'temu'].includes(marketplaceCode(sel))) {
                                                         next.region = 'AU';
                                                         next.schedule_timezone = DEFAULT_TZ.AU;
                                                     }
@@ -1002,7 +1052,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                         />
                                         {isFullStore && (
                                             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                                                Managed store mode currently supports Reverb, Lasoo, MyDeal, Etsy, and Bunnings.
+                                                Managed store mode currently supports Reverb, Lasoo, MyDeal, Etsy, Bunnings, and Temu.
                                             </p>
                                         )}
                                     </div>
@@ -1011,6 +1061,31 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                             <LasooConnectionFields form={form} setForm={setForm} mode="create" />
                                         ) : isBunnings ? (
                                             <BunningsConnectionFields form={form} setForm={setForm} mode="create" />
+                                        ) : isTemu ? (
+                                            <div className="space-y-2">
+                                                <TemuConnectionFields form={form} setForm={setForm} mode="create" />
+                                                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                    <Button
+                                                        type="button"
+                                                        variant="secondary"
+                                                        onClick={handleTestTemuConnection}
+                                                        disabled={temuTestLoading}
+                                                    >
+                                                        {temuTestLoading ? 'Testing…' : 'Test Connection'}
+                                                    </Button>
+                                                    {temuTestMessage && (
+                                                        <p
+                                                            className={`text-sm ${
+                                                                temuTestOk
+                                                                    ? 'text-emerald-600 dark:text-emerald-400'
+                                                                    : 'text-red-600 dark:text-red-400'
+                                                            }`}
+                                                        >
+                                                            {temuTestMessage}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            </div>
                                         ) : isMydeal ? (
                                             <MydealSetupFields
                                                 setupMethod={isFullStore ? 'api' : mydealSetup}

@@ -46,6 +46,12 @@ def get_adapter(store):
             'MyDeal stores use the WMP Universal API client '
             '(listings.mydeal), not a store_adapters listing adapter.'
         )
+    # Temu signs every call for its own router — the Reverb fallback would be wrong.
+    if str(platform).strip().lower() == 'temu':
+        raise ValueError(
+            'Temu stores use the Partner Open API client '
+            '(listings.temu), not a store_adapters listing adapter.'
+        )
     adapter_class = _resolve_adapter_class(platform)
     if not adapter_class:
         adapter_class = ReverbAdapter  # fallback for unknown marketplaces

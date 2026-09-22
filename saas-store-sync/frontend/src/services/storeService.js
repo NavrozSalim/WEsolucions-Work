@@ -23,6 +23,15 @@ export const testSearsConnection = (data) => api.post('/stores/test-sears-connec
 /** Test Etsy JSON credentials before creating a store. */
 export const testEtsyConnection = (data) => api.post('/stores/test-etsy-connection/', data);
 
+/** Test Temu App Key / Secret / Access Token before creating a store. */
+export const testTemuConnection = (data) => api.post('/stores/test-temu-connection/', data);
+
+/** Build the AU Seller Center authorization URL for a Temu app. */
+export const getTemuAuthorizeUrl = (data) => api.post('/stores/temu-authorize-url/', data);
+
+/** Swap a Temu authorization code for a per-mall access token + mall id. */
+export const exchangeTemuCode = (data) => api.post('/stores/temu-exchange-code/', data);
+
 /** Upload / overwrite Nora Inventory Excel for a store. */
 export const uploadNoraInventory = (storeId, file) => {
     const form = new FormData();

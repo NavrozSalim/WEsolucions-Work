@@ -19,7 +19,18 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
     const isMydeal = code === 'mydeal';
     const isEtsy = code === 'etsy';
     const isBunnings = code === 'bunnings';
-    const templateLabel = isReverb ? 'Reverb' : isMydeal ? 'MyDeal' : isEtsy ? 'Etsy' : isBunnings ? 'Bunnings' : 'marketplace';
+    const isTemu = code === 'temu';
+    const templateLabel = isReverb
+        ? 'Reverb'
+        : isMydeal
+            ? 'MyDeal'
+            : isEtsy
+                ? 'Etsy'
+                : isBunnings
+                    ? 'Bunnings'
+                    : isTemu
+                        ? 'Temu'
+                        : 'marketplace';
     const fileRef = useRef(null);
     const [file, setFile] = useState(null);
     const [action, setAction] = useState('create');
@@ -140,6 +151,8 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                                 the same when there is no variation. Options can be left blank.
                                 {isMydeal ? (
                                     <> Same Parent SKU is sent as one MyDeal product with multiple buyables.</>
+                                ) : isTemu ? (
+                                    <> Same Parent SKU is sent as one Temu product with multiple SKUs.</>
                                 ) : (
                                     <> Fill <strong>Option 1–4 Name/Value</strong> (e.g. Size / XL), and a <strong>Variation Img URL</strong> on every variant row.</>
                                 )}
@@ -150,6 +163,9 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                         )}
                         {isMydeal && (
                             <> MyDeal columns include Parent SKU, Category ID, Price, GTIN, shipping, delivery times, and option Name/Value pairs.</>
+                        )}
+                        {isTemu && (
+                            <> Temu columns include Parent SKU, Category (leaf catId), Warehouse ID, Price, Image URLs, and option Name/Value pairs.</>
                         )}
                     </p>
                     )}

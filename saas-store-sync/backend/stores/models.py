@@ -29,6 +29,9 @@ class Store(models.Model):
         ('staging', 'Staging'),
         ('production', 'Production'),
     ]
+    TEMU_REGION_CHOICES = [
+        ('au', 'Australia / Global'),
+    ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -131,6 +134,35 @@ class Store(models.Model):
         blank=True,
         db_index=True,
         help_text='Last successful Bunnings order sync cutoff (UTC). Used for incremental OR11 pulls.',
+    )
+    # --- Temu Partner Open API (AU / Global router; managed stores) ---
+    temu_region = models.CharField(
+        max_length=10,
+        choices=TEMU_REGION_CHOICES,
+        default='au',
+        blank=True,
+        help_text='Temu site region. AU sellers use the Global router (openapi-b-global.temu.com).',
+    )
+    temu_base_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text='Override the Temu Open API router URL. Blank uses the AU/Global default.',
+    )
+    temu_app_key = EncryptedTextField(null=True, blank=True)
+    temu_app_secret = EncryptedTextField(null=True, blank=True)
+    temu_access_token = EncryptedTextField(null=True, blank=True)
+    temu_mall_id = models.CharField(
+        max_length=64,
+        blank=True,
+        default='',
+        help_text='Temu mall id returned by bg.open.accesstoken.create.',
+    )
+    temu_last_order_sync_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text='Last successful Temu order sync cutoff (UTC). Used for incremental pulls.',
     )
     # --- Shopify (optional: push new marketplace orders into Shopify Admin) ---
     shopify_enabled = models.BooleanField(

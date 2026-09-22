@@ -1,8 +1,9 @@
 """Listing CRUD, validation, bulk import, and publish to the store's marketplace.
 
-Lasoo, Reverb, MyDeal, Etsy, and Bunnings managed stores are supported. Dispatch happens in
+Lasoo, Reverb, MyDeal, Etsy, Bunnings, and Temu managed stores are supported. Dispatch happens in
 ``publish()`` / validation helpers by marketplace kind.
 """
+import json
 import logging
 from decimal import Decimal, InvalidOperation
 
@@ -346,8 +347,8 @@ def _search_lasoo_listing(store, listing: StoreListing) -> dict:
 
 
 def _listing_env(store) -> str:
-    """Reverb/Etsy have no staging API — always production. Lasoo/MyDeal/Bunnings use store setting."""
-    if _store_kind(store) in ("reverb", "etsy"):
+    """Reverb/Etsy/Temu have no staging API — always production. Lasoo/MyDeal/Bunnings use store setting."""
+    if _store_kind(store) in ("reverb", "etsy", "temu"):
         return Environment.PRODUCTION
     if _store_kind(store) == "mydeal":
         env = (getattr(store, "mydeal_environment", None) or "sandbox").strip().lower()
@@ -371,6 +372,9 @@ def _validate_listing(store, data: dict) -> list[str]:
     if kind == "mydeal":
         from .mydeal import products as mydeal_products
         return source_errors + mydeal_products.validate_listing(data)
+    if kind == "temu":
+        from .temu import products as temu_products
+        return source_errors + temu_products.validate_listing(data)
     return source_errors + validator.validate_listing(data)
 
 
@@ -446,6 +450,16 @@ def _apply_fields(listing: StoreListing, data: dict):
         listing.external_data_object_json = bunnings_products.build_extras(data)
         if not listing.barcode:
             listing.barcode = str(data.get("gtin") or data.get("barcode") or "").strip()
+    elif _store_kind(store) == "temu":
+        from .temu import products as temu_products
+
+        listing.image_urls = mapper.normalize_image_urls(data.get("image_urls"))
+        listing.infinite_quantity = bool(data.get("infinite_quantity"))
+        listing.external_data_object_json = temu_products.build_extras(data)
+        # Temu leaf catId lives in the Category column.
+        cat = str(data.get("cat_id") or data.get("category") or "").strip()
+        if cat:
+            listing.category = cat
     else:
         listing.image_urls = mapper.normalize_image_urls(data.get("image_urls"))
         listing.infinite_quantity = bool(data.get("infinite_quantity"))
@@ -453,8 +467,8 @@ def _apply_fields(listing: StoreListing, data: dict):
         listing.inventory = 0 if listing.infinite_quantity else int(data.get("inventory") or 0)
     except (TypeError, ValueError):
         listing.inventory = 0
-    # Reverb/Etsy use a single Price → store as both original + sale
-    if _store_kind(store) in ("reverb", "etsy"):
+    # Reverb/Etsy/Temu use a single Price → store as both original + sale
+    if _store_kind(store) in ("reverb", "etsy", "temu"):
         price = data.get("sale_price")
         if price in (None, ""):
             price = data.get("price")
@@ -486,7 +500,7 @@ def _finalize_validation(listing: StoreListing, data: dict, *, keep_uploaded: bo
     if errors:
         listing.validation_errors_json = errors
         listing.status = ListingStatus.VALIDATION_FAILED
-        if _store_kind(store) not in ("reverb", "etsy", "mydeal", "bunnings"):
+        if _store_kind(store) not in ("reverb", "etsy", "mydeal", "bunnings", "temu"):
             listing.external_data_object_json = ""
         listing.original_price_cents = 0
         listing.sale_price_cents = 0
@@ -524,6 +538,18 @@ def _finalize_validation(listing: StoreListing, data: dict, *, keep_uploaded: bo
             listing.original_price_cents = mapper.dollars_to_cents(data.get("original_price"))
             listing.sale_price_cents = mapper.dollars_to_cents(data.get("sale_price"))
             listing.external_data_object_json = bunnings_products.build_extras(data)
+        elif _store_kind(store) == "temu":
+            from .temu import products as temu_products
+
+            price = data.get("sale_price")
+            if price in (None, ""):
+                price = data.get("price")
+            if price in (None, ""):
+                price = data.get("original_price")
+            cents = int(_safe_decimal(price) * 100)
+            listing.original_price_cents = cents
+            listing.sale_price_cents = cents
+            listing.external_data_object_json = temu_products.build_extras(data)
         else:
             listing.original_price_cents = mapper.dollars_to_cents(data.get("original_price"))
             listing.sale_price_cents = mapper.dollars_to_cents(data.get("sale_price"))
@@ -720,10 +746,34 @@ def _attach_mapped_listing(listing: StoreListing) -> list[str]:
         if warnings:
             listing.validation_errors_json = warnings
         return []
-    if kind not in ("reverb", "etsy", "bunnings"):
+    if kind not in ("reverb", "etsy", "bunnings", "temu"):
         return []
     if not sku:
         return [f"SKU is required to map a {kind.title()} listing."]
+    if kind == "temu":
+        from .temu import products as temu_products
+
+        try:
+            found = temu_products.lookup_sku(store, sku)
+        except MarketplaceError as exc:
+            return [str(exc) or "Could not look up SKU on Temu."]
+        if not found:
+            return [
+                f'No product with SKU "{sku}" was found on Temu. '
+                "Mapped is for products already on the marketplace — use Create for new ones."
+            ]
+        listing.external_product_key = (
+            str(found.get("out_sku_sn") or "").strip()
+            or listing.external_product_key
+            or sku
+        )
+        goods_id = str(found.get("goods_id") or "").strip()
+        if goods_id:
+            extras = temu_products.parse_extras(listing)
+            extras["marketplace"] = "temu"
+            extras["goods_id"] = goods_id
+            listing.external_data_object_json = json.dumps(extras)
+        return []
     if kind == "bunnings":
         from .bunnings import products as bunnings_products
 
@@ -805,6 +855,10 @@ def _end_listing_on_marketplace(store, listing: StoreListing) -> bool:
         from .bunnings import products as bunnings_products
 
         return bunnings_products.end_listing(store, listing)
+    if kind == "temu":
+        from .temu import products as temu_products
+
+        return temu_products.end_listing(store, listing)
     if kind == "etsy":
         adapter = get_adapter(store)
         lid = (listing.external_product_key or "").strip()
@@ -873,7 +927,7 @@ def delete(user, store, listing: StoreListing) -> dict:
     """
     marketplace_deleted = False
     kind = marketplace_kind(store.marketplace)
-    if kind in ("lasoo", "reverb", "mydeal", "bunnings"):
+    if kind in ("lasoo", "reverb", "mydeal", "bunnings", "temu"):
         marketplace_deleted = _end_listing_on_marketplace(store, listing)
     variant_key = listing.external_variant_key
     listing.delete()
@@ -899,7 +953,7 @@ def _keys_from_upload_rows(upload: ListingUpload) -> list[str]:
 
 
 def _delete_listings_marketplace(store, listings: list) -> int:
-    """Remove listings from Lasoo/Reverb/MyDeal/Bunnings. Returns marketplace removals count."""
+    """Remove listings from Lasoo/Reverb/MyDeal/Bunnings/Temu. Returns marketplace removals count."""
     if not listings:
         return 0
     kind = marketplace_kind(store.marketplace)
@@ -1042,6 +1096,39 @@ def _listing_to_data(listing: StoreListing) -> dict:
             "option_3_value": listing.option_3_value,
             "option_4_name": listing.option_4_name,
             "option_4_value": listing.option_4_value,
+            "variation_image_url": listing.variation_image_url,
+            "vendor_url": listing.vendor_url,
+            "vendor_id": listing.vendor_id,
+            "source_vendor_code": listing.source_vendor_code,
+            "vendor_name": listing.source_vendor_code,
+            "image_urls": listing.image_urls,
+            "inventory": listing.inventory,
+            "infinite_quantity": listing.infinite_quantity,
+            "original_price": listing.original_price,
+            "sale_price": listing.sale_price,
+            **extras,
+        }
+    if _store_kind(listing.store) == "temu":
+        from .temu import products as temu_products
+
+        extras = temu_products.parse_extras(listing)
+        return {
+            "product_key": listing.external_product_key,
+            "variant_key": listing.external_variant_key,
+            "title": listing.title,
+            "description": listing.description,
+            "brand": listing.brand,
+            "category": listing.category,
+            "cat_id": listing.category,
+            "sku": listing.sku or listing.external_variant_key,
+            "barcode": listing.barcode,
+            "options": listing.options,
+            "option_1_name": listing.option_1_name,
+            "option_1_value": listing.option_1_value,
+            "option_2_name": listing.option_2_name,
+            "option_2_value": listing.option_2_value,
+            "option_3_name": listing.option_3_name,
+            "option_3_value": listing.option_3_value,
             "variation_image_url": listing.variation_image_url,
             "vendor_url": listing.vendor_url,
             "vendor_id": listing.vendor_id,
@@ -1268,6 +1355,10 @@ def bulk_import(
 
         rows = mydeal_products.prepare_import_rows(rows)
         duplicate_child = mydeal_products.duplicate_child_sku_errors(rows)
+    elif _store_kind(store) == "temu":
+        from .temu import products as temu_products
+
+        duplicate_child = temu_products.duplicate_child_sku_errors(rows)
 
     file_action = _resolve_file_action(rows, action)
     if file_action in DELETE_FILE_ACTIONS:
@@ -1788,10 +1879,10 @@ def publish(user, store, listing_ids=None) -> dict:
     ``push_inventory`` so publish never re-creates duplicates on the store.
     """
     kind = marketplace_kind(store.marketplace)
-    if kind not in ("lasoo", "reverb", "mydeal", "etsy", "bunnings"):
+    if kind not in ("lasoo", "reverb", "mydeal", "etsy", "bunnings", "temu"):
         raise MarketplaceError(
             f'Publishing created products is not supported yet for "{kind or "this marketplace"}". '
-            "Currently Lasoo, Reverb, MyDeal, Etsy, and Bunnings stores can publish."
+            "Currently Lasoo, Reverb, MyDeal, Etsy, Bunnings, and Temu stores can publish."
         )
 
     confirmed_existing = 0
@@ -1840,6 +1931,10 @@ def publish(user, store, listing_ids=None) -> dict:
         from .bunnings import products as bunnings_products
 
         return bunnings_products.publish_listings(user, store, publishable)
+    if kind == "temu":
+        from .temu import products as temu_products
+
+        return temu_products.publish_listings(user, store, publishable)
     with transaction.atomic():
         return _publish_lasoo(user, store, publishable)
 
@@ -2787,6 +2882,37 @@ def push_inventory(user, store, listing_ids=None) -> dict:
             "failed": 0 if result.get("ok") else len(listings),
             "rows": [],
         }
+    if kind == "temu":
+        from .temu import products as temu_products
+
+        qs = StoreListing.objects.filter(
+            user=user,
+            store=store,
+            status__in=[
+                ListingStatus.UPLOADED_STAGING,
+                ListingStatus.UPLOADED_PRODUCTION,
+            ],
+        )
+        if listing_ids:
+            qs = qs.filter(id__in=listing_ids)
+        listings = list(qs)
+        if not listings:
+            raise MarketplaceError(
+                "No marketplace listings to push. Publish from Created products first."
+            )
+        result = temu_products.push_inventory(listings, store)
+        if result.get("ok"):
+            StoreListing.objects.filter(id__in=[l.id for l in listings]).update(
+                inventory_sync_status=InventorySyncStatus.SYNCED,
+            )
+        return {
+            "ok": bool(result.get("ok")),
+            "message": result.get("message") or "",
+            "pushed": result.get("updated") or 0,
+            "failed": 0 if result.get("ok") else len(listings),
+            "skipped": result.get("skipped") or 0,
+            "rows": [],
+        }
     if kind == "bunnings":
         from .bunnings import products as bunnings_products
 
@@ -2896,7 +3022,8 @@ def push_inventory(user, store, listing_ids=None) -> dict:
         }
     if kind != "reverb":
         raise MarketplaceError(
-            "Inventory push is currently supported for Reverb, Lasoo, MyDeal, and Etsy managed stores."
+            "Inventory push is currently supported for Reverb, Lasoo, MyDeal, Etsy, "
+            "Bunnings, and Temu managed stores."
         )
 
     qs = StoreListing.objects.filter(
@@ -3024,7 +3151,7 @@ def reset_inventory_status(user, store, scope: str = "failed") -> dict:
 
 
 def critical_zero_inventory(user, store) -> dict:
-    """Set stock to 0 on all marketplace listings and push (Reverb / Lasoo)."""
+    """Set stock to 0 on all marketplace listings, then push to the marketplace."""
     qs = StoreListing.objects.filter(
         user=user,
         store=store,

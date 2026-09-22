@@ -1,4 +1,4 @@
-"""Live marketplace SKU lookup for managed stores (Lasoo + Reverb + Bunnings + MyDeal)."""
+"""Live marketplace SKU lookup for managed stores (Lasoo + Reverb + Bunnings + MyDeal + Temu)."""
 from __future__ import annotations
 
 import logging
@@ -17,7 +17,7 @@ from .models import StoreListing
 
 logger = logging.getLogger("listings")
 
-LOOKUP_KINDS = ("lasoo", "reverb", "bunnings", "mydeal")
+LOOKUP_KINDS = ("lasoo", "reverb", "bunnings", "mydeal", "temu")
 
 
 def _normalize_reverb_hit(row: dict) -> dict:
@@ -381,6 +381,42 @@ def _lookup_mydeal(store, sku: str) -> dict:
     }
 
 
+def _lookup_temu(store, sku: str) -> dict:
+    """Match a Hub SKU against the Temu outGoodsSn / outSkuSn on the mall."""
+    from .temu import products as temu_products
+
+    found = temu_products.lookup_sku(store, sku)
+    hit = None
+    if found:
+        hit = {
+            "product_key": found.get("goods_id") or sku,
+            "variant_key": found.get("out_sku_sn") or sku,
+            "sku": found.get("out_sku_sn") or sku,
+            "title": found.get("goods_name") or "",
+            "status": found.get("status") or "unknown",
+            "created_at": None,
+            "updated_at": None,
+            "published_at": None,
+            "marketplace_id": found.get("sku_id") or found.get("goods_id") or None,
+            "url": None,
+        }
+    return {
+        "ok": True,
+        "found": bool(found),
+        "advertised": bool(found),
+        "marketplace": "temu",
+        "environment": "production",
+        "query": {"sku": sku},
+        "message": (
+            f'SKU "{sku}" found on Temu.'
+            if found
+            else f'SKU "{sku}" is not in this Temu mall.'
+        ),
+        "results": [hit] if hit else [],
+        "local_listing": _local_listing_summary(store, sku),
+    }
+
+
 def lookup_sku(store, sku: str) -> dict:
     """Search the store's marketplace for a SKU / variant key."""
     text = (sku or "").strip()
@@ -398,6 +434,8 @@ def lookup_sku(store, sku: str) -> dict:
         return _lookup_bunnings(store, text)
     if kind == "mydeal":
         return _lookup_mydeal(store, text)
+    if kind == "temu":
+        return _lookup_temu(store, text)
     raise MarketplaceError(
         f'Marketplace SKU check is not supported for "{kind or "this marketplace"}" yet.'
     )

@@ -9,6 +9,7 @@ import MydealSetupFields from './MydealSetupFields';
 import MydealUploadModal from '../catalog/MydealUploadModal';
 import LasooConnectionFields from './LasooConnectionFields';
 import BunningsConnectionFields from './BunningsConnectionFields';
+import TemuConnectionFields, { buildTemuPayload, emptyTemuFields } from './TemuConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor, isWallkoalaVendor } from './NoraInventoryUploadField';
 import ShopifyConnectFields, {
     buildShopifyPayload,
@@ -89,6 +90,7 @@ function storeToForm(store) {
         bunnings_staging_shop_key: '',
         bunnings_production_base_url: BUNNINGS_DEFAULT_PRODUCTION_URL,
         bunnings_production_shop_key: '',
+        ...emptyTemuFields(),
         ...shopifyFieldsFromStore(null),
         vendor_price_settings: [],
         vendor_inventory_settings: [],
@@ -128,6 +130,9 @@ function storeToForm(store) {
         bunnings_staging_shop_key: '',
         bunnings_production_base_url: store.bunnings_production_base_url || BUNNINGS_DEFAULT_PRODUCTION_URL,
         bunnings_production_shop_key: '',
+        ...emptyTemuFields(),
+        temu_base_url: store.temu_base_url || '',
+        temu_mall_id: store.temu_mall_id || '',
         ...shopifyFieldsFromStore(store),
         vendor_price_settings: (store.vendor_price_settings || []).map((vp) => ({
             vendor_id: vp.vendor || vp.vendor_id,
@@ -355,13 +360,14 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const isEtsy = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'etsy';
     const isLasoo = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'lasoo';
     const isBunnings = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'bunnings';
+    const isTemu = (store?.marketplace_name || store?.marketplace_code || '').toString().trim().toLowerCase() === 'temu';
     const marketplaceCode = (store?.marketplace_code || store?.marketplace_name || '').toString().trim().toLowerCase();
-    const showShopifyConnect = isManaged && ['reverb', 'lasoo', 'mydeal', 'etsy', 'bunnings'].includes(marketplaceCode);
+    const showShopifyConnect = isManaged && ['reverb', 'lasoo', 'mydeal', 'etsy', 'bunnings', 'temu'].includes(marketplaceCode);
     const showRrpDiscount = isMydeal || isSears || isKogan;
     // Same Store / Price / Inventory flow as inventory-only stores (including managed).
     const maxStep = 3;
     // Lasoo managed: vendors optional (same as create). Reverb managed: required.
-    const vendorsOptional = isManaged && (isLasoo || isBunnings);
+    const vendorsOptional = isManaged && (isLasoo || isBunnings || isTemu);
     const credentialsLabel = isSears
         ? 'Sears credentials (JSON)'
         : isWalmart
@@ -415,6 +421,10 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
             if (form.bunnings_production_shop_key?.trim()) {
                 payload.bunnings_production_shop_key = form.bunnings_production_shop_key.trim();
             }
+        }
+
+        if (isTemu) {
+            Object.assign(payload, buildTemuPayload(form));
         }
 
         if (isMydeal) {
@@ -672,6 +682,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                         <LasooConnectionFields form={form} setForm={setForm} mode="edit" />
                                     ) : isBunnings ? (
                                         <BunningsConnectionFields form={form} setForm={setForm} mode="edit" />
+                                    ) : isTemu ? (
+                                        <TemuConnectionFields form={form} setForm={setForm} mode="edit" />
                                     ) : isMydeal ? (
                                         <MydealSetupFields
                                             setupMethod={isManaged ? 'api' : mydealSetup}

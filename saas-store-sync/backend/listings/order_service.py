@@ -36,10 +36,14 @@ def fetch(user, store, page: int = 1, take: int = 50) -> dict:
     if kind == "bunnings":
         from .bunnings import orders as bunnings_orders
         return bunnings_orders.fetch(user, store, page=page, take=take)
+    if kind == "temu":
+        from .temu import orders as temu_orders
+        return temu_orders.fetch(user, store, page=page, take=take)
     if kind != "lasoo":
         raise MarketplaceError(
             f'Order management is not supported yet for "{kind or "this marketplace"}". '
-            'Currently Lasoo, Reverb, MyDeal, Etsy, and Bunnings managed stores can fetch orders.'
+            'Currently Lasoo, Reverb, MyDeal, Etsy, Bunnings, and Temu managed stores '
+            'can fetch orders.'
         )
     return _fetch_lasoo(user, store, page=page, take=take)
 
@@ -103,6 +107,11 @@ def create_test_order(user, store) -> dict:
         raise MarketplaceError(
             "Bunnings has no test-order API. Use Fetch orders to pull live Mirakl orders "
             "(OR11) from the connected shop."
+        )
+    if kind == "temu":
+        raise MarketplaceError(
+            "Temu has no test-order API. Use Fetch orders to pull live orders "
+            "(bg.order.list.v2.get) from the authorized mall."
         )
     _require_lasoo(store)
     environment = store.lasoo_environment or 'staging'
@@ -1083,6 +1092,9 @@ def cancel_reasons(store) -> dict:
     if kind == "bunnings":
         from .bunnings import orders as bunnings_orders
         return bunnings_orders.cancel_reasons()
+    if kind == "temu":
+        from .temu import orders as temu_orders
+        return temu_orders.cancel_reasons()
     if kind != "lasoo":
         raise MarketplaceError(
             f'Cancel reasons are not available for "{kind or "this marketplace"}" yet.'
@@ -1139,6 +1151,9 @@ def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
     elif kind == "bunnings":
         from .bunnings import orders as bunnings_orders
         result = bunnings_orders.cancel(order, reason=reason)
+    elif kind == "temu":
+        from .temu import orders as temu_orders
+        result = temu_orders.cancel(order, reason=reason)
     else:
         result = _cancel_lasoo(order, reason=reason)
     from .shopify.orders import cancel_shopify_order

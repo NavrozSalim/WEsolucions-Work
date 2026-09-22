@@ -257,6 +257,46 @@ const EMPTY_MYDEAL = {
     source_vendor_code: '',
 };
 
+const EMPTY_TEMU = {
+    action: 'create',
+    vendor_name: '',
+    vendor_url: '',
+    vendor_id: '',
+    marketplace_name: '',
+    store_name: '',
+    sku: '',
+    product_key: '',
+    variant_key: '',
+    title: '',
+    description: '',
+    brand: '',
+    category: '',
+    warehouse_id: '',
+    shipping_template_id: '',
+    image_urls: '',
+    variation_image_url: '',
+    inventory: '1',
+    infinite_quantity: false,
+    sale_price: '',
+    original_price: '',
+    currency: 'AUD',
+    barcode: '',
+    weight: '',
+    weight_unit: 'kg',
+    length: '',
+    width: '',
+    height: '',
+    dimension_unit: 'cm',
+    option_1_name: '',
+    option_1_value: '',
+    option_2_name: '',
+    option_2_value: '',
+    option_3_name: '',
+    option_3_value: '',
+    publish_status: 'draft',
+    source_vendor_code: '',
+};
+
 const EMPTY_BUNNINGS = {
     action: 'create',
     vendor_name: '',
@@ -301,7 +341,7 @@ const EMPTY_BUNNINGS = {
 
 /**
  * Create or edit a single managed-store listing ("created product").
- * Field order matches the bulk listing CSV template for Reverb / Lasoo / MyDeal / Bunnings.
+ * Field order matches the bulk listing CSV template for Reverb / Lasoo / MyDeal / Bunnings / Temu.
  */
 export default function ListingFormModal({
     open,
@@ -318,6 +358,7 @@ export default function ListingFormModal({
     const isEtsy = code === 'etsy';
     const isLasoo = code === 'lasoo';
     const isBunnings = code === 'bunnings';
+    const isTemu = code === 'temu';
     const willPushLasoo = Boolean(
         isLasoo
         && isEdit
@@ -334,7 +375,9 @@ export default function ListingFormModal({
             ? EMPTY_ETSY
             : isBunnings
               ? EMPTY_BUNNINGS
-              : EMPTY_LASOO;
+              : isTemu
+                ? EMPTY_TEMU
+                : EMPTY_LASOO;
     const [form, setForm] = useState(emptyForm);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
@@ -507,6 +550,48 @@ export default function ListingFormModal({
                             ? listing.attributes
                             : {},
                 });
+            } else if (isTemu) {
+                setForm({
+                    ...EMPTY_TEMU,
+                    ...defaults,
+                    action: listing.action || 'create',
+                    sku: listing.sku || '',
+                    product_key: listing.external_product_key || listing.product_key || '',
+                    variant_key: listing.external_variant_key || listing.variant_key || '',
+                    title: listing.title || '',
+                    description: listing.description || '',
+                    brand: listing.brand || '',
+                    category: listing.category || '',
+                    warehouse_id: listing.warehouse_id || '',
+                    shipping_template_id: listing.shipping_template_id || '',
+                    image_urls: listing.image_urls || '',
+                    variation_image_url: listing.variation_image_url || '',
+                    inventory: String(listing.inventory ?? 1),
+                    infinite_quantity: !!listing.infinite_quantity,
+                    sale_price: String(listing.sale_price ?? ''),
+                    original_price: String(listing.original_price ?? ''),
+                    currency: listing.currency || 'AUD',
+                    barcode: listing.barcode || '',
+                    weight: listing.weight || '',
+                    weight_unit: listing.weight_unit || 'kg',
+                    length: listing.length || '',
+                    width: listing.width || '',
+                    height: listing.height || '',
+                    dimension_unit: listing.dimension_unit || 'cm',
+                    option_1_name: listing.option_1_name || '',
+                    option_1_value: listing.option_1_value || '',
+                    option_2_name: listing.option_2_name || '',
+                    option_2_value: listing.option_2_value || '',
+                    option_3_name: listing.option_3_name || '',
+                    option_3_value: listing.option_3_value || '',
+                    publish_status: listing.publish_status === 'live' ? 'live' : 'draft',
+                    source_vendor_code: listing.source_vendor_code || '',
+                    vendor_name: listing.vendor_name || '',
+                    vendor_url: listing.vendor_url || '',
+                    vendor_id: listing.vendor_id || '',
+                    marketplace_name: listing.marketplace_name || defaults.marketplace_name,
+                    store_name: listing.store_name || defaults.store_name,
+                });
             } else if (isEtsy) {
                 setForm({
                     ...EMPTY_ETSY,
@@ -576,11 +661,13 @@ export default function ListingFormModal({
                         ? EMPTY_ETSY
                         : isBunnings
                           ? EMPTY_BUNNINGS
-                          : EMPTY_LASOO),
+                          : isTemu
+                            ? EMPTY_TEMU
+                            : EMPTY_LASOO),
                 ...defaults,
             });
         }
-    }, [open, listing, isReverb, isMydeal, isEtsy, isBunnings, storeMeta.name, storeMeta.marketplace_name]);
+    }, [open, listing, isReverb, isMydeal, isEtsy, isBunnings, isTemu, storeMeta.name, storeMeta.marketplace_name]);
 
     const vendorOptions = useMemo(() => {
         const opts = [{ value: '', label: storeVendors.length ? 'Select vendor…' : 'No vendors on store Price settings' }];
@@ -746,6 +833,23 @@ export default function ListingFormModal({
                 category: form.category || '',
                 attributes: form.attributes && typeof form.attributes === 'object' ? form.attributes : {},
             };
+        } else if (isTemu) {
+            const price = form.sale_price === '' ? 0 : form.sale_price;
+            payload = {
+                ...form,
+                vendor_name: selectedVendorName || form.vendor_name || '',
+                source_vendor_code: form.source_vendor_code || '',
+                inventory: parseInt(form.inventory, 10) || 0,
+                sale_price: price,
+                original_price: form.original_price === '' ? price : form.original_price,
+                category: form.category || '',
+                cat_id: form.category || '',
+                warehouse_id: form.warehouse_id || '',
+                shipping_template_id: form.shipping_template_id || '',
+                currency: form.currency || 'AUD',
+                infinite_quantity: !!form.infinite_quantity,
+                publish_status: form.publish_status === 'live' ? 'live' : 'draft',
+            };
         } else {
             payload = {
                 ...form,
@@ -810,6 +914,8 @@ export default function ListingFormModal({
                                 ? 'Create MyDeal listing'
                                 : isBunnings
                                   ? 'Create Bunnings listing'
+                                : isTemu
+                                  ? 'Create Temu listing'
                                 : 'Create listing'}
                     </h2>
                     <button type="button" className="rounded-md p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={onClose}>
@@ -1057,6 +1163,122 @@ export default function ListingFormModal({
                                     options={[
                                         { value: 'draft', label: 'draft — save unpublished' },
                                         { value: 'live', label: 'live — publish immediately' },
+                                    ]}
+                                />
+                            </div>
+                        ) : isTemu ? (
+                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                <div className="sm:col-span-2">
+                                    <Select
+                                        label="Vendor Name (Optional)"
+                                        value={form.source_vendor_code || ''}
+                                        onChange={setVendor}
+                                        options={vendorOptions}
+                                        required={storeVendors.length > 0}
+                                    />
+                                </div>
+                                <VendorSourceFields
+                                    noraSelected={noraSelected}
+                                    vevorSelected={vevorSelected}
+                                    costwaySelected={costwaySelected}
+                                    selectedVendor={selectedVendor}
+                                    form={form}
+                                    set={set}
+                                    urlRequired={false}
+                                />
+                                <Input label="Marketplace Name (Optional)" value={form.marketplace_name} onChange={set('marketplace_name')} placeholder="e.g. Temu" />
+                                <Input label="Store Name (Optional)" value={form.store_name} onChange={set('store_name')} />
+                                {!isEdit && (
+                                    <Select
+                                        label="Action"
+                                        value={form.action}
+                                        onChange={set('action')}
+                                        options={[
+                                            { value: 'create', label: 'Create — new listing' },
+                                            { value: 'mapped', label: 'Mapped — already on the store' },
+                                        ]}
+                                    />
+                                )}
+                                <Input
+                                    label="Parent SKU"
+                                    placeholder="Temu outGoodsSn — same on every variant"
+                                    value={form.product_key}
+                                    onChange={set('product_key')}
+                                />
+                                <Input
+                                    label="SKU"
+                                    placeholder="Temu outSkuSn; blank uses Parent SKU"
+                                    value={form.sku}
+                                    onChange={set('sku')}
+                                />
+                                <div className="sm:col-span-2 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 px-3 py-2 text-xs text-slate-600 dark:text-slate-300">
+                                    Rows sharing a Parent SKU are sent as one Temu product with several SKUs.
+                                    Parent SKU and SKU may be the same when there is no variation.
+                                </div>
+                                <div className="sm:col-span-2">
+                                    <Input label="Title" value={form.title} onChange={set('title')} required />
+                                </div>
+                                <div className="sm:col-span-2">
+                                    <Textarea label="Description" rows={4} value={form.description} onChange={set('description')} required />
+                                </div>
+                                <Input label="Brand (Optional)" value={form.brand} onChange={set('brand')} />
+                                <Input
+                                    label="Category"
+                                    value={form.category}
+                                    onChange={set('category')}
+                                    placeholder="Temu leaf catId e.g. 30847"
+                                    required
+                                />
+                                <Input
+                                    label="Warehouse ID"
+                                    value={form.warehouse_id}
+                                    onChange={set('warehouse_id')}
+                                    placeholder="From bg.logistics.warehouse.list.get"
+                                    required
+                                />
+                                <Input
+                                    label="Shipping Template ID (Optional)"
+                                    value={form.shipping_template_id}
+                                    onChange={set('shipping_template_id')}
+                                />
+                                <div className="sm:col-span-2">
+                                    <ListingPhotoUploader
+                                        storeId={storeId}
+                                        value={form.image_urls}
+                                        onChange={(urls) => setForm((f) => ({ ...f, image_urls: urls }))}
+                                        required
+                                        label="Image URLs"
+                                    />
+                                </div>
+                                <Input
+                                    label="Variation Img URL (Optional)"
+                                    value={form.variation_image_url}
+                                    onChange={set('variation_image_url')}
+                                    type="url"
+                                />
+                                <Input label="Barcode (Optional)" value={form.barcode} onChange={set('barcode')} />
+                                <Input label="Inventory" type="number" min="0" value={form.inventory} onChange={set('inventory')} required />
+                                <Input label="Price" type="number" min="0" step="0.01" value={form.sale_price} onChange={set('sale_price')} required />
+                                <Input label="Currency (Optional)" value={form.currency} onChange={set('currency')} placeholder="AUD" />
+                                <Input label="Weight (Optional)" value={form.weight} onChange={set('weight')} />
+                                <Input label="Weight Unit (Optional)" value={form.weight_unit} onChange={set('weight_unit')} />
+                                <Input label="Length (Optional)" value={form.length} onChange={set('length')} />
+                                <Input label="Width (Optional)" value={form.width} onChange={set('width')} />
+                                <Input label="Height (Optional)" value={form.height} onChange={set('height')} />
+                                <Input label="Dimension Unit (Optional)" value={form.dimension_unit} onChange={set('dimension_unit')} />
+                                <Input label="Option 1 Name (Optional)" value={form.option_1_name} onChange={set('option_1_name')} />
+                                <Input label="Option 1 Value (Optional)" value={form.option_1_value} onChange={set('option_1_value')} />
+                                <Input label="Option 2 Name (Optional)" value={form.option_2_name} onChange={set('option_2_name')} />
+                                <Input label="Option 2 Value (Optional)" value={form.option_2_value} onChange={set('option_2_value')} />
+                                <Input label="Option 3 Name (Optional)" value={form.option_3_name} onChange={set('option_3_name')} />
+                                <Input label="Option 3 Value (Optional)" value={form.option_3_value} onChange={set('option_3_value')} />
+                                <Select
+                                    label="status (Optional)"
+                                    value={form.publish_status}
+                                    onChange={set('publish_status')}
+                                    options={[
+                                        { value: 'draft', label: 'draft — save unpublished' },
+                                        { value: 'live', label: 'live — put on sale after publish' },
                                     ]}
                                 />
                             </div>

@@ -8,6 +8,10 @@ There is no separate "complete" endpoint; marking complete is an upsert with
 
 MyDeal (WMP):
 - ``POST /orders/fulfill`` with OrderFulfillment + tracking per OrderItem.
+
+Temu:
+- ``bg.logistics.shipment.create`` with the tracking number and child order
+  lines, then ``bg.logistics.shipment.confirm`` to mark the parent order shipped.
 """
 import logging
 
@@ -212,6 +216,90 @@ def _submit_bunnings(order: MarketplaceOrder, *, tracking_number: str, carrier: 
     }
 
 
+def _submit_temu(order: MarketplaceOrder, *, tracking_number: str, carrier: str,
+                 tracking_url: str = "") -> dict:
+    """bg.logistics.shipment.create then confirm, per parent order."""
+    from .temu import orders as temu_orders
+    from .temu.client import TemuClient
+
+    tracking = (tracking_number or "").strip()
+    if not tracking:
+        raise MarketplaceError("Tracking number is required for Temu shipments.")
+    order_sn = (order.external_order_key or order.invoice_number or "").strip()
+    if not order_sn:
+        raise MarketplaceError("Temu parentOrderSn is missing on this order.")
+
+    shipment = OrderShipment.objects.create(
+        order=order,
+        tracking_number=tracking,
+        carrier=(carrier or "").strip(),
+        tracking_url=(tracking_url or "").strip(),
+        shipped_at=timezone.now(),
+        status="submitted",
+    )
+    try:
+        client = TemuClient(order.store)
+    except MarketplaceError as exc:
+        shipment.status = "failed"
+        shipment.marketplace_response_json = {"error": str(exc)}
+        shipment.save(update_fields=["status", "marketplace_response_json"])
+        return {"ok": False, "message": str(exc), "shipment_id": str(shipment.id)}
+
+    company_id, company_name = temu_orders.resolve_shipping_company(client, carrier)
+    payload = temu_orders.build_shipment_payload(
+        order,
+        tracking_number=tracking,
+        ship_company_id=company_id,
+        carrier=company_name or carrier,
+    )
+    if not payload.get("sendRequestList", [{}])[0].get("packageDetailList"):
+        shipment.status = "failed"
+        shipment.marketplace_response_json = {"error": "No Temu child orders to ship"}
+        shipment.save(update_fields=["status", "marketplace_response_json"])
+        return {
+            "ok": False,
+            "message": (
+                "No Temu child order lines are stored for this order. "
+                "Fetch orders again, then retry shipping."
+            ),
+            "shipment_id": str(shipment.id),
+        }
+
+    created = client.create_shipment(payload)
+    confirmed = None
+    if created.ok:
+        confirmed = client.confirm_shipment({"parentOrderSn": order_sn})
+
+    ok = bool(created.ok and (confirmed is None or confirmed.ok))
+    shipment.marketplace_request_json = payload
+    shipment.marketplace_response_json = {
+        "create": created.data if created.ok else {"error": created.message},
+        "confirm": None if confirmed is None else (
+            confirmed.data if confirmed.ok else {"error": confirmed.message}
+        ),
+    }
+    shipment.status = "submitted" if ok else "failed"
+    shipment.save(
+        update_fields=["marketplace_request_json", "marketplace_response_json", "status"]
+    )
+
+    if ok:
+        order.shipping_status = "submitted"
+        order.status = OrderStatus.SHIPPING_SUBMITTED
+        order.save(update_fields=["shipping_status", "status", "updated_at"])
+
+    if not created.ok:
+        message = created.message or "Temu shipment create failed."
+    elif confirmed is not None and not confirmed.ok:
+        message = (
+            "Shipment was created, but Temu confirm failed: "
+            f"{confirmed.message or 'shipment confirm failed'}."
+        )
+    else:
+        message = "Shipping info sent to Temu."
+    return {"ok": ok, "message": message, "shipment_id": str(shipment.id)}
+
+
 def _submit_etsy(order: MarketplaceOrder, *, tracking_number: str, carrier: str) -> dict:
     from store_adapters import get_adapter
     from store_adapters.etsy_adapter import EtsyAPIError
@@ -291,6 +379,13 @@ def submit(order: MarketplaceOrder, *, tracking_number: str, carrier: str,
         )
     elif kind == "bunnings":
         result = _submit_bunnings(
+            order,
+            tracking_number=tracking_number,
+            carrier=carrier,
+            tracking_url=tracking_url,
+        )
+    elif kind == "temu":
+        result = _submit_temu(
             order,
             tracking_number=tracking_number,
             carrier=carrier,
@@ -401,6 +496,18 @@ def complete(order: MarketplaceOrder) -> dict:
         return {
             "ok": True,
             "message": "Marked complete locally (Bunnings ship is OR23 tracking + OR24 ship).",
+        }
+    if kind == "temu":
+        order.shipping_status = "complete"
+        order.status = OrderStatus.SHIPPING_COMPLETE
+        order.save(update_fields=["shipping_status", "status", "updated_at"])
+        last = order.shipments.first()
+        if last:
+            last.status = "complete"
+            last.save(update_fields=["status"])
+        return {
+            "ok": True,
+            "message": "Marked complete locally (Temu marks shipped from the confirmed shipment).",
         }
     if kind == "reverb":
         raise MarketplaceError("Shipping complete is not supported for Reverb yet.")

@@ -564,3 +564,111 @@ class StoreViewSet(viewsets.ModelViewSet):
             {'valid': False, 'message': err_msg or 'Invalid Etsy API credentials.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+    @action(detail=False, methods=['post'], url_path='temu-authorize-url')
+    def temu_authorize_url(self, request):
+        """Build the AU Seller Center URL the seller opens to authorize this app.
+
+        Body: { "temu_app_key": "...", "redirect_uri": "...", "state": "..." }.
+        """
+        from listings.temu.client import authorize_url
+
+        app_key = (request.data.get('temu_app_key') or '').strip()
+        redirect_uri = (request.data.get('redirect_uri') or '').strip()
+        if not app_key:
+            return Response(
+                {'valid': False, 'message': 'Temu App Key is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not redirect_uri:
+            return Response(
+                {'valid': False, 'message': 'Redirect URI is required. It must match the app redirect_url.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({
+            'valid': True,
+            'url': authorize_url(app_key, redirect_uri, (request.data.get('state') or '').strip()),
+            'message': (
+                'Open this URL while signed in to au.seller.temu.com, approve the permissions, '
+                'then paste the returned code.'
+            ),
+        })
+
+    @action(detail=False, methods=['post'], url_path='temu-exchange-code')
+    def temu_exchange_code(self, request):
+        """Swap a Temu authorization code for a per-mall access token.
+
+        Body: { "temu_app_key": "...", "temu_app_secret": "...", "code": "..." }.
+        The token is returned so the create form can save it with the store; it
+        is never stored on its own.
+        """
+        from stores.credentials import exchange_temu_code
+
+        app_key = (request.data.get('temu_app_key') or '').strip()
+        app_secret = (request.data.get('temu_app_secret') or '').strip()
+        code = (request.data.get('code') or request.data.get('temu_auth_code') or '').strip()
+        if not (app_key and app_secret and code):
+            return Response(
+                {
+                    'valid': False,
+                    'message': 'Temu App Key, App Secret, and the authorization code are required.',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        ok, msg, tokens = exchange_temu_code(
+            app_key,
+            app_secret,
+            code,
+            region=(request.data.get('temu_region') or 'au'),
+            base_url=(request.data.get('temu_base_url') or ''),
+        )
+        if not ok:
+            return Response(
+                {'valid': False, 'message': msg},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({
+            'valid': True,
+            'message': msg,
+            'temu_access_token': tokens.get('access_token') or '',
+            'temu_mall_id': tokens.get('mall_id') or '',
+        })
+
+    @action(detail=False, methods=['post'], url_path='test-temu-connection')
+    def test_temu_connection(self, request):
+        """Test Temu credentials before saving a store (create flow).
+
+        Body: { "temu_app_key": "...", "temu_app_secret": "...", "temu_access_token": "..." }.
+        """
+        from stores.credentials import verify_temu_credentials_from_token
+
+        app_key = (request.data.get('temu_app_key') or '').strip()
+        app_secret = (request.data.get('temu_app_secret') or '').strip()
+        access_token = (request.data.get('temu_access_token') or '').strip()
+        missing = [
+            label
+            for value, label in (
+                (app_key, 'App Key'),
+                (app_secret, 'App Secret'),
+                (access_token, 'Access Token'),
+            )
+            if not value
+        ]
+        if missing:
+            return Response(
+                {'valid': False, 'message': f"Temu {', '.join(missing)} is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        ok, msg = verify_temu_credentials_from_token(
+            app_key,
+            app_secret,
+            access_token,
+            region=(request.data.get('temu_region') or 'au'),
+            base_url=(request.data.get('temu_base_url') or ''),
+        )
+        if ok:
+            return Response({'valid': True, 'message': msg or 'Temu connection successful.'})
+        return Response(
+            {'valid': False, 'message': msg or 'Invalid Temu API credentials.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
