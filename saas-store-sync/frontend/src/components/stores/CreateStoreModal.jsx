@@ -325,6 +325,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             temu_app_key: form.temu_app_key.trim(),
             temu_app_secret: form.temu_app_secret.trim(),
             temu_access_token: form.temu_access_token.trim(),
+            region: form.region,
             temu_base_url: form.temu_base_url?.trim() || '',
         })
             .then((res) => {
@@ -1037,7 +1038,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                     if (f.management_mode === 'full_store' && sel && marketplaceCode(sel) === 'mydeal') {
                                                         next.mydeal_setup_method = 'api';
                                                     }
-                                                    if (sel && ['bunnings', 'temu'].includes(marketplaceCode(sel))) {
+                                                    if (sel && marketplaceCode(sel) === 'bunnings') {
                                                         next.region = 'AU';
                                                         next.schedule_timezone = DEFAULT_TZ.AU;
                                                     }

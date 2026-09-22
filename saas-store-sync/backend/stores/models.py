@@ -31,6 +31,7 @@ class Store(models.Model):
     ]
     TEMU_REGION_CHOICES = [
         ('au', 'Australia / Global'),
+        ('us', 'United States'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -135,19 +136,19 @@ class Store(models.Model):
         db_index=True,
         help_text='Last successful Bunnings order sync cutoff (UTC). Used for incremental OR11 pulls.',
     )
-    # --- Temu Partner Open API (AU / Global router; managed stores) ---
+    # --- Temu Partner Open API (AU Global router or US router; managed stores) ---
     temu_region = models.CharField(
         max_length=10,
         choices=TEMU_REGION_CHOICES,
         default='au',
         blank=True,
-        help_text='Temu site region. AU sellers use the Global router (openapi-b-global.temu.com).',
+        help_text='Temu API region, copied from the store Region. AU uses openapi-b-global.temu.com; USA uses openapi-b-us.temu.com.',
     )
     temu_base_url = models.URLField(
         max_length=500,
         blank=True,
         default='',
-        help_text='Override the Temu Open API router URL. Blank uses the AU/Global default.',
+        help_text='Override the Temu Open API host. Blank uses the host for the store Region.',
     )
     temu_app_key = EncryptedTextField(null=True, blank=True)
     temu_app_secret = EncryptedTextField(null=True, blank=True)

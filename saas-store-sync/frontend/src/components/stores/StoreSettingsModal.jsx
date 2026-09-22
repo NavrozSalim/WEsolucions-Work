@@ -131,6 +131,8 @@ function storeToForm(store) {
         bunnings_production_base_url: store.bunnings_production_base_url || BUNNINGS_DEFAULT_PRODUCTION_URL,
         bunnings_production_shop_key: '',
         ...emptyTemuFields(),
+        region: store.region || 'USA',
+        temu_region: store.region === 'USA' ? 'us' : (store.temu_region || 'au'),
         temu_base_url: store.temu_base_url || '',
         temu_mall_id: store.temu_mall_id || '',
         ...shopifyFieldsFromStore(store),

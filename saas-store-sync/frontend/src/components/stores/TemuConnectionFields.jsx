@@ -4,8 +4,24 @@ import Button from '../ui/Button';
 import Input from '../ui/Input';
 import { exchangeTemuCode, getTemuAuthorizeUrl } from '../../services/storeService';
 
-export const TEMU_DEFAULT_BASE_URL = 'https://openapi-b-global.temu.com';
+export const TEMU_AU_BASE_URL = 'https://openapi-b-global.temu.com';
+export const TEMU_US_BASE_URL = 'https://openapi-b-us.temu.com';
+export const TEMU_DEFAULT_BASE_URL = TEMU_AU_BASE_URL;
 const TEMU_AU_SELLER_CENTER = 'https://au.seller.temu.com/open-platform/client-manage';
+const TEMU_US_SELLER_CENTER = 'https://seller.temu.com/open-platform/client-manage';
+
+export function temuRegionCode(region) {
+    const raw = String(region || '').trim().toLowerCase();
+    return raw === 'us' || raw === 'usa' ? 'us' : 'au';
+}
+
+export function temuRouterForRegion(region) {
+    return temuRegionCode(region) === 'us' ? TEMU_US_BASE_URL : TEMU_AU_BASE_URL;
+}
+
+export function temuSellerCenterForRegion(region) {
+    return temuRegionCode(region) === 'us' ? TEMU_US_SELLER_CENTER : TEMU_AU_SELLER_CENTER;
+}
 
 export const emptyTemuFields = () => ({
     temu_region: 'au',
@@ -21,7 +37,7 @@ export const emptyTemuFields = () => ({
 /** Payload for create/update. Blank secrets are dropped so a PATCH keeps the stored value. */
 export function buildTemuPayload(form, { includeBlankSecrets = false } = {}) {
     const payload = {
-        temu_region: 'au',
+        temu_region: temuRegionCode(form.region || form.temu_region),
         temu_base_url: form.temu_base_url?.trim() || '',
         temu_mall_id: form.temu_mall_id?.trim() || '',
     };
@@ -45,16 +61,21 @@ export function validateTemuFields(form, { requireSecrets = true } = {}) {
 }
 
 /**
- * Temu Partner Open API connection fields (AU / Global router only).
+ * Temu Partner Open API connection fields.
  *
+ * The store Region picks the host: Australia uses the Global router, USA uses the US router.
  * Two ways to connect:
- *  - paste the Access Token shown by AU Seller Center after self-authorizing
+ *  - paste the Access Token shown by Seller Center after self-authorizing
  *  - Connect Temu: open the authorization URL, then exchange the returned code
  *
  * @param {'create'|'edit'} mode - edit leaves secrets blank to keep the stored value
  */
 export default function TemuConnectionFields({ form, setForm, mode = 'edit' }) {
     const isCreate = mode === 'create';
+    const regionCode = temuRegionCode(form.region || form.temu_region);
+    const routerUrl = temuRouterForRegion(regionCode);
+    const sellerCenter = temuSellerCenterForRegion(regionCode);
+    const sellerLabel = regionCode === 'us' ? 'US Seller Center' : 'AU Seller Center';
     const [authUrl, setAuthUrl] = useState('');
     const [busy, setBusy] = useState('');
     const [message, setMessage] = useState('');
@@ -78,7 +99,11 @@ export default function TemuConnectionFields({ form, setForm, mode = 'edit' }) {
         setBusy('url');
         setMessage('');
         setOk(null);
-        getTemuAuthorizeUrl({ temu_app_key: appKey, redirect_uri: redirect })
+        getTemuAuthorizeUrl({
+            temu_app_key: appKey,
+            redirect_uri: redirect,
+            region: form.region || form.temu_region || 'AU',
+        })
             .then((res) => {
                 setAuthUrl(res.data?.url || '');
                 setOk(true);
@@ -107,6 +132,7 @@ export default function TemuConnectionFields({ form, setForm, mode = 'edit' }) {
             temu_app_key: appKey,
             temu_app_secret: appSecret,
             code,
+            region: form.region || form.temu_region || 'AU',
             temu_base_url: form.temu_base_url?.trim() || '',
         })
             .then((res) => {
@@ -137,7 +163,7 @@ export default function TemuConnectionFields({ form, setForm, mode = 'edit' }) {
             <div className="flex items-start justify-between gap-3">
                 <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">Temu connection</p>
                 <span className="shrink-0 rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-xs text-slate-600 dark:text-slate-300">
-                    AU / Global
+                    {regionCode === 'us' ? 'USA' : 'AU / Global'}
                 </span>
             </div>
 
@@ -145,14 +171,14 @@ export default function TemuConnectionFields({ form, setForm, mode = 'edit' }) {
                 Create a self-developed app in{' '}
                 <a
                     className="text-accent-600 dark:text-accent-400 underline"
-                    href={TEMU_AU_SELLER_CENTER}
+                    href={sellerCenter}
                     target="_blank"
                     rel="noreferrer"
                 >
-                    AU Seller Center → Open Platform
+                    {sellerLabel} → Open Platform
                 </a>
                 , then copy its App Key and App Secret. Requests go to{' '}
-                <code className="text-[11px]">{TEMU_DEFAULT_BASE_URL}</code>.
+                <code className="text-[11px]">{routerUrl}</code>.
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -196,7 +222,7 @@ export default function TemuConnectionFields({ form, setForm, mode = 'edit' }) {
                 />
                 <Input
                     label="Router URL (Optional)"
-                    placeholder={TEMU_DEFAULT_BASE_URL}
+                    placeholder={routerUrl}
                     value={form.temu_base_url || ''}
                     onChange={set('temu_base_url')}
                 />

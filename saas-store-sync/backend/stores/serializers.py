@@ -372,11 +372,11 @@ class StoreSerializer(serializers.ModelSerializer):
                 validated_data['bunnings_staging_shop_key'] = shop_key
             validated_data.setdefault('api_token', '')
         if is_temu:
-            region = (req.get('temu_region') or validated_data.get('temu_region') or 'au').strip().lower()
-            if region != 'au':
-                raise ValidationError({
-                    'temu_region': 'Temu is supported for the AU / Global router only.',
-                })
+            from listings.temu.client import normalize_region
+
+            region = normalize_region(
+                req.get('region') or validated_data.get('region') or req.get('temu_region') or 'AU'
+            )
             validated_data['temu_region'] = region
             validated_data['temu_base_url'] = (
                 req.get('temu_base_url') or validated_data.get('temu_base_url') or ''
@@ -412,7 +412,7 @@ class StoreSerializer(serializers.ModelSerializer):
             if not access_token:
                 raise ValidationError({
                     'temu_access_token': (
-                        'Temu Access Token is required. Paste the token from AU Seller Center, '
+                        'Temu Access Token is required. Paste the token from Seller Center, '
                         'or use Connect Temu to authorize the app.'
                     ),
                 })
@@ -747,7 +747,11 @@ class StoreSerializer(serializers.ModelSerializer):
         verify_new_credentials = False
         if is_bunnings and any(k in req for k in ('bunnings_environment', 'bunnings_staging_base_url', 'bunnings_production_base_url', *BUNNINGS_SECRET_FIELDS)):
             verify_new_credentials = True
-        if is_temu and any(k in req for k in ('temu_base_url', 'temu_auth_code', *TEMU_SECRET_FIELDS)):
+        if is_temu:
+            from listings.temu.client import normalize_region
+
+            instance.temu_region = normalize_region(instance.region or instance.temu_region)
+        if is_temu and any(k in req for k in ('temu_base_url', 'temu_auth_code', 'region', *TEMU_SECRET_FIELDS)):
             auth_code = (req.get('temu_auth_code') or '').strip()
             if auth_code:
                 from stores.credentials import exchange_temu_code
@@ -762,7 +766,7 @@ class StoreSerializer(serializers.ModelSerializer):
                     app_key,
                     app_secret,
                     auth_code,
-                    region=(req.get('temu_region') or instance.temu_region or 'au'),
+                    region=instance.region or instance.temu_region,
                     base_url=(req.get('temu_base_url') or instance.temu_base_url or ''),
                 )
                 if not ok:

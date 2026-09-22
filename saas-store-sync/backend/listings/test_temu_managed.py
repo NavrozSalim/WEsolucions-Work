@@ -18,6 +18,7 @@ from listings.temu import orders as temu_orders
 from listings.temu import products as temu_products
 from listings.temu.client import (
     DEFAULT_BASE_URL,
+    US_BASE_URL,
     TemuClient,
     TemuResult,
     authorize_url,
@@ -124,6 +125,22 @@ class TemuSignatureTests(SimpleTestCase):
         self.assertTrue(url.startswith("https://au.seller.temu.com/open-platform/client-manage/authorization?"))
         self.assertIn("appKey=k", url)
         self.assertIn("state=store-1", url)
+
+    def test_usa_store_region_uses_us_router_even_if_temu_region_is_au(self):
+        client = TemuClient(_store_ns(region="USA", temu_region="au"))
+        self.assertEqual(client.region, "us")
+        self.assertEqual(client.router_url, f"{US_BASE_URL}/openapi/router")
+        self.assertNotIn("openapi-b-global", client.router_url)
+        self.assertNotIn("openapi-b-eu", client.router_url)
+
+    def test_explicit_router_url_overrides_region_host(self):
+        client = TemuClient(_store_ns(region="USA", temu_base_url="https://example.test"))
+        self.assertEqual(client.base_url, "https://example.test")
+
+    def test_authorize_url_points_at_us_seller_center(self):
+        url = authorize_url("k", "https://hub.example.com/cb", "store-1", region="USA")
+        self.assertTrue(url.startswith("https://seller.temu.com/open-platform/client-manage/authorization?"))
+        self.assertNotIn("au.seller.temu.com", url)
 
     def test_extract_access_token_reads_camel_case(self):
         token, mall = extract_access_token({"accessToken": "abc", "mallId": "77"})
@@ -331,6 +348,17 @@ class TemuManagedStoreTests(TestCase):
         from stores.credentials import marketplace_kind
 
         self.assertEqual(marketplace_kind(self.store.marketplace), "temu")
+
+    def test_saved_store_region_selects_the_temu_host(self):
+        au = TemuClient(self.store)
+        self.assertEqual(au.region, "au")
+        self.assertIn("openapi-b-global", au.router_url)
+
+        self.store.region = "USA"
+        self.store.temu_region = "au"
+        us = TemuClient(self.store)
+        self.assertEqual(us.region, "us")
+        self.assertIn("openapi-b-us", us.router_url)
 
     def test_template_headers_and_parse_round_trip(self):
         csv_text = csv_import.build_template_csv("create", store=self.store)

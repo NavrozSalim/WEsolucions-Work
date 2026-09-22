@@ -567,14 +567,15 @@ class StoreViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='temu-authorize-url')
     def temu_authorize_url(self, request):
-        """Build the AU Seller Center URL the seller opens to authorize this app.
+        """Build the Seller Center URL the seller opens to authorize this app.
 
-        Body: { "temu_app_key": "...", "redirect_uri": "...", "state": "..." }.
+        Body: { "temu_app_key": "...", "redirect_uri": "...", "state": "...", "region": "USA"|"AU" }.
         """
-        from listings.temu.client import authorize_url
+        from listings.temu.client import authorize_url, normalize_region, seller_center_for
 
         app_key = (request.data.get('temu_app_key') or '').strip()
         redirect_uri = (request.data.get('redirect_uri') or '').strip()
+        region = normalize_region(request.data.get('region') or request.data.get('temu_region') or 'au')
         if not app_key:
             return Response(
                 {'valid': False, 'message': 'Temu App Key is required.'},
@@ -585,11 +586,17 @@ class StoreViewSet(viewsets.ModelViewSet):
                 {'valid': False, 'message': 'Redirect URI is required. It must match the app redirect_url.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        seller_host = seller_center_for(region).replace('https://', '')
         return Response({
             'valid': True,
-            'url': authorize_url(app_key, redirect_uri, (request.data.get('state') or '').strip()),
+            'url': authorize_url(
+                app_key,
+                redirect_uri,
+                (request.data.get('state') or '').strip(),
+                region=region,
+            ),
             'message': (
-                'Open this URL while signed in to au.seller.temu.com, approve the permissions, '
+                f'Open this URL while signed in to {seller_host}, approve the permissions, '
                 'then paste the returned code.'
             ),
         })
@@ -619,7 +626,7 @@ class StoreViewSet(viewsets.ModelViewSet):
             app_key,
             app_secret,
             code,
-            region=(request.data.get('temu_region') or 'au'),
+            region=(request.data.get('region') or request.data.get('temu_region') or 'au'),
             base_url=(request.data.get('temu_base_url') or ''),
         )
         if not ok:
@@ -663,7 +670,7 @@ class StoreViewSet(viewsets.ModelViewSet):
             app_key,
             app_secret,
             access_token,
-            region=(request.data.get('temu_region') or 'au'),
+            region=(request.data.get('region') or request.data.get('temu_region') or 'au'),
             base_url=(request.data.get('temu_base_url') or ''),
         )
         if ok:

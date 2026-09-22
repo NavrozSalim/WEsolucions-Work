@@ -164,7 +164,7 @@ def verify_bunnings_connection(store) -> tuple[bool, str | None]:
 
 
 def verify_temu_connection(store) -> tuple[bool, str | None]:
-    """Verify Temu app key + secret + per-mall access token on the AU/Global router."""
+    """Verify Temu app key + secret + per-mall access token on the store's regional router."""
     from listings.errors import MarketplaceError
     from listings.temu.client import TemuClient
 
@@ -196,12 +196,14 @@ def verify_temu_credentials_from_token(
 ) -> tuple[bool, str | None]:
     """Test Temu credentials before a store is saved (create flow)."""
     from listings.errors import MarketplaceError
-    from listings.temu.client import TemuClient
+    from listings.temu.client import TemuClient, normalize_region
 
+    code = normalize_region(region)
     store = SimpleNamespace(
         name='Temu (unsaved)',
         marketplace=SimpleNamespace(code='temu', name='Temu'),
-        temu_region=(region or 'au'),
+        region='USA' if code == 'us' else 'AU',
+        temu_region=code,
         temu_base_url=(base_url or ''),
         temu_app_key=(app_key or ''),
         temu_app_secret=(app_secret or ''),
@@ -230,12 +232,14 @@ def exchange_temu_code(
 ) -> tuple[bool, str, dict]:
     """Swap an authorization ``code`` for a per-mall access token + mall id."""
     from listings.errors import MarketplaceError
-    from listings.temu.client import TemuClient, extract_access_token
+    from listings.temu.client import TemuClient, extract_access_token, normalize_region
 
+    region_code = normalize_region(region)
     store = SimpleNamespace(
         name='Temu (authorizing)',
         marketplace=SimpleNamespace(code='temu', name='Temu'),
-        temu_region=(region or 'au'),
+        region='USA' if region_code == 'us' else 'AU',
+        temu_region=region_code,
         temu_base_url=(base_url or ''),
         temu_app_key=(app_key or ''),
         temu_app_secret=(app_secret or ''),

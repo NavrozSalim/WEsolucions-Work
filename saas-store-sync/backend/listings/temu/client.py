@@ -1,4 +1,4 @@
-"""HTTP client for the Temu Partner Open API (AU / Global router).
+"""HTTP client for the Temu Partner Open API (AU / Global and US routers).
 
 All calls are ``POST {router}/openapi/router`` with a single flat JSON body that
 carries both the common parameters and the business parameters:
@@ -16,8 +16,10 @@ Signature (per Temu "Signature Method for API request"):
   3. wrap the long string with ``app_secret`` at head and tail
   4. MD5, then uppercase
 
-AU sellers use the Global router. US/EU hosts are intentionally not supported
-here — a Temu AU token is rejected by the regional US/EU endpoints.
+The store Region picks the host. Australia uses the Global router
+(``openapi-b-global.temu.com``) and ``au.seller.temu.com``. USA uses
+``openapi-b-us.temu.com`` and ``seller.temu.com``. A token from one region
+is rejected by the other host. EU is not supported.
 
 Secrets are never logged.
 """
@@ -36,12 +38,13 @@ logger = logging.getLogger("listings.temu")
 
 REQUEST_TIMEOUT = 60
 
-# AU / Global sellers. Do not point this at openapi-b-us / openapi-b-eu.
+# Australia sellers use the Global router. USA sellers use the US router.
 DEFAULT_BASE_URL = "https://openapi-b-global.temu.com"
+US_BASE_URL = "https://openapi-b-us.temu.com"
 ROUTER_PATH = "/openapi/router"
 
-# Seller Center used for the AU authorization redirect.
 AU_SELLER_CENTER = "https://au.seller.temu.com"
+US_SELLER_CENTER = "https://seller.temu.com"
 AUTHORIZE_PATH = "/open-platform/client-manage/authorization"
 
 SUCCESS_CODE = 1000000
@@ -131,28 +134,54 @@ def _sign_value(value) -> str:
     return str(value)
 
 
-def authorize_url(app_key: str, redirect_uri: str, state: str = "") -> str:
-    """AU Seller Center URL the seller opens to authorize this app."""
+def normalize_region(value) -> str:
+    """Map a store Region or Temu region to ``au`` or ``us``."""
+    raw = str(value or "").strip().lower().replace("_", " ")
+    if raw in {"us", "usa", "united states"}:
+        return "us"
+    return "au"
+
+
+def default_base_url(region) -> str:
+    return US_BASE_URL if normalize_region(region) == "us" else DEFAULT_BASE_URL
+
+
+def seller_center_for(region) -> str:
+    return US_SELLER_CENTER if normalize_region(region) == "us" else AU_SELLER_CENTER
+
+
+def resolve_region(store, credentials: dict | None = None) -> str:
+    """Store Region (USA / Australia) wins over the stored Temu region code."""
+    creds = credentials or {}
+    store_region = creds.get("store_region")
+    if store_region in (None, ""):
+        store_region = getattr(store, "region", None)
+    if store_region not in (None, ""):
+        return normalize_region(store_region)
+    if creds.get("region") not in (None, ""):
+        return normalize_region(creds.get("region"))
+    return normalize_region(getattr(store, "temu_region", None))
+
+
+def authorize_url(app_key: str, redirect_uri: str, state: str = "", region: str = "au") -> str:
+    """Seller Center URL the seller opens to authorize this app."""
     from urllib.parse import urlencode
 
     query = {"appKey": (app_key or "").strip(), "redirect_uri": (redirect_uri or "").strip()}
     if (state or "").strip():
         query["state"] = state.strip()
-    return f"{AU_SELLER_CENTER}{AUTHORIZE_PATH}?{urlencode(query)}"
+    return f"{seller_center_for(region)}{AUTHORIZE_PATH}?{urlencode(query)}"
 
 
 class TemuClient:
     def __init__(self, store, *, require_auth: bool = True, credentials: dict | None = None):
         self.store = store
         creds = credentials or {}
-        self.region = (
-            str(creds.get("region") or getattr(store, "temu_region", None) or "au").strip().lower()
-            or "au"
-        )
+        self.region = resolve_region(store, creds)
         base = str(
             creds.get("base_url") or getattr(store, "temu_base_url", None) or ""
         ).strip().rstrip("/")
-        self.base_url = base or DEFAULT_BASE_URL
+        self.base_url = base or default_base_url(self.region)
         self._app_key = str(creds.get("app_key") or getattr(store, "temu_app_key", None) or "").strip()
         self._app_secret = str(
             creds.get("app_secret") or getattr(store, "temu_app_secret", None) or ""
