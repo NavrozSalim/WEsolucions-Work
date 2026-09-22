@@ -1339,7 +1339,7 @@ export default function ListingFormModal({
                                 <Input label="Width (Optional)" value={form.width} onChange={set('width')} />
                                 <Input label="Dimension Unit (Optional)" value={form.dimension_unit} onChange={set('dimension_unit')} />
                                 <p className="sm:col-span-2 text-xs text-slate-500 dark:text-slate-400">
-                                    Create sends a product import then an offer. Mapped SKUs skip the product import and only update the offer. DISPLAY_NAME, PRODUCT_DESCRIPTION, BRAND, GTIN, and PRIMARY_IMAGE are sent with the Bunnings operator codes. New products may wait for Bunnings review before they are live.
+                                    Create sends a product import then an offer. If Bunnings already has the SKU, Publish skips the product file and only sends price and stock. Mapped SKUs skip the product import and only update the offer. DISPLAY_NAME, PRODUCT_DESCRIPTION, BRAND, GTIN, and PRIMARY_IMAGE are sent with the Bunnings operator codes. New products may wait for Bunnings review before they are live.
                                 </p>
                             </div>
                         ) : (

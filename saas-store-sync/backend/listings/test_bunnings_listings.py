@@ -1037,6 +1037,48 @@ class BunningsListingServiceTests(TestCase):
         self.assertIn("2006", listing.validation_errors_json[0])
         client.import_offers.assert_not_called()
 
+    @patch("listings.bunnings.products.BunningsClient")
+    def test_publish_skips_product_import_when_sku_already_in_catalog(self, mock_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        client = mock_cls.return_value
+        client.environment = "production"
+        client.product_exists.return_value = True
+        client.import_offers.return_value = BunningsResult(ok=True, data={"import_id": "o1"})
+        client.poll_import.return_value = BunningsResult(
+            ok=True, data={"import_status": "COMPLETE"}, message="COMPLETE"
+        )
+        result = listing_service.publish(self.user, self.store)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["published"], 1)
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.UPLOADED_PRODUCTION)
+        client.import_products.assert_not_called()
+        client.import_offers.assert_called_once()
+
+    @patch("listings.bunnings.products.BunningsClient")
+    def test_publish_sends_offer_when_p41_still_sent_but_product_exists(self, mock_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        client = mock_cls.return_value
+        client.environment = "production"
+        client.product_exists.side_effect = [False, True]
+        client.import_products.return_value = BunningsResult(ok=True, data={"import_id": "p1"})
+        client.import_offers.return_value = BunningsResult(ok=True, data={"import_id": "o1"})
+        client.poll_import.side_effect = [
+            BunningsResult(
+                ok=False,
+                data={"import_status": "SENT"},
+                message="Bunnings product import p1 still SENT.",
+            ),
+            BunningsResult(ok=True, data={"import_status": "COMPLETE"}, message="COMPLETE"),
+        ]
+        result = listing_service.publish(self.user, self.store)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["published"], 1)
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.UPLOADED_PRODUCTION)
+        client.import_products.assert_called_once()
+        client.import_offers.assert_called_once()
+
     @patch("listings.bunnings.products.time.sleep", return_value=None)
     @patch("listings.bunnings.products.BunningsClient")
     def test_publish_retries_offer_when_product_missing(self, mock_cls, _sleep):

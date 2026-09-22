@@ -960,8 +960,24 @@ def _mark_listing(listing: StoreListing, *, status: str, request: dict, response
     )
 
 
+def _partition_by_catalog(client, listings: list[StoreListing]) -> tuple[list, list]:
+    """Split listings whose shop SKU is already in Bunnings vs those that still need P41."""
+    found: list[StoreListing] = []
+    missing: list[StoreListing] = []
+    for listing in listings:
+        if _catalog_product_known(client, listing_sku(listing)) is True:
+            found.append(listing)
+        else:
+            missing.append(listing)
+    return found, missing
+
+
 def publish_listings(user, store, listings: list[StoreListing]) -> dict:
-    """P41 product import (create only) then OF01 offer import."""
+    """P41 product import (create only) then OF01 offer import.
+
+    If Bunnings already has the shop SKU (Pending/accepted), skip P41 and
+    send the offer so price and stock are not blocked by a SENT product import.
+    """
     client = BunningsClient(store)
     creates = [l for l in listings if (l.action or ListingAction.CREATE) != ListingAction.MAPPED]
     mapped = [l for l in listings if (l.action or "") == ListingAction.MAPPED]
@@ -974,12 +990,13 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
     product_import_id = ""
     product_result = None
     p41_failed_ids: set = set()
-    if creates:
-        csv_text = products_csv(creates)
+    already_in_catalog, need_p41 = _partition_by_catalog(client, creates)
+    if need_p41:
+        csv_text = products_csv(need_p41)
         product_result = client.import_products(csv_text)
         product_import_id = extract_import_id(product_result.data)
         if not product_result.ok:
-            for listing in creates:
+            for listing in need_p41:
                 p41_failed_ids.add(listing.id)
                 _mark_listing(
                     listing,
@@ -988,11 +1005,11 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
                     response={"error": product_result.message, "data": product_result.data},
                     errors=[product_result.message or "P41 product import failed."],
                 )
-            if not mapped:
+            if not mapped and not already_in_catalog:
                 return {
                     "ok": False,
                     "published": 0,
-                    "failed": len(creates),
+                    "failed": len(need_p41),
                     "message": product_result.message or "Bunnings product import failed.",
                     "environment": client.environment,
                 }
@@ -1000,20 +1017,11 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
             polled = client.poll_import("product", product_import_id)
             product_result = polled
             if _import_still_running(polled):
-                return {
-                    "ok": False,
-                    "published": 0,
-                    "failed": 0,
-                    "message": (
-                        polled.message
-                        or "Bunnings product import is still running. "
-                        "Wait a minute, then publish again. The listing was not marked live."
-                    ),
-                    "environment": client.environment,
-                }
-            if not polled.ok:
+                now_found, _still_missing = _partition_by_catalog(client, need_p41)
+                already_in_catalog = already_in_catalog + now_found
+            elif not polled.ok:
                 sku_errors = line_errors_by_sku(polled.data)
-                for listing in creates:
+                for listing in need_p41:
                     p41_failed_ids.add(listing.id)
                     sku = listing_sku(listing)
                     detail = sku_errors.get(sku.lower()) if sku else ""
@@ -1025,16 +1033,16 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
                         response={"error": msg, "data": polled.data},
                         errors=[msg],
                     )
-                if not mapped:
+                if not mapped and not already_in_catalog:
                     return {
                         "ok": False,
                         "published": 0,
-                        "failed": len(creates),
+                        "failed": len(need_p41),
                         "message": polled.message or "Bunnings product import failed.",
                         "environment": client.environment,
                     }
         if product_result and product_result.ok:
-            wait_for_catalog_products(client, [listing_sku(l) for l in creates])
+            wait_for_catalog_products(client, [listing_sku(l) for l in need_p41])
 
     # Previous Push failed rows must still get OF01 after a successful P41 retry.
     offer_targets = [l for l in listings if l.id not in p41_failed_ids]
@@ -1055,12 +1063,14 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
     offer_text = getattr(offer_result, "offer_csv", "") or offers_csv(offer_targets)
 
     create_ids = {id(l) for l in creates}
+    p41_accepted = bool(
+        (product_result and (product_result.ok or _import_still_running(product_result)))
+        or already_in_catalog
+    )
     if (
         not offer_result.ok
         and _offer_product_missing(offer_result)
-        and product_import_id
-        and product_result
-        and product_result.ok
+        and p41_accepted
     ):
         waiting = [l for l in offer_targets if id(l) in create_ids]
         hard_fail = [l for l in offer_targets if id(l) not in create_ids]
