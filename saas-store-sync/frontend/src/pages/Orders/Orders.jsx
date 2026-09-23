@@ -190,6 +190,74 @@ function formatAddress(addr) {
     return lines.length ? lines : null;
 }
 
+function addressSearchParts(addr) {
+    if (!addr || typeof addr !== 'object') return [];
+    return [
+        addr.company,
+        addr.name,
+        addr.firstName || addr.first_name,
+        addr.lastName || addr.last_name,
+        addr.line1,
+        addr.line2,
+        addr.city,
+        addr.state,
+        addr.postcode,
+        addr.country,
+        addr.phone,
+        addr.email,
+    ];
+}
+
+function digitsOnly(value) {
+    return String(value || '').replace(/\D/g, '');
+}
+
+/** Drop a trunk prefix so 0412… and +61 412… compare as the same number. */
+function significantDigits(value) {
+    return digitsOnly(value).replace(/^0+/, '');
+}
+
+function phoneFieldsMatch(query, phones) {
+    const queryDigits = significantDigits(query);
+    if (queryDigits.length < 6) return false;
+    return phones.some((phone) => {
+        const stored = significantDigits(phone);
+        if (stored.length < 6) return false;
+        return stored.includes(queryDigits) || queryDigits.includes(stored);
+    });
+}
+
+/** Match a free-text query against customer identity, contact, address, and order ids. */
+function orderMatchesCustomerSearch(order, rawQuery) {
+    const query = String(rawQuery || '').trim().toLowerCase();
+    if (!query) return true;
+    const d = orderDetails(order);
+    const customer = d.customer || order.customer_info_json || {};
+    const addresses = [
+        d.shippingAddress,
+        d.billingAddress,
+        d.shipping?.address,
+        customer.shippingAddress,
+        customer.billingAddress,
+    ];
+    const parts = [
+        customer.firstName,
+        customer.first_name,
+        customer.lastName,
+        customer.last_name,
+        customer.name,
+        customer.email,
+        customer.phone,
+        order.invoice_number,
+        order.external_order_key,
+        ...addresses.flatMap(addressSearchParts),
+    ];
+    const haystack = parts.filter((part) => part != null && String(part).trim() !== '').join(' ').toLowerCase();
+    if (haystack.includes(query)) return true;
+    const phones = [customer.phone, ...addresses.map((addr) => addr?.phone)];
+    return phoneFieldsMatch(query, phones);
+}
+
 function ShippingModal({ open, onClose, onSubmit, order, loading, marketplaceCode = '' }) {
     const [form, setForm] = useState({
         tracking_number: '', carrier: '', carrier_other: '', tracking_url: '', shipped_date: '',
@@ -792,6 +860,7 @@ export default function Orders() {
         if (Object.prototype.hasOwnProperty.call(STATUS_LABELS, initialStatus)) return initialStatus;
         return 'all';
     });
+    const [customerSearch, setCustomerSearch] = useState('');
 
     useEffect(() => {
         getCatalogStores()
@@ -948,12 +1017,18 @@ export default function Orders() {
     const orderDateTz = isMydeal ? MYDEAL_TZ : undefined;
 
     const filteredOrders = useMemo(() => {
-        if (!statusFilter || statusFilter === 'all') return orders;
-        if (statusFilter === 'open') {
-            return orders.filter((o) => o.status === 'new' || o.status === 'paid');
+        let list = orders;
+        if (statusFilter && statusFilter !== 'all') {
+            if (statusFilter === 'open') {
+                list = list.filter((o) => o.status === 'new' || o.status === 'paid');
+            } else {
+                list = list.filter((o) => o.status === statusFilter);
+            }
         }
-        return orders.filter((o) => o.status === statusFilter);
-    }, [orders, statusFilter]);
+        const query = customerSearch.trim();
+        if (!query) return list;
+        return list.filter((o) => orderMatchesCustomerSearch(o, query));
+    }, [orders, statusFilter, customerSearch]);
 
     const statusFilterOptions = useMemo(() => {
         const present = new Set(orders.map((o) => o.status).filter(Boolean));
@@ -1025,6 +1100,7 @@ export default function Orders() {
                         onChange={(e) => {
                             setSelectedStore(e.target.value);
                             setStatusFilter('all');
+                            setCustomerSearch('');
                         }}
                         options={[
                             { value: '', label: storesLoading ? 'Loading stores…' : 'Select a store' },
@@ -1035,6 +1111,17 @@ export default function Orders() {
                         ]}
                     />
                 </div>
+                {selectedStore && (
+                    <div className="w-full sm:min-w-[16rem] sm:max-w-md sm:flex-1">
+                        <Input
+                            label="Search"
+                            type="search"
+                            value={customerSearch}
+                            onChange={(e) => setCustomerSearch(e.target.value)}
+                            placeholder="Name, email, phone, address, or invoice"
+                        />
+                    </div>
+                )}
                 {selectedStore && (
                     <div className="w-full sm:max-w-[11rem]">
                         <Select
@@ -1099,7 +1186,11 @@ export default function Orders() {
                         <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">
                             {orders.length === 0
                                 ? 'No orders yet. Use “Fetch from marketplace” to pull the latest orders.'
-                                : 'No orders match this status filter.'}
+                                : customerSearch.trim() && statusFilter && statusFilter !== 'all'
+                                  ? `No orders match “${customerSearch.trim()}” with this status filter.`
+                                  : customerSearch.trim()
+                                    ? `No orders match “${customerSearch.trim()}”.`
+                                    : 'No orders match this status filter.'}
                         </p>
                     ) : (
                         <>
