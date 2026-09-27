@@ -177,6 +177,43 @@ class LoadCostwayCsvTests(unittest.TestCase):
         )
         self.assertEqual(fallback['Posted Price'], 56.95)
 
+    def test_kogan_sku_uses_the_vendor_id_not_the_shared_item_number(self):
+        lookup, compact, _ = load_costway_via_csv(self.path)
+        lookup['73982054'] = {'Posted Price': 2, 'Posted Inventory': 0}
+        hit = lookup_costway_price_stock(
+            lookup,
+            compact,
+            {},
+            sku='COW-73982054-TP10003-New',
+        )
+        self.assertEqual(hit['Posted Price'], 109.95)
+        self.assertEqual(hit['Posted Inventory'], 5)
+        by_vendor_id = lookup_costway_price_stock(
+            lookup,
+            compact,
+            {},
+            vendor_id='TP10003',
+            sku='73982054',
+        )
+        self.assertEqual(by_vendor_id['Posted Price'], 109.95)
+        sibling = lookup_costway_price_stock(
+            lookup,
+            compact,
+            {},
+            product_key='COW-111-TW10004C-New',
+            sku='73982054',
+        )
+        self.assertEqual(sibling['Posted Price'], 262.95)
+        lookup['T-JH10016WH'] = {'Posted Price': 59.95, 'Posted Inventory': 4}
+        hyphenated = lookup_costway_price_stock(
+            lookup,
+            compact,
+            {},
+            product_key='COW-83902741-T-JH10016WH-New',
+            sku='73982054',
+        )
+        self.assertEqual(hyphenated['Posted Price'], 59.95)
+
 
 class BomAndDelimiterTests(unittest.TestCase):
     def test_utf8_bom_header(self):

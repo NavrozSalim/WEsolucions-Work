@@ -2474,8 +2474,9 @@ def run_costway_au_ingest(store_id: str | None = None, *, job_id: str | None = N
     the store are refreshed. Without ``job_id``, only ``pending`` rows run.
     ``store_id`` is required (multi-tenant).
 
-    Matches use Vendor ID / SKU first, then Item NO. The product URL is used
-    only when those IDs are not in the feed. Misses are bulk-updated
+    Matches use the Vendor ID first, including the ID inside a Kogan
+    ``COW-{item}-{vendorId}-New`` SKU. The product URL is used only when
+    that Vendor ID is not in the feed. Misses are bulk-updated
     with the successes. This pass does not push stock to the marketplace;
     Manual sync and the schedule do that.
     """
@@ -2626,14 +2627,18 @@ def run_costway_au_ingest(store_id: str | None = None, *, job_id: str | None = N
         if not product:
             continue
         raw_sku = (product.vendor_sku or '').strip()
+        vendor_id = (getattr(product, 'inventory_vendor_id', None) or '').strip()
         vendor_url = (getattr(product, 'vendor_url', None) or '').strip()
         child_sku = (getattr(pm, 'marketplace_child_sku', None) or '').strip()
+        parent_sku = (getattr(pm, 'marketplace_parent_sku', None) or '').strip()
         entry = lookup_costway_price_stock(
             lookup,
             lookup_compact,
             lookup_by_url,
+            vendor_id=vendor_id,
             sku=raw_sku,
             variant_key=child_sku,
+            product_key=parent_sku,
             vendor_url=vendor_url,
         )
         if not entry:

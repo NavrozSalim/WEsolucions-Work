@@ -107,6 +107,18 @@ def normalize_costway_product_url(url: str | None) -> str:
     return s
 
 
+# Kogan listing SKU: COW-{item number}-{Vendor ID}-New. Vendor ID may contain hyphens.
+_KOGAN_COSTWAY_SKU_RE = re.compile(r"^COW-\d+-(.+)-New$", re.IGNORECASE)
+
+
+def costway_vendor_id_from_listing_sku(value) -> str:
+    """Return the Vendor ID embedded in ``COW-{item}-{vendorId}-New``."""
+    match = _KOGAN_COSTWAY_SKU_RE.match(clean_id(value))
+    if not match:
+        return ""
+    return clean_id(match.group(1))
+
+
 def costway_identity_candidates(
     *,
     vendor_id: str = "",
@@ -115,7 +127,11 @@ def costway_identity_candidates(
     product_key: str = "",
     vendor_url: str = "",
 ) -> list[str]:
-    """Ordered Vendor ID / SKU / Item NO. guesses. The page slug is not an ID."""
+    """Vendor ID first, including the ID inside a Kogan ``COW-…-New`` SKU.
+
+    The shared Item NO. inside that Kogan SKU is not a candidate. Several
+    colors share it, and the feed keeps only one price on that key.
+    """
     from urllib.parse import parse_qs, unquote, urlparse
 
     keys: list[str] = []
@@ -131,10 +147,12 @@ def costway_identity_candidates(
         seen.add(marker)
         keys.append(s)
 
+    raw_values = (vendor_id, sku, variant_key, product_key)
     add(vendor_id)
-    add(sku)
-    add(variant_key)
-    add(product_key)
+    for val in raw_values:
+        add(costway_vendor_id_from_listing_sku(val))
+    for val in raw_values[1:]:
+        add(val)
     url = (vendor_url or "").strip()
     if url:
         parsed = urlparse(url)
