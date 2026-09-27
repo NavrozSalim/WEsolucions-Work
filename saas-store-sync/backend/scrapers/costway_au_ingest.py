@@ -365,6 +365,19 @@ def fetch_costway_feed(url: str | None = None, timeout: int = 90) -> str:
     return tmp.name
 
 
+def build_costway_url_index(lookup: dict) -> dict[str, dict]:
+    """Map normalized product Link values to feed price/stock entries."""
+    lookup_by_url: dict[str, dict] = {}
+    for entry in lookup.values():
+        link = (entry.get("Product Link") or "").strip()
+        if not link:
+            continue
+        key = normalize_costway_product_url(link)
+        if key:
+            lookup_by_url[key] = entry
+    return lookup_by_url
+
+
 def load_costway_feed_lookups() -> dict:
     """Download and parse the live Costway AU CSV once per scrape job."""
     csv_path = fetch_costway_feed(COSTWAY_AU_FEED_URL)
@@ -375,18 +388,10 @@ def load_costway_feed_lookups() -> dict:
             os.unlink(csv_path)
         except OSError:
             pass
-    lookup_by_url: dict[str, dict] = {}
-    for entry in lookup.values():
-        link = (entry.get("Product Link") or "").strip()
-        if not link:
-            continue
-        key = normalize_costway_product_url(link)
-        if key:
-            lookup_by_url[key] = entry
     return {
         "lookup": lookup,
         "lookup_compact": lookup_compact,
-        "lookup_by_url": lookup_by_url,
+        "lookup_by_url": build_costway_url_index(lookup),
         "feed_rows": pos_rows,
     }
 
@@ -408,6 +413,7 @@ __all__ = [
     "normalize_costway_product_url",
     "costway_identity_candidates",
     "lookup_costway_price_stock",
+    "build_costway_url_index",
     "load_costway_feed_lookups",
     "resolve_costway_feed_columns",
     "load_costway_via_csv",

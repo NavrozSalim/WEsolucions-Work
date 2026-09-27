@@ -422,6 +422,67 @@ class CostwayIngestTenantTests(TestCase):
         self.assertEqual(int(pm.store_stock), 5)
 
     @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+    @patch('catalog.tasks._fail_mapping')
+    @patch('scrapers.costway_au_ingest.fetch_costway_feed')
+    def test_costway_ingest_matches_url_and_batches_misses(self, mock_fetch, mock_fail):
+        import os
+        import tempfile
+
+        csv_body = (
+            'SKU,Item NO.,Title,Description,Price,Category,Link,QTY,Weight,Image\n'
+            'TP10003,73982054,Costway chair,Desc,109.95,Baby,'
+            'http://au.costway.com/tp.html,5,37.58882,http://au.costway.com/i.jpg\n'
+        )
+        tmp = tempfile.NamedTemporaryFile(prefix='costway_ing_', suffix='.csv', delete=False)
+        tmp.write(csv_body.encode('utf-8'))
+        tmp.close()
+        mock_fetch.return_value = tmp.name
+
+        mp, _ = Marketplace.objects.get_or_create(code='kogan_costway5', defaults={'name': 'Kogan Costway'})
+        user = User.objects.create_user(username='costway_u5', email='costway_u5@example.com', password='pass12345')
+        store = Store.objects.create(
+            user=user, name='Costway URL', region='AU', api_token='tok-cw5', marketplace=mp,
+            connection_status='connected',
+        )
+        vendor, _ = Vendor.objects.get_or_create(code='costwayau', defaults={'name': 'CostwayAU'})
+        by_url = Product.objects.create(
+            vendor=vendor,
+            vendor_sku='MARKET-SKU',
+            vendor_url='https://au.costway.com/tp.html?utm=1',
+            owner=user,
+        )
+        missing = Product.objects.create(
+            vendor=vendor, vendor_sku='NOT-IN-FEED', owner=user,
+        )
+        pm_url = ProductMapping.objects.create(
+            store=store, product=by_url, marketplace_id='MID-CW-5A',
+            sync_status='pending', is_active=True, store_price=Decimal('10.00'), store_stock=3,
+        )
+        pm_miss = ProductMapping.objects.create(
+            store=store, product=missing, marketplace_id='MID-CW-5B',
+            sync_status='pending', is_active=True, store_price=Decimal('20.00'), store_stock=4,
+        )
+        try:
+            out = run_costway_au_ingest(store_id=str(store.id))
+        finally:
+            if os.path.exists(tmp.name):
+                os.unlink(tmp.name)
+        mock_fail.assert_not_called()
+        self.assertEqual(out.get('status'), 'ok')
+        self.assertEqual(out.get('matched'), 1)
+        self.assertEqual(out.get('missing'), 1)
+        self.assertEqual(out.get('updated'), 2)
+        pm_url.refresh_from_db()
+        pm_miss.refresh_from_db()
+        self.assertEqual(pm_url.sync_status, 'scraped')
+        self.assertEqual(float(pm_url.store_price), 109.95)
+        self.assertEqual(int(pm_url.store_stock), 5)
+        self.assertEqual(pm_miss.sync_status, 'failed')
+        self.assertEqual(int(pm_miss.store_stock), 0)
+        self.assertEqual(float(pm_miss.store_price), 20.0)
+        self.assertIn('costway_feed_sku_missing', pm_miss.scrape_error or '')
+
+    @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
     def test_heal_stale_costway_claimed_job_when_no_sync_pending(self):
         mp, _ = Marketplace.objects.get_or_create(code='kogan_costway4', defaults={'name': 'Kogan Costway'})
         user = User.objects.create_user(username='costway_u4', email='costway_u4@example.com', password='pass12345')

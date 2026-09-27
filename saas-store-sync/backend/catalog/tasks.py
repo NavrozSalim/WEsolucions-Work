@@ -2473,12 +2473,17 @@ def run_costway_au_ingest(store_id: str | None = None, *, job_id: str | None = N
     When ``job_id`` is set (Start Scraping), all active Costway mappings for
     the store are refreshed. Without ``job_id``, only ``pending`` rows run.
     ``store_id`` is required (multi-tenant).
+
+    Matches use SKU, Item NO., and the product URL. Misses are bulk-updated
+    with the successes. This pass does not push stock to the marketplace;
+    Manual sync and the schedule do that.
     """
     from scrapers.costway_au_ingest import (
         COSTWAY_AU_FEED_URL,
+        build_costway_url_index,
         fetch_costway_feed,
         load_costway_via_csv,
-        lookup_sku,
+        lookup_costway_price_stock,
     )
     from sync.tasks import (
         _apply_inventory,
@@ -2560,6 +2565,7 @@ def run_costway_au_ingest(store_id: str | None = None, *, job_id: str | None = N
         )
         return {'status': 'empty_feed', 'feed_rows': pos_rows, 'updated': 0}
 
+    lookup_by_url = build_costway_url_index(lookup)
     pm_list = list(pm_qs)
     store = pm_list[0].store if pm_list else None
     if store is None:
@@ -2598,30 +2604,52 @@ def run_costway_au_ingest(store_id: str | None = None, *, job_id: str | None = N
         VendorPrice.objects.bulk_create(vp_batch, batch_size=bulk_pm_size)
         vp_batch.clear()
 
+    def _queue_costway_miss(pm, code: str, message: str) -> None:
+        """Record a feed miss in the same bulk batch. No marketplace push."""
+        nonlocal missing
+        missing += 1
+        pm.store_stock = 0
+        pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
+        pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
+        reason = code
+        if message:
+            reason = f'{code}: {str(message)[:240]}'
+        pm.scrape_error = reason[:512]
+        pm.last_scrape_time = now
+        pm_batch.append(pm)
+        if len(pm_batch) >= bulk_pm_size:
+            _flush_pm_batch()
+
     for pm in pm_list:
         product = pm.product
         if not product:
             continue
         raw_sku = (product.vendor_sku or '').strip()
-        if not raw_sku:
-            missing += 1
-            _fail_mapping(pm, 'costway_feed_sku_missing', 'Missing vendor SKU', store=store)
-            continue
-        entry = lookup_sku(lookup, lookup_compact, raw_sku)
+        vendor_url = (getattr(product, 'vendor_url', None) or '').strip()
+        child_sku = (getattr(pm, 'marketplace_child_sku', None) or '').strip()
+        entry = lookup_costway_price_stock(
+            lookup,
+            lookup_compact,
+            lookup_by_url,
+            sku=raw_sku,
+            variant_key=child_sku,
+            vendor_url=vendor_url,
+        )
         if not entry:
-            missing += 1
-            _fail_mapping(
-                pm, 'costway_feed_sku_missing', 'SKU not in Costway AU CSV feed', store=store,
-            )
+            if not raw_sku and not vendor_url and not child_sku:
+                _queue_costway_miss(pm, 'costway_feed_sku_missing', 'Missing vendor SKU')
+            else:
+                _queue_costway_miss(
+                    pm, 'costway_feed_sku_missing', 'SKU not in Costway AU CSV feed',
+                )
             continue
-        matched += 1
         try:
             price = Decimal(str(entry['Posted Price'] or 0))
             stock_val = int(entry.get('Posted Inventory') or 0)
         except Exception as parse_err:
-            missing += 1
-            _fail_mapping(pm, 'costway_feed_row_invalid', str(parse_err)[:240], store=store)
+            _queue_costway_miss(pm, 'costway_feed_row_invalid', str(parse_err)[:240])
             continue
+        matched += 1
 
         vp_batch.append(VendorPrice(product=product, price=price, stock=stock_val))
         if len(vp_batch) >= bulk_pm_size:
