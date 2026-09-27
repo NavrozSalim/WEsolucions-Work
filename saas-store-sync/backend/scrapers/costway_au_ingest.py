@@ -16,7 +16,9 @@ Feed columns (Dropship-AU.csv):
   SKU | Item NO. | Title | Description | Price | Category | Link | QTY | Weight | Image
 
 Only **SKU** (match key), **Price** (vendor cost) and **QTY** (stock) are applied.
-**Item NO.** and **Link** are secondary lookup keys. Weight is never treated as qty.
+**Item NO.** is a secondary ID. **Link** is used only when the Vendor ID / SKU is
+not in the file, so a shared page cannot replace that SKU's price. Weight is
+never treated as qty.
 """
 from __future__ import annotations
 
@@ -113,7 +115,7 @@ def costway_identity_candidates(
     product_key: str = "",
     vendor_url: str = "",
 ) -> list[str]:
-    """Ordered product-ID guesses to match against feed SKU / Item NO."""
+    """Ordered Vendor ID / SKU / Item NO. guesses. The page slug is not an ID."""
     from urllib.parse import parse_qs, unquote, urlparse
 
     keys: list[str] = []
@@ -140,11 +142,6 @@ def costway_identity_candidates(
         for qk in ("sku", "SKU", "id", "product_id", "productId", "item_no", "item"):
             for val in qs.get(qk, []):
                 add(unquote(val or ""))
-        path = unquote(parsed.path or "").rstrip("/")
-        last = path.split("/")[-1] if path else ""
-        last = re.sub(r"\.(html?|php)$", "", last, flags=re.I)
-        if last:
-            add(last)
     return keys
 
 
@@ -159,12 +156,11 @@ def lookup_costway_price_stock(
     product_key: str = "",
     vendor_url: str = "",
 ) -> dict | None:
-    """Find a feed row by Link, then by Vendor ID / SKU / Item NO. tokens."""
-    url = (vendor_url or "").strip()
-    if url and lookup_by_url:
-        hit = lookup_by_url.get(normalize_costway_product_url(url))
-        if hit:
-            return hit
+    """Find a feed row by Vendor ID / SKU first, then by product Link.
+
+    Link is only used when none of those IDs are in the feed. A shared page
+    must not replace the price of a Vendor ID that has its own CSV row.
+    """
     for key in costway_identity_candidates(
         vendor_id=vendor_id,
         sku=sku,
@@ -175,6 +171,9 @@ def lookup_costway_price_stock(
         hit = lookup_sku(lookup, lookup_compact, key)
         if hit:
             return hit
+    url = (vendor_url or "").strip()
+    if url and lookup_by_url:
+        return lookup_by_url.get(normalize_costway_product_url(url))
     return None
 
 

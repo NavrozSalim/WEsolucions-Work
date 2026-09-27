@@ -2474,7 +2474,8 @@ def run_costway_au_ingest(store_id: str | None = None, *, job_id: str | None = N
     the store are refreshed. Without ``job_id``, only ``pending`` rows run.
     ``store_id`` is required (multi-tenant).
 
-    Matches use SKU, Item NO., and the product URL. Misses are bulk-updated
+    Matches use Vendor ID / SKU first, then Item NO. The product URL is used
+    only when those IDs are not in the feed. Misses are bulk-updated
     with the successes. This pass does not push stock to the marketplace;
     Manual sync and the schedule do that.
     """

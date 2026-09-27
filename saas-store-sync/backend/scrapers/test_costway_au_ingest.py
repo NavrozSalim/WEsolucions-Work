@@ -157,6 +157,26 @@ class LoadCostwayCsvTests(unittest.TestCase):
         self.assertEqual(hit['Posted Price'], 262.95)
         self.assertEqual(hit['Posted Inventory'], 407)
 
+    def test_vendor_id_wins_over_a_different_product_link(self):
+        lookup, compact, _ = load_costway_via_csv(self.path)
+        by_url = {
+            normalize_costway_product_url('http://au.costway.com/tp10003.html'):
+            lookup['ZEROSTOCK'],
+        }
+        hit = lookup_costway_price_stock(
+            lookup, compact, by_url,
+            sku='TP10003',
+            vendor_url='http://au.costway.com/tp10003.html',
+        )
+        self.assertEqual(hit['Posted Price'], 109.95)
+        self.assertEqual(hit['Posted Inventory'], 5)
+        fallback = lookup_costway_price_stock(
+            lookup, compact, by_url,
+            sku='NOT-IN-FEED',
+            vendor_url='http://au.costway.com/tp10003.html',
+        )
+        self.assertEqual(fallback['Posted Price'], 56.95)
+
 
 class BomAndDelimiterTests(unittest.TestCase):
     def test_utf8_bom_header(self):
