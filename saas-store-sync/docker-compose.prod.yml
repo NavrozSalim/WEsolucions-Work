@@ -216,7 +216,8 @@ services:
   # Split workers so ingest/sync/light never consume heavy-* queues (US/AU are remote).
   # Ingest: file ingest, catalog_sync, catalog_update. Sync: run_store_* (scrape + marketplace push).
   # Light: scrape chord finalizers, resume-after-stop, Beat check_scheduled_updates.
-  # US: docker-compose.us-scraper.prod.yml (-Q heavy-us). AU: docker-compose.au-scraper.prod.yml (-Q heavy-au).
+  # US: docker-compose.us-scraper.prod.yml (-Q heavy-us).
+  # AU: docker-compose.au-scraper.prod.yml (-Q heavy-au browser, -Q feed-au Costway CSV).
   celery_worker_celery:
     <<: *backend-image
     command: >-

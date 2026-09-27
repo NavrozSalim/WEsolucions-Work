@@ -10,11 +10,11 @@ git pull --ff-only origin main
 echo "==> Stop accidental main stack if present"
 docker compose -f docker-compose.prod.yml --env-file .env.prod down 2>/dev/null || true
 
-echo "==> Build AU scraper worker"
-docker compose -f docker-compose.au-scraper.prod.yml --env-file .env.prod build celery_worker_au
+echo "==> Build AU scraper + Costway feed workers"
+docker compose -f docker-compose.au-scraper.prod.yml --env-file .env.prod build celery_worker_au celery_worker_au_feed
 
-echo "==> Start AU scraper"
-docker compose -f docker-compose.au-scraper.prod.yml --env-file .env.prod up -d celery_worker_au
+echo "==> Start AU scraper + Costway feed worker"
+docker compose -f docker-compose.au-scraper.prod.yml --env-file .env.prod up -d celery_worker_au celery_worker_au_feed
 
 echo "==> Verify Costco AU proxy configuration"
 docker compose -f docker-compose.au-scraper.prod.yml --env-file .env.prod exec -T celery_worker_au \
@@ -23,8 +23,8 @@ docker compose -f docker-compose.au-scraper.prod.yml --env-file .env.prod exec -
     print(f'Costco AU proxies loaded: {len(urls)}'); \
     [print(f'  - {u.split(\"@\")[-1]}') for u in urls]" || true
 
-echo "==> Done. AU worker listens on queue: heavy-au"
-docker compose -f docker-compose.au-scraper.prod.yml --env-file .env.prod ps celery_worker_au
+echo "==> Done. Browser worker: heavy-au. Costway feed worker: feed-au"
+docker compose -f docker-compose.au-scraper.prod.yml --env-file .env.prod ps celery_worker_au celery_worker_au_feed
 
 echo ""
 echo "Smoke test (run after setting COSTCO_AU_PROXY_URLS in .env.prod and restarting):"

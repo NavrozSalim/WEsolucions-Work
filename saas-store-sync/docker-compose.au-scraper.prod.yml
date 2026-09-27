@@ -1,8 +1,11 @@
-# Australia browser + AU feed worker — run on an AU-region VPS (e.g. Contabo AU).
+# Australia workers — run on an AU-region VPS (e.g. Contabo AU).
 #
-# Consumes Celery queue ``heavy-au``: Amazon AU, eBay AU, Costway AU CSV ingest.
+# ``celery_worker_au`` consumes ``heavy-au``: Amazon AU, eBay AU (browser).
+# ``celery_worker_au_feed`` consumes ``feed-au``: Costway AU CSV only.
+# The CSV is AU-IP only, so it stays on this host, but on its own process so a
+# feed refresh does not wait behind page scrapes.
 # Vevor AU feed ingest (``catalog.run_vevor_au_ingest``) runs on the main app's ``light`` worker
-# (public S3 XLSX). Costway dropship CSV is AU-IP only and MUST run on this worker.
+# (public S3 XLSX).
 #
 # Requirements:
 # - Same backend image as main (build or pull BACKEND_IMAGE).
@@ -36,7 +39,7 @@ services:
       --concurrency=${CELERY_AU_SCRAPER_CONCURRENCY:-2}
       --prefetch-multiplier=1 -O fair
     init: true
-    environment:
+    environment: &au-worker-env
       - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=${REDIS_URL}
       - USE_REDIS_CACHE=${USE_REDIS_CACHE:-1}
@@ -104,6 +107,24 @@ services:
     volumes:
       - catalog_media_au_worker:/app/media
       # Host dir must contain ebay_au_cookies.json (browser export for ebay.com.au). See .env.prod.example.
+      - ${EBAY_AU_SECRETS_DIR:-./secrets}:/app/secrets:ro
+    restart: always
+    stop_grace_period: 60s
+    logging: *default-logging
+
+  # Costway CSV only. Same AU IP as the browser worker, own queue so a feed
+  # refresh is not stuck behind Amazon/eBay chunks.
+  celery_worker_au_feed:
+    <<: *backend-image
+    command: >-
+      celery -A core worker -l info
+      -Q feed-au
+      --concurrency=${CELERY_AU_FEED_CONCURRENCY:-1}
+      --prefetch-multiplier=1 -O fair
+    init: true
+    environment: *au-worker-env
+    volumes:
+      - catalog_media_au_worker:/app/media
       - ${EBAY_AU_SECRETS_DIR:-./secrets}:/app/secrets:ro
     restart: always
     stop_grace_period: 60s

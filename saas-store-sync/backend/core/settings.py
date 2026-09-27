@@ -401,8 +401,9 @@ if sys.platform == 'win32':
 # - ``sync``: store scrape/push/update tasks (``run_store_*``) — isolated from ingest uploads.
 # - ``light``: scrape chord finalizers, resume-after-stop, Beat ``check_scheduled_updates``.
 # - ``celery``: default (analytics, vendor price prune).
-# US VPS: -Q heavy-us. AU VPS: -Q heavy-au. Vevor AU feed → ``light`` (no browser).
-# Costway AU CSV feed → ``heavy-au`` (AU-IP only; never fetch from main/light/sync).
+# US VPS: -Q heavy-us. AU VPS: -Q heavy-au (browser) and -Q feed-au (Costway CSV).
+# Vevor AU feed → ``light`` (no browser). Costway AU CSV → ``feed-au`` on the AU
+# VPS (AU-IP only; never fetch from main/light/sync, and not behind page scrapes).
 # Managed listing Start Scraping (Lasoo / Reverb / Etsy) also uses heavy-us / heavy-au.
 # Orders/tickets VPS: -Q orders-us (USA stores) / -Q orders-au (AU stores).
 from kombu import Queue  # noqa: E402
@@ -417,6 +418,7 @@ CELERY_TASK_QUEUES = (
     Queue('light'),
     Queue('heavy-us'),
     Queue('heavy-au'),
+    Queue('feed-au'),
     Queue('orders-us'),
     Queue('orders-au'),
 )
@@ -431,8 +433,9 @@ CELERY_TASK_ROUTES = (
         'catalog.tasks.catalog_update_task': {'queue': 'ingest'},
         'catalog.tasks.resume_catalog_scrape_after_stop': {'queue': 'light'},
         'catalog.run_vevor_au_ingest': {'queue': 'light'},
-        # Costway dropship CSV is AU-IP only — AU scraper VPS, not main light worker.
-        'catalog.run_costway_au_ingest': {'queue': 'heavy-au'},
+        # Costway dropship CSV is AU-IP only. Own queue on the AU VPS so it
+        # starts immediately, the same way Vevor uses ``light``.
+        'catalog.run_costway_au_ingest': {'queue': 'feed-au'},
         # Store-wide scrape + marketplace push: separate from catalog file ingest.
         'sync.tasks.run_store_sync': {'queue': 'sync'},
         'sync.tasks.run_store_update': {'queue': 'sync'},

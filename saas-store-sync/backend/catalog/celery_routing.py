@@ -6,13 +6,15 @@ server-side Amazon/eBay scrape tasks are routed to:
 
 - ``heavy-us`` — US marketplace scrapers (Amazon US, eBay US, HEB US).
 - ``heavy-au`` — AU marketplace scrapers (Amazon AU, eBay AU).
+- ``feed-au`` — Costway AU CSV only (same AU VPS, separate process).
 
 Chord finalizers (aggregate chunk results, update ``ScrapeRun``, activity log)
 run on ``light`` so the main app worker can finish jobs without requiring
 the US worker to subscribe to non-scrape queues.
 
 ``catalog.run_vevor_au_ingest`` also runs on ``light`` (XLSX feed, no browser).
-``catalog.run_costway_au_ingest`` runs on ``heavy-au`` (AU-IP CSV feed).
+``catalog.run_costway_au_ingest`` runs on ``feed-au`` (AU-IP CSV; not behind
+browser scrapes on ``heavy-au``).
 
 Managed Inventory Start Scraping (``listings.scrape_store_listings``) uses the
 same ``heavy-us`` / ``heavy-au`` split so Lasoo eBay AU links run on the AU
@@ -22,8 +24,9 @@ Deploy:
 
 - Main server workers: ``-Q celery`` | ``-Q ingest`` | ``-Q sync`` | ``-Q light`` — ingest for file/sync; sync for ``run_store_*``; light for scrape finalizers + Beat tick.
 - US worker: ``-Q heavy-us`` (same ``REDIS_URL`` / ``DATABASE_URL`` as main)
-- AU worker: ``-Q heavy-au`` (Amazon AU, eBay AU, Costway AU CSV ingest)
-- Single-host dev: listen to ``heavy-us`` and ``heavy-au`` together if needed.
+- AU browser worker: ``-Q heavy-au`` (Amazon AU, eBay AU).
+- AU feed worker: ``-Q feed-au`` (Costway AU CSV ingest).
+- Single-host dev: listen to ``heavy-us``, ``heavy-au``, and ``feed-au`` together if needed.
 """
 from __future__ import annotations
 
@@ -34,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 QUEUE_HEAVY_US = "heavy-us"
 QUEUE_HEAVY_AU = "heavy-au"
+QUEUE_FEED_AU = "feed-au"
 QUEUE_SCRAPE_FINALIZE = "light"
 
 # Full task names as registered with Celery (module path unless overridden).

@@ -1,5 +1,5 @@
 # US browser-scrape worker only — run on a US-region VPS (e.g. Contabo US).
-# AU counterpart: docker-compose.au-scraper.prod.yml (-Q heavy-au).
+# AU counterpart: docker-compose.au-scraper.prod.yml (-Q heavy-au and -Q feed-au).
 #
 # Consumes Celery queue ``heavy-us``: Amazon US, eBay US.
 # HEB is handled by a separate Windows desktop runner, not this worker.

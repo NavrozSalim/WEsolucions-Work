@@ -7,8 +7,9 @@ feed is **AU-IP only**:
   https://au.costway.com/media/feed/Dropship-AU.csv
 
 Fetching it from the main/EU/US app returns HTML or 403. Catalog ingest therefore
-runs on the AU Celery worker (``heavy-au``). The HTTP client **must not** use
-``HTTP_PROXY`` / ``PROXY_URL`` — those would egress as a non-AU IP.
+runs on the AU feed worker (queue ``feed-au``), separate from browser scrapes
+on ``heavy-au``. The HTTP client **must not** use ``HTTP_PROXY`` / ``PROXY_URL``
+— those would egress as a non-AU IP.
 
 Feed columns (Dropship-AU.csv):
 
@@ -51,7 +52,7 @@ COSTWAY_QTY_COL = 7
 
 _GEO_BLOCK_MSG = (
     "Costway AU feed is geo-restricted to Australian IPs. "
-    "catalog.run_costway_au_ingest must run on the AU worker (queue heavy-au) "
+    "catalog.run_costway_au_ingest must run on the AU feed worker (queue feed-au) "
     "with a direct connection (no HTTP_PROXY / PROXY_URL)."
 )
 
@@ -76,7 +77,7 @@ def _ingest_only_result() -> dict:
         "error_code": "costway_ingest_only",
         "error_message": (
             "Costway AU is fed from the dropship CSV, not scraped per-URL. "
-            "Run catalog.tasks.run_costway_au_ingest on the AU worker (heavy-au)."
+            "Run catalog.tasks.run_costway_au_ingest on the AU feed worker (feed-au)."
         ),
     }
 

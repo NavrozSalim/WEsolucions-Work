@@ -729,7 +729,7 @@ def _store_has_pending_costway_listings(store_id) -> bool:
 def _scheduled_ingest_refresh(store) -> dict:
     """
     After pending reset: refresh ingest-only vendors (Vevor XLSX feed inline on
-    main; Costway CSV via AU ``heavy-au`` worker and wait; HEB/Costco desktop
+    main; Costway CSV via AU ``feed-au`` worker and wait; HEB/Costco desktop
     jobs queued when applicable).
     """
     from catalog.ingest_views import SUPPORTED_VENDORS
@@ -749,7 +749,7 @@ def _scheduled_ingest_refresh(store) -> dict:
 
     if _store_has_pending_costway_listings(store.id):
         logger.info(
-            'Scheduled update: running Costway AU CSV ingest on heavy-au for store %s',
+            'Scheduled update: running Costway AU CSV ingest on feed-au for store %s',
             store.name,
         )
         try:

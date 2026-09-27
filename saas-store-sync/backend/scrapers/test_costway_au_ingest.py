@@ -243,7 +243,7 @@ class FetchNoProxyTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             fetch_costway_feed('https://au.costway.com/media/feed/Dropship-AU.csv')
         self.assertIn('geo-restricted', str(ctx.exception).lower())
-        self.assertIn('heavy-au', str(ctx.exception))
+        self.assertIn('feed-au', str(ctx.exception))
 
 
 if __name__ == '__main__':

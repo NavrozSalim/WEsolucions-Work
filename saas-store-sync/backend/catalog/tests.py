@@ -153,7 +153,7 @@ class CeleryStaticTaskRoutesTests(SimpleTestCase):
             (catalog_tasks.catalog_update_task, 'ingest'),
             (catalog_tasks.resume_catalog_scrape_after_stop, 'light'),
             (catalog_tasks.vevor_au_ingest_task, 'light'),
-            (catalog_tasks.costway_au_ingest_task, 'heavy-au'),
+            (catalog_tasks.costway_au_ingest_task, 'feed-au'),
             (sync_tasks.run_store_sync, 'sync'),
             (sync_tasks.run_store_update, 'sync'),
             (sync_tasks.run_store_push_listings_only, 'sync'),
@@ -178,18 +178,18 @@ class CeleryStaticTaskRoutesTests(SimpleTestCase):
 
 
 class CostwayIngestInvokeTests(SimpleTestCase):
-    """Costway CSV must be fetched on heavy-au, never inline on sync/light."""
+    """Costway CSV must be fetched on feed-au, never inline on sync/light."""
 
     @override_settings(CELERY_TASK_ALWAYS_EAGER=False)
     @patch('catalog.tasks.costway_au_ingest_task.apply_async')
-    def test_invoke_dispatches_to_heavy_au_and_waits(self, mock_async):
-        from catalog.celery_routing import QUEUE_HEAVY_AU
+    def test_invoke_dispatches_to_feed_au_and_waits(self, mock_async):
+        from catalog.celery_routing import QUEUE_FEED_AU
         from catalog.tasks import invoke_costway_au_ingest
 
         mock_async.return_value.get.return_value = {'status': 'ok', 'updated': 2}
         out = invoke_costway_au_ingest('store-1')
         self.assertEqual(out['updated'], 2)
-        self.assertEqual(mock_async.call_args.kwargs.get('queue'), QUEUE_HEAVY_AU)
+        self.assertEqual(mock_async.call_args.kwargs.get('queue'), QUEUE_FEED_AU)
         mock_async.return_value.get.assert_called_once()
 
     @override_settings(CELERY_TASK_ALWAYS_EAGER=True)

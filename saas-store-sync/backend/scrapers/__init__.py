@@ -22,7 +22,7 @@ Desktop / feed ingest-only vendors (NOT scraped server-side):
 * **Vevor AU**  — refreshed from the public S3 XLSX feed via
   ``catalog.tasks.run_vevor_au_ingest`` (main ``light`` worker)
 * **Costway AU** — refreshed from the AU-IP dropship CSV via
-  ``catalog.tasks.run_costway_au_ingest`` (AU ``heavy-au`` worker)
+  ``catalog.tasks.run_costway_au_ingest`` (AU ``feed-au`` worker)
 
 The catalog and store-sync tasks detect ingest-only vendors via
 ``catalog.tasks._is_ingest_only_product`` and skip server-side HTTP scraping

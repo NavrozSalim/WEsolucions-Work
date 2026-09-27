@@ -85,7 +85,7 @@ SUPPORTED_VENDORS: dict[str, dict[str, Any]] = {
     },
     'costway': {
         # Costway AU dropship CSV is AU-IP only. Celery task
-        # ``catalog.run_costway_au_ingest`` is routed to ``heavy-au``.
+        # ``catalog.run_costway_au_ingest`` is routed to ``feed-au``.
         'scope': 'costway',
         'vendor_db_codes': ['costwayau', 'costway'],
         'vendor_db_code_prefix': 'costway',

@@ -83,7 +83,7 @@ services:
         "-l",
         "info",
         "-Q",
-        "celery,ingest,sync,light,heavy-us,heavy-au,orders-us,orders-au",
+        "celery,ingest,sync,light,heavy-us,heavy-au,feed-au,orders-us,orders-au",
         "--concurrency",
         "2",
       ]

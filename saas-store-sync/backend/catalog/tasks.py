@@ -2466,8 +2466,8 @@ def vevor_au_ingest_task(self, store_id: str | None = None, job_id: str | None =
 def run_costway_au_ingest(store_id: str | None = None, *, job_id: str | None = None) -> dict:
     """Refresh VendorPrice rows for Costway AU from the dropship CSV.
 
-    The CSV is AU-IP only. This function must execute on the AU worker
-    (``catalog.run_costway_au_ingest`` → ``heavy-au``). Do not call it inline
+    The CSV is AU-IP only. This function must execute on the AU feed worker
+    (``catalog.run_costway_au_ingest`` → ``feed-au``). Do not call it inline
     from the main ``sync`` / ``light`` workers.
 
     When ``job_id`` is set (Start Scraping), all active Costway mappings for
@@ -2687,18 +2687,18 @@ def run_costway_au_ingest(store_id: str | None = None, *, job_id: str | None = N
 
 @shared_task(bind=True, max_retries=3, name='catalog.run_costway_au_ingest')
 def costway_au_ingest_task(self, store_id: str | None = None, job_id: str | None = None):
-    """Celery entrypoint — must run on ``heavy-au`` (AU-IP CSV)."""
+    """Celery entrypoint — must run on ``feed-au`` (AU-IP CSV, not the browser queue)."""
     return run_costway_au_ingest(store_id=store_id, job_id=job_id)
 
 
 def invoke_costway_au_ingest(store_id: str, *, job_id: str | None = None) -> dict:
-    """Run Costway CSV ingest on the AU worker and wait for Price/QTY to land.
+    """Run Costway CSV ingest on the AU ``feed-au`` worker and wait for Price/QTY to land.
 
     Scheduled ``run_store_update`` lives on the main ``sync`` worker, which
     cannot download the geo-restricted CSV. Catalog Start Scraping uses
     ``costway_au_ingest_task.delay`` (async). This helper is the wait path.
     """
-    from catalog.celery_routing import QUEUE_HEAVY_AU
+    from catalog.celery_routing import QUEUE_FEED_AU
 
     if getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
         return run_costway_au_ingest(store_id=store_id, job_id=job_id)
@@ -2707,7 +2707,7 @@ def invoke_costway_au_ingest(store_id: str, *, job_id: str | None = None) -> dic
     timeout = max(30, min(timeout, 1800))
     async_result = costway_au_ingest_task.apply_async(
         kwargs={'store_id': str(store_id), 'job_id': job_id},
-        queue=QUEUE_HEAVY_AU,
+        queue=QUEUE_FEED_AU,
     )
     return async_result.get(timeout=timeout)
 

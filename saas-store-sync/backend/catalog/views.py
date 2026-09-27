@@ -784,11 +784,8 @@ def _dispatch_server_vendor_job(vendor_code: str, store, job) -> None:
     elif vendor_code == 'costway':
         try:
             from catalog.tasks import costway_au_ingest_task
-            from catalog.celery_routing import QUEUE_HEAVY_AU
-            costway_au_ingest_task.apply_async(
-                args=[str(store.id), str(job.id)],
-                queue=QUEUE_HEAVY_AU,
-            )
+            # Queue comes from CELERY_TASK_ROUTES (``feed-au``), same as Vevor → light.
+            costway_au_ingest_task.delay(str(store.id), str(job.id))
             job.status = HebScrapeJob.Status.CLAIMED
             job.claimed_at = _tz.now()
             job.save(update_fields=['status', 'claimed_at'])
