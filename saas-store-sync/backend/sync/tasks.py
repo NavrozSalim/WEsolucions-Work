@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from celery import shared_task
+from django.db.models import Prefetch
 from django.utils import timezone
 from decimal import Decimal
 import logging
@@ -10,7 +11,13 @@ import time
 
 logger = logging.getLogger(__name__)
 
-from stores.models import Store, StoreVendorPriceSettings, StoreVendorInventorySettings
+from stores.models import (
+    Store,
+    StoreInventoryRangeMultiplier,
+    StorePriceRangeMargin,
+    StoreVendorPriceSettings,
+    StoreVendorInventorySettings,
+)
 from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
 from catalog.models import ProductMapping
 from catalog.marketplace_catalog import listing_sku_lookup_order, store_is_sears, store_is_walmart
@@ -318,14 +325,33 @@ def _get_inventory_for_vendor(store, vendor_id):
 def _build_store_vendor_pricing_inventory_caches(store):
     """Load per-store vendor pricing/inventory settings once per job.
 
-    Calling ``_get_pricing_for_vendor`` / ``_get_inventory_for_vendor`` inside
-    tight loops issues two queries per listing; at 100k+ rows/day that dominates
-    DB time. Snapshots are consistent for one run (same as repeated get()).
+    Price bands and stock ranges are loaded with the settings. Every listing
+    still picks the band that fits its own feed price and stock; the lists
+    themselves do not change from SKU to SKU. Snapshots are consistent for
+    one run (same as repeated get()).
     """
-    prices = list(StoreVendorPriceSettings.objects.filter(store=store))
+    prices = list(
+        StoreVendorPriceSettings.objects.filter(store=store).prefetch_related(
+            Prefetch(
+                'range_margins',
+                queryset=StorePriceRangeMargin.objects.select_related(
+                    'price_range',
+                ).order_by('price_range__from_value'),
+                to_attr='cached_range_margins',
+            )
+        )
+    )
     price_by_vendor_id = {p.vendor_id: p for p in prices}
     price_fallback = prices[0] if prices else None
-    invs = list(StoreVendorInventorySettings.objects.filter(store=store))
+    invs = list(
+        StoreVendorInventorySettings.objects.filter(store=store).prefetch_related(
+            Prefetch(
+                'range_multipliers',
+                queryset=StoreInventoryRangeMultiplier.objects.order_by('from_value'),
+                to_attr='cached_range_multipliers',
+            )
+        )
+    )
     inv_by_vendor_id = {i.vendor_id: i for i in invs}
     inv_fallback = invs[0] if invs else None
     return price_by_vendor_id, price_fallback, inv_by_vendor_id, inv_fallback
@@ -477,6 +503,9 @@ def _has_fixed_tier(pricing_settings) -> bool:
     if pricing_settings is None:
         return False
     try:
+        cached = getattr(pricing_settings, 'cached_range_margins', None)
+        if isinstance(cached, (list, tuple)):
+            return any(getattr(tier, 'margin_type', '') == 'fixed' for tier in cached)
         return pricing_settings.range_margins.filter(margin_type='fixed').exists()
     except Exception:
         return False
@@ -494,6 +523,21 @@ def _missing_fixed_inputs(pm) -> list:
     return missing
 
 
+def _ordered_inventory_ranges(inventory_settings):
+    """Stock bands for one store+vendor, sorted by the start of each band.
+
+    ``cached_range_multipliers`` is the list loaded once for a scrape. Each
+    SKU still picks its own band from that list.
+    """
+    cached = getattr(inventory_settings, 'cached_range_multipliers', None)
+    if isinstance(cached, (list, tuple)):
+        ranges = list(cached)
+    else:
+        ranges = list(inventory_settings.range_multipliers.order_by('from_value'))
+    ranges.sort(key=lambda row: row.from_value)
+    return ranges
+
+
 def _apply_inventory(vendor_stock, inventory_settings):
     if vendor_stock is None or vendor_stock <= 0:
         return 0
@@ -503,8 +547,9 @@ def _apply_inventory(vendor_stock, inventory_settings):
         vendor_stock = 0
     stock = float(vendor_stock)
 
-    # Check range rules first (sorted by from_value)
-    ranges = list(inventory_settings.range_multipliers.order_by('from_value'))
+    # Check range rules first (sorted by from_value). Reuse the list loaded
+    # with the vendor settings; each stock value still picks its own range.
+    ranges = _ordered_inventory_ranges(inventory_settings)
     for r in ranges:
         from_v = float(r.from_value)
         to_v = float(r.to_value) if r.to_value is not None else float('inf')

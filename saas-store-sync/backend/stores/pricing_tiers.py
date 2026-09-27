@@ -26,6 +26,26 @@ if TYPE_CHECKING:
     from stores.models import StorePriceRangeMargin, StoreVendorPriceSettings
 
 
+def ordered_margin_tiers(pricing_settings: "StoreVendorPriceSettings"):
+    """Price bands for one store+vendor, sorted by the start of each band.
+
+    ``cached_range_margins`` is the list loaded once for a scrape. Each SKU
+    still picks its own band from that list. Without the cache, the same
+    ordered query runs.
+    """
+    cached = getattr(pricing_settings, "cached_range_margins", None)
+    if isinstance(cached, (list, tuple)):
+        tiers = list(cached)
+    else:
+        tiers = list(
+            pricing_settings.range_margins.select_related("price_range").order_by(
+                "price_range__from_value"
+            )
+        )
+    tiers.sort(key=lambda tier: tier.price_range.from_value)
+    return tiers
+
+
 def resolve_margin_tier_for_raw_cost(
     pricing_settings: "StoreVendorPriceSettings",
     raw_vendor_cost: float,
@@ -34,11 +54,7 @@ def resolve_margin_tier_for_raw_cost(
     Pick the tier for ``raw_vendor_cost`` using half-open intervals on every
     tier except the last (see module docstring).
     """
-    tiers = list(
-        pricing_settings.range_margins.select_related("price_range").order_by(
-            "price_range__from_value"
-        )
-    )
+    tiers = ordered_margin_tiers(pricing_settings)
     if not tiers:
         return None
 
