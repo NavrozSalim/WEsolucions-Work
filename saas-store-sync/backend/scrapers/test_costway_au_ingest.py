@@ -215,6 +215,26 @@ class LoadCostwayCsvTests(unittest.TestCase):
         self.assertEqual(hyphenated['Posted Price'], 59.95)
 
 
+class BrokenDescriptionTests(unittest.TestCase):
+    def test_inch_quote_does_not_turn_description_into_the_price(self):
+        raw = (
+            "SKU,Item NO.,Title,Description,Price,Category,Link,QTY,Weight,Image\n"
+            'HV10438DK,8295416,TV stand,"perfect for DIY enthusiasts seeking a unique setup! 2" Durability Meets Elegance: Crafted from premium E0 grade material",95.95,Furniture,http://au.costway.com/modern-entertainment-center-for-living-room.html,12,40.5,http://au.costway.com/img.jpg\n'
+        )
+        tmp = tempfile.NamedTemporaryFile(prefix="costway_quote_", suffix=".csv", delete=False, mode="w", encoding="utf-8", newline="")
+        try:
+            tmp.write(raw)
+            tmp.close()
+            lookup, _, _ = load_costway_via_csv(tmp.name)
+        finally:
+            os.unlink(tmp.name)
+        entry = lookup["HV10438DK"]
+        self.assertEqual(entry["Posted Price"], 95.95)
+        self.assertEqual(entry["Posted Inventory"], 12)
+        self.assertIn("modern-entertainment-center", entry["Product Link"])
+        self.assertNotIn("DIY", entry["Product Link"])
+
+
 class BomAndDelimiterTests(unittest.TestCase):
     def test_utf8_bom_header(self):
         path = _write_csv([

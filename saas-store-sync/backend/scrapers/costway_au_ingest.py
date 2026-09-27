@@ -35,8 +35,6 @@ from scrapers.vevor_au_ingest import (
     clean_id,
     compact_id,
     lookup_sku,
-    parse_inventory_value,
-    parse_price_value,
     round_precise,
 )
 
@@ -241,6 +239,93 @@ def _cell(row, idx):
     return row[idx]
 
 
+_BARE_PRICE_RE = re.compile(r"^\$?\d+(?:\.\d+)?$")
+_BARE_QTY_RE = re.compile(r"^\d+$")
+_PRODUCT_URL_RE = re.compile(
+    r"https?://[^\s\"']*costway\.com/[^\s\"']+\.html",
+    re.IGNORECASE,
+)
+# Price, category, product URL, qty — still visible when a quote inside
+# Description splits the earlier columns.
+_PRICE_QTY_NEAR_URL_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*,\s*[^,\n]{0,120}?,\s*"
+    r"(https?://[^\s,\"']*costway\.com/[^\s,\"']+\.html)\s*,\s*(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _bare_price(value):
+    """A price cell is only a number. Do not pull a digit out of a sentence."""
+    text = str(value or "").strip().replace(",", "")
+    if not _BARE_PRICE_RE.match(text):
+        return None
+    return round_precise(float(text.replace("$", "")), 2)
+
+
+def _bare_qty(value):
+    text = str(value or "").strip()
+    if not _BARE_QTY_RE.match(text):
+        return None
+    return int(text)
+
+
+def _is_image_url(text: str) -> bool:
+    path = text.lower().split("?", 1)[0]
+    return path.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
+
+
+def _product_url_in_text(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if " " not in text:
+        lowered = text.lower()
+        if lowered.startswith("http") and "costway.com" in lowered and not _is_image_url(text):
+            return text
+    match = _PRODUCT_URL_RE.search(text)
+    return match.group(0) if match else ""
+
+
+def _anchored_price_qty_link(row):
+    """Find Price and QTY next to the product URL, ignoring a shifted Description."""
+    for idx in range(len(row) - 1, -1, -1):
+        cell = str(row[idx] or "")
+        url = _product_url_in_text(cell)
+        if not url:
+            continue
+        if cell.strip() == url or cell.strip().startswith(url):
+            qty = _bare_qty(row[idx + 1]) if idx + 1 < len(row) else None
+            price = None
+            for back in range(1, 8):
+                pos = idx - back
+                if pos < 0:
+                    break
+                price = _bare_price(row[pos])
+                if price is not None:
+                    break
+            if price is not None and qty is not None:
+                return price, qty, url
+        buried = _PRICE_QTY_NEAR_URL_RE.search(cell)
+        if buried:
+            return (
+                round_precise(float(buried.group(1)), 2),
+                int(buried.group(3)),
+                buried.group(2),
+            )
+    return None
+
+
+def _row_price_qty_link(row, price_idx, qty_idx, link_idx):
+    """Return ``(price, qty, link)`` or None when the row has no real product URL."""
+    link = str(_cell(row, link_idx) or "").strip()
+    price = _bare_price(_cell(row, price_idx))
+    qty = _bare_qty(_cell(row, qty_idx))
+    url = _product_url_in_text(link)
+    if price is not None and qty is not None and url and url == link:
+        return price, qty, url
+    return _anchored_price_qty_link(row)
+
+
 def load_costway_via_csv(path: str) -> tuple[dict, dict, int]:
     """
     Read the Costway AU CSV into SKU lookups.
@@ -253,6 +338,7 @@ def load_costway_via_csv(path: str) -> tuple[dict, dict, int]:
     lookup_compact: dict[str, dict] = {}
     pos_rows = 0
     priced_rows = 0
+    skipped_rows = 0
     sku_idx = price_idx = qty_idx = None
     item_no_idx = link_idx = None
     mode = "positional"
@@ -260,11 +346,18 @@ def load_costway_via_csv(path: str) -> tuple[dict, dict, int]:
     with open(path, "r", encoding="utf-8-sig", newline="") as handle:
         sample = handle.read(8192)
         handle.seek(0)
+        delimiter = ","
         try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+            sniffed = csv.Sniffer().sniff(sample, delimiters=",;\t")
+            if sniffed.delimiter:
+                delimiter = sniffed.delimiter
         except csv.Error:
-            dialect = csv.excel
-        reader = csv.reader(handle, dialect)
+            delimiter = ","
+        # Always quote with ". The sniffer's quote character splits Description
+        # on an inch mark and moves Price onto a stray "2".
+        reader = csv.reader(
+            handle, delimiter=delimiter, quotechar='"', doublequote=True,
+        )
         for idx, row in enumerate(reader):
             if idx == 0:
                 sku_idx, price_idx, qty_idx, item_no_idx, link_idx, mode = (
@@ -283,16 +376,16 @@ def load_costway_via_csv(path: str) -> tuple[dict, dict, int]:
             sku = clean_id(_cell(row, sku_idx))
             if not sku:
                 continue
-            price = round_precise(parse_price_value(_cell(row, price_idx)), 2)
-            stock = parse_inventory_value(_cell(row, qty_idx))
+            parsed = _row_price_qty_link(row, price_idx, qty_idx, link_idx)
+            if parsed is None:
+                skipped_rows += 1
+                continue
+            price, stock, link = parsed
             if price > 0:
                 priced_rows += 1
             entry = {"Posted Price": price, "Posted Inventory": int(stock)}
-            link_raw = _cell(row, link_idx)
-            if link_raw is not None:
-                link = str(link_raw).strip()
-                if link:
-                    entry["Product Link"] = link
+            if link:
+                entry["Product Link"] = link
             lookup[sku] = entry
             ckey = compact_id(sku)
             if ckey:
@@ -312,9 +405,10 @@ def load_costway_via_csv(path: str) -> tuple[dict, dict, int]:
         )
     else:
         logger.info(
-            "Costway AU feed parsed: %s SKUs, %s with price > 0 (mode=%s, "
+            "Costway AU feed parsed: %s SKUs, %s with price > 0, %s rows skipped "
+            "because Description shifted the price column (mode=%s, "
             "sku=%s price=%s qty=%s).",
-            len(lookup), priced_rows, mode, sku_idx, price_idx, qty_idx,
+            len(lookup), priced_rows, skipped_rows, mode, sku_idx, price_idx, qty_idx,
         )
     return lookup, lookup_compact, pos_rows
 
