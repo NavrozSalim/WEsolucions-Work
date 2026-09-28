@@ -30,6 +30,8 @@ def _empty_progress() -> dict:
         "active": False,
         "job_id": "",
         "queued": 0,
+        "processed": 0,
+        "failed": 0,
         "message": "",
         "started_at": "",
         "error": "",
@@ -51,6 +53,11 @@ def get_publish_progress(store_id) -> dict:
     out["job_id"] = str(out.get("job_id") or "")
     out["message"] = str(out.get("message") or "")
     out["error"] = str(out.get("error") or "")
+    for count_key in ("processed", "failed"):
+        try:
+            out[count_key] = int(out.get(count_key) or 0)
+        except (TypeError, ValueError):
+            out[count_key] = 0
     return out
 
 
@@ -59,6 +66,8 @@ def begin_publish_progress(store_id, *, job_id, queued, message="") -> dict:
         "active": True,
         "job_id": str(job_id or ""),
         "queued": int(queued or 0),
+        "processed": 0,
+        "failed": 0,
         "message": message or "",
         "started_at": timezone.now().isoformat(),
         "error": "",
@@ -66,6 +75,19 @@ def begin_publish_progress(store_id, *, job_id, queued, message="") -> dict:
     }
     cache.set(_key(store_id), data, _TTL)
     return data
+
+
+def tick_publish_progress(store_id, **fields) -> dict:
+    """Update an in-flight publish banner (chunk progress). Ignores idle jobs."""
+    cur = get_publish_progress(store_id)
+    if not cur.get("active"):
+        return cur
+    if fields.get("job_id") and cur.get("job_id") and str(fields["job_id"]) != str(cur["job_id"]):
+        return cur
+    cur.update(fields)
+    cur["active"] = True
+    cache.set(_key(store_id), cur, _TTL)
+    return cur
 
 
 def finish_publish_progress(store_id, **fields) -> dict:

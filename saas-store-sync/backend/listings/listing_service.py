@@ -1580,32 +1580,40 @@ def _collect_publishable(store, listings: list) -> list:
     return publishable
 
 
-def _publish_lasoo(user, store, publishable: list) -> dict:
-    environment = store.lasoo_environment or Environment.STAGING
-    client = LasooClient(store, environment)
-    variants = [_listing_to_data(l) for l in publishable]
-    payload = mapper.build_bulk_upsert_payload(variants, client.auth_key)
-    result = client.send("bulk_upsert", payload)
-    ok, mapping_message, mapping_errors = interpret_bulk_upsert(result)
+# One Lasoo Variants_BulkUpsert of ~4700 rows kills Gunicorn (HTTP 500).
+# 353 in a single call has worked; keep chunks well under that.
+LASOO_PUBLISH_CHUNK = 100
+LASOO_PUBLISH_ASYNC_MIN = 15
 
+
+def _iter_chunks(items: list, size: int):
+    chunk = max(1, int(size or 1))
+    for i in range(0, len(items), chunk):
+        yield items[i:i + chunk]
+
+
+def _apply_lasoo_chunk(listings: list, *, ok: bool, mapping_errors: list, result, payload, environment: str):
+    """Persist one BulkUpsert outcome onto its listings. Commits immediately."""
     now = timezone.now()
-    request_for_storage = {**payload, "auth": "***"}  # never persist the raw key
-    new_status = (
-        _uploaded_status(environment) if ok else ListingStatus.FAILED
+    request_for_storage = {**payload, "auth": "***"}
+    new_status = _uploaded_status(environment) if ok else ListingStatus.FAILED
+    response_body = result.data if getattr(result, "ok", False) else (
+        result.error if getattr(result, "error", None) is not None else {"error": getattr(result, "message", "") or "Lasoo rejected the upload."}
     )
-    response_body = result.data if result.ok else result.error
-    for listing in publishable:
+    fail_errors = list(mapping_errors or [])
+    if not ok and not fail_errors:
+        msg = (getattr(result, "message", None) or "").strip() or "Lasoo rejected the upload."
+        fail_errors = [msg]
+    for listing in listings:
         listing.status = new_status
         listing.marketplace_request_json = request_for_storage
         listing.marketplace_response_json = response_body
-        extra_fields = []
+        extra_fields = ["validation_errors_json"]
         if ok:
             listing.last_uploaded_at = now
             listing.validation_errors_json = None
-            extra_fields = ["validation_errors_json"]
-        elif mapping_errors:
-            listing.validation_errors_json = mapping_errors
-            extra_fields = ["validation_errors_json"]
+        else:
+            listing.validation_errors_json = fail_errors
         listing.save(
             update_fields=[
                 "status",
@@ -1616,18 +1624,103 @@ def _publish_lasoo(user, store, publishable: list) -> dict:
                 *extra_fields,
             ]
         )
-    if ok:
-        message = mapping_message or result.message or (
-            f"Published {len(publishable)} listing(s) to Lasoo {environment}."
+
+
+def _lasoo_auth_failure(result) -> bool:
+    status = int(getattr(result, "status", 0) or 0)
+    if status in (401, 403):
+        return True
+    msg = (getattr(result, "message", None) or "").lower()
+    return "authkey" in msg or "unauthorized" in msg or "authentication" in msg
+
+
+def _tick_lasoo_publish(store, *, processed: int, failed: int, queued: int, batch: int, batches: int):
+    from . import publish_progress as pub_prog
+
+    live = pub_prog.get_publish_progress(store.id)
+    if not live.get("active"):
+        return
+    pub_prog.tick_publish_progress(
+        store.id,
+        processed=processed,
+        failed=failed,
+        queued=queued,
+        message=(
+            f"Publishing {processed} of {queued} listing(s) to Lasoo "
+            f"(batch {batch}/{batches})…"
+        ),
+    )
+
+
+def _publish_lasoo(user, store, publishable: list) -> dict:
+    environment = store.lasoo_environment or Environment.STAGING
+    client = LasooClient(store, environment)
+    queued = len(publishable)
+    published = 0
+    failed = 0
+    last_error = ""
+    chunks = list(_iter_chunks(publishable, LASOO_PUBLISH_CHUNK))
+    batches = len(chunks) or 1
+
+    for batch_i, chunk in enumerate(chunks, start=1):
+        variants = [_listing_to_data(l) for l in chunk]
+        payload = mapper.build_bulk_upsert_payload(variants, client.auth_key)
+        result = client.send("bulk_upsert", payload)
+        ok, mapping_message, mapping_errors = interpret_bulk_upsert(result)
+        _apply_lasoo_chunk(
+            chunk,
+            ok=ok,
+            mapping_errors=mapping_errors,
+            result=result,
+            payload=payload,
+            environment=environment,
         )
+        if ok:
+            published += len(chunk)
+        else:
+            failed += len(chunk)
+            last_error = mapping_message or result.message or last_error
+            logger.warning(
+                "Lasoo publish chunk %s/%s failed store=%s size=%s status=%s msg=%s",
+                batch_i, batches, store.id, len(chunk), getattr(result, "status", 0), last_error,
+            )
+            if _lasoo_auth_failure(result):
+                remaining = [row for more in chunks[batch_i:] for row in more]
+                if remaining:
+                    _apply_lasoo_chunk(
+                        remaining,
+                        ok=False,
+                        mapping_errors=mapping_errors or [last_error or "Lasoo authentication failed."],
+                        result=result,
+                        payload=payload,
+                        environment=environment,
+                    )
+                    failed += len(remaining)
+                break
+        _tick_lasoo_publish(
+            store,
+            processed=published + failed,
+            failed=failed,
+            queued=queued,
+            batch=batch_i,
+            batches=batches,
+        )
+
+    if published and failed:
+        message = (
+            f"Published {published} listing(s) to Lasoo {environment}; {failed} failed."
+            + (f" {last_error}" if last_error else "")
+        )
+    elif published:
+        message = f"Published {published} listing(s) to Lasoo {environment}."
     else:
-        message = mapping_message or result.message or (
-            "Lasoo did not publish the listing to the public website."
-        )
+        message = last_error or "Lasoo did not publish the listing to the public website."
     return {
-        "ok": ok,
+        "ok": published > 0 and failed == 0,
         "message": message,
-        "published": len(publishable) if ok else 0,
+        "published": published,
+        "uploaded": published,
+        "failed": failed,
         "environment": environment,
     }
 
@@ -1935,21 +2028,24 @@ def publish(user, store, listing_ids=None) -> dict:
         from .temu import products as temu_products
 
         return temu_products.publish_listings(user, store, publishable)
-    with transaction.atomic():
-        return _publish_lasoo(user, store, publishable)
+    return _publish_lasoo(user, store, publishable)
 
 
 MYDEAL_PUBLISH_ASYNC_MIN = 15
 
 
 def start_publish_async(user, store, listing_ids=None) -> dict:
-    """Queue MyDeal publish on the ingest worker so Gunicorn is not killed at 120s."""
+    """Queue MyDeal/Lasoo publish on the ingest worker so Gunicorn is not killed.
+
+    Lasoo batches under ``LASOO_PUBLISH_ASYNC_MIN`` still run in-request
+    (chunked). Large Lasoo publishes go to Celery.
+    """
     from . import publish_progress as pub_prog
     from .tasks import publish_store_listings
 
     kind = marketplace_kind(store.marketplace)
-    if kind != "mydeal":
-        raise MarketplaceError("Background publish is only used for MyDeal.")
+    if kind not in ("mydeal", "lasoo"):
+        raise MarketplaceError("Background publish is only used for MyDeal and Lasoo.")
 
     live = pub_prog.enrich_publish_progress(store.id)
     if live.get("active"):
@@ -1958,17 +2054,20 @@ def start_publish_async(user, store, listing_ids=None) -> dict:
             "the Created products banner stays visible if you leave and come back."
         )
 
-    from .mydeal import products as mydeal_products
-
     confirmed_existing = 0
-    try:
-        confirmed_existing = mydeal_products.confirm_false_failed_uploads(store)
-    except Exception:
-        logger.exception("MyDeal confirm-before-publish failed store=%s", store.id)
-    mydeal_products.requeue_unconfirmed_uploads(store)
+    if kind == "mydeal":
+        from .mydeal import products as mydeal_products
+
+        try:
+            confirmed_existing = mydeal_products.confirm_false_failed_uploads(store)
+        except Exception:
+            logger.exception("MyDeal confirm-before-publish failed store=%s", store.id)
+        mydeal_products.requeue_unconfirmed_uploads(store)
 
     statuses = [ListingStatus.READY, ListingStatus.FAILED]
     qs = StoreListing.objects.filter(store=store, status__in=statuses)
+    if kind != "mydeal":
+        qs = qs.filter(user=user)
     if listing_ids:
         qs = qs.filter(id__in=listing_ids)
     listings = list(qs)
@@ -1988,14 +2087,22 @@ def start_publish_async(user, store, listing_ids=None) -> dict:
     if not publishable:
         raise MarketplaceError("All selected listings failed validation. Fix the errors and retry.")
 
+    if kind == "lasoo" and len(publishable) < LASOO_PUBLISH_ASYNC_MIN:
+        result = _publish_lasoo(user, store, publishable)
+        result["async"] = False
+        result["job_id"] = ""
+        result["queued"] = 0
+        return result
+
     id_strs = [str(item.id) for item in publishable]
+    marketplace_label = "MyDeal" if kind == "mydeal" else "Lasoo"
     try:
         async_res = publish_store_listings.apply_async(
             args=[user.id, str(store.id), id_strs],
             queue="ingest",
         )
     except Exception as exc:
-        logger.exception("Failed to enqueue MyDeal publish store=%s", store.id)
+        logger.exception("Failed to enqueue %s publish store=%s", marketplace_label, store.id)
         raise MarketplaceError(
             "Could not start the publish worker. Try again in a moment."
         ) from exc
@@ -2003,7 +2110,7 @@ def start_publish_async(user, store, listing_ids=None) -> dict:
     job_id = str(getattr(async_res, "id", "") or "")
     queued = len(id_strs)
     message = (
-        f"Creating {queued} listing(s) on MyDeal. This can take several minutes. "
+        f"Creating {queued} listing(s) on {marketplace_label}. This can take several minutes. "
         "You can leave this page — progress stays on Created products."
     )
     pub_prog.begin_publish_progress(

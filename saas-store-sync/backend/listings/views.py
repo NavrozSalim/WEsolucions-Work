@@ -946,24 +946,28 @@ class StoreListingPublishView(APIView):
         if listing_ids is not None and not isinstance(listing_ids, list):
             listing_ids = None
         kind = marketplace_kind(store.marketplace)
-        use_async = kind == "mydeal"
+        use_async = kind in ("mydeal", "lasoo")
         try:
             if use_async:
                 result = listing_service.start_publish_async(request.user, store, listing_ids)
-                return Response(result, status=status.HTTP_202_ACCEPTED)
-            result = listing_service.publish(request.user, store, listing_ids)
+                if result.get("async"):
+                    return Response(result, status=status.HTTP_202_ACCEPTED)
+            else:
+                result = listing_service.publish(request.user, store, listing_ids)
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         published = result.get('published') or result.get('uploaded') or 0
+        failed = result.get('failed') or 0
         code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY
-        if published:
+        if published or failed:
             listing_service.record_activity(
                 request.user, store,
                 action=ListingAction.CREATE,
                 source=ListingUpload.Source.SINGLE,
                 filename='Publish to marketplace',
-                total=published,
+                total=published + failed,
                 success=published,
+                errors=failed,
                 message=result.get('message') or '',
             )
         return Response(result, status=code)

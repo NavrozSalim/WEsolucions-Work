@@ -1417,6 +1417,79 @@ class ListingServiceTests(TestCase):
         self.assertEqual(listing.status, ListingStatus.FAILED)
         self.assertTrue(listing.validation_errors_json)
 
+    def _extra_lasoo_row(self, sku):
+        data = dict(VALID_DATA)
+        data.update({
+            "sku": sku,
+            "variant_key": sku,
+            "product_key": sku,
+        })
+        return listing_service.create(self.user, self.store, data)
+
+    @patch("listings.listing_service.LasooClient")
+    def test_publish_chunks_lasoo_bulk_upsert(self, mock_client_cls):
+        rows = [
+            listing_service.create(self.user, self.store, dict(VALID_DATA)),
+            self._extra_lasoo_row("TSHIRT-002-BLACK-M"),
+            self._extra_lasoo_row("TSHIRT-003-BLACK-M"),
+        ]
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.return_value = LasooResult(ok=True, message="ok", data={"success": True})
+        with patch.object(listing_service, "LASOO_PUBLISH_CHUNK", 1):
+            result = listing_service.publish(self.user, self.store)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["published"], 3)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(mock_client.send.call_count, 3)
+        for row in rows:
+            row.refresh_from_db()
+            self.assertEqual(row.status, ListingStatus.UPLOADED_STAGING)
+
+    @patch("listings.listing_service.LasooClient")
+    def test_publish_continues_after_lasoo_chunk_502(self, mock_client_cls):
+        first = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        second = self._extra_lasoo_row("TSHIRT-002-BLACK-M")
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.side_effect = [
+            LasooResult(ok=False, message="Lasoo 502", error={"raw": "502"}, status=502),
+            LasooResult(ok=True, message="ok", data={"success": True}, status=200),
+        ]
+        with patch.object(listing_service, "LASOO_PUBLISH_CHUNK", 1):
+            result = listing_service.publish(self.user, self.store)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["published"], 1)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(mock_client.send.call_count, 2)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(
+            {first.status, second.status},
+            {ListingStatus.FAILED, ListingStatus.UPLOADED_STAGING},
+        )
+
+    @patch("listings.listing_service.LasooClient")
+    def test_publish_stops_remaining_lasoo_chunks_on_auth_error(self, mock_client_cls):
+        rows = [
+            listing_service.create(self.user, self.store, dict(VALID_DATA)),
+            self._extra_lasoo_row("TSHIRT-002-BLACK-M"),
+            self._extra_lasoo_row("TSHIRT-003-BLACK-M"),
+        ]
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.return_value = LasooResult(
+            ok=False, message="Unauthorized", error={"raw": "401"}, status=401,
+        )
+        with patch.object(listing_service, "LASOO_PUBLISH_CHUNK", 1):
+            result = listing_service.publish(self.user, self.store)
+        self.assertEqual(mock_client.send.call_count, 1)
+        self.assertEqual(result["failed"], 3)
+        self.assertEqual(result["published"], 0)
+        for row in rows:
+            row.refresh_from_db()
+            self.assertEqual(row.status, ListingStatus.FAILED)
+
     def test_reverb_template_headers(self):
         reverb, _ = Marketplace.objects.get_or_create(code="reverb", defaults={"name": "Reverb"})
         store2 = Store.objects.create(

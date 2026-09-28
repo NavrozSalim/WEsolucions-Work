@@ -19,6 +19,7 @@ from .queries import (
 logger = logging.getLogger("listings.lasoo")
 
 REQUEST_TIMEOUT = 30
+BULK_UPSERT_TIMEOUT = 90
 
 
 class LasooResult:
@@ -77,8 +78,9 @@ class LasooClient:
             payload.get("query"),
         )
 
+        timeout = BULK_UPSERT_TIMEOUT if endpoint_key == "bulk_upsert" else REQUEST_TIMEOUT
         try:
-            resp = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+            resp = requests.post(url, json=payload, timeout=timeout)
         except requests.RequestException as exc:
             logger.error("Lasoo connection error endpoint=%s: %s", endpoint_key, exc)
             return LasooResult(

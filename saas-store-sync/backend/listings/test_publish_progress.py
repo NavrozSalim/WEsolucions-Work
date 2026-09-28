@@ -44,6 +44,18 @@ class PublishProgressCacheTests(TestCase):
         self.assertFalse(done["active"])
         self.assertEqual(pub_prog.get_publish_progress(self.store_id)["message"], "Published 2 listing(s).")
 
+    def test_tick_updates_processed_while_active(self):
+        pub_prog.begin_publish_progress(self.store_id, job_id="job-1", queued=10)
+        live = pub_prog.tick_publish_progress(
+            self.store_id,
+            processed=4,
+            failed=1,
+            message="Publishing 4 of 10…",
+        )
+        self.assertTrue(live["active"])
+        self.assertEqual(live["processed"], 4)
+        self.assertEqual(live["failed"], 1)
+
     def test_finish_ignores_other_job(self):
         pub_prog.begin_publish_progress(self.store_id, job_id="job-new", queued=1)
         pub_prog.finish_publish_progress(self.store_id, job_id="job-old", message="stale")
@@ -183,3 +195,73 @@ class MyDealPublishProgressApiTests(TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertTrue(res.data["publish_job"]["active"])
         self.assertEqual(res.data["publish_job"]["job_id"], "job-list")
+
+
+class LasooPublishAsyncServiceTests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="lasoo_pub",
+            email="lasoo_pub@example.com",
+            password="pw",
+        )
+        lasoo, _ = Marketplace.objects.get_or_create(code="lasoo", defaults={"name": "Lasoo"})
+        self.store = Store.objects.create(
+            user=self.user,
+            name="Lasoo Publish Async",
+            region="AU",
+            marketplace=lasoo,
+            management_mode="full_store",
+            lasoo_environment="staging",
+            lasoo_staging_auth_key="test-key",
+        )
+        self.listing = StoreListing.objects.create(
+            user=self.user,
+            store=self.store,
+            external_product_key="L1",
+            external_variant_key="L1",
+            sku="L1",
+            title="Lasoo row",
+            status=ListingStatus.READY,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def tearDown(self):
+        pub_prog.clear_publish_progress(self.store.id)
+
+    @patch("listings.listing_service._publish_lasoo")
+    @patch("listings.listing_service._collect_publishable")
+    def test_small_lasoo_publish_stays_sync(self, mock_collect, mock_pub):
+        mock_collect.return_value = [self.listing]
+        mock_pub.return_value = {
+            "ok": True, "published": 1, "failed": 0, "message": "ok", "environment": "staging",
+        }
+        result = listing_service.start_publish_async(self.user, self.store)
+        self.assertFalse(result.get("async"))
+        mock_pub.assert_called_once()
+
+    @patch("listings.tasks.publish_store_listings.apply_async")
+    @patch("listings.listing_service._collect_publishable")
+    def test_large_lasoo_publish_enqueues(self, mock_collect, mock_apply):
+        mock_collect.return_value = [self.listing]
+        mock_apply.return_value = MagicMock(id="lasoo-job")
+        with patch.object(listing_service, "LASOO_PUBLISH_ASYNC_MIN", 1):
+            result = listing_service.start_publish_async(self.user, self.store)
+        self.assertTrue(result["async"])
+        self.assertEqual(result["job_id"], "lasoo-job")
+        self.assertIn("Lasoo", result["message"])
+        live = pub_prog.get_publish_progress(self.store.id)
+        self.assertTrue(live["active"])
+        mock_apply.assert_called_once()
+
+    @patch("listings.tasks.publish_store_listings.apply_async")
+    @patch("listings.listing_service._collect_publishable")
+    def test_lasoo_publish_api_returns_202_when_queued(self, mock_collect, mock_apply):
+        mock_collect.return_value = [self.listing]
+        mock_apply.return_value = MagicMock(id="lasoo-job")
+        with patch.object(listing_service, "LASOO_PUBLISH_ASYNC_MIN", 1):
+            res = self.client.post(f"/api/v1/stores/{self.store.id}/listings/publish/")
+        self.assertEqual(res.status_code, 202)
+        self.assertTrue(res.data["async"])
+        self.assertEqual(res.data["queued"], 1)

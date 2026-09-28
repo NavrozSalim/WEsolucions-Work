@@ -71,6 +71,7 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
     const [loading, setLoading] = useState(false);
     const [publishing, setPublishing] = useState(false);
     const [publishQueued, setPublishQueued] = useState(0);
+    const [publishProcessed, setPublishProcessed] = useState(0);
     const [editListing, setEditListing] = useState(null);
     const [editOpen, setEditOpen] = useState(false);
     const [filter, setFilter] = useState('all');
@@ -108,6 +109,7 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                 if (res.publishJob?.active) {
                     setPublishing(true);
                     setPublishQueued(Number(res.publishJob.queued) || 0);
+                    setPublishProcessed(Number(res.publishJob.processed) || 0);
                     if (res.publishJob.job_id) persistListingPublishJob(storeId, res.publishJob.job_id);
                 }
                 if (res.page > res.totalPages && res.totalPages >= 1) {
@@ -165,16 +167,19 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                         onMessageRef.current?.(msg, ok ? 'success' : 'error');
                         setPublishing(false);
                         setPublishQueued(0);
+                        setPublishProcessed(0);
                         loadRef.current();
                     } else if (!active) {
                         persistListingPublishJob(storeId, '');
                         setPublishing(false);
                         setPublishQueued(0);
+                        setPublishProcessed(0);
                     }
                     publishWasActiveRef.current = active;
                     if (active) {
                         setPublishing(true);
                         setPublishQueued(Number(data.queued) || 0);
+                        setPublishProcessed(Number(data.processed) || 0);
                         refreshTick += 1;
                         if (refreshTick % 3 === 0) loadRef.current();
                     }
@@ -199,6 +204,7 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
             .then((res) => {
                 if (res.data?.job_id || res.data?.async) {
                     setPublishQueued(Number(res.data?.queued) || 0);
+                    setPublishProcessed(0);
                     return;
                 }
                 publishStartingRef.current = false;
@@ -280,7 +286,7 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                 <div className="flex items-center gap-2 border-b border-sky-200 bg-sky-50 px-4 py-2.5 text-sm text-sky-800 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200">
                     <RefreshCw className="h-4 w-4 shrink-0 animate-spin" />
                     {publishQueued > 0
-                        ? `Creating ${publishQueued} product${publishQueued === 1 ? '' : 's'} on ${marketplaceLabel}.`
+                        ? `Creating ${Math.min(publishProcessed, publishQueued).toLocaleString()} / ${publishQueued.toLocaleString()} product${publishQueued === 1 ? '' : 's'} on ${marketplaceLabel}.`
                         : `Creating products on ${marketplaceLabel}.`}
                     {' '}This can take several minutes. You can leave this page — the banner will still be here when you come back.
                 </div>
