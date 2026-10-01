@@ -63,6 +63,7 @@ import PageHeader from '../../components/design/PageHeader';
 import EmptyState from '../../components/design/EmptyState';
 import Badge from '../../components/design/Badge';
 import UpdateWithFileModal from '../../components/catalog/UpdateWithFileModal';
+import VendorScopeMenu from '../../components/catalog/VendorScopeMenu';
 import { getListingUploads, downloadListingUploadErrors, exportListingUpload, deleteListingUpload } from '../../services/listingService';
 import { useSidebarActivity } from '../../context/SidebarActivityContext';
 import { placeFixedMenu } from '../../utils/fixedMenuPosition';
@@ -861,6 +862,16 @@ function vendorIngestIsRunning(vendor) {
  * state when a store has products from multiple desktop-runner vendors.
  * Prefer one that still has pending work; otherwise fall back to the first.
  */
+/** Feed/desktop progress keys used by the scrape progress payload. */
+function progressVendorKey(code) {
+    const c = String(code || '').trim().toLowerCase();
+    if (c.startsWith('heb')) return 'heb';
+    if (c.startsWith('costco')) return 'costco';
+    if (c.startsWith('vevor')) return 'vevor';
+    if (c.startsWith('costway')) return 'costway';
+    return '';
+}
+
 function getActiveVendor(vendors) {
     if (!Array.isArray(vendors) || vendors.length === 0) return null;
     return vendors.find((v) => vendorSyncPending(v) > 0 || vendorIngestIsRunning(v)) || vendors[0];
@@ -1264,6 +1275,7 @@ export default function Catalog() {
     // Managed (full_store) stores get Create Listing / Bulk Listing and a
     // "Created products" view alongside the regular vendor catalog flow.
     const isManagedStore = selectedStoreData?.management_mode === 'full_store';
+    const storeVendors = Array.isArray(selectedStoreData?.vendors) ? selectedStoreData.vendors : [];
     // Only show Pack QTY / Prep Fees / Shipping Fees columns when the store
     // has at least one ``margin_type='fixed'`` tier configured. The backend
     // (CatalogStoresView) exposes this via ``has_fixed_tier`` so we don't
@@ -2036,13 +2048,19 @@ export default function Catalog() {
         });
     };
 
-    const handleScrape = (uploadId = null) => {
+    const handleScrape = (uploadId = null, vendorId = null) => {
         if (!selectedStore) return;
         const storeId = selectedStore;
+        const scopedVendor = vendorId
+            ? storeVendors.find((v) => String(v.id) === String(vendorId))
+            : null;
+        const progressKey = progressVendorKey(scopedVendor?.code);
         setScraping(true);
         setScrapingUploadId(uploadId);
         setFlowStatus('scraping');
-        setMessage('Fetching vendor prices and stock…');
+        setMessage(scopedVendor?.name
+            ? `Fetching ${scopedVendor.name} prices and stock…`
+            : 'Fetching vendor prices and stock…');
         startProgress();
 
         const MAX_RETRIES = 1;
@@ -2066,7 +2084,12 @@ export default function Catalog() {
                     trackingServerScrapeRef.current = false;
                     setTrackingServerScrape(false);
                 }
-                const vendors = getVendorSummaries(progress);
+                let vendors = getVendorSummaries(progress);
+                if (progressKey) {
+                    vendors = vendors.filter((v) => v.code === progressKey);
+                } else if (scopedVendor) {
+                    vendors = [];
+                }
                 const pendingVendors = vendors.filter(
                     (v) => vendorSyncPending(v) > 0 || vendorIngestIsRunning(v),
                 );
@@ -2151,7 +2174,7 @@ export default function Catalog() {
 
         const runScrape = () => {
             attempt++;
-            return triggerCatalogScrape(storeId, false, uploadId)
+            return triggerCatalogScrape(storeId, false, uploadId, vendorId || null)
                 .then((res) => {
                     const ok = res?.data?.rows_succeeded ?? 0;
                     const proc = res?.data?.rows_processed ?? 0;
@@ -2407,15 +2430,21 @@ export default function Catalog() {
             .finally(() => setExportDownloading(false));
     };
 
-    const handleManualPushListings = () => {
+    const handleManualPushListings = (vendorId = null) => {
         if (!selectedStore || manualPushLoading || trackingManualPush) return;
+        const scopedVendor = vendorId
+            ? storeVendors.find((v) => String(v.id) === String(vendorId))
+            : null;
         setManualPushLoading(true);
         setTrackingManualPush(true);
         trackingManualPushRef.current = true;
         setFlowStatus('syncing');
-        setMessage('Manual sync started — watch the progress bar above your product list.');
+        setMessage(scopedVendor?.name
+            ? `Manual sync started for ${scopedVendor.name} — watch the progress bar above your product list.`
+            : 'Manual sync started — watch the progress bar above your product list.');
         startProgress();
         triggerCatalogPushListings(selectedStore, false, {
+            vendorId: vendorId || null,
             onPoll: () => {
                 getPushListingsProgress(selectedStore)
                     .then((res) => {
@@ -2852,6 +2881,7 @@ export default function Catalog() {
                 <InventoryManagementPanel
                     storeId={selectedStore}
                     marketplaceCode={selectedStoreData?.marketplace_code || selectedStoreData?.marketplace_name}
+                    vendors={storeVendors}
                     reloadNonce={createdReloadNonce}
                     onMessage={handleInventoryMessage}
                 />
@@ -3152,16 +3182,28 @@ export default function Catalog() {
                         </div>
                         <div className="flex w-full flex-1 flex-col gap-2 lg:flex-row lg:flex-wrap lg:justify-end lg:items-center lg:max-w-none">
                             <div className="flex flex-wrap items-center gap-2">
-                                <Button
-                                    variant="secondary"
-                                    size="sm"
-                                    onClick={handleManualPushListings}
-                                    disabled={manualPushLoading || trackingManualPush || scraping || !selectedStore}
-                                    title="Push current price/stock to marketplace for Synced / Scrape rows only (no new vendor fetch)"
-                                >
-                                    <RefreshCw className={`h-4 w-4 mr-1.5 ${(manualPushLoading || trackingManualPush) ? 'animate-spin' : ''}`} />
-                                    Manual sync
-                                </Button>
+                                {storeVendors.length > 1 ? (
+                                    <VendorScopeMenu
+                                        label="Manual sync"
+                                        title="Push current price/stock for one vendor, or all vendors, to the marketplace (no new vendor fetch)"
+                                        disabled={manualPushLoading || trackingManualPush || scraping || !selectedStore}
+                                        icon={RefreshCw}
+                                        iconClassName={(manualPushLoading || trackingManualPush) ? 'animate-spin' : ''}
+                                        vendors={storeVendors}
+                                        onSelect={(vendor) => handleManualPushListings(vendor?.id || null)}
+                                    />
+                                ) : (
+                                    <Button
+                                        variant="secondary"
+                                        size="sm"
+                                        onClick={() => handleManualPushListings(null)}
+                                        disabled={manualPushLoading || trackingManualPush || scraping || !selectedStore}
+                                        title="Push current price/stock to marketplace for Synced / Scrape rows only (no new vendor fetch)"
+                                    >
+                                        <RefreshCw className={`h-4 w-4 mr-1.5 ${(manualPushLoading || trackingManualPush) ? 'animate-spin' : ''}`} />
+                                        Manual sync
+                                    </Button>
+                                )}
                                 <CriticalActionDropdown
                                     disabled={criticalLoading || !selectedStore}
                                     loading={criticalLoading}
@@ -3240,6 +3282,8 @@ export default function Catalog() {
                                     titleText = 'Stop was sent. The current vendor page may finish, then remaining stay Pending.';
                                 } else if (trackingServerScrape) {
                                     titleText = 'We are fetching vendor prices on our servers. You can leave this page. Use Stop Scraping to cancel.';
+                                } else if (storeVendors.length > 1) {
+                                    titleText = 'Choose one vendor, or all vendors, to refresh price and stock.';
                                 } else if (vendorList.length > 0) {
                                     const labels = vendorList
                                         .map((v) => v.label || (v.code || '').toUpperCase())
@@ -3249,18 +3293,30 @@ export default function Catalog() {
                                     titleText = 'Refresh vendor price and stock for all active listings.';
                                 }
 
+                                const showVendorMenu = !isActive && !scraping && storeVendors.length > 1;
                                 return (
                                     <>
-                                        <Button
-                                            variant="secondary"
-                                            size="sm"
-                                            onClick={() => handleScrape(null)}
-                                            disabled={scraping || isActive || !selectedStore}
-                                            title={titleText}
-                                        >
-                                            <RefreshCw className={`h-4 w-4 mr-1.5 ${scraping || isActive ? 'animate-spin' : ''}`} />
-                                            {label}
-                                        </Button>
+                                        {showVendorMenu ? (
+                                            <VendorScopeMenu
+                                                label="Start Scraping"
+                                                title={titleText}
+                                                disabled={scraping || !selectedStore}
+                                                icon={RefreshCw}
+                                                vendors={storeVendors}
+                                                onSelect={(vendor) => handleScrape(null, vendor?.id || null)}
+                                            />
+                                        ) : (
+                                            <Button
+                                                variant="secondary"
+                                                size="sm"
+                                                onClick={() => handleScrape(null)}
+                                                disabled={scraping || isActive || !selectedStore}
+                                                title={titleText}
+                                            >
+                                                <RefreshCw className={`h-4 w-4 mr-1.5 ${scraping || isActive ? 'animate-spin' : ''}`} />
+                                                {label}
+                                            </Button>
+                                        )}
                                         {isActive && (
                                             <Button
                                                 variant="secondary"

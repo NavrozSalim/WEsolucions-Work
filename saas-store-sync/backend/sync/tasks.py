@@ -1659,7 +1659,7 @@ def _return_push_listings_cancelled(store, succeeded, failed, skipped, total_to_
     }
 
 
-def _execute_store_push_listings_only(store_id, disable_schedule=False):
+def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_id=None):
     """
     Push local store_price / store_stock to the marketplace for listings that are
     already scraped or synced — no vendor URL scrape (excludes pending / failed / needs_attention).
@@ -1689,10 +1689,18 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
             'store_id': str(store_id),
         }
 
+    vendor_id = (str(vendor_id).strip() if vendor_id else '') or None
+    vendor_label = ''
+    if vendor_id:
+        from vendor.models import Vendor
+        vendor_row = Vendor.objects.filter(pk=vendor_id).only('name').first()
+        vendor_label = ((vendor_row.name if vendor_row else '') or '').strip()
+    scope_note = f' for {vendor_label}' if vendor_label else ''
     append_catalog_log(
         store.id,
-        'Marketplace sync started — pushing local prices and stock to your marketplace.',
+        f'Marketplace sync started{scope_note} — pushing local prices and stock to your marketplace.',
         action_type='sync_start',
+        metadata={'vendor_id': vendor_id} if vendor_id else None,
     )
     if disable_schedule:
         SyncSchedule.objects.filter(store=store).update(is_active=False)
@@ -1711,6 +1719,8 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
         sync_status__in=['synced', 'scraped'],
         store_price__isnull=False,
     ).select_related('product', 'product__vendor')
+    if vendor_id:
+        qs = qs.filter(product__vendor_id=vendor_id)
     total_to_push = qs.count()
 
     succeeded, failed, skipped = 0, 0, 0
@@ -2137,7 +2147,7 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False):
 
 
 @shared_task(bind=True)
-def run_store_push_listings_only(self, store_id, disable_schedule=False):
+def run_store_push_listings_only(self, store_id, disable_schedule=False, vendor_id=None):
     """Celery entry: one push per store at a time (see sync.push_listings_lock)."""
     from django.core.cache import cache
 
@@ -2167,7 +2177,9 @@ def run_store_push_listings_only(self, store_id, disable_schedule=False):
                 'total': 0,
                 'cancelled': True,
             }
-        return _execute_store_push_listings_only(store_id, disable_schedule=disable_schedule)
+        return _execute_store_push_listings_only(
+            store_id, disable_schedule=disable_schedule, vendor_id=vendor_id,
+        )
     finally:
         clear_push_listings_cancel(store_key)
         release_push_listings_lock(store_key, task_id)

@@ -134,24 +134,26 @@ def _ingest_only_vendor_ids() -> list:
     return list(Vendor.objects.filter(q).values_list('id', flat=True))
 
 
-def store_has_scrapeable_pending_mappings(store) -> bool:
+def store_has_scrapeable_pending_mappings(store, vendor_id=None) -> bool:
     """True when the store has pending listings that need live browser scraping."""
-    return _count_scrapeable_pending_mappings(store) > 0
+    return _count_scrapeable_pending_mappings(store, vendor_id=vendor_id) > 0
 
 
-def _count_scrapeable_pending_mappings(store) -> int:
+def _count_scrapeable_pending_mappings(store, vendor_id=None) -> int:
     ingest_ids = _ingest_only_vendor_ids()
     qs = ProductMapping.objects.filter(store=store, is_active=True, sync_status='pending')
+    if vendor_id:
+        qs = qs.filter(product__vendor_id=vendor_id)
     if ingest_ids:
         qs = qs.exclude(product__vendor_id__in=ingest_ids)
     return qs.count()
 
 
-def _pending_left_scrape_note(store, *, user_cancelled: bool) -> tuple[str, int]:
+def _pending_left_scrape_note(store, *, user_cancelled: bool, vendor_id=None) -> tuple[str, int]:
     """Activity-log suffix when live-scrape rows are still Pending after a run."""
     if user_cancelled:
         return '', 0
-    left = _count_scrapeable_pending_mappings(store)
+    left = _count_scrapeable_pending_mappings(store, vendor_id=vendor_id)
     if left <= 0:
         return '', 0
     return (
@@ -1872,34 +1874,56 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
     }
 
 
-def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> dict:
+def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False, vendor_id: str | None = None) -> dict:
     """
     Scrape vendor URLs for active listings whose ``sync_status`` is ``pending`` only.
 
     Parallel mode (Celery + ``CATALOG_SCRAPE_CHUNK_SIZE``) splits pending mappings across
     tasks, each with its own Amazon/eBay session.
+
+    ``vendor_id`` limits the run to one store vendor. Omit it to scrape every
+    live-scrape vendor on the store.
     """
     from scrapers import close_amazon_session
     from stores.models import Store
 
     from catalog.activity_log import append_catalog_log
 
+    vendor_id = (str(vendor_id).strip() if vendor_id else '') or None
     try:
         store = Store.objects.select_related('marketplace').get(id=store_id)
     except Store.DoesNotExist:
         return {'error': 'store_not_found', 'store_id': str(store_id)}
 
+    vendor_label = ''
+    if vendor_id:
+        from vendor.models import Vendor
+        vendor_row = Vendor.objects.filter(pk=vendor_id).only('name').first()
+        vendor_label = ((vendor_row.name if vendor_row else '') or '').strip()
+
+    started_at = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
+    if vendor_label:
+        start_msg = (
+            f'{vendor_label} scrape started at {started_at} '
+            f'for active listings with sync_status=pending.'
+        )
+    else:
+        start_msg = (
+            f'Store-wide vendor scrape started at {started_at} '
+            f'for active listings with sync_status=pending.'
+        )
     append_catalog_log(
         store.id,
-        f'Store-wide vendor scrape started at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")} '
-        f'for active listings with sync_status=pending.',
+        start_msg,
         action_type='scrape_start',
-        metadata={'scope': 'store'},
+        metadata={'scope': 'vendor' if vendor_id else 'store', 'vendor_id': vendor_id},
     )
 
     base_qs = ProductMapping.objects.filter(
         store=store, is_active=True, sync_status='pending',
     ).order_by('id')
+    if vendor_id:
+        base_qs = base_qs.filter(product__vendor_id=vendor_id)
     ingest_ids = _ingest_only_vendor_ids()
     if ingest_ids:
         base_qs = base_qs.exclude(product__vendor_id__in=ingest_ids)
@@ -1941,7 +1965,7 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> d
             catalog_scrape_store_chunk_task.si(str(store_id), [str(x) for x in ch])
             for ch in chunks
         ]
-        chord(group(sigs))(catalog_scrape_store_finalize.s(str(store_id)))
+        chord(group(sigs))(catalog_scrape_store_finalize.s(str(store_id), vendor_id or ''))
         return {
             'store_id': str(store_id),
             'scope': 'store',
@@ -1979,8 +2003,9 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> d
         'stalled': stalled_out,
         'user_cancelled': bool(user_cancelled),
     }
+    finished_label = f'{vendor_label} scrape' if vendor_label else 'Store-wide vendor scrape'
     end_msg = (
-        f'Store-wide vendor scrape finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
+        f'{finished_label} finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
         f'{succeeded} listing(s) updated, {failed} failed, {processed} processed.'
     )
     if stalled_out:
@@ -1996,7 +2021,9 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False) -> d
             metadata={'scope': 'store'},
         )
         end_msg += ' Stopped because you clicked Stop.'
-    left_note, left_n = _pending_left_scrape_note(store, user_cancelled=bool(user_cancelled))
+    left_note, left_n = _pending_left_scrape_note(
+        store, user_cancelled=bool(user_cancelled), vendor_id=vendor_id,
+    )
     end_msg += left_note
     if left_n:
         end_meta['pending_left'] = left_n
@@ -2069,7 +2096,7 @@ def catalog_scrape_store_chunk_task(self, store_id: str, mapping_ids: list):
 
 
 @shared_task
-def catalog_scrape_store_finalize(results, store_id: str):
+def catalog_scrape_store_finalize(results, store_id: str, vendor_id: str | None = None):
     from stores.models import Store
 
     from catalog.activity_log import append_catalog_log
@@ -2079,6 +2106,8 @@ def catalog_scrape_store_finalize(results, store_id: str):
         store = Store.objects.select_related('marketplace').get(id=store_id)
     except Store.DoesNotExist:
         return {'error': 'store_not_found', 'store_id': str(store_id)}
+
+    vendor_id = (str(vendor_id).strip() if vendor_id else '') or None
 
     try:
         processed = succeeded = failed = 0
@@ -2136,7 +2165,9 @@ def catalog_scrape_store_finalize(results, store_id: str):
                 action_type='scrape_cancelled',
                 metadata={'scope': 'store', 'parallel': True},
             )
-        left_note, left_n = _pending_left_scrape_note(store, user_cancelled=bool(user_cancelled))
+        left_note, left_n = _pending_left_scrape_note(
+            store, user_cancelled=bool(user_cancelled), vendor_id=vendor_id,
+        )
         end_msg += left_note
         if left_n:
             end_meta['pending_left'] = left_n
@@ -2193,13 +2224,16 @@ def catalog_scrape_task(self, upload_id: str):
 
 
 @shared_task(bind=True, max_retries=3)
-def catalog_scrape_store_task(self, store_id: str):
-    """Celery: scrape all active listings for a store (no marketplace push)."""
+def catalog_scrape_store_task(self, store_id: str, vendor_id: str | None = None):
+    """Celery: scrape active listings for a store (no marketplace push).
+
+    ``vendor_id`` limits the run to one vendor. Scheduled updates omit it.
+    """
     from catalog.celery_scrape_state import clear_celery_scrape_state
 
     mark_celery_scrape_worker_started(str(store_id))
     try:
-        out = run_store_wide_catalog_scrape(store_id, parallel=True)
+        out = run_store_wide_catalog_scrape(store_id, parallel=True, vendor_id=vendor_id or None)
     except Exception:
         clear_celery_scrape_state(store_id)
         raise

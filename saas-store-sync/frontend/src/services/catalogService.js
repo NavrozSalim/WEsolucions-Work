@@ -210,9 +210,10 @@ export const triggerCatalogSync = (storeId, runInline = false, uploadId = null, 
 };
 
 /** Scrape: async via Celery only; UI polls /catalog/scrape/progress/ (never poll /sync/jobs/). */
-export const triggerCatalogScrape = (storeId, runInline = false, uploadId = null) => {
+export const triggerCatalogScrape = (storeId, runInline = false, uploadId = null, vendorId = null) => {
     const body = { run_inline: runInline };
     if (uploadId) body.upload_id = uploadId;
+    if (vendorId) body.vendor_id = vendorId;
     const storeWide = !uploadId;
     return runWithCeleryFallback(`/stores/${storeId}/catalog/scrape/`, body, storeId, {
         forbidInlineFallback: storeWide,
@@ -444,7 +445,10 @@ export const downloadMydealTemplates = (storeId, type = 'both') => {
 export const triggerCatalogPushListings = (storeId, runInline = false, options = {}) =>
     runCatalogJobPost(
         `/stores/${storeId}/catalog/push-listings/`,
-        { run_inline: runInline },
+        {
+            run_inline: runInline,
+            ...(options.vendorId ? { vendor_id: options.vendorId } : {}),
+        },
         storeId,
         {
             forbidInlineFallback: !runInline,

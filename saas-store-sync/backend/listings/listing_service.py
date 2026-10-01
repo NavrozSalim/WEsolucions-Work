@@ -2128,6 +2128,14 @@ def start_publish_async(user, store, listing_ids=None) -> dict:
     }
 
 
+def _filter_qs_by_source_vendor(qs, vendor_code):
+    """Limit managed listings to one store vendor. Blank code leaves the queryset unchanged."""
+    code = (vendor_code or "").strip()
+    if not code:
+        return qs
+    return qs.filter(source_vendor_code__iexact=code)
+
+
 def _scrapeable_listings_qs(user, store, listing_ids=None):
     """Base queryset for managed inventory scrapes."""
     qs = StoreListing.objects.filter(user=user, store=store)
@@ -2166,7 +2174,7 @@ def _estimate_scrape_total(user, store, listing_ids=None) -> int:
     return total
 
 
-def start_scrape_async(user, store, listing_ids=None) -> dict:
+def start_scrape_async(user, store, listing_ids=None, vendor_code=None) -> dict:
     """Start a managed-listing scrape on the regional Celery worker.
 
     Store-wide Start (no ``listing_ids``) scrapes only rows that are already
@@ -2199,6 +2207,8 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
     qs = _scrapeable_listings_qs(user, store, ids)
     if store_wide:
         qs = qs.filter(inventory_sync_status=InventorySyncStatus.PENDING)
+    if vendor_code:
+        qs = _filter_qs_by_source_vendor(qs, vendor_code)
     nora_map = None
     try:
         nora_map = load_store_nora_stock_map(store)
@@ -2211,6 +2221,11 @@ def start_scrape_async(user, store, listing_ids=None) -> dict:
             batch.append(listing)
 
     if not batch:
+        if store_wide and (vendor_code or "").strip():
+            raise MarketplaceError(
+                "No Pending listings for this vendor to scrape. "
+                "Use Reset status to move Scraped or Failed rows back to Pending first."
+            )
         if store_wide:
             raise MarketplaceError(
                 "No Pending listings with a Vendor URL, Nora Vendor ID, Vevor SKU, Costway SKU, or Wallkoala SKU to scrape. "
@@ -2900,9 +2915,14 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
 
 
 
-def push_inventory(user, store, listing_ids=None) -> dict:
+def push_inventory(user, store, listing_ids=None, vendor_code=None) -> dict:
     """Push local price/stock to the marketplace (Manual sync for managed stores)."""
     kind = marketplace_kind(store.marketplace)
+    empty_push = (
+        "No marketplace listings for this vendor to push."
+        if (vendor_code or "").strip()
+        else "No marketplace listings to push. Publish from Created products first."
+    )
     if kind == "lasoo":
         qs = StoreListing.objects.filter(
             user=user,
@@ -2914,10 +2934,11 @@ def push_inventory(user, store, listing_ids=None) -> dict:
         )
         if listing_ids:
             qs = qs.filter(id__in=listing_ids)
+        qs = _filter_qs_by_source_vendor(qs, vendor_code)
         listings = list(qs)
         if not listings:
             raise MarketplaceError(
-                "No marketplace listings to push. Publish from Created products first."
+                empty_push
             )
         confirmed = []
         skipped = []
@@ -2972,10 +2993,11 @@ def push_inventory(user, store, listing_ids=None) -> dict:
         )
         if listing_ids:
             qs = qs.filter(id__in=listing_ids)
+        qs = _filter_qs_by_source_vendor(qs, vendor_code)
         listings = list(qs)
         if not listings:
             raise MarketplaceError(
-                "No marketplace listings to push. Publish from Created products first."
+                empty_push
             )
         result = mydeal_products.push_inventory(listings, store)
         if result.get("ok"):
@@ -3002,10 +3024,11 @@ def push_inventory(user, store, listing_ids=None) -> dict:
         )
         if listing_ids:
             qs = qs.filter(id__in=listing_ids)
+        qs = _filter_qs_by_source_vendor(qs, vendor_code)
         listings = list(qs)
         if not listings:
             raise MarketplaceError(
-                "No marketplace listings to push. Publish from Created products first."
+                empty_push
             )
         result = temu_products.push_inventory(listings, store)
         if result.get("ok"):
@@ -3033,10 +3056,11 @@ def push_inventory(user, store, listing_ids=None) -> dict:
         )
         if listing_ids:
             qs = qs.filter(id__in=listing_ids)
+        qs = _filter_qs_by_source_vendor(qs, vendor_code)
         listings = list(qs)
         if not listings:
             raise MarketplaceError(
-                "No marketplace listings to push. Publish from Created products first."
+                empty_push
             )
         result = bunnings_products.push_inventory(listings, store)
         if result.get("ok"):
@@ -3061,10 +3085,11 @@ def push_inventory(user, store, listing_ids=None) -> dict:
         )
         if listing_ids:
             qs = qs.filter(id__in=listing_ids)
+        qs = _filter_qs_by_source_vendor(qs, vendor_code)
         listings = list(qs)
         if not listings:
             raise MarketplaceError(
-                "No marketplace listings to push. Publish from Created products first."
+                empty_push
             )
         adapter = get_adapter(store)
         pushed = 0
@@ -3143,10 +3168,11 @@ def push_inventory(user, store, listing_ids=None) -> dict:
     )
     if listing_ids:
         qs = qs.filter(id__in=listing_ids)
+    qs = _filter_qs_by_source_vendor(qs, vendor_code)
     listings = list(qs)
     if not listings:
         raise MarketplaceError(
-            "No marketplace listings to push. Publish from Created products first."
+            empty_push
         )
 
     adapter = get_adapter(store)

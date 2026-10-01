@@ -61,6 +61,30 @@ def _get_store(request, store_pk) -> Store:
     return get_store_for_user(request.user, store_pk, select_related=('marketplace',))
 
 
+def _vendor_code_on_store(store, raw_code):
+    """Return a canonical vendor code when it is on the store, else an error Response.
+
+    Blank means store-wide (``('', None)``).
+    """
+    code = str(raw_code or '').strip()
+    if not code or code.lower() in ('all', 'none'):
+        return '', None
+    from stores.models import StoreVendorPriceSettings
+
+    row = (
+        StoreVendorPriceSettings.objects
+        .filter(store=store, vendor__code__iexact=code)
+        .select_related('vendor')
+        .first()
+    )
+    if row is None:
+        return '', Response(
+            {'detail': 'That vendor is not on this store.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return (row.vendor.code or code), None
+
+
 def _get_listing(request, store, pk) -> StoreListing:
     # Listings are scoped by store (org-shared); do not require listing.user == request.user.
     return get_object_or_404(StoreListing, pk=pk, store=store)
@@ -1063,8 +1087,13 @@ class StoreListingScrapeView(APIView):
     def post(self, request, store_pk):
         store = _get_store(request, store_pk)
         listing_ids = request.data.get('listing_ids') or None
+        vendor_code, vendor_err = _vendor_code_on_store(store, request.data.get('vendor_code'))
+        if vendor_err is not None:
+            return vendor_err
         try:
-            result = listing_service.start_scrape_async(request.user, store, listing_ids)
+            result = listing_service.start_scrape_async(
+                request.user, store, listing_ids, vendor_code=vendor_code or None,
+            )
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result, status=status.HTTP_200_OK)
@@ -1103,8 +1132,13 @@ class StoreListingPushInventoryView(APIView):
     def post(self, request, store_pk):
         store = _get_store(request, store_pk)
         listing_ids = request.data.get('listing_ids') or None
+        vendor_code, vendor_err = _vendor_code_on_store(store, request.data.get('vendor_code'))
+        if vendor_err is not None:
+            return vendor_err
         try:
-            result = listing_service.push_inventory(request.user, store, listing_ids)
+            result = listing_service.push_inventory(
+                request.user, store, listing_ids, vendor_code=vendor_code or None,
+            )
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY

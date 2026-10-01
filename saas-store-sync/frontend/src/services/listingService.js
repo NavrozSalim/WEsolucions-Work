@@ -166,8 +166,12 @@ export const getBunningsAttributes = (storeId, hierarchy = '') =>
     });
 
 /** Scrape vendor URLs on managed listings → update local price/stock. */
-export const scrapeListings = (storeId, listingIds = null) =>
-    api.post(`/stores/${storeId}/listings/scrape/`, listingIds ? { listing_ids: listingIds } : {});
+export const scrapeListings = (storeId, listingIds = null, vendorCode = null) => {
+    const body = {};
+    if (listingIds) body.listing_ids = listingIds;
+    if (vendorCode) body.vendor_code = vendorCode;
+    return api.post(`/stores/${storeId}/listings/scrape/`, body);
+};
 
 /** Live managed-listing scrape progress (processed / total). */
 export const getListingScrapeProgress = (storeId) =>
@@ -178,8 +182,12 @@ export const cancelListingScrape = (storeId) =>
     api.post(`/stores/${storeId}/listings/scrape/cancel/`, {});
 
 /** Push local price/stock to marketplace for already-uploaded listings. */
-export const pushListingInventory = (storeId, listingIds = null) =>
-    api.post(`/stores/${storeId}/listings/push-inventory/`, listingIds ? { listing_ids: listingIds } : {});
+export const pushListingInventory = (storeId, listingIds = null, vendorCode = null) => {
+    const body = {};
+    if (listingIds) body.listing_ids = listingIds;
+    if (vendorCode) body.vendor_code = vendorCode;
+    return api.post(`/stores/${storeId}/listings/push-inventory/`, body);
+};
 
 /** Reset inventory sync status to pending. scope: failed | scraped | all */
 export const resetListingInventory = (storeId, scope = 'failed') =>

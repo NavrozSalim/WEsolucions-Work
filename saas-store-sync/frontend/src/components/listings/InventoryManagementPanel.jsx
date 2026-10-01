@@ -13,6 +13,7 @@ import {
     scrapeListings,
 } from '../../services/listingService';
 import ListingFormModal from './ListingFormModal';
+import VendorScopeMenu from '../catalog/VendorScopeMenu';
 
 const PAGE_SIZE = 10;
 
@@ -188,7 +189,7 @@ function inventoryLoadError(err) {
 }
 
 /** Managed-store inventory: scrape then Manual sync / schedule — same as Reverb. */
-export default function InventoryManagementPanel({ storeId, marketplaceCode = '', reloadNonce = 0, onMessage }) {
+export default function InventoryManagementPanel({ storeId, marketplaceCode = '', vendors = [], reloadNonce = 0, onMessage }) {
     const marketplaceLabel = String(marketplaceCode || '').trim() || 'marketplace';
     const isReverb = marketplaceLabel.toLowerCase() === 'reverb';
     const isLasoo = marketplaceLabel.toLowerCase() === 'lasoo';
@@ -375,7 +376,9 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     const serverScraping = Boolean(scrapeProgress?.active) && scrapeProgress?.phase !== 'cancelled';
     const scrapeBusy = (scraping || serverScraping) && scrapeProgress?.phase !== 'cancelled';
 
-    const handleScrape = (ids = null) => {
+    const storeVendors = Array.isArray(vendors) ? vendors : [];
+
+    const handleScrape = (ids = null, vendorCode = null) => {
         const targetCount = ids?.length ? ids.length : withVendor;
         setJobCount(targetCount);
         setScrapeProgress({
@@ -392,7 +395,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
         ignoreServerActiveRef.current = false;
         scrapeStartingRef.current = true;
         setScraping(true);
-        scrapeListings(storeId, ids)
+        scrapeListings(storeId, ids, ids ? null : vendorCode)
             .then((res) => {
                 const serverTotal = Number(res.data?.total || 0);
                 if (serverTotal > 0) {
@@ -457,11 +460,11 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
             });
     };
 
-    const handlePush = (ids = null) => {
+    const handlePush = (ids = null, vendorCode = null) => {
         const targetCount = ids?.length || totalCount;
         setJobCount(targetCount);
         setPushing(true);
-        pushListingInventory(storeId, ids)
+        pushListingInventory(storeId, ids, ids ? null : vendorCode)
             .then((res) => {
                 onMessage?.(res.data?.message || 'Manual sync finished.', res.data?.ok ? 'success' : 'error');
                 load();
@@ -563,16 +566,28 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                    <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => handlePush()}
-                        disabled={busy || totalCount === 0}
-                        title="Push current price/stock to marketplace (no new vendor fetch)"
-                    >
-                        <RefreshCw className={`mr-1.5 h-4 w-4 ${pushing ? 'animate-spin' : ''}`} />
-                        Manual sync
-                    </Button>
+                    {storeVendors.length > 1 ? (
+                        <VendorScopeMenu
+                            label="Manual sync"
+                            title="Push current price/stock for one vendor, or all vendors (no new vendor fetch)"
+                            disabled={busy || totalCount === 0}
+                            icon={RefreshCw}
+                            iconClassName={pushing ? 'animate-spin' : ''}
+                            vendors={storeVendors}
+                            onSelect={(vendor) => handlePush(null, vendor?.code || null)}
+                        />
+                    ) : (
+                        <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => handlePush()}
+                            disabled={busy || totalCount === 0}
+                            title="Push current price/stock to marketplace (no new vendor fetch)"
+                        >
+                            <RefreshCw className={`mr-1.5 h-4 w-4 ${pushing ? 'animate-spin' : ''}`} />
+                            Manual sync
+                        </Button>
+                    )}
 
                     <div className="relative">
                         <Button
@@ -611,7 +626,17 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         {exporting ? 'Exporting…' : 'Export'}
                     </Button>
 
-                    {canScrape && !scrapeBusy && (
+                    {canScrape && !scrapeBusy && storeVendors.length > 1 && (
+                        <VendorScopeMenu
+                            label={`Start Scraping (${withVendor})`}
+                            title={withVendor === 0 ? 'No Pending listings to scrape. Use Reset status to re-queue Scraped or Failed rows.' : `Scrape one vendor, or all vendors, for ${withVendor} Pending listing(s)`}
+                            disabled={busy || withVendor === 0}
+                            icon={Play}
+                            vendors={storeVendors}
+                            onSelect={(vendor) => handleScrape(null, vendor?.code || null)}
+                        />
+                    )}
+                    {canScrape && !scrapeBusy && storeVendors.length <= 1 && (
                         <Button
                             variant="secondary"
                             size="sm"

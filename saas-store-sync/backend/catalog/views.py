@@ -136,7 +136,7 @@ class CatalogStoresView(APIView):
 
     def get(self, request):
         from sync.models import SyncSchedule
-        from stores.models import StorePriceRangeMargin
+        from stores.models import StorePriceRangeMargin, StoreVendorPriceSettings
 
         from users.org_scope import stores_for_user
 
@@ -174,6 +174,18 @@ class CatalogStoresView(APIView):
             .values_list('price_settings__store_id', flat=True)
             .distinct()
         )
+        vendors_by_store = {}
+        for row in (
+            StoreVendorPriceSettings.objects
+            .filter(store_id__in=store_ids)
+            .select_related('vendor')
+            .order_by('vendor__name')
+        ):
+            vendors_by_store.setdefault(row.store_id, []).append({
+                'id': str(row.vendor_id),
+                'code': row.vendor.code or '',
+                'name': row.vendor.name or row.vendor.code or '',
+            })
         from catalog.mydeal_templates import store_is_mydeal, template_status
 
         mydeal_store_ids = [
@@ -204,6 +216,7 @@ class CatalogStoresView(APIView):
                 ),
                 'schedule_active': sch.is_active if sch else None,
                 'has_fixed_tier': s.id in fixed_tier_store_ids,
+                'vendors': vendors_by_store.get(s.id, []),
             }
             if store_is_mydeal(s):
                 row['mydeal_setup_method'] = getattr(s, 'mydeal_setup_method', None) or 'upload'
@@ -710,6 +723,76 @@ class CatalogSyncTriggerView(APIView):
         }, status=status.HTTP_202_ACCEPTED)
 
 
+def ingest_vendor_key_for_code(vendor_code: str) -> str | None:
+    """Map a store vendor code (``costwayau``, ``amazonau``) to a feed/desktop runner key.
+
+    Browser vendors such as Amazon and eBay return ``None``.
+    """
+    from catalog.ingest_views import SUPPORTED_VENDORS
+
+    code = (vendor_code or '').strip().lower()
+    if not code:
+        return None
+    for key, cfg in SUPPORTED_VENDORS.items():
+        codes = [(c or '').strip().lower() for c in (cfg.get('vendor_db_codes') or [])]
+        prefix = (cfg.get('vendor_db_code_prefix') or '').strip().lower()
+        if code in codes or (prefix and code.startswith(prefix)):
+            return key
+    return None
+
+
+def _selected_store_vendor(store, raw_vendor_id):
+    """Resolve an optional catalog ``vendor_id`` to a vendor on this store.
+
+    Returns ``(vendor, error_response)``. ``vendor`` is ``None`` when the
+    request is store-wide (omitted, blank, or ``all``).
+    """
+    import uuid
+
+    raw = str(raw_vendor_id or '').strip()
+    if not raw or raw.lower() in ('all', 'none'):
+        return None, None
+    try:
+        uuid.UUID(raw)
+    except ValueError:
+        return None, Response(
+            {'error': 'unknown_vendor', 'detail': 'That vendor is not on this store.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    from stores.models import StoreVendorPriceSettings
+
+    row = (
+        StoreVendorPriceSettings.objects
+        .filter(store=store, vendor_id=raw)
+        .select_related('vendor')
+        .first()
+    )
+    if row is None:
+        return None, Response(
+            {'error': 'unknown_vendor', 'detail': 'That vendor is not on this store.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return row.vendor, None
+
+
+def _scrape_vendor_scope(view, vendor):
+    """Split a chosen store vendor into desktop-job keys and a browser vendor id.
+
+    ``vendor_keys`` is ``None`` for every feed vendor, a one-item list for a
+    single feed vendor, or ``[]`` when the choice is a browser vendor.
+    ``browser_vendor_id`` is set only for live/browser scrapes.
+    """
+    if vendor is None:
+        return None, None
+    from catalog.ingest_views import SUPPORTED_VENDORS
+
+    key = ingest_vendor_key_for_code(getattr(vendor, 'code', None))
+    cfg = SUPPORTED_VENDORS.get(key) if key else None
+    if key and cfg and not view._vendor_runs_live(key, cfg):
+        return [key], None
+    return [], str(vendor.id)
+
+
 def _vendor_db_ids_for(vendor_code: str) -> list:
     """Resolve a desktop-runner ``vendor_code`` (e.g. 'heb', 'costco') into
     the matching ``Vendor.id`` list in the DB. Uses the registry declared in
@@ -834,11 +917,14 @@ class CatalogScrapeTriggerView(APIView):
         return job
 
     @classmethod
-    def _maybe_enqueue_desktop_jobs(cls, store, user) -> list:
+    def _maybe_enqueue_desktop_jobs(cls, store, user, vendor_keys=None) -> list:
         """Walk every supported non-live runner vendor and enqueue a job for
         each one that has products in ``store``. Returns a list of
         ``(vendor_code, job)`` tuples for the ones that got queued (new or
         pre-existing pending/claimed).
+
+        ``vendor_keys`` limits the walk: ``None`` means every supported vendor,
+        and ``[]`` enqueues nothing (a browser-only vendor was chosen).
 
         Vendors with ``runner='live'`` (e.g. Costco AU when residential proxies
         are configured) are intentionally skipped — they're scraped through the
@@ -848,6 +934,8 @@ class CatalogScrapeTriggerView(APIView):
         from catalog.ingest_views import SUPPORTED_VENDORS
         jobs: list = []
         for vendor_code, cfg in SUPPORTED_VENDORS.items():
+            if vendor_keys is not None and vendor_code not in vendor_keys:
+                continue
             if cls._vendor_runs_live(vendor_code, cfg):
                 continue
             job = cls._maybe_enqueue_vendor_job(store, user, vendor_code)
@@ -934,11 +1022,21 @@ class CatalogScrapeTriggerView(APIView):
                 user_id=request.user.id,
             )
             return dup
+        selected_vendor, vendor_err = _selected_store_vendor(store, request.data.get('vendor_id'))
+        if vendor_err is not None:
+            return vendor_err
+        desktop_vendor_keys, browser_vendor_id = _scrape_vendor_scope(self, selected_vendor)
+        vendor_name = ((selected_vendor.name if selected_vendor else '') or '').strip()
         append_catalog_log(
             store.id,
-            'You requested a vendor scrape from the catalog page.',
+            (
+                f'You requested a {vendor_name} scrape from the catalog page.'
+                if vendor_name
+                else 'You requested a vendor scrape from the catalog page.'
+            ),
             action_type='user_action',
             user_id=request.user.id,
+            metadata={'vendor_id': str(selected_vendor.id), 'vendor_name': vendor_name} if selected_vendor else None,
         )
 
         desktop_jobs_payload: list[dict] = []
@@ -955,7 +1053,9 @@ class CatalogScrapeTriggerView(APIView):
 
         def log_desktop_vendor_jobs() -> list:
             """HEB/Costco desktop runner jobs — fast DB inserts only."""
-            desktop_jobs = self._maybe_enqueue_desktop_jobs(store, request.user)
+            desktop_jobs = self._maybe_enqueue_desktop_jobs(
+                store, request.user, vendor_keys=desktop_vendor_keys,
+            )
             for vendor_code, vendor_job in desktop_jobs:
                 append_catalog_log(
                     store.id,
@@ -1090,7 +1190,7 @@ class CatalogScrapeTriggerView(APIView):
             )
         if run_inline:
             inline_jobs = log_desktop_vendor_jobs()
-            result = run_store_wide_catalog_scrape(str(store.id))
+            result = run_store_wide_catalog_scrape(str(store.id), vendor_id=browser_vendor_id)
             if result.get('error'):
                 return Response(
                     {'detail': result['error'], **result},
@@ -1099,7 +1199,12 @@ class CatalogScrapeTriggerView(APIView):
             result['desktop_jobs'] = _serialize_desktop_jobs(inline_jobs)
             return Response(result, status=status.HTTP_200_OK)
         celery_task_id = str(uuid.uuid4())
-        has_browser_scrape = store_has_scrapeable_pending_mappings(store)
+        if browser_vendor_id is None and desktop_vendor_keys is not None:
+            has_browser_scrape = False
+        else:
+            has_browser_scrape = store_has_scrapeable_pending_mappings(
+                store, vendor_id=browser_vendor_id,
+            )
         with transaction.atomic():
             if has_browser_scrape:
                 set_celery_scrape_state(
@@ -1111,13 +1216,25 @@ class CatalogScrapeTriggerView(APIView):
                 mark_celery_scrape_worker_started(str(store.id))
             schedule_desktop_jobs_after_commit()
         if not has_browser_scrape:
+            if vendor_name and not desktop_jobs_payload:
+                queued_message = f'No pending {vendor_name} listings to scrape.'
+            elif vendor_name:
+                queued_message = f'{vendor_name} scrape queued.'
+            else:
+                queued_message = 'Feed/desktop vendors queued; no browser scrape needed.'
             append_catalog_log(
                 store.id,
-                'Browser scrape skipped (no pending Amazon/eBay listings). '
-                'Feed vendors (VevorAU, CostwayAU, etc.) were queued separately.',
+                queued_message if vendor_name else (
+                    'Browser scrape skipped (no pending Amazon/eBay listings). '
+                    'Feed vendors (VevorAU, CostwayAU, etc.) were queued separately.'
+                ),
                 action_type='scrape_start',
                 user_id=request.user.id,
-                metadata={'scope': 'store', 'browser_scrape': False},
+                metadata={
+                    'scope': 'vendor' if selected_vendor else 'store',
+                    'browser_scrape': False,
+                    'vendor_id': str(selected_vendor.id) if selected_vendor else None,
+                },
             )
             return Response({
                 "job_id": celery_task_id,
@@ -1125,11 +1242,15 @@ class CatalogScrapeTriggerView(APIView):
                 "status": "accepted",
                 "browser_scrape": False,
                 "desktop_jobs": desktop_jobs_payload,
-                "message": "Feed/desktop vendors queued; no browser scrape needed.",
+                "vendor_id": str(selected_vendor.id) if selected_vendor else None,
+                "message": queued_message,
             }, status=status.HTTP_202_ACCEPTED)
         try:
+            task_args = [str(store.id)]
+            if browser_vendor_id:
+                task_args.append(browser_vendor_id)
             catalog_scrape_store_task.apply_async(
-                args=[str(store.id)],
+                args=task_args,
                 task_id=celery_task_id,
             )
         except Exception:
@@ -1573,11 +1694,21 @@ class CatalogPushListingsView(APIView):
         from sync.tasks import _execute_store_push_listings_only, run_store_push_listings_only
 
         store = get_store_for_user(request.user, store_pk)
+        selected_vendor, vendor_err = _selected_store_vendor(store, request.data.get('vendor_id'))
+        if vendor_err is not None:
+            return vendor_err
+        vendor_name = ((selected_vendor.name if selected_vendor else '') or '').strip()
+        push_vendor_id = str(selected_vendor.id) if selected_vendor else None
         append_catalog_log(
             store.id,
-            'You started Manual sync (push listings to the marketplace).',
+            (
+                f'You started Manual sync for {vendor_name} (push listings to the marketplace).'
+                if vendor_name
+                else 'You started Manual sync (push listings to the marketplace).'
+            ),
             action_type='user_action',
             user_id=request.user.id,
+            metadata={'vendor_id': push_vendor_id, 'vendor_name': vendor_name} if selected_vendor else None,
         )
         if store.connection_status != 'connected':
             return Response(
@@ -1585,12 +1716,15 @@ class CatalogPushListingsView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        total_listings = ProductMapping.objects.filter(
+        listing_qs = ProductMapping.objects.filter(
             store=store,
             is_active=True,
             sync_status__in=['synced', 'scraped'],
             store_price__isnull=False,
-        ).count()
+        )
+        if push_vendor_id:
+            listing_qs = listing_qs.filter(product__vendor_id=push_vendor_id)
+        total_listings = listing_qs.count()
 
         run_inline = request.data.get('run_inline') or request.query_params.get('inline') == '1'
         store_key = str(store.id)
@@ -1609,7 +1743,9 @@ class CatalogPushListingsView(APIView):
                     status=status.HTTP_409_CONFLICT,
                 )
             try:
-                result = _execute_store_push_listings_only(store_key, disable_schedule=True)
+                result = _execute_store_push_listings_only(
+                    store_key, disable_schedule=True, vendor_id=push_vendor_id,
+                )
             finally:
                 from sync.push_listings_cancel import clear_push_listings_cancel
 
@@ -1640,7 +1776,7 @@ class CatalogPushListingsView(APIView):
             )
 
         try:
-            async_result = run_store_push_listings_only.delay(store_key, True)
+            async_result = run_store_push_listings_only.delay(store_key, True, push_vendor_id)
             handoff_push_listings_lock(store_key, reservation, async_result.id)
         except Exception as e:
             release_push_listings_lock(store_key, reservation)
