@@ -155,6 +155,10 @@ export const getBunningsCategories = (storeId, q = '') =>
 export const getBunningsLogistics = (storeId) =>
     api.get(`/stores/${storeId}/listings/bunnings/logistics/`);
 
+/** Bunnings OR23 carrier codes for the shipping modal. */
+export const getBunningsCarriers = (storeId) =>
+    api.get(`/stores/${storeId}/listings/bunnings/carriers/`);
+
 /** Bunnings PM11 required/recommended attributes for a hierarchy code. */
 export const getBunningsAttributes = (storeId, hierarchy = '') =>
     api.get(`/stores/${storeId}/listings/bunnings/attributes/`, {

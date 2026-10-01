@@ -28,6 +28,7 @@ import {
     completeOrderShipping,
     createTestOrder,
     exportOrdersExcel,
+    getBunningsCarriers,
     getOrderCancelReasons,
     getOrders,
     submitOrderShipping,
@@ -66,6 +67,18 @@ function money(cents, currency = 'AUD') {
 }
 
 const MYDEAL_TZ = 'Australia/Sydney';
+
+const BUNNINGS_FALLBACK_CARRIERS = [
+    { code: 'AUSPOST', name: 'Australia Post' },
+    { code: 'STARTRACK', name: 'StarTrack' },
+    { code: 'TNT', name: 'TNT' },
+    { code: 'DHL', name: 'DHL' },
+    { code: 'FEDEX', name: 'FedEx' },
+    { code: 'UPS', name: 'UPS' },
+    { code: 'ARAMEX', name: 'Aramex' },
+    { code: 'COURIERSPLEASE', name: 'Couriers Please' },
+    { code: 'SENDLE', name: 'Sendle' },
+];
 
 const MYDEAL_CARRIERS = [
     { value: 'Australia Post', label: 'Australia Post', requiresTracking: true },
@@ -258,12 +271,14 @@ function orderMatchesCustomerSearch(order, rawQuery) {
     return phoneFieldsMatch(query, phones);
 }
 
-function ShippingModal({ open, onClose, onSubmit, order, loading, marketplaceCode = '' }) {
+function ShippingModal({ open, onClose, onSubmit, order, loading, marketplaceCode = '', storeId = '' }) {
     const [form, setForm] = useState({
         tracking_number: '', carrier: '', carrier_other: '', tracking_url: '', shipped_date: '',
     });
     const [error, setError] = useState('');
+    const [bunningsCarriers, setBunningsCarriers] = useState(BUNNINGS_FALLBACK_CARRIERS);
     const isMydeal = (marketplaceCode || '').toLowerCase() === 'mydeal';
+    const isBunnings = (marketplaceCode || '').toLowerCase() === 'bunnings';
     const selectedCarrier = isMydeal ? mydealCarrier(form.carrier) : null;
     const needsTracking = isMydeal ? selectedCarrier?.requiresTracking !== false : true;
     const needsCustomName = Boolean(selectedCarrier?.customName);
@@ -274,6 +289,32 @@ function ShippingModal({ open, onClose, onSubmit, order, loading, marketplaceCod
             setError('');
         }
     }, [open]);
+
+    useEffect(() => {
+        if (!open || !isBunnings || !storeId) {
+            return undefined;
+        }
+        let cancelled = false;
+        getBunningsCarriers(storeId)
+            .then((res) => {
+                const list = Array.isArray(res.data?.carriers) ? res.data.carriers : [];
+                const rows = list
+                    .map((row) => ({
+                        code: String(row.code || '').trim(),
+                        name: String(row.name || row.code || '').trim(),
+                    }))
+                    .filter((row) => row.code);
+                if (!cancelled) {
+                    setBunningsCarriers(rows.length ? rows : BUNNINGS_FALLBACK_CARRIERS);
+                }
+            })
+            .catch(() => {
+                if (!cancelled) setBunningsCarriers(BUNNINGS_FALLBACK_CARRIERS);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [open, isBunnings, storeId]);
 
     if (!open) return null;
 
@@ -385,13 +426,29 @@ function ShippingModal({ open, onClose, onSubmit, order, loading, marketplaceCod
                                 onChange={(e) => setForm((f) => ({ ...f, tracking_number: e.target.value }))}
                                 required
                             />
-                            <Input
-                                label="Carrier"
-                                placeholder="e.g. Australia Post"
-                                value={form.carrier}
-                                onChange={(e) => setForm((f) => ({ ...f, carrier: e.target.value }))}
-                                required
-                            />
+                            {isBunnings ? (
+                                <Select
+                                    label="Carrier"
+                                    required
+                                    value={form.carrier}
+                                    onChange={(e) => setForm((f) => ({ ...f, carrier: e.target.value }))}
+                                    options={[
+                                        { value: '', label: 'Select carrier' },
+                                        ...bunningsCarriers.map((c) => ({
+                                            value: c.code,
+                                            label: c.name && c.name !== c.code ? `${c.name} (${c.code})` : c.code,
+                                        })),
+                                    ]}
+                                />
+                            ) : (
+                                <Input
+                                    label="Carrier"
+                                    placeholder="e.g. Australia Post"
+                                    value={form.carrier}
+                                    onChange={(e) => setForm((f) => ({ ...f, carrier: e.target.value }))}
+                                    required
+                                />
+                            )}
                             <Input
                                 label="Tracking URL (optional)"
                                 value={form.tracking_url}
@@ -1435,6 +1492,7 @@ export default function Orders() {
             <ShippingModal
                 open={!!shippingOrder}
                 order={shippingOrder}
+                storeId={selectedStore}
                 marketplaceCode={selectedStoreData?.marketplace_code || ''}
                 onClose={() => setShippingOrder(null)}
                 onSubmit={handleSubmitShipping}

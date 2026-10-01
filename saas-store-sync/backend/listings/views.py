@@ -328,6 +328,41 @@ class StoreBunningsLogisticsView(APIView):
         return Response({'classes': bunnings_products.flatten_logistic_classes(result.data)})
 
 
+class StoreBunningsCarriersView(APIView):
+    """Bunnings OR23 carrier codes for the shipping modal."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        from listings.bunnings.client import BunningsClient
+        from listings.bunnings import orders as bunnings_orders
+        from listings.errors import MarketplaceError
+
+        store = _get_store(request, store_pk)
+        if marketplace_kind(store.marketplace) != 'bunnings':
+            return Response(
+                {'detail': 'Carriers are only available for Bunnings stores.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            client = BunningsClient(store)
+            result = client.list_carriers()
+        except MarketplaceError as exc:
+            return Response(
+                {
+                    'carriers': bunnings_orders.carrier_choices(),
+                    'detail': str(exc),
+                }
+            )
+        if not result.ok:
+            return Response(
+                {
+                    'carriers': bunnings_orders.carrier_choices(),
+                    'detail': result.message or '',
+                }
+            )
+        return Response({'carriers': bunnings_orders.carrier_choices(result.data)})
+
+
 class StoreBunningsAttributesView(APIView):
     """Bunnings PM11 required/recommended attributes for a hierarchy."""
     permission_classes = [IsAuthenticated]

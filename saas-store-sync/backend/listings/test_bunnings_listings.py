@@ -567,6 +567,36 @@ class BunningsOrdersUnitTests(SimpleTestCase):
         self.assertEqual(payload["carrier_code"], "AUSPOST")
         self.assertEqual(payload["carrier_url"], "https://auspost.com.au/track/ABC123")
 
+    def test_flatten_carriers_and_fallback_choices(self):
+        rows = bunnings_orders.flatten_carriers({
+            "carriers": [
+                {"code": "AUSPOST", "label": "Australia Post"},
+                {"name": "StarTrack", "carrier_code": "STARTRACK"},
+            ]
+        })
+        self.assertEqual(rows[0], {"code": "AUSPOST", "name": "Australia Post"})
+        self.assertEqual(rows[1]["code"], "STARTRACK")
+        fallback = bunnings_orders.carrier_choices({})
+        self.assertTrue(any(row["code"] == "AUSPOST" for row in fallback))
+        live = bunnings_orders.carrier_choices({"carriers": [{"code": "AUSPOST", "label": "Australia Post"}]})
+        self.assertEqual(live, [{"code": "AUSPOST", "name": "Australia Post"}])
+
+    def test_resolve_carrier_matches_shop_list(self):
+        store = SimpleNamespace()
+        client = SimpleNamespace(
+            list_carriers=lambda: BunningsResult(
+                ok=True,
+                data={"carriers": [{"code": "AUSPOST", "label": "Australia Post"}]},
+            )
+        )
+        with patch("listings.bunnings.orders.BunningsClient", return_value=client):
+            code, name = bunnings_orders.resolve_carrier(store, "Australia Post")
+        self.assertEqual(code, "AUSPOST")
+        self.assertEqual(name, "Australia Post")
+        with patch("listings.bunnings.orders.BunningsClient", return_value=client):
+            code, name = bunnings_orders.resolve_carrier(store, "AUSPOST")
+        self.assertEqual(code, "AUSPOST")
+
     def test_to_ui_raw_shape(self):
         ui = bunnings_orders.to_ui_raw_shape({
             "order_id": "ORD-9",
@@ -889,6 +919,32 @@ class BunningsListingServiceTests(TestCase):
         self.assertEqual(delete_resp.status_code, 200)
         self.assertIn("text/csv", delete_resp["Content-Type"])
         self.assertIn("listing_template_delete.csv", delete_resp["Content-Disposition"])
+
+    @patch("listings.bunnings.client.BunningsClient.list_carriers")
+    def test_carriers_endpoint_returns_shop_list(self, mock_list):
+        from rest_framework.test import APIClient
+
+        mock_list.return_value = BunningsResult(
+            ok=True,
+            data={"carriers": [{"code": "AUSPOST", "label": "Australia Post"}]},
+        )
+        api = APIClient()
+        api.force_authenticate(user=self.user)
+        resp = api.get(f"/api/v1/stores/{self.store.id}/listings/bunnings/carriers/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["carriers"], [{"code": "AUSPOST", "name": "Australia Post"}])
+
+    @patch("listings.bunnings.client.BunningsClient.list_carriers")
+    def test_carriers_endpoint_falls_back_when_empty(self, mock_list):
+        from rest_framework.test import APIClient
+
+        mock_list.return_value = BunningsResult(ok=True, data={"carriers": []})
+        api = APIClient()
+        api.force_authenticate(user=self.user)
+        resp = api.get(f"/api/v1/stores/{self.store.id}/listings/bunnings/carriers/")
+        self.assertEqual(resp.status_code, 200)
+        codes = [row["code"] for row in resp.data["carriers"]]
+        self.assertIn("AUSPOST", codes)
 
     def test_create_variation_listing(self):
         listing = listing_service.create(

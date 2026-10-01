@@ -17,6 +17,17 @@ BUNNINGS_CANCEL_REASONS = [
     ("WRONG_ITEM", "Wrong item / dispatch error"),
     ("OTHER", "Other"),
 ]
+FALLBACK_CARRIERS = [
+    {"code": "AUSPOST", "name": "Australia Post"},
+    {"code": "STARTRACK", "name": "StarTrack"},
+    {"code": "TNT", "name": "TNT"},
+    {"code": "DHL", "name": "DHL"},
+    {"code": "FEDEX", "name": "FedEx"},
+    {"code": "UPS", "name": "UPS"},
+    {"code": "ARAMEX", "name": "Aramex"},
+    {"code": "COURIERSPLEASE", "name": "Couriers Please"},
+    {"code": "SENDLE", "name": "Sendle"},
+]
 
 
 def store_environment(store) -> str:
@@ -462,6 +473,12 @@ def flatten_carriers(payload) -> list[dict]:
         if code:
             out.append({"code": code, "name": label})
     return out
+
+
+def carrier_choices(payload=None) -> list[dict]:
+    """Shop carrier list from Mirakl, or AU fallbacks if the API is empty."""
+    rows = flatten_carriers(payload)
+    return rows or [dict(row) for row in FALLBACK_CARRIERS]
 
 
 def resolve_carrier(store, carrier: str) -> tuple[str, str]:
