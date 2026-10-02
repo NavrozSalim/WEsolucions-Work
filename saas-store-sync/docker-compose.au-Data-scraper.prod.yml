@@ -4,7 +4,7 @@
 # Raise CELERY_AU_SCRAPER_CONCURRENCY when the AU box has 24 GB.
 # DATABASE_URL and REDIS_URL must reach the main app.
 #
-#   docker compose -f docker-compose.au-scraper.yml --env-file .env.prod up -d --build
+#   docker compose -f docker-compose.au-Data-scraper.prod.yml --env-file .env.prod up -d --build
 
 x-au-image: &au-image
   image: saas-store-sync-au-scraper

@@ -3,7 +3,7 @@
 # Cloud VPS 6 (6 vCPU / 12 GB): catalog concurrency 3, discovery concurrency 1.
 # DATABASE_URL and REDIS_URL must reach the main app.
 #
-#   docker compose -f docker-compose.us-scraper.yml --env-file .env.prod up -d --build
+#   docker compose -f docker-compose.us-Data-scraper.prod.yml --env-file .env.prod up -d --build
 
 x-us-image: &us-image
   image: saas-store-sync-us-scraper
