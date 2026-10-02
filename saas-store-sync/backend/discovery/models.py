@@ -44,7 +44,9 @@ class DiscoveryJob(models.Model):
     )
     original_filename = models.CharField(max_length=255, blank=True)
     source_file = models.FileField(upload_to='discovery/uploads/%Y/%m/')
+    source_bytes = models.BinaryField(null=True, blank=True)
     result_file = models.FileField(upload_to='discovery/results/%Y/%m/', blank=True)
+    result_bytes = models.BinaryField(null=True, blank=True)
     rules = models.JSONField(default=dict, blank=True)
     columns = models.JSONField(default=list, blank=True)
     use_sample = models.BooleanField(default=False)
@@ -61,6 +63,24 @@ class DiscoveryJob(models.Model):
 
     def __str__(self):
         return f'{self.marketplace} {self.mode} {self.status}'
+
+    def read_source(self) -> bytes:
+        """Spreadsheet bytes from the shared database, then the local file."""
+        if self.source_bytes:
+            return bytes(self.source_bytes)
+        if not self.source_file:
+            return b''
+        with self.source_file.open('rb') as handle:
+            return handle.read()
+
+    def read_result(self) -> bytes:
+        """Result spreadsheet from the shared database, then the local file."""
+        if self.result_bytes:
+            return bytes(self.result_bytes)
+        if not self.result_file:
+            return b''
+        with self.result_file.open('rb') as handle:
+            return handle.read()
 
 
 class DiscoveryProduct(models.Model):

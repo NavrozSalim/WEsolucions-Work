@@ -1,4 +1,5 @@
 import io
+import os
 import tempfile
 from unittest.mock import patch
 
@@ -309,3 +310,32 @@ class DiscoveryJobTests(TestCase):
         self.assertEqual(child.status, DiscoveryJob.Status.SUCCEEDED, child.error_message)
         self.assertEqual(child.stats['kept'], 1)
         self.assertEqual(child.stats['input_rows'], 1)
+        self.assertTrue(child.source_bytes)
+
+    def test_scrape_reads_the_database_copy_when_the_disk_file_is_missing(self):
+        filename, payload = template_bytes('amazon_us', 'product')
+        response = self.client.post(
+            '/api/v1/discovery/jobs/',
+            {
+                'marketplace': 'amazon_us',
+                'mode': 'product',
+                'use_sample': 'true',
+                'rules': '{}',
+                'columns': '[]',
+                'file': ContentFile(payload, name=filename),
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        job = DiscoveryJob.objects.get(id=response.data['id'])
+        self.assertTrue(job.source_bytes)
+        os.remove(job.source_file.path)
+        execute_job(job.id)
+        job.refresh_from_db()
+        self.assertEqual(job.status, DiscoveryJob.Status.SUCCEEDED, job.error_message)
+        self.assertTrue(job.result_bytes)
+        os.remove(job.result_file.path)
+        download = self.client.get(f'/api/v1/discovery/jobs/{job.id}/download/')
+        self.assertEqual(download.status_code, 200)
+        sheet = load_workbook(io.BytesIO(b''.join(download.streaming_content))).active
+        self.assertEqual([cell.value for cell in next(sheet.iter_rows(max_row=1))][0], 'asin')

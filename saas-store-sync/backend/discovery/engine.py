@@ -12,6 +12,7 @@ from django.utils import timezone
 from .columns import HOSTS, clean_columns, is_amazon, is_ebay, output_columns
 from .files import (
     looks_like_category_url,
+    open_bytes,
     product_url,
     read_spreadsheet,
     stamp_identity,
@@ -152,8 +153,13 @@ def _project(row: dict, columns: list[str]) -> dict:
 
 
 def _load_inputs(job: DiscoveryJob) -> list[dict]:
-    with job.source_file.open('rb') as handle:
-        return read_spreadsheet(handle)
+    try:
+        blob = job.read_source()
+    except FileNotFoundError:
+        blob = b''
+    if not blob:
+        raise DiscoveryError('The uploaded file is missing from the shared database.')
+    return read_spreadsheet(open_bytes(blob, job.original_filename))
 
 
 def _sample_category_rows(job: DiscoveryJob, urls: list[str]) -> list[dict]:
@@ -441,7 +447,11 @@ def execute_job(job_id) -> None:
 
         payload = workbook_bytes(columns, [_project(row, columns) for row in kept_rows])
         filename = f'{job.marketplace}-{job.mode}-{job.id}.xlsx'
-        job.result_file.save(filename, ContentFile(payload), save=False)
+        job.result_bytes = payload
+        try:
+            job.result_file.save(filename, ContentFile(payload), save=False)
+        except OSError:
+            logger.warning('discovery job %s result stayed in the database', job_id)
         job.columns = columns
         job.rules = rules
         warning = ''

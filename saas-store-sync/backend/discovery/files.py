@@ -92,6 +92,13 @@ def _rows_from_matrix(matrix: list[list], expected: list[str] | None = None) -> 
     return rows
 
 
+def open_bytes(data: bytes, name: str):
+    """File-like object so a database copy still has a filename."""
+    handle = io.BytesIO(data)
+    handle.name = name or 'upload.xlsx'
+    return handle
+
+
 def read_spreadsheet(uploaded, marketplace: str | None = None, mode: str | None = None) -> list[dict]:
     name = (getattr(uploaded, 'name', '') or '').lower()
     data = uploaded.read()
