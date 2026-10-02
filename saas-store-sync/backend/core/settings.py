@@ -124,6 +124,7 @@ INSTALLED_APPS = [
     'vendor',
     'products',
     'catalog',
+    'discovery',
     'listings',
     'sync',
     'analytics',
@@ -409,6 +410,7 @@ if sys.platform == 'win32':
 from kombu import Queue  # noqa: E402
 
 from catalog.celery_routing import CatalogScrapeTaskRouter  # noqa: E402
+from discovery.routing import DiscoveryTaskRouter  # noqa: E402
 
 CELERY_TASK_CREATE_MISSING_QUEUES = True
 CELERY_TASK_QUEUES = (
@@ -421,10 +423,15 @@ CELERY_TASK_QUEUES = (
     Queue('feed-au'),
     Queue('orders-us'),
     Queue('orders-au'),
+    # Full marketplace discovery (category + product details). Separate from
+    # heavy-us / heavy-au so a crawl does not block catalog price updates.
+    Queue('discover-us'),
+    Queue('discover-au'),
 )
 CELERY_TASK_DEFAULT_QUEUE = 'celery'
 CELERY_TASK_ROUTES = (
     CatalogScrapeTaskRouter(),
+    DiscoveryTaskRouter(),
     {
         'catalog.ingest_upload_file': {'queue': 'ingest'},
         'listings.ingest_bulk_upload': {'queue': 'ingest'},

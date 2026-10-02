@@ -1,0 +1,89 @@
+# US scrape image — run on the US VPS only. Do not use docker-compose.yml for this host.
+#
+# Cloud VPS 6 (6 vCPU / 12 GB): catalog concurrency 3, discovery concurrency 1.
+# DATABASE_URL and REDIS_URL must reach the main app.
+#
+#   docker compose -f docker-compose.us-scraper.yml --env-file .env.prod up -d --build
+
+x-us-image: &us-image
+  image: saas-store-sync-us-scraper
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "4"
+
+x-us-env: &us-env
+  - DATABASE_URL=${DATABASE_URL}
+  - REDIS_URL=${REDIS_URL}
+  - USE_REDIS_CACHE=${USE_REDIS_CACHE:-1}
+  - PG_CONN_MAX_AGE=${PG_CONN_MAX_AGE:-120}
+  - CATALOG_SCRAPE_CHUNK_SIZE=${CATALOG_SCRAPE_CHUNK_SIZE:-40}
+  - CATALOG_SCRAPE_STALL_MINUTES=${CATALOG_SCRAPE_STALL_MINUTES:-20}
+  - JWT_SECRET=${JWT_SECRET}
+  - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+  - ALLOWED_HOSTS=${ALLOWED_HOSTS}
+  - DEBUG=False
+  - SECURE_SSL_REDIRECT=${SECURE_SSL_REDIRECT:-0}
+  - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-1}
+  - PROXY_URL=${PROXY_URL:-}
+  - PROXY_URLS=${PROXY_URLS:-}
+  - PROXY_ENDPOINTS=${PROXY_ENDPOINTS:-}
+  - PROXY_HOST=${PROXY_HOST:-}
+  - PROXY_PORT=${PROXY_PORT:-}
+  - PROXY_USER=${PROXY_USER:-}
+  - PROXY_PASS=${PROXY_PASS:-}
+  - PROXY_SCHEME=${PROXY_SCHEME:-http}
+
+services:
+  celery_worker_us:
+    <<: *us-image
+    command: >-
+      celery -A core worker -l info
+      -Q heavy-us
+      --concurrency=${CELERY_US_SCRAPER_CONCURRENCY:-3}
+      --prefetch-multiplier=1
+      --max-tasks-per-child=${CELERY_US_MAX_TASKS_PER_CHILD:-40}
+      -n us-catalog@%h
+      -O fair
+    init: true
+    environment: *us-env
+    volumes:
+      - catalog_media_us_scraper:/app/media
+    restart: always
+    stop_grace_period: 90s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 7G
+
+  celery_discover_us:
+    <<: *us-image
+    command: >-
+      celery -A core worker -l info
+      -Q discover-us
+      --concurrency=${CELERY_US_DISCOVER_CONCURRENCY:-1}
+      --prefetch-multiplier=1
+      -n discover-us@%h
+      -O fair
+    init: true
+    environment: *us-env
+    volumes:
+      - catalog_media_us_scraper:/app/media
+    restart: always
+    stop_grace_period: 90s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 3G
+
+volumes:
+  catalog_media_us_scraper:

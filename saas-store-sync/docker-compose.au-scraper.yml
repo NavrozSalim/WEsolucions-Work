@@ -1,0 +1,127 @@
+# AU scrape image — run on an Australia VPS only. Do not use docker-compose.yml for this host.
+#
+# Sized for 12 GB RAM: catalog concurrency 3, discovery concurrency 1, Costway feed concurrency 1.
+# Raise CELERY_AU_SCRAPER_CONCURRENCY when the AU box has 24 GB.
+# DATABASE_URL and REDIS_URL must reach the main app.
+#
+#   docker compose -f docker-compose.au-scraper.yml --env-file .env.prod up -d --build
+
+x-au-image: &au-image
+  image: saas-store-sync-au-scraper
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "4"
+
+x-au-env: &au-env
+  - DATABASE_URL=${DATABASE_URL}
+  - REDIS_URL=${REDIS_URL}
+  - USE_REDIS_CACHE=${USE_REDIS_CACHE:-1}
+  - PG_CONN_MAX_AGE=${PG_CONN_MAX_AGE:-60}
+  - CATALOG_SCRAPE_CHUNK_SIZE=${CATALOG_SCRAPE_CHUNK_SIZE:-40}
+  - JWT_SECRET=${JWT_SECRET}
+  - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+  - ALLOWED_HOSTS=${ALLOWED_HOSTS}
+  - DEBUG=False
+  - SECURE_SSL_REDIRECT=${SECURE_SSL_REDIRECT:-0}
+  - EBAY_HTTP_FIRST=${EBAY_HTTP_FIRST:-1}
+  - EBAY_HTTP_TIMEOUT_SEC=${EBAY_HTTP_TIMEOUT_SEC:-12}
+  - EBAY_AU_HTTP_FIRST=${EBAY_AU_HTTP_FIRST:-}
+  - EBAY_AU_FAST_SCRAPE=${EBAY_AU_FAST_SCRAPE:-1}
+  - EBAY_AU_COOKIES_FILE=${EBAY_AU_COOKIES_FILE:-/app/secrets/ebay_au_cookies.json}
+  - AMAZON_AU_POSTCODE=${AMAZON_AU_POSTCODE:-2762}
+  - COSTWAY_AU_FEED_URL=${COSTWAY_AU_FEED_URL:-https://au.costway.com/media/feed/Dropship-AU.csv}
+  - PROXY_URL=${PROXY_URL:-}
+  - PROXY_URLS=${PROXY_URLS:-}
+  - COSTCO_AU_PROXY_URL=${COSTCO_AU_PROXY_URL:-}
+  - COSTCO_AU_PROXY_URLS=${COSTCO_AU_PROXY_URLS:-}
+  - EBAY_AU_PROXY_URLS=${EBAY_AU_PROXY_URLS:-}
+  - EBAY_AU_MIN_REQUEST_GAP_SEC=${EBAY_AU_MIN_REQUEST_GAP_SEC:-5}
+  - EBAY_AU_HTTP_RETRIES=${EBAY_AU_HTTP_RETRIES:-1}
+  - EBAY_AU_PROXY_BLOCK_COOLDOWN_SEC=${EBAY_AU_PROXY_BLOCK_COOLDOWN_SEC:-300}
+  - EBAY_AU_DISABLE_PROXIES=${EBAY_AU_DISABLE_PROXIES:-}
+  - EBAY_AU_BAIL_ON_HTTP_BLOCK=${EBAY_AU_BAIL_ON_HTTP_BLOCK:-1}
+  - PROXY_ENDPOINTS=${PROXY_ENDPOINTS:-}
+  - PROXY_HOST=${PROXY_HOST:-}
+  - PROXY_PORT=${PROXY_PORT:-}
+  - PROXY_USER=${PROXY_USER:-}
+  - PROXY_PASS=${PROXY_PASS:-}
+  - PROXY_SCHEME=${PROXY_SCHEME:-http}
+
+services:
+  celery_worker_au:
+    <<: *au-image
+    command: >-
+      celery -A core worker -l info
+      -Q heavy-au
+      --concurrency=${CELERY_AU_SCRAPER_CONCURRENCY:-3}
+      --prefetch-multiplier=1
+      --max-tasks-per-child=${CELERY_AU_MAX_TASKS_PER_CHILD:-40}
+      -n au-catalog@%h
+      -O fair
+    init: true
+    environment: *au-env
+    volumes:
+      - catalog_media_au_scraper:/app/media
+      - ${EBAY_AU_SECRETS_DIR:-./secrets}:/app/secrets:ro
+    restart: always
+    stop_grace_period: 90s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 6G
+
+  celery_discover_au:
+    <<: *au-image
+    command: >-
+      celery -A core worker -l info
+      -Q discover-au
+      --concurrency=${CELERY_AU_DISCOVER_CONCURRENCY:-1}
+      --prefetch-multiplier=1
+      -n discover-au@%h
+      -O fair
+    init: true
+    environment: *au-env
+    volumes:
+      - catalog_media_au_scraper:/app/media
+      - ${EBAY_AU_SECRETS_DIR:-./secrets}:/app/secrets:ro
+    restart: always
+    stop_grace_period: 90s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 3G
+
+  celery_worker_au_feed:
+    <<: *au-image
+    command: >-
+      celery -A core worker -l info
+      -Q feed-au
+      --concurrency=${CELERY_AU_FEED_CONCURRENCY:-1}
+      --prefetch-multiplier=1
+      -n au-feed@%h
+      -O fair
+    init: true
+    environment: *au-env
+    volumes:
+      - catalog_media_au_scraper:/app/media
+    restart: always
+    stop_grace_period: 60s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 1G
+
+volumes:
+  catalog_media_au_scraper:

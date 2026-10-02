@@ -214,6 +214,7 @@ const en = {
         dashboard: 'Dashboard',
         stores: 'Stores',
         catalog: 'Catalog',
+        scraping: 'Scraping',
         orders: 'Orders',
         tickets: 'Tickets',
         team: 'Team',

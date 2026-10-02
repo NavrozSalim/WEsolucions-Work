@@ -19,6 +19,8 @@ import Team from './pages/Team/Team';
 import PlatformAdmin from './pages/Platform/PlatformAdmin';
 
 const Catalog = lazy(() => import('./pages/Catalog/Catalog'));
+const Scraping = lazy(() => import('./pages/Scraping/Scraping'));
+const ScrapingProducts = lazy(() => import('./pages/Scraping/ScrapingProducts'));
 const Orders = lazy(() => import('./pages/Orders/Orders'));
 const Tickets = lazy(() => import('./pages/Tickets/Tickets'));
 
@@ -65,6 +67,36 @@ function App() {
                                                     }
                                                 >
                                                     <Catalog />
+                                                </Suspense>
+                                            }
+                                        />
+                                    </Route>
+                                    <Route element={<PermissionRoute permission="catalog" />}>
+                                        <Route
+                                            path="/scraping/:jobId"
+                                            element={
+                                                <Suspense
+                                                    fallback={
+                                                        <div className="p-8 text-slate-600 dark:text-slate-400">
+                                                            Loading products…
+                                                        </div>
+                                                    }
+                                                >
+                                                    <ScrapingProducts />
+                                                </Suspense>
+                                            }
+                                        />
+                                        <Route
+                                            path="/scraping"
+                                            element={
+                                                <Suspense
+                                                    fallback={
+                                                        <div className="p-8 text-slate-600 dark:text-slate-400">
+                                                            Loading scraping…
+                                                        </div>
+                                                    }
+                                                >
+                                                    <Scraping />
                                                 </Suspense>
                                             }
                                         />

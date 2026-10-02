@@ -18,6 +18,39 @@
     }
 }
 
+/* Scrollbars follow the app theme instead of the white system bar. */
+.theme-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(148 163 184) rgb(241 245 249);
+    color-scheme: light;
+}
+.theme-scroll::-webkit-scrollbar {
+    height: 10px;
+    width: 10px;
+}
+.theme-scroll::-webkit-scrollbar-track {
+    background: rgb(241 245 249);
+}
+.theme-scroll::-webkit-scrollbar-thumb {
+    background: rgb(148 163 184);
+    border-radius: 999px;
+    border: 2px solid rgb(241 245 249);
+}
+.dark .theme-scroll {
+    scrollbar-color: rgb(71 85 105) rgb(15 23 42);
+    color-scheme: dark;
+}
+.dark .theme-scroll::-webkit-scrollbar-track {
+    background: rgb(15 23 42);
+}
+.dark .theme-scroll::-webkit-scrollbar-thumb {
+    background: rgb(71 85 105);
+    border-color: rgb(15 23 42);
+}
+.dark .theme-scroll::-webkit-scrollbar-thumb:hover {
+    background: rgb(100 116 139);
+}
+
 /* Public marketing surface — always light, independent of app theme */
 .landing-root {
     --landing-ink: #0b1220;
