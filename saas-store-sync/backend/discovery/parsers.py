@@ -143,6 +143,44 @@ def amazon_results_url(page_url: str) -> str:
     return f'{host}/s?rh=n%3A{node}&fs=true'
 
 
+_AMAZON_TOTAL_RE = re.compile(r'of(?:\s+over)?\s+([\d,]+)\s+results', re.I)
+
+
+def amazon_reported_total(html: str) -> int | None:
+    """How many products Amazon says this search has, when the page states it."""
+    match = _AMAZON_TOTAL_RE.search(html or '')
+    if not match:
+        return None
+    try:
+        return int(match.group(1).replace(',', ''))
+    except ValueError:
+        return None
+
+
+def amazon_with_price(url: str, low_cents: int, high_cents: int) -> str:
+    """Same Amazon search limited to a price band. Amounts are cents."""
+    parts = urlsplit(url)
+    query = parse_qs(parts.query, keep_blank_values=True)
+    low = max(0, int(low_cents))
+    high = max(low, int(high_cents))
+    rh_bits = [
+        bit for bit in (query.get('rh') or [''])[0].split(',')
+        if bit and not bit.startswith('p_36:')
+    ]
+    rh_bits.append(f'p_36:{low}-{high}')
+    query['rh'] = [','.join(rh_bits)]
+    query.pop('page', None)
+    query.pop('low-price', None)
+    query.pop('high-price', None)
+    return urlunsplit((
+        parts.scheme,
+        parts.netloc,
+        parts.path or '/',
+        urlencode(query, doseq=True),
+        '',
+    ))
+
+
 def with_page(url: str, page: int) -> str:
     """Search result page N. Amazon uses ``page``, eBay uses ``_pgn``."""
     parts = urlsplit(url)

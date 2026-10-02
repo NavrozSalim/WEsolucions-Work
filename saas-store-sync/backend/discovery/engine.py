@@ -21,7 +21,9 @@ from .files import (
 from .identity import dedupe_rows, extract_asin, extract_ebay_item_id, product_key
 from .models import DiscoveryJob, DiscoveryProduct
 from .parsers import (
+    amazon_reported_total,
     amazon_results_url,
+    amazon_with_price,
     listing_follow_urls,
     next_page_url,
     parse_amazon_category,
@@ -37,8 +39,14 @@ logger = logging.getLogger(__name__)
 
 MAX_CATEGORY_URLS = 50
 MAX_PRODUCT_URLS = 200
-MAX_CATEGORY_PAGES = 20
-MAX_CATEGORY_PRODUCTS = 300
+# Per search URL. Amazon repeats the same cards after a few hundred, so a
+# department-sized category is split by price instead of trusting page=400.
+MAX_CATEGORY_PAGES = 500
+MAX_CATEGORY_PRODUCTS = 100_000
+# One Amazon search URL lists a few hundred cards. Above this, split by price.
+_AMAZON_PAGE_COVER = 400
+_AMAZON_PRICE_CAP_CENTS = 2_000_000
+_AMAZON_MIN_BAND_CENTS = 100
 FETCH_TIMEOUT = 25
 
 _UA = (
@@ -256,6 +264,107 @@ class _LiveTable:
         self.job.save(update_fields=['stats'])
 
 
+def _paginate_amazon(grid, session, errors, seen_asins, rows, on_batch, note_empty, can_split):
+    """Walk page=1, page=2, ... until a page adds no new ASINs.
+
+    Returns the result count printed on the page, whether the request was
+    blocked, and whether the last page was still full of new products.
+    """
+    reported = None
+    blocked = False
+    still_growing = False
+    previous = None
+    for page in range(1, MAX_CATEGORY_PAGES + 1):
+        if len(rows) >= MAX_CATEGORY_PRODUCTS:
+            break
+        current = with_page(grid, page)
+        try:
+            html = _fetch(current, session)
+        except requests.RequestException as exc:
+            errors.append(f'{current}: {exc}')
+            blocked = True
+            break
+        if _blocked(html):
+            errors.append(f'{current}: the site blocked the request')
+            blocked = True
+            break
+        if reported is None:
+            reported = amazon_reported_total(html)
+        parsed = parse_amazon_category(html, current)
+        page_asins = tuple(row.get('asin') for row in parsed)
+        if previous is not None and page_asins == previous:
+            break
+        previous = page_asins
+        fresh = [row for row in parsed if row.get('asin') not in seen_asins]
+        if not fresh:
+            if page == 1 and note_empty and not rows:
+                errors.append(f'{current}: no product cards found')
+            break
+        for row in fresh:
+            seen_asins.add(row.get('asin'))
+        rows.extend(fresh)
+        if on_batch:
+            on_batch(fresh)
+        if len(rows) >= MAX_CATEGORY_PRODUCTS:
+            break
+        # One search URL will not list a whole department. Split by price
+        # instead of walking pages that repeat the same cards.
+        if (
+            can_split
+            and reported is not None
+            and reported > _AMAZON_PAGE_COVER
+            and len(seen_asins) < reported
+        ):
+            still_growing = True
+            break
+        still_growing = page == MAX_CATEGORY_PAGES
+    return reported, blocked, still_growing
+
+
+def _amazon_band_can_split(low: int | None, high: int | None, depth: int) -> bool:
+    if depth >= 24:
+        return False
+    if low is None or high is None:
+        return True
+    return high - low > _AMAZON_MIN_BAND_CENTS
+
+
+def _collect_amazon(grid, low, high, depth, session, errors, seen_asins, rows, on_batch):
+    if len(rows) >= MAX_CATEGORY_PRODUCTS:
+        return
+    target = grid if low is None else amazon_with_price(grid, low, high)
+    before = len(seen_asins)
+    can_split = _amazon_band_can_split(low, high, depth)
+    reported, blocked, still_growing = _paginate_amazon(
+        target,
+        session,
+        errors,
+        seen_asins,
+        rows,
+        on_batch,
+        note_empty=low is None and not rows and before == 0,
+        can_split=can_split,
+    )
+    if blocked:
+        return
+    gained = len(seen_asins) - before
+    too_big = (
+        (reported is not None and reported > max(gained, _AMAZON_PAGE_COVER))
+        or (reported is None and still_growing)
+    )
+    if not too_big or not can_split:
+        return
+    if gained == 0 and low is not None:
+        return
+    if low is None or high is None:
+        low, high = 0, _AMAZON_PRICE_CAP_CENTS
+    mid = low + (high - low) // 2
+    if mid <= low or mid >= high:
+        return
+    _collect_amazon(grid, low, mid, depth + 1, session, errors, seen_asins, rows, on_batch)
+    _collect_amazon(grid, mid + 1, high, depth + 1, session, errors, seen_asins, rows, on_batch)
+
+
 def _live_category_rows(
     url: str,
     marketplace: str,
@@ -264,48 +373,27 @@ def _live_category_rows(
     session: requests.Session | None = None,
     zip_code: str = '',
 ) -> list[dict]:
-    """Walk the category grid page by page.
+    """Walk every results page of a category link.
 
-    An Amazon ``/b/?node=`` link is opened as the search grid for that node,
-    then ``page=2``, ``page=3``, and so on, until a page adds no new products.
+    An Amazon ``/b/?node=`` link is opened as the search grid. Pages continue
+    until a page adds no new products. When Amazon says the category is larger
+    than one search URL will list, the same grid is fetched again in price bands.
     """
     rows = []
     if is_amazon(marketplace):
         grid = amazon_results_url(url) or url
-        seen_asins = set()
-        for page in range(1, MAX_CATEGORY_PAGES + 1):
-            if len(rows) >= MAX_CATEGORY_PRODUCTS:
-                break
-            current = with_page(grid, page)
-            try:
-                html = _fetch(current, session)
-            except requests.RequestException as exc:
-                errors.append(f'{current}: {exc}')
-                break
-            if _blocked(html):
-                errors.append(f'{current}: the site blocked the request')
-                break
-            parsed = parse_amazon_category(html, current)
-            fresh = [row for row in parsed if row.get('asin') not in seen_asins]
-            if not fresh:
-                if page == 1:
-                    errors.append(f'{current}: no product cards found')
-                break
-            for row in fresh:
-                seen_asins.add(row.get('asin'))
-            rows.extend(fresh)
-            if on_batch:
-                on_batch(fresh)
+        _collect_amazon(grid, None, None, 0, session, errors, set(), rows, on_batch)
         return rows[:MAX_CATEGORY_PRODUCTS]
 
     pages = [_with_ebay_zip(url, zip_code)]
-    seen = set()
+    seen_urls = set()
+    seen_ids = set()
     discovered_follows = False
-    while pages and len(seen) < MAX_CATEGORY_PAGES and len(rows) < MAX_CATEGORY_PRODUCTS:
+    while pages and len(seen_urls) < MAX_CATEGORY_PAGES and len(rows) < MAX_CATEGORY_PRODUCTS:
         current = pages.pop(0)
-        if not current or current in seen:
+        if not current or current in seen_urls:
             continue
-        seen.add(current)
+        seen_urls.add(current)
         try:
             html = _fetch(current, session)
         except requests.RequestException as exc:
@@ -321,16 +409,25 @@ def _live_category_rows(
             errors.append(f'{current}: the site blocked the request')
             continue
         parsed = parse_ebay_category(html, current)
-        if not parsed and not rows:
-            errors.append(f'{current}: no product cards found')
-        rows.extend(parsed)
-        if on_batch and parsed:
-            on_batch(parsed)
+        fresh = []
+        for row in parsed:
+            key = str(row.get('item_id') or row.get('url') or '')
+            if not key or key in seen_ids:
+                continue
+            seen_ids.add(key)
+            fresh.append(row)
+        if not fresh:
+            if not rows:
+                errors.append(f'{current}: no product cards found')
+            continue
+        rows.extend(fresh)
+        if on_batch:
+            on_batch(fresh)
         if not discovered_follows:
             discovered_follows = True
             for follow in listing_follow_urls(html, current):
-                _queue_page(pages, seen, follow)
-        _queue_page(pages, seen, next_page_url(html, current))
+                _queue_page(pages, seen_urls, follow)
+        _queue_page(pages, seen_urls, next_page_url(html, current))
     return rows[:MAX_CATEGORY_PRODUCTS]
 
 

@@ -10,12 +10,14 @@ from openpyxl import load_workbook
 from rest_framework.test import APIClient
 
 from discovery.columns import ID_FIELD
-from discovery.engine import execute_job
+from discovery.engine import _live_category_rows, execute_job
 from discovery.files import template_bytes, workbook_bytes
 from discovery.identity import dedupe_rows
 from discovery.models import DiscoveryJob
 from discovery.parsers import (
+    amazon_reported_total,
     amazon_results_url,
+    amazon_with_price,
     listing_follow_urls,
     parse_amazon_category,
     parse_amazon_product,
@@ -126,6 +128,19 @@ class ParserTests(TestCase):
         self.assertEqual(row['inventory'], 3)
         self.assertIn('Oven safe', row['bullets'])
 
+    def test_amazon_total_and_price_band(self):
+        html = '<span>1-48 of over 50,000 results</span>'
+        self.assertEqual(amazon_reported_total(html), 50000)
+        self.assertIsNone(amazon_reported_total('<span>No results</span>'))
+        sliced = amazon_with_price(
+            'https://www.amazon.com/s?rh=n%3A8882491011&fs=true&page=3',
+            0,
+            2500,
+        )
+        self.assertIn('p_36%3A0-2500', sliced)
+        self.assertNotIn('page=3', sliced)
+        self.assertIn('8882491011', sliced)
+
     def test_amazon_node_page_opens_the_full_grid(self):
         url = (
             'https://www.amazon.com/b/?ie=UTF8&node=8882491011'
@@ -168,6 +183,57 @@ class ParserTests(TestCase):
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(prefix='discovery-test-'))
+class AmazonCategoryWalkTests(TestCase):
+    def test_category_walks_past_300_products(self):
+        def fake_fetch(url, session=None):
+            query = __import__('urllib.parse', fromlist=['parse_qs']).parse_qs(
+                __import__('urllib.parse', fromlist=['urlsplit']).urlsplit(url).query,
+            )
+            page = int((query.get('page') or ['1'])[0])
+            if page > 25:
+                return '<html></html>'
+            cards = []
+            for offset in range(16):
+                asin = f'B{(page * 16 + offset):09d}'
+                cards.append(
+                    f'<div data-asin="{asin}"><h2><a href="/dp/{asin}">Item {asin}</a></h2></div>'
+                )
+            return ''.join(cards)
+
+        with patch('discovery.engine._fetch', side_effect=fake_fetch):
+            rows = _live_category_rows(
+                'https://www.amazon.com/s?rh=n%3A8882491011&fs=true',
+                'amazon_us',
+                [],
+            )
+        self.assertGreater(len(rows), 300)
+        self.assertEqual(len(rows), 25 * 16)
+
+    def test_large_amazon_category_is_split_by_price(self):
+        def fake_fetch(url, session=None):
+            if 'p_36' in url:
+                return '<html></html>'
+            query = __import__('urllib.parse', fromlist=['parse_qs']).parse_qs(
+                __import__('urllib.parse', fromlist=['urlsplit']).urlsplit(url).query,
+            )
+            page = int((query.get('page') or ['1'])[0])
+            if page > 1:
+                return '<html></html>'
+            return (
+                '<span>1-1 of over 10,000 results</span>'
+                '<div data-asin="B0SAMPLE01"><h2><a href="/dp/B0SAMPLE01">Mixer</a></h2></div>'
+            )
+
+        with patch('discovery.engine._fetch', side_effect=fake_fetch) as fetch:
+            rows = _live_category_rows(
+                'https://www.amazon.com/s?rh=n%3A8882491011&fs=true',
+                'amazon_us',
+                [],
+            )
+        self.assertEqual([row['asin'] for row in rows], ['B0SAMPLE01'])
+        self.assertGreaterEqual(sum(1 for call in fetch.call_args_list if 'p_36' in call.args[0]), 2)
+
+
 class DiscoveryJobTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(
