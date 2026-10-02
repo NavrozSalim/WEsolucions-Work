@@ -40,11 +40,9 @@ logger = logging.getLogger(__name__)
 MAX_CATEGORY_URLS = 50
 MAX_PRODUCT_URLS = 200
 # Per search URL. Amazon repeats the same cards after a few hundred, so a
-# department-sized category is split by price instead of trusting page=400.
+# department-sized category is split by price instead of stopping there.
 MAX_CATEGORY_PAGES = 500
 MAX_CATEGORY_PRODUCTS = 100_000
-# One Amazon search URL lists a few hundred cards. Above this, split by price.
-_AMAZON_PAGE_COVER = 400
 _AMAZON_PRICE_CAP_CENTS = 2_000_000
 _AMAZON_MIN_BAND_CENTS = 100
 FETCH_TIMEOUT = 25
@@ -264,20 +262,28 @@ class _LiveTable:
         self.job.save(update_fields=['stats'])
 
 
-def _paginate_amazon(grid, session, errors, seen_asins, rows, on_batch, note_empty, can_split):
-    """Walk page=1, page=2, ... until a page adds no new ASINs.
+def _paginate_amazon(grid, session, errors, seen_asins, rows, on_batch, note_empty):
+    """Walk a search URL until a page adds no new ASINs.
 
-    Returns the result count printed on the page, whether the request was
-    blocked, and whether the last page was still full of new products.
+    Follows Amazon's own Next link, then ``page=`` if that link is missing.
+    A repeated page is Amazon's cap for this URL, not the end of the category.
+    Returns the printed result count, whether the request was blocked, and
+    whether that cap was hit.
     """
     reported = None
     blocked = False
-    still_growing = False
+    recycled = False
     previous = None
-    for page in range(1, MAX_CATEGORY_PAGES + 1):
+    current = with_page(grid, 1)
+    seen_pages = set()
+    for step in range(1, MAX_CATEGORY_PAGES + 1):
         if len(rows) >= MAX_CATEGORY_PRODUCTS:
+            recycled = True
             break
-        current = with_page(grid, page)
+        if not current or current in seen_pages:
+            recycled = True
+            break
+        seen_pages.add(current)
         try:
             html = _fetch(current, session)
         except requests.RequestException as exc:
@@ -292,12 +298,17 @@ def _paginate_amazon(grid, session, errors, seen_asins, rows, on_batch, note_emp
             reported = amazon_reported_total(html)
         parsed = parse_amazon_category(html, current)
         page_asins = tuple(row.get('asin') for row in parsed)
-        if previous is not None and page_asins == previous:
+        if previous is not None and page_asins and page_asins == previous:
+            recycled = True
             break
         previous = page_asins
         fresh = [row for row in parsed if row.get('asin') not in seen_asins]
         if not fresh:
-            if page == 1 and note_empty and not rows:
+            if parsed and len(parsed) >= 8:
+                recycled = True
+            elif reported is not None and reported > len(seen_asins) + 24:
+                recycled = True
+            elif step == 1 and note_empty and not rows:
                 errors.append(f'{current}: no product cards found')
             break
         for row in fresh:
@@ -306,19 +317,15 @@ def _paginate_amazon(grid, session, errors, seen_asins, rows, on_batch, note_emp
         if on_batch:
             on_batch(fresh)
         if len(rows) >= MAX_CATEGORY_PRODUCTS:
+            recycled = True
             break
-        # One search URL will not list a whole department. Split by price
-        # instead of walking pages that repeat the same cards.
-        if (
-            can_split
-            and reported is not None
-            and reported > _AMAZON_PAGE_COVER
-            and len(seen_asins) < reported
-        ):
-            still_growing = True
-            break
-        still_growing = page == MAX_CATEGORY_PAGES
-    return reported, blocked, still_growing
+        nxt = next_page_url(html, current)
+        if not nxt or nxt in seen_pages:
+            nxt = with_page(grid, step + 1)
+        current = nxt
+    else:
+        recycled = True
+    return reported, blocked, recycled
 
 
 def _amazon_band_can_split(low: int | None, high: int | None, depth: int) -> bool:
@@ -335,7 +342,7 @@ def _collect_amazon(grid, low, high, depth, session, errors, seen_asins, rows, o
     target = grid if low is None else amazon_with_price(grid, low, high)
     before = len(seen_asins)
     can_split = _amazon_band_can_split(low, high, depth)
-    reported, blocked, still_growing = _paginate_amazon(
+    reported, blocked, recycled = _paginate_amazon(
         target,
         session,
         errors,
@@ -343,16 +350,14 @@ def _collect_amazon(grid, low, high, depth, session, errors, seen_asins, rows, o
         rows,
         on_batch,
         note_empty=low is None and not rows and before == 0,
-        can_split=can_split,
     )
     if blocked:
         return
     gained = len(seen_asins) - before
-    too_big = (
-        (reported is not None and reported > max(gained, _AMAZON_PAGE_COVER))
-        or (reported is None and still_growing)
-    )
-    if not too_big or not can_split:
+    # A repeated page means this URL is capped (often a few hundred ASINs).
+    # The printed total means the same thing when Amazon states it.
+    short = reported is not None and reported > gained + 24
+    if (not recycled and not short) or not can_split:
         return
     if gained == 0 and low is not None:
         return
@@ -375,9 +380,10 @@ def _live_category_rows(
 ) -> list[dict]:
     """Walk every results page of a category link.
 
-    An Amazon ``/b/?node=`` link is opened as the search grid. Pages continue
-    until a page adds no new products. When Amazon says the category is larger
-    than one search URL will list, the same grid is fetched again in price bands.
+    An Amazon ``/b/?node=`` link is opened as the search grid. Pages follow the
+    Next link until a page adds no new products. When that page is only a repeat,
+    or Amazon's own total is still higher, the same grid is fetched again in
+    price bands.
     """
     rows = []
     if is_amazon(marketplace):

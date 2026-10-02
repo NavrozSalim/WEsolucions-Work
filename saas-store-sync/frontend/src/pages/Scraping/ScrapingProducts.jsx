@@ -62,7 +62,7 @@ function getPageItems(currentPage, totalPages) {
 function headerCellClass(column) {
   if (ID_COLUMNS.has(column)) return 'w-[150px] min-w-[150px] max-w-[180px]';
   if (column === 'url') return 'w-[82px] min-w-[82px] max-w-[82px]';
-  if (column === 'title') return 'min-w-[320px]';
+  if (column === 'title') return 'min-w-[28rem]';
   if (NUMERIC_COLUMNS.has(column)) return 'w-[110px] min-w-[100px]';
   if (column === 'availability') return 'w-[130px] min-w-[120px]';
   if (column === 'category') return 'w-[180px] min-w-[160px]';
@@ -235,8 +235,8 @@ export default function ScrapingProducts() {
             </p>
           </div>
         ) : (
-          <div className="theme-scroll max-h-[62vh] w-full overflow-auto">
-            <table className="w-full min-w-[860px] border-separate border-spacing-0 text-left text-sm">
+          <div className="theme-scroll max-h-[62vh] w-full overflow-x-auto overflow-y-auto">
+            <table className="w-max min-w-full border-separate border-spacing-0 text-left text-sm">
               <thead className="text-slate-500 dark:text-slate-400">
                 <tr>
                   {columns.map((column) => (
@@ -287,14 +287,10 @@ export default function ScrapingProducts() {
                         return (
                           <td
                             key={column}
-                            className="min-w-[320px] border-b border-slate-100 px-3 py-2.5 text-slate-800 dark:border-slate-800 dark:text-slate-100"
+                            title={title}
+                            className="min-w-[28rem] whitespace-nowrap border-b border-slate-100 px-3 py-2.5 text-slate-800 dark:border-slate-800 dark:text-slate-100"
                           >
-                            <span
-                              title={title}
-                              className="block max-w-full whitespace-normal leading-5 [display:-webkit-box] overflow-hidden [-webkit-box-orient:vertical] [-webkit-line-clamp:2]"
-                            >
-                              {title || '—'}
-                            </span>
+                            {title || '—'}
                           </td>
                         );
                       }
@@ -326,11 +322,9 @@ export default function ScrapingProducts() {
                         <td
                           key={column}
                           title={String(value ?? '')}
-                          className={`${headerCellClass(column)} border-b border-slate-100 px-3 py-2.5 text-slate-800 dark:border-slate-800 dark:text-slate-100`}
+                          className={`${headerCellClass(column)} whitespace-nowrap border-b border-slate-100 px-3 py-2.5 text-slate-800 dark:border-slate-800 dark:text-slate-100`}
                         >
-                          <span className="block max-w-[240px] truncate whitespace-nowrap">
-                            {String(value ?? '') || '—'}
-                          </span>
+                          {String(value ?? '') || '—'}
                         </td>
                       );
                     })}

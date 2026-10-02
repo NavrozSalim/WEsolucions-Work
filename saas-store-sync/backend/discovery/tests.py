@@ -131,6 +131,15 @@ class ParserTests(TestCase):
     def test_amazon_total_and_price_band(self):
         html = '<span>1-48 of over 50,000 results</span>'
         self.assertEqual(amazon_reported_total(html), 50000)
+        self.assertEqual(amazon_reported_total('<span>10,000+ results</span>'), 10000)
+        self.assertEqual(
+            amazon_reported_total('{"totalResultCount":41000,"other":1}'),
+            41000,
+        )
+        self.assertEqual(
+            amazon_reported_total('of over <span>60,000</span> results'),
+            60000,
+        )
         self.assertIsNone(amazon_reported_total('<span>No results</span>'))
         sliced = amazon_with_price(
             'https://www.amazon.com/s?rh=n%3A8882491011&fs=true&page=3',
@@ -232,6 +241,57 @@ class AmazonCategoryWalkTests(TestCase):
             )
         self.assertEqual([row['asin'] for row in rows], ['B0SAMPLE01'])
         self.assertGreaterEqual(sum(1 for call in fetch.call_args_list if 'p_36' in call.args[0]), 2)
+
+    def test_repeated_amazon_page_is_split_by_price(self):
+        """Amazon repeats the same cards after a few hundred. That is a cap, not the end."""
+        first = ''.join(
+            f'<div data-asin="B0SAMPLE{n:02d}"><h2><a href="/dp/B0SAMPLE{n:02d}">Item {n}</a></h2></div>'
+            for n in range(1, 3)
+        )
+
+        def fake_fetch(url, session=None):
+            if 'p_36' in url:
+                if 'page=2' in url or 'page%3D2' in url:
+                    return '<html></html>'
+                if 'p_36%3A0-' in url or 'p_36:0-' in url:
+                    return (
+                        '<div data-asin="B0LOW00001">'
+                        '<h2><a href="/dp/B0LOW00001">Low</a></h2></div>'
+                    )
+                return (
+                    '<div data-asin="B0HIGH0001">'
+                    '<h2><a href="/dp/B0HIGH0001">High</a></h2></div>'
+                )
+            return first
+
+        with patch('discovery.engine._fetch', side_effect=fake_fetch):
+            rows = _live_category_rows(
+                'https://www.amazon.com/s?rh=n%3A8882491011&fs=true',
+                'amazon_us',
+                [],
+            )
+        self.assertEqual(
+            [row['asin'] for row in rows],
+            ['B0SAMPLE01', 'B0SAMPLE02', 'B0LOW00001', 'B0HIGH0001'],
+        )
+
+    def test_finished_amazon_category_is_not_split(self):
+        def fake_fetch(url, session=None):
+            if 'page=2' in url or 'p_36' in url:
+                return '<html></html>'
+            return (
+                '<div data-asin="B0SAMPLE01">'
+                '<h2><a href="/dp/B0SAMPLE01">Mixer</a></h2></div>'
+            )
+
+        with patch('discovery.engine._fetch', side_effect=fake_fetch) as fetch:
+            rows = _live_category_rows(
+                'https://www.amazon.com/s?rh=n%3A8882491011&fs=true',
+                'amazon_us',
+                [],
+            )
+        self.assertEqual([row['asin'] for row in rows], ['B0SAMPLE01'])
+        self.assertFalse(any('p_36' in call.args[0] for call in fetch.call_args_list))
 
 
 class DiscoveryJobTests(TestCase):

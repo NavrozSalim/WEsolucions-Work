@@ -143,18 +143,26 @@ def amazon_results_url(page_url: str) -> str:
     return f'{host}/s?rh=n%3A{node}&fs=true'
 
 
-_AMAZON_TOTAL_RE = re.compile(r'of(?:\s+over)?\s+([\d,]+)\s+results', re.I)
+_AMAZON_TOTAL_PATTERNS = (
+    re.compile(r'of(?:\s+over)?\s+([\d,]+)\+?\s+results', re.I),
+    re.compile(r'"totalResultCount"\s*:\s*"?([\d,]+)', re.I),
+    re.compile(r'([\d,]{2,})\+\s+results', re.I),
+)
 
 
 def amazon_reported_total(html: str) -> int | None:
     """How many products Amazon says this search has, when the page states it."""
-    match = _AMAZON_TOTAL_RE.search(html or '')
-    if not match:
-        return None
-    try:
-        return int(match.group(1).replace(',', ''))
-    except ValueError:
-        return None
+    raw = html or ''
+    flat = re.sub(r'<[^>]+>', ' ', raw).replace('\xa0', ' ').replace('&nbsp;', ' ')
+    found = []
+    for blob in (raw, flat):
+        for pattern in _AMAZON_TOTAL_PATTERNS:
+            for match in pattern.finditer(blob):
+                try:
+                    found.append(int(match.group(1).replace(',', '')))
+                except ValueError:
+                    continue
+    return max(found) if found else None
 
 
 def amazon_with_price(url: str, low_cents: int, high_cents: int) -> str:

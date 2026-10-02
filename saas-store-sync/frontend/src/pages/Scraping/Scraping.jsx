@@ -60,7 +60,7 @@ function rulesPayload(form) {
 
 function RuleRow({ label, hint, value, onChange }) {
     return (
-        <div className="grid gap-2 sm:grid-cols-[140px_160px_1fr] sm:items-end">
+        <div className="grid gap-2">
             <div>
                 <p className="text-sm font-medium text-slate-800 dark:text-slate-100">{label}</p>
                 <p className="text-xs text-slate-500 dark:text-slate-400">{hint}</p>
@@ -278,7 +278,7 @@ export default function Scraping() {
     }
 
     return (
-        <div className="mx-auto flex max-w-6xl flex-col gap-6">
+        <div className="flex w-full min-w-0 flex-col gap-6">
             <PageHeader
                 title="Scraping"
                 description="Upload category or product links for Amazon and eBay. Rules and duplicate removal run before the result file is written. US and AU jobs use separate workers."
@@ -364,9 +364,11 @@ export default function Scraping() {
                             Applied to category cards and to product details. A product must pass every rule. Duplicates are always removed.
                         </p>
                     </div>
-                    <RuleRow label="Rating" hint="Example: under 3.5" value={rating} onChange={setRating} />
-                    <RuleRow label="Reviews" hint="Example: under 10" value={reviews} onChange={setReviews} />
-                    <RuleRow label="Price" hint="Highest price is “over”" value={price} onChange={setPrice} />
+                    <div className="grid gap-4 lg:grid-cols-3">
+                        <RuleRow label="Rating" hint="Example: under 3.5" value={rating} onChange={setRating} />
+                        <RuleRow label="Reviews" hint="Example: under 10" value={reviews} onChange={setReviews} />
+                        <RuleRow label="Price" hint="Highest price is “over”" value={price} onChange={setPrice} />
+                    </div>
                     <label className="block text-sm font-medium text-slate-800 dark:text-slate-100">
                         Remove these categories
                         <textarea
