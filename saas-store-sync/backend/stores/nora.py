@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from scrapers.nora_au_ingest import is_nora_vendor_code, load_nora_stock_map_from_file
+from stores.inventory_file import NamedBytes, read_saved_inventory
 
 logger = logging.getLogger("stores.nora")
 
@@ -26,10 +27,17 @@ def load_store_nora_stock_map(store) -> dict[str, int] | None:
       - ``dict`` (possibly empty) when a file is present and parsed
     """
     inv = get_nora_inventory_settings(store)
-    if inv is None or not inv.nora_inventory_file:
+    if inv is None or not (inv.nora_inventory_file or inv.inventory_file_bytes):
         return None
     try:
-        return load_nora_stock_map_from_file(inv.nora_inventory_file)
+        blob = read_saved_inventory(inv)
+        if not blob:
+            name = inv.nora_inventory_file.name if inv.nora_inventory_file else ''
+            raise FileNotFoundError(f'Nora inventory file is missing from this server: {name}')
+        filename = inv.nora_inventory_original_name or (
+            inv.nora_inventory_file.name if inv.nora_inventory_file else ''
+        ) or 'nora.xlsx'
+        return load_nora_stock_map_from_file(NamedBytes(blob, filename))
     except Exception:
         logger.exception(
             "Failed to parse Nora inventory file for store %s",

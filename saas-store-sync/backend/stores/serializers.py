@@ -1024,11 +1024,12 @@ class StoreSerializer(serializers.ModelSerializer):
         # Preserve Nora Excel files across delete/recreate of inventory settings.
         existing_nora = {}
         for old in StoreVendorInventorySettings.objects.filter(store=store).select_related('vendor'):
-            if old.nora_inventory_file:
+            if old.nora_inventory_file or old.inventory_file_bytes:
                 existing_nora[str(old.vendor_id)] = {
-                    'file': old.nora_inventory_file.name,
+                    'file': old.nora_inventory_file.name if old.nora_inventory_file else '',
                     'uploaded_at': old.nora_inventory_uploaded_at,
                     'original_name': old.nora_inventory_original_name or '',
+                    'file_bytes': bytes(old.inventory_file_bytes) if old.inventory_file_bytes else b'',
                 }
         StoreVendorInventorySettings.objects.filter(store=store).delete()
         for item in data:
@@ -1047,12 +1048,15 @@ class StoreSerializer(serializers.ModelSerializer):
                 zero_if_low=item.get('zero_if_low', True) if item.get('zero_if_low') is not False else False,
             )
             preserved = existing_nora.get(str(vendor.id))
-            if preserved and preserved.get('file'):
-                inv.nora_inventory_file.name = preserved['file']
+            if preserved and (preserved.get('file') or preserved.get('file_bytes')):
+                if preserved.get('file'):
+                    inv.nora_inventory_file.name = preserved['file']
+                inv.inventory_file_bytes = preserved.get('file_bytes') or None
                 inv.nora_inventory_uploaded_at = preserved.get('uploaded_at')
                 inv.nora_inventory_original_name = preserved.get('original_name') or ''
                 inv.save(update_fields=[
                     'nora_inventory_file',
+                    'inventory_file_bytes',
                     'nora_inventory_uploaded_at',
                     'nora_inventory_original_name',
                 ])

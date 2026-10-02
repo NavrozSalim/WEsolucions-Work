@@ -366,6 +366,11 @@ class StoreVendorInventorySettings(models.Model):
     )
     nora_inventory_uploaded_at = models.DateTimeField(null=True, blank=True)
     nora_inventory_original_name = models.CharField(max_length=255, blank=True, default='')
+    inventory_file_bytes = models.BinaryField(
+        null=True,
+        blank=True,
+        help_text='Spreadsheet bytes. The AU worker reads this because it does not share the main media disk.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -183,14 +183,19 @@ class StoreViewSet(viewsets.ModelViewSet):
             )
         if hasattr(upload, 'seek'):
             upload.seek(0)
+        payload = upload.read()
+        if hasattr(upload, 'seek'):
+            upload.seek(0)
 
         if inv.nora_inventory_file:
             inv.nora_inventory_file.delete(save=False)
         inv.nora_inventory_file = upload
+        inv.inventory_file_bytes = payload
         inv.nora_inventory_original_name = upload.name or ''
         inv.nora_inventory_uploaded_at = timezone.now()
         inv.save(update_fields=[
             'nora_inventory_file',
+            'inventory_file_bytes',
             'nora_inventory_original_name',
             'nora_inventory_uploaded_at',
             'updated_at',
@@ -262,16 +267,21 @@ class StoreViewSet(viewsets.ModelViewSet):
             )
         if hasattr(upload, 'seek'):
             upload.seek(0)
+        payload = upload.read()
+        if hasattr(upload, 'seek'):
+            upload.seek(0)
 
         sku_count = len({id(v) for v in feed.values()}) if feed else 0
 
         if inv.nora_inventory_file:
             inv.nora_inventory_file.delete(save=False)
         inv.nora_inventory_file = upload
+        inv.inventory_file_bytes = payload
         inv.nora_inventory_original_name = upload.name or ''
         inv.nora_inventory_uploaded_at = timezone.now()
         inv.save(update_fields=[
             'nora_inventory_file',
+            'inventory_file_bytes',
             'nora_inventory_original_name',
             'nora_inventory_uploaded_at',
             'updated_at',

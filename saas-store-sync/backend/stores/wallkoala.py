@@ -8,6 +8,7 @@ from scrapers.wallkoala_ingest import (
     load_wallkoala_feed_from_file,
     lookup_wallkoala_entry,
 )
+from stores.inventory_file import NamedBytes, read_saved_inventory
 
 logger = logging.getLogger("stores.wallkoala")
 
@@ -24,10 +25,17 @@ def get_wallkoala_inventory_settings(store):
 def load_store_wallkoala_feed(store) -> dict | None:
     """SKU → {price, inventory} for ``store``, or None if not configured."""
     inv = get_wallkoala_inventory_settings(store)
-    if inv is None or not inv.nora_inventory_file:
+    if inv is None or not (inv.nora_inventory_file or inv.inventory_file_bytes):
         return None
     try:
-        return load_wallkoala_feed_from_file(inv.nora_inventory_file)
+        blob = read_saved_inventory(inv)
+        if not blob:
+            name = inv.nora_inventory_file.name if inv.nora_inventory_file else ''
+            raise FileNotFoundError(f'Wallkoala inventory file is missing from this server: {name}')
+        filename = inv.nora_inventory_original_name or (
+            inv.nora_inventory_file.name if inv.nora_inventory_file else ''
+        ) or 'wallkoala.xlsx'
+        return load_wallkoala_feed_from_file(NamedBytes(blob, filename))
     except Exception:
         logger.exception(
             "Failed to parse Wallkoala inventory file for store %s",
