@@ -289,10 +289,15 @@ def _is_vevor_listing(listing) -> bool:
 
 
 def _is_costway_listing(listing) -> bool:
-    from scrapers.costway_au_ingest import is_costway_product_url, is_costway_vendor_code
+    from scrapers.costway_au_ingest import is_costway_feed_listing
 
-    return is_costway_vendor_code(getattr(listing, "source_vendor_code", None)) or is_costway_product_url(
-        getattr(listing, "vendor_url", None)
+    return is_costway_feed_listing(
+        source_vendor_code=getattr(listing, "source_vendor_code", None) or "",
+        vendor_url=getattr(listing, "vendor_url", None) or "",
+        vendor_id=getattr(listing, "vendor_id", None) or "",
+        sku=getattr(listing, "sku", None) or "",
+        variant_key=getattr(listing, "external_variant_key", None) or "",
+        product_key=getattr(listing, "external_product_key", None) or "",
     )
 
 
@@ -340,6 +345,8 @@ def _batch_needs_nora_inventory(qs) -> bool:
         | Q(vendor_url__icontains="costway.com")
         | Q(vendor_url__icontains="aliexpress.")
         | Q(vendor_url__icontains="costco.")
+    ).exclude(
+        Q(sku__istartswith="COW-") | Q(external_variant_key__istartswith="COW-")
     ).exists()
 
 
@@ -2712,7 +2719,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     return ""
                 if is_vevor_vendor_code(src) or is_vevor_product_url(url):
                     return "vevor"
-                if is_costway_vendor_code(src) or is_costway_product_url(url):
+                if _is_costway_listing(listing):
                     return "costway"
                 if is_wallkoala_vendor_code(src):
                     return "wallkoala"
@@ -2793,6 +2800,8 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                         price = float(entry.get("Posted Price") or 0)
                     except (TypeError, ValueError):
                         price = None
+                    if price is None or price <= 0:
+                        return None, None, "No price in Costway AU CSV feed"
                     try:
                         stock = int(entry.get("Posted Inventory") or 0)
                     except (TypeError, ValueError):
@@ -2991,9 +3000,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                 uses_vevor = (not explicit_nora) and (
                     is_vevor_vendor_code(src_code) or is_vevor_product_url(url)
                 )
-                uses_costway = (not explicit_nora) and (not uses_vevor) and (
-                    is_costway_vendor_code(src_code) or is_costway_product_url(url)
-                )
+                uses_costway = (not explicit_nora) and (not uses_vevor) and _is_costway_listing(listing)
                 uses_wallkoala = (not explicit_nora) and (not uses_vevor) and (not uses_costway) and (
                     is_wallkoala_vendor_code(src_code)
                 )
@@ -3095,6 +3102,9 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                         price = float(entry.get("Posted Price") or 0)
                     except (TypeError, ValueError):
                         price = None
+                    if price is None or price <= 0:
+                        _fail_row("No price in Costway AU CSV feed")
+                        continue
                     try:
                         stock = int(entry.get("Posted Inventory") or 0)
                     except (TypeError, ValueError):

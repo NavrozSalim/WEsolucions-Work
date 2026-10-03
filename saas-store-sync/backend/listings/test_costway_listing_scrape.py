@@ -211,6 +211,48 @@ class ManagedListingCostwayScrapeTests(TestCase):
         self.assertEqual(ebay.inventory_sync_status, InventorySyncStatus.SCRAPED)
         self.assertEqual(float(ebay.vendor_price), 18.5)
 
+    @patch("stores.nora.load_store_nora_stock_map", return_value=None)
+    @patch("scrapers.close_amazon_session")
+    @patch("scrapers.get_price_and_stock")
+    @patch("scrapers.costway_au_ingest.load_costway_feed_lookups")
+    def test_kogan_sku_uses_costway_file_not_a_page(self, mock_feed, mock_price, _close, _nora):
+        mock_feed.return_value = self._feed("TP10562", price=189.0, stock=4)
+        mock_feed.return_value["lookup"]["36301993"] = {"Posted Price": 0, "Posted Inventory": 0}
+        listing = self._listing(
+            "COW-36301993-TP10562-New",
+            url="https://example.com/not-costway",
+            vendor_id="TP10562",
+            source="",
+        )
+        result = listing_service.scrape_listings(self.user, self.store)
+        self.assertEqual(result["scraped"], 1)
+        self.assertEqual(result["failed"], 0)
+        mock_price.assert_not_called()
+        listing.refresh_from_db()
+        self.assertEqual(listing.inventory_sync_status, InventorySyncStatus.SCRAPED)
+        self.assertEqual(float(listing.vendor_price), 189.0)
+        self.assertEqual(listing.inventory, 4)
+
+    @patch("stores.nora.load_store_nora_stock_map", return_value=None)
+    @patch("scrapers.close_amazon_session")
+    @patch("scrapers.get_price_and_stock")
+    @patch("scrapers.costway_au_ingest.load_costway_feed_lookups")
+    def test_costway_zero_price_is_failed_not_scraped(self, mock_feed, mock_price, _close, _nora):
+        mock_feed.return_value = self._feed("TP10562", price=0, stock=0)
+        listing = self._listing(
+            "COW-36301993-TP10562-New",
+            vendor_id="TP10562",
+            source="",
+        )
+        result = listing_service.scrape_listings(self.user, self.store)
+        self.assertEqual(result["scraped"], 0)
+        self.assertEqual(result["failed"], 1)
+        mock_price.assert_not_called()
+        listing.refresh_from_db()
+        self.assertEqual(listing.inventory_sync_status, InventorySyncStatus.FAILED)
+        self.assertIn("No price", listing.last_scrape_error)
+        self.assertIsNone(listing.vendor_price)
+
     @patch("catalog.tasks._costco_au_runs_on_server", return_value=True)
     @patch("stores.nora.load_store_nora_stock_map", return_value=None)
     @patch("scrapers.close_amazon_session")

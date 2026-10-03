@@ -2494,6 +2494,9 @@ def _run_pending_feed_ingest(
         except Exception as parse_err:
             _miss(pm, f'{kind}_feed_row_invalid', str(parse_err)[:240])
             continue
+        if kind == 'costway' and price <= 0:
+            _miss(pm, f'{kind}_feed_price_missing', 'No price in Costway AU CSV feed')
+            continue
         try:
             pricing = _get_pricing_for_vendor_from_cache(product.vendor_id, price_by_vid, price_fb)
             inventory = _get_inventory_for_vendor_from_cache(product.vendor_id, inv_by_vid, inv_fb)

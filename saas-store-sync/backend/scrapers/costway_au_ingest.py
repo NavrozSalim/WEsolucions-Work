@@ -117,6 +117,29 @@ def costway_vendor_id_from_listing_sku(value) -> str:
     return clean_id(match.group(1))
 
 
+def is_costway_feed_listing(
+    *,
+    source_vendor_code: str = "",
+    vendor_url: str = "",
+    vendor_id: str = "",
+    sku: str = "",
+    variant_key: str = "",
+    product_key: str = "",
+) -> bool:
+    """True when this row should use the Costway CSV, not a product page.
+
+    A Kogan ``COW-{item}-{vendorId}-New`` SKU is enough. The vendor code and
+    ``costway.com`` link are the other signals. The shared item number in the
+    middle of that SKU is not.
+    """
+    if is_costway_vendor_code(source_vendor_code) or is_costway_product_url(vendor_url):
+        return True
+    for val in (vendor_id, sku, variant_key, product_key):
+        if costway_vendor_id_from_listing_sku(val):
+            return True
+    return False
+
+
 def costway_identity_candidates(
     *,
     vendor_id: str = "",
