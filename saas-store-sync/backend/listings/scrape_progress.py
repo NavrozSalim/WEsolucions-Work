@@ -53,7 +53,7 @@ def _empty_progress() -> dict:
 
 def is_feed_progress_message(message) -> bool:
     """True for the vendor-file banner. The poll must not replace this text."""
-    return str(message or "").strip().lower().startswith(("downloading", "applying"))
+    return str(message or "").strip().lower().startswith(("loading", "downloading", "applying"))
 
 
 def get_scrape_progress(store_id) -> dict:

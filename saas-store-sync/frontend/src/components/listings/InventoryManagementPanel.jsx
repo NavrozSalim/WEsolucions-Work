@@ -82,7 +82,7 @@ function JobProgressStrip({
         ? (phase === 'pushing' ? 'Pushing scraped prices…' : 'Fetching vendor prices…')
         : `Pushing price/stock to ${marketplaceLabel}…`;
     const serverMsg = String(progress?.message || '').trim();
-    const feedMsg = /^(downloading|applying)\b/i.test(serverMsg);
+    const feedMsg = /^(loading|downloading|applying)\b/i.test(serverMsg);
     const detail = isScrape
         ? (feedMsg
             ? serverMsg

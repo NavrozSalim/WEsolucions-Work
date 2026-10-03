@@ -375,6 +375,14 @@ _SCRAPE_LISTING_ONLY = (
     "external_variant_key",
 )
 
+# Full rows carry images and marketplace JSON. Loading 5,000 of them from the
+# AU worker took ~10 minutes before the first price was read.
+_SCRAPE_RUN_FIELDS = tuple(
+    dict.fromkeys(
+        _SCRAPE_LISTING_ONLY + ("external_product_key",) + _LISTING_SCRAPE_SAVE_FIELDS
+    )
+)
+
 
 def _store_kind(store) -> str:
     return marketplace_kind(getattr(store, "marketplace", None))
@@ -2460,7 +2468,21 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
             logger.warning("Nora map unavailable for managed scrape store=%s: %s", store.id, nora_err)
             nora_map = None
 
-    listings = [listing for listing in qs if _listing_is_scrapeable(listing, nora_map)]
+    from . import scrape_progress as scrape_prog
+
+    scrape_prog.set_scrape_progress(
+        store.id,
+        job_generation=job_generation,
+        current_sku="",
+        message="Loading listings…",
+    )
+    logger.info("Managed scrape loading listings store=%s", store.id)
+    listings = [
+        listing
+        for listing in qs.only(*_SCRAPE_RUN_FIELDS).iterator(chunk_size=2000)
+        if _listing_is_scrapeable(listing, nora_map)
+    ]
+    logger.info("Managed scrape loaded %s listing(s) store=%s", len(listings), store.id)
 
     wallkoala_feed = None
     wallkoala_vendor_pk = None
@@ -2483,8 +2505,6 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
             "No listings with a Vendor URL, Nora Vendor ID, Vevor SKU, Costway SKU, or Wallkoala SKU to scrape. "
             "Add a vendor link / Vendor ID on each listing first."
         )
-
-    from . import scrape_progress as scrape_prog
 
     if job_generation:
         early_state = scrape_prog.scrape_job_state(store.id, job_generation)
