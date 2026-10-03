@@ -301,6 +301,47 @@ def _is_wallkoala_listing(listing) -> bool:
     return is_wallkoala_vendor_code(getattr(listing, "source_vendor_code", None))
 
 
+_LISTING_SCRAPE_SAVE_FIELDS = (
+    "updated_at",
+    "inventory_sync_status",
+    "last_scrape_at",
+    "last_scrape_error",
+    "vendor_price",
+    "sale_price",
+    "original_price",
+    "sale_price_cents",
+    "original_price_cents",
+    "inventory",
+    "infinite_quantity",
+)
+_SCRAPE_WRITE_BATCH = 200
+
+
+def _batch_needs_nora_inventory(qs) -> bool:
+    """True when this scrape must read the Nora Excel.
+
+    A Costway-only batch does not. Loading that spreadsheet from the database
+    before 5,000 feed lookups is what kept the bar on row 1.
+    """
+    from django.db.models import Q
+
+    from scrapers.nora_au_ingest import is_nora_vendor_code
+
+    from .template_routing import is_nora_like
+
+    for code in qs.values_list("source_vendor_code", flat=True).distinct():
+        if is_nora_like(code) or is_nora_vendor_code(code):
+            return True
+    return qs.filter(source_vendor_code="").exclude(vendor_id="").exclude(
+        Q(vendor_url__icontains="ebay.")
+        | Q(vendor_url__icontains="amazon.")
+        | Q(vendor_url__icontains="vevor")
+        | Q(vendor_url__icontains="costway.com")
+        | Q(vendor_url__icontains="aliexpress.")
+        | Q(vendor_url__icontains="costco.")
+    ).exists()
+
+
 def _listing_is_scrapeable(listing, nora_map) -> bool:
     """True when a managed listing can be scraped (URL, Nora ID, or feed SKU)."""
     has_url = bool((listing.vendor_url or "").strip())
@@ -2162,10 +2203,11 @@ def _estimate_scrape_total(user, store, listing_ids=None) -> int:
 
     qs = _scrapeable_listings_qs(user, store, listing_ids)
     nora_map = None
-    try:
-        nora_map = load_store_nora_stock_map(store)
-    except Exception:  # noqa: BLE001
-        nora_map = None
+    if _batch_needs_nora_inventory(qs):
+        try:
+            nora_map = load_store_nora_stock_map(store)
+        except Exception:  # noqa: BLE001
+            nora_map = None
 
     total = 0
     for listing in qs.only(*_SCRAPE_LISTING_ONLY):
@@ -2210,10 +2252,11 @@ def start_scrape_async(user, store, listing_ids=None, vendor_code=None) -> dict:
     if vendor_code:
         qs = _filter_qs_by_source_vendor(qs, vendor_code)
     nora_map = None
-    try:
-        nora_map = load_store_nora_stock_map(store)
-    except Exception:  # noqa: BLE001
-        nora_map = None
+    if _batch_needs_nora_inventory(qs):
+        try:
+            nora_map = load_store_nora_stock_map(store)
+        except Exception:  # noqa: BLE001
+            nora_map = None
 
     batch = []
     for listing in qs.only(*_SCRAPE_LISTING_ONLY):
@@ -2399,14 +2442,15 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
 
     nora_map = None
     nora_vendor_pk = None
-    try:
-        nora_map = load_store_nora_stock_map(store)
-        nora_inv = get_nora_inventory_settings(store)
-        if nora_inv is not None:
-            nora_vendor_pk = nora_inv.vendor_id
-    except Exception as nora_err:
-        logger.warning("Nora map unavailable for managed scrape store=%s: %s", store.id, nora_err)
-        nora_map = None
+    if _batch_needs_nora_inventory(qs):
+        try:
+            nora_map = load_store_nora_stock_map(store)
+            nora_inv = get_nora_inventory_settings(store)
+            if nora_inv is not None:
+                nora_vendor_pk = nora_inv.vendor_id
+        except Exception as nora_err:
+            logger.warning("Nora map unavailable for managed scrape store=%s: %s", store.id, nora_err)
+            nora_map = None
 
     listings = [listing for listing in qs if _listing_is_scrapeable(listing, nora_map)]
 
@@ -2529,6 +2573,12 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
     costway_lookups = None
     costway_feed_error = ""
     try:
+        pending_writes = []
+        last_sku = ""
+
+        def _flush_writes():
+            return
+
         try:
             if any(_is_vevor_listing(listing) for listing in listings):
                 early = scrape_prog.scrape_job_state(store.id, my_gen)
@@ -2594,9 +2644,37 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     costway_feed_error = (
                         str(feed_err) or "Costway AU feed download failed."
                     )[:500]
+            def _flush_writes():
+                if not pending_writes:
+                    return
+                stamp = timezone.now()
+                for item in pending_writes:
+                    item.updated_at = stamp
+                StoreListing.objects.bulk_update(pending_writes, list(_LISTING_SCRAPE_SAVE_FIELDS))
+                pending_writes.clear()
+                _set_progress(
+                    processed=scraped + failed,
+                    scraped=scraped,
+                    failed=failed,
+                    current_sku=last_sku,
+                    message=(
+                        f"Scraped {scraped} of {total}"
+                        + (f" ({failed} failed)" if failed else "")
+                        + "…"
+                    ),
+                )
+
+            def _queue_write(listing, *, immediate=False):
+                nonlocal last_sku
+                last_sku = (listing.sku or listing.external_variant_key or "")[:80]
+                pending_writes.append(listing)
+                if immediate or len(pending_writes) >= _SCRAPE_WRITE_BATCH:
+                    _flush_writes()
+
             for idx, listing in enumerate(listings):
                 loop_state = scrape_prog.scrape_job_state(store.id, my_gen)
                 if loop_state == "superseded":
+                    _flush_writes()
                     return {
                         "ok": True,
                         "cancelled": True,
@@ -2608,16 +2686,8 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                         "rows": rows,
                     }
                 if loop_state == "cancel":
+                    _flush_writes()
                     return _cancel_result(scraped, failed, rows)
-                _set_progress(
-                    total=total,
-                    processed=idx,
-                    scraped=scraped,
-                    failed=failed,
-                    phase="running",
-                    current_sku=(listing.sku or listing.external_variant_key or "")[:80],
-                    message=f"Scraping {idx + 1} of {total}…",
-                )
                 url = (listing.vendor_url or "").strip()
                 nora_key = (listing.vendor_id or "").strip()
                 src_code = (listing.source_vendor_code or "").strip()
@@ -2655,29 +2725,16 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     "error": "",
                 }
 
-                def _fail_row(message: str) -> None:
+                def _fail_row(message: str, *, immediate: bool = False) -> None:
                     nonlocal failed
                     listing.inventory_sync_status = InventorySyncStatus.FAILED
                     listing.last_scrape_at = now
                     listing.last_scrape_error = (message or "Scrape failed.")[:500]
-                    listing.save(
-                        update_fields=[
-                            "inventory_sync_status",
-                            "last_scrape_at",
-                            "last_scrape_error",
-                            "updated_at",
-                        ]
-                    )
                     row["error"] = listing.last_scrape_error
                     failed += 1
                     rows.append(row)
-                    _set_progress(
-                        processed=idx + 1,
-                        scraped=scraped,
-                        failed=failed,
-                        current_sku=row["sku"] or "",
-                    )
                     logger.warning("Listing scrape failed SKU %s: %s", listing.sku, message)
+                    _queue_write(listing, immediate=immediate)
 
                 result = {}
                 price = None
@@ -2768,13 +2825,14 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                         stock = 0
                     result = {"price": price, "inventory": stock}
                 elif url:
+                    _flush_writes()
                     try:
                         result = get_price_and_stock(
                             url, region, session, vendor_code=src_code or None,
                         ) or {}
                     except Exception as exc:  # noqa: BLE001
                         if not uses_nora:
-                            _fail_row(str(exc) or "Scrape failed.")
+                            _fail_row(str(exc) or "Scrape failed.", immediate=True)
                             continue
                         logger.warning(
                             "Listing scrape failed SKU %s (Nora stock still applied): %s",
@@ -2785,7 +2843,8 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
 
                     if result.get("ingest_only") and not uses_nora:
                         _fail_row(
-                            "This vendor is ingest-only and cannot be scraped server-side."
+                            "This vendor is ingest-only and cannot be scraped server-side.",
+                            immediate=True,
                         )
                         continue
 
@@ -2868,18 +2927,17 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     update_fields.extend(["inventory", "infinite_quantity"])
                     row["inventory"] = listing.inventory
 
-                listing.save(update_fields=list(dict.fromkeys(update_fields)))
                 row["ok"] = True
                 scraped += 1
                 rows.append(row)
-                _set_progress(
-                    processed=idx + 1,
-                    scraped=scraped,
-                    failed=failed,
-                    current_sku=row["sku"] or "",
-                    message=f"Scraped {scraped} of {total}…",
-                )
+                feed_only = uses_vevor or uses_costway or uses_wallkoala
+                _queue_write(listing, immediate=not feed_only)
+            _flush_writes()
         except Exception as scrape_exc:  # noqa: BLE001
+            try:
+                _flush_writes()
+            except Exception:
+                logger.exception("Could not save the last listing batch for store %s", store.id)
             _finish_progress(
                 scraped=scraped,
                 failed=failed + max(0, total - scraped - failed),

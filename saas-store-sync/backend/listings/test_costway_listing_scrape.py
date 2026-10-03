@@ -81,6 +81,7 @@ class ManagedListingCostwayScrapeTests(TestCase):
         self.assertEqual(result["scraped"], 1)
         self.assertEqual(result["failed"], 0)
         mock_price.assert_not_called()
+        _nora.assert_not_called()
         listing.refresh_from_db()
         self.assertEqual(listing.inventory_sync_status, InventorySyncStatus.SCRAPED)
         self.assertEqual(float(listing.vendor_price), 109.95)
