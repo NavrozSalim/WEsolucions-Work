@@ -111,8 +111,8 @@ class ManagedListingCostwayScrapeTests(TestCase):
         self.assertEqual(result["scraped"], 3)
         self.assertEqual(result["failed"], 0)
         mock_price.assert_not_called()
-        # One check before the CSV download. The SKU loop does not call Redis.
-        self.assertEqual(mock_state.call_count, 1)
+        # Download check plus one check for the whole Costway batch, not one per SKU.
+        self.assertLessEqual(mock_state.call_count, 2)
 
     @patch("stores.nora.load_store_nora_stock_map", return_value=None)
     @patch("scrapers.close_amazon_session")

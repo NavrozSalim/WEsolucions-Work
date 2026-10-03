@@ -2685,8 +2685,265 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                 if immediate or len(pending_writes) >= _SCRAPE_WRITE_BATCH:
                     _flush_writes(feed=not immediate)
 
+            def _feed_kind(listing) -> str:
+                src = (listing.source_vendor_code or "").strip()
+                url = (listing.vendor_url or "").strip()
+                if is_nora_like(src) or is_nora_vendor_code(src):
+                    return ""
+                if is_vevor_vendor_code(src) or is_vevor_product_url(url):
+                    return "vevor"
+                if is_costway_vendor_code(src) or is_costway_product_url(url):
+                    return "costway"
+                if is_wallkoala_vendor_code(src):
+                    return "wallkoala"
+                return ""
+
+            page_listings = []
+            feed_groups = {"costway": [], "vevor": [], "wallkoala": []}
+            for listing in listings:
+                kind = _feed_kind(listing)
+                if kind:
+                    feed_groups[kind].append(listing)
+                else:
+                    page_listings.append(listing)
+
+            rules_vendor_ids = {}
+
+            def _rules_vendor_id(listing):
+                src = (listing.source_vendor_code or "").strip()
+                url = (listing.vendor_url or "").strip()
+                key = src.lower() or url.lower()
+                if key in rules_vendor_ids:
+                    return rules_vendor_ids[key]
+                vid = (
+                    _vendor_id_from_source_code(src, price_by_vid, inv_by_vid)
+                    or _vendor_id_from_url(url, price_by_vid, inv_by_vid)
+                )
+                rules_vendor_ids[key] = vid
+                return vid
+
+            def _quote_feed(kind, listing):
+                url = (listing.vendor_url or "").strip()
+                if kind == "vevor":
+                    if vevor_feed_error:
+                        return None, None, vevor_feed_error
+                    entry = lookup_vevor_price_stock(
+                        (vevor_lookups or {}).get("lookup") or {},
+                        (vevor_lookups or {}).get("lookup_compact") or {},
+                        (vevor_lookups or {}).get("lookup_by_url") or {},
+                        vendor_id=listing.vendor_id or "",
+                        sku=listing.sku or "",
+                        variant_key=listing.external_variant_key or "",
+                        product_key=listing.external_product_key or "",
+                        vendor_url=url,
+                    )
+                    if not entry:
+                        return None, None, "SKU not in Vevor AU XLSX feed"
+                    try:
+                        price = float(entry.get("Posted Price") or 0)
+                    except (TypeError, ValueError):
+                        price = None
+                    try:
+                        stock = int(entry.get("Posted Inventory") or 0)
+                    except (TypeError, ValueError):
+                        stock = 0
+                    return price, stock, ""
+                if kind == "costway":
+                    if costway_feed_error:
+                        return None, None, costway_feed_error
+                    entry = lookup_costway_price_stock(
+                        (costway_lookups or {}).get("lookup") or {},
+                        (costway_lookups or {}).get("lookup_compact") or {},
+                        (costway_lookups or {}).get("lookup_by_url") or {},
+                        vendor_id=listing.vendor_id or "",
+                        sku=listing.sku or "",
+                        variant_key=listing.external_variant_key or "",
+                        product_key=listing.external_product_key or "",
+                        vendor_url=url,
+                    )
+                    if not entry:
+                        return None, None, "SKU not in Costway AU CSV feed"
+                    try:
+                        price = float(entry.get("Posted Price") or 0)
+                    except (TypeError, ValueError):
+                        price = None
+                    try:
+                        stock = int(entry.get("Posted Inventory") or 0)
+                    except (TypeError, ValueError):
+                        stock = 0
+                    return price, stock, ""
+                if wallkoala_feed is None:
+                    return None, None, (
+                        "Upload a Wallkoala Excel file in Store Settings "
+                        "(SKU, Vendor Price, Vendor Inventory)."
+                    )
+                entry = lookup_wallkoala_entry(
+                    wallkoala_feed,
+                    listing.vendor_id or "",
+                    listing.sku or "",
+                    listing.external_variant_key or "",
+                    listing.external_product_key or "",
+                )
+                if not entry:
+                    return None, None, "SKU not in Wallkoala Excel"
+                price = entry.get("price")
+                if price is None:
+                    return None, None, "No Vendor Price in Wallkoala Excel for this SKU"
+                try:
+                    price = float(price)
+                except (TypeError, ValueError):
+                    return None, None, "No Vendor Price in Wallkoala Excel for this SKU"
+                try:
+                    stock = int(entry.get("inventory") or 0)
+                except (TypeError, ValueError):
+                    stock = 0
+                return price, stock, ""
+
+            def _apply_vendor_feeds():
+                """Match a whole vendor file, then save price and stock in large batches."""
+                nonlocal scraped, failed
+                labels = {"costway": "Costway", "vevor": "Vevor", "wallkoala": "Wallkoala"}
+                fail_logs = 0
+                for kind in ("costway", "vevor", "wallkoala"):
+                    group = feed_groups[kind]
+                    if not group:
+                        continue
+                    state = scrape_prog.scrape_job_state(store.id, my_gen)
+                    if state == "superseded":
+                        return {
+                            "ok": True,
+                            "cancelled": True,
+                            "superseded": True,
+                            "message": "A newer scrape started; this worker stopped.",
+                            "scraped": scraped,
+                            "failed": failed,
+                            "pushed": 0,
+                            "rows": rows,
+                        }
+                    if state == "cancel":
+                        return _cancel_result(scraped, failed, rows)
+                    label = labels[kind]
+                    _set_progress(
+                        processed=scraped + failed,
+                        scraped=scraped,
+                        failed=failed,
+                        current_sku="",
+                        message=f"Applying {label} prices… {scraped + failed} of {total}",
+                    )
+                    batch = []
+
+                    def _flush_feed():
+                        if not batch:
+                            return
+                        stamp = timezone.now()
+                        for item in batch:
+                            item.updated_at = stamp
+                        StoreListing.objects.bulk_update(batch, list(_LISTING_SCRAPE_SAVE_FIELDS))
+                        batch.clear()
+                        done = scraped + failed
+                        _set_progress(
+                            processed=done,
+                            scraped=scraped,
+                            failed=failed,
+                            current_sku="",
+                            message=f"Applying {label} prices… {done} of {total}",
+                        )
+
+                    for listing in group:
+                        if len(batch) >= _SCRAPE_WRITE_BATCH:
+                            _flush_feed()
+                            state = scrape_prog.scrape_job_state(store.id, my_gen)
+                            if state == "superseded":
+                                return {
+                                    "ok": True,
+                                    "cancelled": True,
+                                    "superseded": True,
+                                    "message": "A newer scrape started; this worker stopped.",
+                                    "scraped": scraped,
+                                    "failed": failed,
+                                    "pushed": 0,
+                                    "rows": rows,
+                                }
+                            if state == "cancel":
+                                return _cancel_result(scraped, failed, rows)
+                        url = (listing.vendor_url or "").strip()
+                        price, stock, err = _quote_feed(kind, listing)
+                        row = {
+                            "id": str(listing.id),
+                            "sku": listing.sku or listing.external_variant_key,
+                            "vendor_url": url,
+                            "vendor_id": (listing.vendor_id or "").strip(),
+                            "ok": False,
+                            "vendor_price": None,
+                            "price": None,
+                            "inventory": None,
+                            "error": "",
+                        }
+                        if err or (price is None and stock is None):
+                            listing.inventory_sync_status = InventorySyncStatus.FAILED
+                            listing.last_scrape_at = now
+                            listing.last_scrape_error = (err or "No price or stock returned.")[:500]
+                            row["error"] = listing.last_scrape_error
+                            failed += 1
+                            rows.append(row)
+                            batch.append(listing)
+                            if fail_logs < 8:
+                                fail_logs += 1
+                                logger.warning(
+                                    "Listing scrape failed SKU %s: %s",
+                                    listing.sku,
+                                    listing.last_scrape_error,
+                                )
+                            continue
+                        vendor_id = _rules_vendor_id(listing)
+                        inventory_vendor = (
+                            wallkoala_vendor_pk
+                            if kind == "wallkoala" and wallkoala_vendor_pk
+                            else vendor_id
+                        )
+                        listing.last_scrape_at = now
+                        listing.last_scrape_error = ""
+                        listing.inventory_sync_status = InventorySyncStatus.SCRAPED
+                        if price is not None:
+                            vp = _safe_decimal(price)
+                            listing.vendor_price = vp
+                            pricing = _get_pricing_for_vendor_from_cache(
+                                vendor_id, price_by_vid, price_fb,
+                            )
+                            priced = _apply_pricing(vp, pricing)
+                            if priced is None:
+                                priced = vp
+                            listing.sale_price = priced
+                            listing.original_price = priced
+                            cents = int(priced * 100)
+                            listing.sale_price_cents = cents
+                            listing.original_price_cents = cents
+                            row["vendor_price"] = float(vp)
+                            row["price"] = float(priced)
+                        if stock is not None:
+                            try:
+                                raw_stock = max(0, int(stock))
+                            except (TypeError, ValueError):
+                                raw_stock = 0
+                            inventory_settings = _get_inventory_for_vendor_from_cache(
+                                inventory_vendor, inv_by_vid, inv_fb,
+                            )
+                            listing.inventory = int(_apply_inventory(raw_stock, inventory_settings))
+                            listing.infinite_quantity = False
+                            row["inventory"] = listing.inventory
+                        row["ok"] = True
+                        scraped += 1
+                        rows.append(row)
+                        batch.append(listing)
+                    _flush_feed()
+                return None
+
+            stopped = _apply_vendor_feeds()
+            if stopped:
+                return stopped
+
             feed_since_check = 0
-            for idx, listing in enumerate(listings):
+            for idx, listing in enumerate(page_listings):
                 url = (listing.vendor_url or "").strip()
                 nora_key = (listing.vendor_id or "").strip()
                 src_code = (listing.source_vendor_code or "").strip()
