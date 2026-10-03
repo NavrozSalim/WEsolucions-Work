@@ -197,12 +197,6 @@ function inventoryLoadError(err) {
 /** Managed-store inventory: scrape then Manual sync / schedule — same as Reverb. */
 export default function InventoryManagementPanel({ storeId, marketplaceCode = '', vendors = [], reloadNonce = 0, onMessage }) {
     const marketplaceLabel = String(marketplaceCode || '').trim() || 'marketplace';
-    const isReverb = marketplaceLabel.toLowerCase() === 'reverb';
-    const isLasoo = marketplaceLabel.toLowerCase() === 'lasoo';
-    const isEtsy = marketplaceLabel.toLowerCase() === 'etsy';
-    const isBunnings = marketplaceLabel.toLowerCase() === 'bunnings';
-    const isTemu = marketplaceLabel.toLowerCase() === 'temu';
-    const canScrape = isReverb || isLasoo || isEtsy || isBunnings || isTemu;
     const [listings, setListings] = useState([]);
     const [totalCount, setTotalCount] = useState(0);
     const [scrapeableCount, setScrapeableCount] = useState(0);
@@ -562,11 +556,9 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                             {loading && listings.length === 0
                                 ? 'Loading…'
                                 : `${totalCount.toLocaleString()} listing${totalCount === 1 ? '' : 's'} on the marketplace`}
-                            {canScrape ? (
-                                <span className="block mt-0.5">
-                                    Start Scraping fetches vendor price/stock for Pending listings only. Use Reset status to re-queue Scraped or Failed rows. Manual sync or your store schedule pushes to {marketplaceLabel}.
-                                </span>
-                            ) : null}
+                            <span className="block mt-0.5">
+                                Start Scraping fetches vendor price/stock for Pending listings only. Use Reset status to re-queue Scraped or Failed rows. Manual sync or your store schedule pushes to {marketplaceLabel}.
+                            </span>
                         </p>
                     </div>
                 </div>
@@ -632,7 +624,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         {exporting ? 'Exporting…' : 'Export'}
                     </Button>
 
-                    {canScrape && !scrapeBusy && storeVendors.length > 1 && (
+                    {!scrapeBusy && storeVendors.length > 1 && (
                         <VendorScopeMenu
                             label={`Start Scraping (${withVendor})`}
                             title={withVendor === 0 ? 'No Pending listings to scrape. Use Reset status to re-queue Scraped or Failed rows.' : `Scrape one vendor, or all vendors, for ${withVendor} Pending listing(s)`}
@@ -642,7 +634,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                             onSelect={(vendor) => handleScrape(null, vendor?.code || null)}
                         />
                     )}
-                    {canScrape && !scrapeBusy && storeVendors.length <= 1 && (
+                    {!scrapeBusy && storeVendors.length <= 1 && (
                         <Button
                             variant="secondary"
                             size="sm"
@@ -654,7 +646,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                             {`Start Scraping (${withVendor})`}
                         </Button>
                     )}
-                    {canScrape && scrapeBusy && (
+                    {scrapeBusy && (
                         <Button
                             variant="secondary"
                             size="sm"
@@ -767,17 +759,15 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                                     </td>
                                     <td className="px-3 py-2.5">
                                         <div className="flex items-center justify-end gap-1">
-                                            {canScrape && (
-                                                <button
-                                                    type="button"
-                                                    title="Scrape vendor URL, Nora stock, Vevor feed, Costway feed, or Wallkoala Excel"
-                                                    className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
-                                                    onClick={() => handleScrape([l.id])}
-                                                    disabled={busy || (!(l.vendor_url || '').trim() && !(l.vendor_id || '').trim() && !/vevor|costway|wallkoala/i.test(l.source_vendor_code || ''))}
-                                                >
-                                                    <Play className="h-4 w-4" />
-                                                </button>
-                                            )}
+                                            <button
+                                                type="button"
+                                                title="Scrape vendor URL, Nora stock, Vevor feed, Costway feed, Wallkoala Excel, or queue HEB / Costco for the desktop runner"
+                                                className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
+                                                onClick={() => handleScrape([l.id])}
+                                                disabled={busy || (!(l.vendor_url || '').trim() && !(l.vendor_id || '').trim() && !/vevor|costway|wallkoala/i.test(l.source_vendor_code || ''))}
+                                            >
+                                                <Play className="h-4 w-4" />
+                                            </button>
                                             <button
                                                 type="button"
                                                 title="Manual sync (push price/stock)"

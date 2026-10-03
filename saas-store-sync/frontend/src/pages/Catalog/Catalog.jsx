@@ -924,6 +924,13 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
     const isPending = jobStatus === 'pending';
     const isClaimed = jobStatus === 'claimed' && vendorIngestIsRunning(vendor);
     const isActive = isPending || isClaimed;
+    const jobStats = job?.stats || {};
+    const jobTotal = Number(jobStats.total || 0);
+    const jobProcessed = Number(jobStats.processed || 0);
+    const showJobCounts = isClaimed && jobTotal > 0;
+    const barPct = showJobCounts
+        ? Math.max(2, Math.min(100, Math.round((100 * jobProcessed) / jobTotal)))
+        : pct;
     const ahead = queue?.ahead_count || 0;
     const etaLabel = formatEtaShort(queue?.eta_seconds);
     const runningOther = queue?.currently_running && !queue.currently_running.is_this_store
@@ -970,6 +977,14 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
                 Pending — {parts.join(' · ')}. This will start on its own when it is your turn.
             </p>
         );
+    } else if (showJobCounts) {
+        queueLine = (
+            <p className="text-xs text-accent-600 dark:text-accent-300 mt-0.5 tabular-nums">
+                {jobStats.phase === 'downloading'
+                    ? `Downloading ${label} feed… ${jobTotal.toLocaleString()} Pending listing(s) to match.`
+                    : `Applying ${label} prices… ${jobProcessed.toLocaleString()}/${jobTotal.toLocaleString()} done · ${Number(jobStats.scraped || 0).toLocaleString()} ok · ${Number(jobStats.failed || 0).toLocaleString()} failed.`}
+            </p>
+        );
     } else if (isClaimed) {
         queueLine = (
             <p className="text-xs text-accent-600 dark:text-accent-300 mt-0.5">
@@ -1009,8 +1024,8 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
             </div>
             <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
                 <div
-                    className={`h-full rounded-full transition-all duration-500 ${barColor}`}
-                    style={{ width: `${pct}%` }}
+                    className={`h-full rounded-full transition-all duration-500 ${showJobCounts ? 'bg-accent-500' : barColor}`}
+                    style={{ width: `${barPct}%` }}
                 />
             </div>
         </div>

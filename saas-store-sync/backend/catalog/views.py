@@ -886,18 +886,19 @@ class CatalogScrapeTriggerView(APIView):
     @staticmethod
     def _maybe_enqueue_vendor_job(store, user, vendor_code: str) -> HebScrapeJob | None:
         """Create (or return existing) ``HebScrapeJob`` row for ``vendor_code``
-        if ``store`` actually has products for that vendor.
+        if ``store`` has Pending products for that vendor (Inventory management
+        rule: Start Scraping only touches Pending rows).
 
         For vendors whose ``runner`` is ``'server'`` (e.g. VevorAU), the Celery
         task is dispatched here so the job starts immediately instead of
         waiting for a desktop poller to claim it.
 
-        Returns ``None`` if the store has nothing for this vendor — callers
+        Returns ``None`` if the store has nothing Pending for this vendor — callers
         should silently skip that vendor in that case.
         """
         from catalog.ingest_views import SUPPORTED_VENDORS
 
-        if not _store_has_vendor_products(store, vendor_code):
+        if not _store_has_pending_vendor_products(store, vendor_code):
             return None
         existing = HebScrapeJob.objects.filter(
             store=store,

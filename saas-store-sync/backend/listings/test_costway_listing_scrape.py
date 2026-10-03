@@ -211,13 +211,14 @@ class ManagedListingCostwayScrapeTests(TestCase):
         self.assertEqual(ebay.inventory_sync_status, InventorySyncStatus.SCRAPED)
         self.assertEqual(float(ebay.vendor_price), 18.5)
 
+    @patch("catalog.tasks._costco_au_runs_on_server", return_value=True)
     @patch("stores.nora.load_store_nora_stock_map", return_value=None)
     @patch("scrapers.close_amazon_session")
     @patch("scrapers.get_price_and_stock")
     @patch("scrapers.vevor_au_ingest.load_vevor_feed_lookups")
     @patch("scrapers.costway_au_ingest.load_costway_feed_lookups")
     def test_costco_url_is_not_treated_as_costway(
-        self, mock_cw, mock_vevor, mock_price, _close, _nora,
+        self, mock_cw, mock_vevor, mock_price, _close, _nora, _proxies,
     ):
         mock_price.return_value = {"price": 20.0, "stock": 2, "error_code": "costco_ingest_only"}
         listing = self._listing(

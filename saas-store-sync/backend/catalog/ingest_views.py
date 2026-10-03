@@ -28,6 +28,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from catalog.models import HebScrapeJob, IngestToken, ProductMapping
+from listings.desktop_ingest import apply_runner_result_to_listings
 from products.models import Product
 from vendor.models import Vendor, VendorPrice
 
@@ -389,12 +390,39 @@ class VendorIngestView(APIView):
                 iexact_filter = {**product_filter, 'vendor_url__iexact': url}
                 del iexact_filter['vendor_url']
                 products = list(Product.objects.filter(**iexact_filter))
+
+            listings_updated = 0
+            try:
+                listings_updated = apply_runner_result_to_listings(
+                    url,
+                    price,
+                    stock,
+                    error_code,
+                    url_host_contains=url_must_contain,
+                    restrict_to_user_id=tok.created_by_id,
+                )
+            except Exception:
+                logger.exception('%s ingest: managed listing update failed for %s', cfg['label'], url)
+
             if not products:
-                results.append({'index': idx, 'status': 'unmatched', 'url': url})
-                stats['skipped'] += 1
+                if listings_updated:
+                    stats['matched'] += 1
+                    stats['applied'] += listings_updated
+                    results.append({
+                        'index': idx,
+                        'status': 'ok',
+                        'url': url,
+                        'product_ids': [],
+                        'mappings_updated': 0,
+                        'listings_updated': listings_updated,
+                    })
+                else:
+                    results.append({'index': idx, 'status': 'unmatched', 'url': url})
+                    stats['skipped'] += 1
                 continue
 
             stats['matched'] += 1
+            stats['applied'] += listings_updated
 
             try:
                 applied_total = 0
@@ -423,6 +451,7 @@ class VendorIngestView(APIView):
                     'url': url,
                     'product_ids': product_ids,
                     'mappings_updated': applied_total,
+                    'listings_updated': listings_updated,
                 })
             except Exception as exc:
                 logger.exception('%s ingest failure for %s', cfg['label'], url)
@@ -564,6 +593,35 @@ def _collect_vendor_urls(
     waiting for scrape data (``sync_status='pending'``) are included — so the
     poller does not re-scrape already populated products.
     """
+    from listings.desktop_ingest import listing_urls_for_runner
+
+    listing_urls = listing_urls_for_runner(
+        _vendor_cfg(vendor)['url_host_contains'],
+        store_id,
+        restrict_to_user_id=restrict_to_user_id,
+        pending_only=pending_only,
+    )
+    mapping_urls = _collect_mapping_vendor_urls(
+        store_id,
+        vendor,
+        restrict_to_user_id=restrict_to_user_id,
+        backfill_missing=backfill_missing,
+        pending_only=pending_only,
+    )
+    if not listing_urls:
+        return mapping_urls
+    return sorted(set(mapping_urls) | set(listing_urls))
+
+
+def _collect_mapping_vendor_urls(
+    store_id: str | None,
+    vendor: str,
+    *,
+    restrict_to_user_id: int | None,
+    backfill_missing: bool,
+    pending_only: bool,
+) -> list[str]:
+    """Vendor URLs from catalog ``ProductMapping`` rows (inventory-only stores)."""
     qs = _ingest_mapping_qs(vendor, store_id, restrict_to_user_id)
     if pending_only:
         qs = qs.filter(sync_status='pending')

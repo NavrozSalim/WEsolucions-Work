@@ -2264,7 +2264,12 @@ def _finalize_vevor_scrape_job(
             'done': HebScrapeJob.Status.DONE,
             'failed': HebScrapeJob.Status.FAILED,
         }.get(status, HebScrapeJob.Status.DONE)
-        if job.status == terminal:
+        if job.status in (terminal, HebScrapeJob.Status.CANCELLED):
+            if stats is not None and job.status == HebScrapeJob.Status.CANCELLED:
+                job.stats = stats
+                job.save(update_fields=['stats'])
+                if store_id:
+                    invalidate_scrape_progress_cache(str(store_id))
             return
         job.status = terminal
         job.completed_at = timezone.now()
@@ -2277,25 +2282,83 @@ def _finalize_vevor_scrape_job(
         logger.exception('Failed to finalize VevorAU job %s', job_id)
 
 
-def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = None) -> dict:
-    """Refresh VendorPrice rows for Vevor AU products from the public S3 XLSX feed.
+_FEED_INGEST_BATCH = 1000
 
-    When ``job_id`` is set (user clicked Start Scraping), **all active** Vevor
-    listings for the store are refreshed in one bulk pass from the feed.
 
-    Without ``job_id`` (background/cron), only ``sync_status='pending'`` rows
-    are processed; when none are pending the feed is not downloaded.
+def _feed_job_cancelled(job_id) -> bool:
+    if not job_id:
+        return False
+    from catalog.models import HebScrapeJob
 
-    ``store_id`` is **required**: mappings are updated only for that store (multi-tenant).
-    """
-    from decimal import Decimal
+    return HebScrapeJob.objects.filter(
+        id=job_id, status=HebScrapeJob.Status.CANCELLED,
+    ).exists()
 
-    from scrapers.vevor_au_ingest import (
-        VEVOR_AU_FEED_URL,
-        fetch_vevor_feed,
-        load_veror_via_excel_positions,
-        lookup_sku,
+
+def _set_feed_job_progress(job_id, store_id, **stats) -> None:
+    """Store live counts on the running feed job so the vendor strip moves per batch."""
+    if not job_id:
+        return
+    from catalog.models import HebScrapeJob
+    from catalog.scrape_progress import invalidate_scrape_progress_cache
+
+    HebScrapeJob.objects.filter(
+        id=job_id,
+        status__in=[HebScrapeJob.Status.PENDING, HebScrapeJob.Status.CLAIMED],
+    ).update(stats=stats)
+    invalidate_scrape_progress_cache(str(store_id))
+
+
+def _feed_identity(pm) -> dict:
+    product = pm.product
+    return {
+        'vendor_id': (getattr(product, 'inventory_vendor_id', None) or '').strip(),
+        'sku': (product.vendor_sku or '').strip(),
+        'variant_key': (getattr(pm, 'marketplace_child_sku', None) or '').strip(),
+        'product_key': (getattr(pm, 'marketplace_parent_sku', None) or '').strip(),
+        'vendor_url': (getattr(product, 'vendor_url', None) or '').strip(),
+    }
+
+
+def _vevor_feed_entry(lookups: dict, **identity):
+    from scrapers.vevor_au_ingest import lookup_vevor_price_stock
+
+    return lookup_vevor_price_stock(
+        lookups.get('lookup') or {},
+        lookups.get('lookup_compact') or {},
+        lookups.get('lookup_by_url') or {},
+        **identity,
     )
+
+
+def _costway_feed_entry(lookups: dict, **identity):
+    from scrapers.costway_au_ingest import lookup_costway_price_stock
+
+    return lookup_costway_price_stock(
+        lookups.get('lookup') or {},
+        lookups.get('lookup_compact') or {},
+        lookups.get('lookup_by_url') or {},
+        **identity,
+    )
+
+
+def _run_pending_feed_ingest(
+    *,
+    kind: str,
+    label: str,
+    store_id: str,
+    job_id: str | None,
+    vendor_ids: list,
+    load_lookups,
+    find_entry,
+    miss_message: str,
+) -> dict:
+    """Apply one vendor file to this store's Pending rows (Inventory management rules).
+
+    Scraped / Synced / Failed rows wait for Reset status. Hits become Scraped,
+    misses become Failed with stock 0. Rows are saved in large batches and
+    nothing is pushed to the marketplace here: Manual sync and the schedule do that.
+    """
     from sync.tasks import (
         _apply_inventory,
         _apply_pricing,
@@ -2303,136 +2366,134 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
         _get_inventory_for_vendor_from_cache,
         _get_pricing_for_vendor_from_cache,
     )
-    from vendor.models import Vendor, VendorPrice
-
-    vevor_codes = ('vevorau', 'vevor_au', 'vevor-au', 'vevor')
-    vendor_ids = list(
-        Vendor.objects.filter(code__iregex=r'^vevor(au|_au|-au)?$')
-        .values_list('id', flat=True)
-    )
-    if not vendor_ids:
-        return {'status': 'no_vendor', 'message': 'Vevor vendor not seeded.', 'updated': 0}
-
-    if not store_id:
-        logger.warning('run_vevor_au_ingest: store_id missing; refusing global apply (multi-tenant).')
-        return {'status': 'skipped', 'message': 'store_id is required', 'updated': 0}
-
-    pm_qs = ProductMapping.objects.filter(
-        store_id=store_id,
-        is_active=True,
-        product__vendor_id__in=vendor_ids,
-    ).select_related('product', 'product__vendor', 'store')
+    from vendor.models import VendorPrice
 
     user_triggered = bool(job_id)
-    if not user_triggered:
-        pm_qs = pm_qs.filter(sync_status='pending')
-
-    if not pm_qs.exists():
-        reason = 'no_vevor_listings' if user_triggered else 'no_pending_vevor'
+    pm_list = list(
+        ProductMapping.objects.filter(
+            store_id=store_id,
+            is_active=True,
+            sync_status='pending',
+            product__vendor_id__in=vendor_ids,
+        ).select_related('product', 'product__vendor', 'store')
+    )
+    if not pm_list:
         result = {
             'status': 'skipped',
-            'reason': reason,
+            'reason': f'no_pending_{kind}',
             'updated': 0,
             'store_id': str(store_id),
             'job_id': str(job_id) if job_id else None,
         }
-        if job_id:
-            _finalize_vevor_scrape_job(
-                job_id, store_id,
-                stats={'received': 0, 'matched': 0, 'applied': 0},
-            )
-        logger.info('Vevor AU ingest skipped: %s', result)
+        _finalize_vevor_scrape_job(
+            job_id, store_id,
+            stats={
+                'received': 0, 'matched': 0, 'applied': 0,
+                'total': 0, 'processed': 0, 'scraped': 0, 'failed': 0, 'phase': 'done',
+            },
+        )
+        logger.info('%s ingest skipped: %s', label, result)
         return result
 
+    total = len(pm_list)
+    _set_feed_job_progress(
+        job_id, store_id, phase='downloading', total=total, processed=0, scraped=0, failed=0,
+    )
     try:
-        xlsx_path = fetch_vevor_feed(VEVOR_AU_FEED_URL)
+        lookups = load_lookups() or {}
     except Exception as e:
-        logger.exception('Vevor AU feed download failed: %s', e)
-        _finalize_vevor_scrape_job(job_id, store_id, status='failed', stats={'error': str(e)[:240]})
+        logger.exception('%s feed download/parse failed: %s', label, e)
+        _finalize_vevor_scrape_job(
+            job_id, store_id, status='failed',
+            stats={
+                'error': str(e)[:240], 'total': total,
+                'processed': 0, 'scraped': 0, 'failed': 0, 'phase': 'failed',
+            },
+        )
         return {'status': 'failed', 'error': str(e), 'updated': 0}
 
-    try:
-        lookup, lookup_compact, pos_rows = load_veror_via_excel_positions(xlsx_path)
-    except Exception as e:
-        logger.exception('Vevor AU feed parse failed: %s', e)
-        _finalize_vevor_scrape_job(job_id, store_id, status='failed', stats={'error': str(e)[:240]})
-        return {'status': 'failed', 'error': str(e), 'updated': 0}
-    finally:
-        try:
-            import os as _os
-            _os.unlink(xlsx_path)
-        except Exception:
-            pass
-
+    lookup = lookups.get('lookup') or {}
+    pos_rows = int(lookups.get('feed_rows') or 0)
     if not lookup:
-        _finalize_vevor_scrape_job(job_id, store_id, stats={'received': pos_rows, 'matched': 0, 'applied': 0})
+        _finalize_vevor_scrape_job(
+            job_id, store_id,
+            stats={
+                'received': pos_rows, 'matched': 0, 'applied': 0,
+                'total': total, 'processed': 0, 'scraped': 0, 'failed': 0, 'phase': 'done',
+            },
+        )
         return {'status': 'empty_feed', 'feed_rows': pos_rows, 'updated': 0}
 
-    pm_list = list(pm_qs)
-    store = pm_list[0].store if pm_list else None
-    if store is None:
-        try:
-            from stores.models import Store
-            store = Store.objects.get(id=store_id)
-        except Exception:
-            store = None
-
-    price_by_vid, price_fb, inv_by_vid, inv_fb = (
-        _build_store_vendor_pricing_inventory_caches(store) if store else ({}, {}, {}, {})
-    )
+    store = pm_list[0].store
+    price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
 
     now = timezone.now()
     matched = missing = updated_rows = 0
     pm_batch: list[ProductMapping] = []
     vp_batch: list[VendorPrice] = []
-    bulk_pm_size = int(getattr(settings, 'VEVOR_INGEST_BULK_BATCH', 500) or 500)
-    bulk_pm_size = max(50, min(bulk_pm_size, 2000))
     pm_fields = (
         'store_price', 'store_stock', 'sync_status',
         'failed_sync_count', 'last_scrape_time', 'scrape_error',
     )
 
-    def _flush_pm_batch() -> None:
+    def _progress(phase: str = 'applying') -> None:
+        _set_feed_job_progress(
+            job_id, store_id,
+            phase=phase,
+            received=pos_rows,
+            total=total,
+            processed=matched + missing,
+            scraped=matched,
+            failed=missing,
+        )
+
+    def _flush() -> None:
         nonlocal updated_rows
-        if not pm_batch:
-            return
-        ProductMapping.objects.bulk_update(pm_batch, pm_fields, batch_size=bulk_pm_size)
-        updated_rows += len(pm_batch)
-        pm_batch.clear()
+        if vp_batch:
+            VendorPrice.objects.bulk_create(vp_batch, batch_size=_FEED_INGEST_BATCH)
+            vp_batch.clear()
+        if pm_batch:
+            ProductMapping.objects.bulk_update(pm_batch, pm_fields, batch_size=_FEED_INGEST_BATCH)
+            updated_rows += len(pm_batch)
+            pm_batch.clear()
+        _progress()
 
-    def _flush_vp_batch() -> None:
-        if not vp_batch:
-            return
-        VendorPrice.objects.bulk_create(vp_batch, batch_size=bulk_pm_size)
-        vp_batch.clear()
+    def _miss(pm, code: str, message: str) -> None:
+        nonlocal missing
+        missing += 1
+        pm.store_stock = 0
+        pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
+        pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
+        reason = f'{code}: {str(message)[:240]}' if message else code
+        pm.scrape_error = reason[:512]
+        pm.last_scrape_time = now
+        pm_batch.append(pm)
 
+    _progress()
+    cancelled = False
     for pm in pm_list:
+        if len(pm_batch) >= _FEED_INGEST_BATCH:
+            _flush()
+            if _feed_job_cancelled(job_id):
+                cancelled = True
+                break
         product = pm.product
         if not product:
             continue
-        raw_sku = (product.vendor_sku or '').strip()
-        if not raw_sku:
-            missing += 1
-            _fail_mapping(pm, 'vevor_feed_sku_missing', 'Missing vendor SKU', store=store)
-            continue
-        entry = lookup_sku(lookup, lookup_compact, raw_sku)
+        identity = _feed_identity(pm)
+        entry = find_entry(lookups, **identity)
         if not entry:
-            missing += 1
-            _fail_mapping(pm, 'vevor_feed_sku_missing', 'SKU not in Vevor AU XLSX feed', store=store)
+            if not identity['sku'] and not identity['vendor_url'] and not identity['variant_key']:
+                _miss(pm, f'{kind}_feed_sku_missing', 'Missing vendor SKU')
+            else:
+                _miss(pm, f'{kind}_feed_sku_missing', miss_message)
             continue
-        matched += 1
         try:
             price = Decimal(str(entry['Posted Price'] or 0))
             stock_val = int(entry.get('Posted Inventory') or 0)
         except Exception as parse_err:
-            missing += 1
-            _fail_mapping(pm, 'vevor_feed_row_invalid', str(parse_err)[:240], store=store)
+            _miss(pm, f'{kind}_feed_row_invalid', str(parse_err)[:240])
             continue
-
-        vp_batch.append(VendorPrice(product=product, price=price, stock=stock_val))
-        if len(vp_batch) >= bulk_pm_size:
-            _flush_vp_batch()
-
         try:
             pricing = _get_pricing_for_vendor_from_cache(product.vendor_id, price_by_vid, price_fb)
             inventory = _get_inventory_for_vendor_from_cache(product.vendor_id, inv_by_vid, inv_fb)
@@ -2446,24 +2507,37 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
             if new_price is None:
                 new_price = price
             new_stock = _apply_inventory(stock_val, inventory)
-            pm.store_price = new_price
-            pm.store_stock = new_stock
-            pm.sync_status = 'scraped'
-            pm.failed_sync_count = 0
-            pm.last_scrape_time = now
-            pm.scrape_error = None
-            pm_batch.append(pm)
-            if len(pm_batch) >= bulk_pm_size:
-                _flush_pm_batch()
         except Exception as apply_err:
             logger.exception(
-                'Vevor AU apply failed for SKU %s (store=%s): %s',
-                product.vendor_sku, pm.store_id, apply_err,
+                '%s apply failed for SKU %s (store=%s): %s',
+                label, product.vendor_sku, pm.store_id, apply_err,
             )
+            _miss(pm, f'{kind}_feed_apply_error', str(apply_err)[:240])
+            continue
+        matched += 1
+        vp_batch.append(VendorPrice(product=product, price=price, stock=stock_val))
+        pm.store_price = new_price
+        pm.store_stock = new_stock
+        pm.sync_status = 'scraped'
+        pm.failed_sync_count = 0
+        pm.last_scrape_time = now
+        pm.scrape_error = None
+        pm_batch.append(pm)
+    _flush()
 
-    _flush_vp_batch()
-    _flush_pm_batch()
-
+    _finalize_vevor_scrape_job(
+        job_id, store_id,
+        stats={
+            'received': pos_rows,
+            'matched': matched,
+            'applied': updated_rows,
+            'total': total,
+            'processed': matched + missing,
+            'scraped': matched,
+            'failed': missing,
+            'phase': 'cancelled' if cancelled else 'done',
+        },
+    )
     result = {
         'status': 'ok',
         'feed_rows': pos_rows,
@@ -2471,25 +2545,47 @@ def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = Non
         'matched': matched,
         'missing': missing,
         'updated': updated_rows,
-        'store_id': str(store_id) if store_id else None,
+        'cancelled': cancelled,
+        'store_id': str(store_id),
         'job_id': str(job_id) if job_id else None,
         'user_triggered': user_triggered,
-        'listing_count': len(pm_list),
+        'listing_count': total,
     }
-
-    if job_id:
-        _finalize_vevor_scrape_job(
-            job_id, store_id,
-            stats={
-                'received': pos_rows,
-                'matched': matched,
-                'applied': updated_rows,
-            },
-        )
-
-    logger.info('Vevor AU ingest summary: %s', result)
+    logger.info('%s ingest summary: %s', label, result)
     return result
 
+
+def run_vevor_au_ingest(store_id: str | None = None, *, job_id: str | None = None) -> dict:
+    """Apply the Vevor AU XLSX feed to this store's Pending Vevor rows.
+
+    Same rules as Inventory management Start Scraping: one feed download,
+    match by Product link / Vendor ID / SKU, batched saves. ``store_id`` is
+    required (multi-tenant). ``job_id`` is the Start Scraping job that carries
+    live counts for the vendor strip.
+    """
+    from scrapers.vevor_au_ingest import load_vevor_feed_lookups
+
+    vendor_ids = list(
+        Vendor.objects.filter(code__iregex=r'^vevor(au|_au|-au)?$')
+        .values_list('id', flat=True)
+    )
+    if not vendor_ids:
+        return {'status': 'no_vendor', 'message': 'Vevor vendor not seeded.', 'updated': 0}
+
+    if not store_id:
+        logger.warning('run_vevor_au_ingest: store_id missing; refusing global apply (multi-tenant).')
+        return {'status': 'skipped', 'message': 'store_id is required', 'updated': 0}
+
+    return _run_pending_feed_ingest(
+        kind='vevor',
+        label='Vevor AU',
+        store_id=store_id,
+        job_id=job_id,
+        vendor_ids=vendor_ids,
+        load_lookups=load_vevor_feed_lookups,
+        find_entry=_vevor_feed_entry,
+        miss_message='SKU not in Vevor AU XLSX feed',
+    )
 
 @shared_task(bind=True, max_retries=3, name='catalog.run_vevor_au_ingest')
 def vevor_au_ingest_task(self, store_id: str | None = None, job_id: str | None = None):
@@ -2504,9 +2600,8 @@ def run_costway_au_ingest(store_id: str | None = None, *, job_id: str | None = N
     (``catalog.run_costway_au_ingest`` → ``feed-au``). Do not call it inline
     from the main ``sync`` / ``light`` workers.
 
-    When ``job_id`` is set (Start Scraping), all active Costway mappings for
-    the store are refreshed. Without ``job_id``, only ``pending`` rows run.
-    ``store_id`` is required (multi-tenant).
+    Same rules as Inventory management Start Scraping: only Pending rows run
+    (Reset status re-queues the rest). ``store_id`` is required (multi-tenant).
 
     Matches use the Vendor ID first, including the ID inside a Kogan
     ``COW-{item}-{vendorId}-New`` SKU. The product URL is used only when
@@ -2514,21 +2609,7 @@ def run_costway_au_ingest(store_id: str | None = None, *, job_id: str | None = N
     with the successes. This pass does not push stock to the marketplace;
     Manual sync and the schedule do that.
     """
-    from scrapers.costway_au_ingest import (
-        COSTWAY_AU_FEED_URL,
-        build_costway_url_index,
-        fetch_costway_feed,
-        load_costway_via_csv,
-        lookup_costway_price_stock,
-    )
-    from sync.tasks import (
-        _apply_inventory,
-        _apply_pricing,
-        _build_store_vendor_pricing_inventory_caches,
-        _get_inventory_for_vendor_from_cache,
-        _get_pricing_for_vendor_from_cache,
-    )
-    from vendor.models import Vendor, VendorPrice
+    from scrapers.costway_au_ingest import load_costway_feed_lookups
 
     vendor_ids = list(
         Vendor.objects.filter(code__iregex=r'^costway(au|_au|-au)?$')
@@ -2543,215 +2624,16 @@ def run_costway_au_ingest(store_id: str | None = None, *, job_id: str | None = N
         )
         return {'status': 'skipped', 'message': 'store_id is required', 'updated': 0}
 
-    pm_qs = ProductMapping.objects.filter(
+    return _run_pending_feed_ingest(
+        kind='costway',
+        label='Costway AU',
         store_id=store_id,
-        is_active=True,
-        product__vendor_id__in=vendor_ids,
-    ).select_related('product', 'product__vendor', 'store')
-
-    user_triggered = bool(job_id)
-    if not user_triggered:
-        pm_qs = pm_qs.filter(sync_status='pending')
-
-    if not pm_qs.exists():
-        reason = 'no_costway_listings' if user_triggered else 'no_pending_costway'
-        result = {
-            'status': 'skipped',
-            'reason': reason,
-            'updated': 0,
-            'store_id': str(store_id),
-            'job_id': str(job_id) if job_id else None,
-        }
-        if job_id:
-            _finalize_vevor_scrape_job(
-                job_id, store_id,
-                stats={'received': 0, 'matched': 0, 'applied': 0},
-            )
-        logger.info('Costway AU ingest skipped: %s', result)
-        return result
-
-    try:
-        csv_path = fetch_costway_feed(COSTWAY_AU_FEED_URL)
-    except Exception as e:
-        logger.exception('Costway AU feed download failed: %s', e)
-        _finalize_vevor_scrape_job(
-            job_id, store_id, status='failed', stats={'error': str(e)[:240]},
-        )
-        return {'status': 'failed', 'error': str(e), 'updated': 0}
-
-    try:
-        lookup, lookup_compact, pos_rows = load_costway_via_csv(csv_path)
-    except Exception as e:
-        logger.exception('Costway AU feed parse failed: %s', e)
-        _finalize_vevor_scrape_job(
-            job_id, store_id, status='failed', stats={'error': str(e)[:240]},
-        )
-        return {'status': 'failed', 'error': str(e), 'updated': 0}
-    finally:
-        try:
-            import os as _os
-            _os.unlink(csv_path)
-        except Exception:
-            pass
-
-    if not lookup:
-        _finalize_vevor_scrape_job(
-            job_id, store_id,
-            stats={'received': pos_rows, 'matched': 0, 'applied': 0},
-        )
-        return {'status': 'empty_feed', 'feed_rows': pos_rows, 'updated': 0}
-
-    lookup_by_url = build_costway_url_index(lookup)
-    pm_list = list(pm_qs)
-    store = pm_list[0].store if pm_list else None
-    if store is None:
-        try:
-            from stores.models import Store
-            store = Store.objects.get(id=store_id)
-        except Exception:
-            store = None
-
-    price_by_vid, price_fb, inv_by_vid, inv_fb = (
-        _build_store_vendor_pricing_inventory_caches(store) if store else ({}, {}, {}, {})
+        job_id=job_id,
+        vendor_ids=vendor_ids,
+        load_lookups=load_costway_feed_lookups,
+        find_entry=_costway_feed_entry,
+        miss_message='SKU not in Costway AU CSV feed',
     )
-
-    now = timezone.now()
-    matched = missing = updated_rows = 0
-    pm_batch: list[ProductMapping] = []
-    vp_batch: list[VendorPrice] = []
-    bulk_pm_size = int(getattr(settings, 'COSTWAY_INGEST_BULK_BATCH', 500) or 500)
-    bulk_pm_size = max(50, min(bulk_pm_size, 2000))
-    pm_fields = (
-        'store_price', 'store_stock', 'sync_status',
-        'failed_sync_count', 'last_scrape_time', 'scrape_error',
-    )
-
-    def _flush_pm_batch() -> None:
-        nonlocal updated_rows
-        if not pm_batch:
-            return
-        ProductMapping.objects.bulk_update(pm_batch, pm_fields, batch_size=bulk_pm_size)
-        updated_rows += len(pm_batch)
-        pm_batch.clear()
-
-    def _flush_vp_batch() -> None:
-        if not vp_batch:
-            return
-        VendorPrice.objects.bulk_create(vp_batch, batch_size=bulk_pm_size)
-        vp_batch.clear()
-
-    def _queue_costway_miss(pm, code: str, message: str) -> None:
-        """Record a feed miss in the same bulk batch. No marketplace push."""
-        nonlocal missing
-        missing += 1
-        pm.store_stock = 0
-        pm.failed_sync_count = (pm.failed_sync_count or 0) + 1
-        pm.sync_status = 'needs_attention' if pm.failed_sync_count >= 3 else 'failed'
-        reason = code
-        if message:
-            reason = f'{code}: {str(message)[:240]}'
-        pm.scrape_error = reason[:512]
-        pm.last_scrape_time = now
-        pm_batch.append(pm)
-        if len(pm_batch) >= bulk_pm_size:
-            _flush_pm_batch()
-
-    for pm in pm_list:
-        product = pm.product
-        if not product:
-            continue
-        raw_sku = (product.vendor_sku or '').strip()
-        vendor_id = (getattr(product, 'inventory_vendor_id', None) or '').strip()
-        vendor_url = (getattr(product, 'vendor_url', None) or '').strip()
-        child_sku = (getattr(pm, 'marketplace_child_sku', None) or '').strip()
-        parent_sku = (getattr(pm, 'marketplace_parent_sku', None) or '').strip()
-        entry = lookup_costway_price_stock(
-            lookup,
-            lookup_compact,
-            lookup_by_url,
-            vendor_id=vendor_id,
-            sku=raw_sku,
-            variant_key=child_sku,
-            product_key=parent_sku,
-            vendor_url=vendor_url,
-        )
-        if not entry:
-            if not raw_sku and not vendor_url and not child_sku:
-                _queue_costway_miss(pm, 'costway_feed_sku_missing', 'Missing vendor SKU')
-            else:
-                _queue_costway_miss(
-                    pm, 'costway_feed_sku_missing', 'SKU not in Costway AU CSV feed',
-                )
-            continue
-        try:
-            price = Decimal(str(entry['Posted Price'] or 0))
-            stock_val = int(entry.get('Posted Inventory') or 0)
-        except Exception as parse_err:
-            _queue_costway_miss(pm, 'costway_feed_row_invalid', str(parse_err)[:240])
-            continue
-        matched += 1
-
-        vp_batch.append(VendorPrice(product=product, price=price, stock=stock_val))
-        if len(vp_batch) >= bulk_pm_size:
-            _flush_vp_batch()
-
-        try:
-            pricing = _get_pricing_for_vendor_from_cache(product.vendor_id, price_by_vid, price_fb)
-            inventory = _get_inventory_for_vendor_from_cache(product.vendor_id, inv_by_vid, inv_fb)
-            new_price = _apply_pricing(
-                price,
-                pricing,
-                pack_qty=getattr(pm, 'pack_qty', None),
-                prep_fees=getattr(pm, 'prep_fees', None),
-                shipping_fees=getattr(pm, 'shipping_fees', None),
-            )
-            if new_price is None:
-                new_price = price
-            new_stock = _apply_inventory(stock_val, inventory)
-            pm.store_price = new_price
-            pm.store_stock = new_stock
-            pm.sync_status = 'scraped'
-            pm.failed_sync_count = 0
-            pm.last_scrape_time = now
-            pm.scrape_error = None
-            pm_batch.append(pm)
-            if len(pm_batch) >= bulk_pm_size:
-                _flush_pm_batch()
-        except Exception as apply_err:
-            logger.exception(
-                'Costway AU apply failed for SKU %s (store=%s): %s',
-                product.vendor_sku, pm.store_id, apply_err,
-            )
-
-    _flush_vp_batch()
-    _flush_pm_batch()
-
-    result = {
-        'status': 'ok',
-        'feed_rows': pos_rows,
-        'feed_unique_skus': len(lookup),
-        'matched': matched,
-        'missing': missing,
-        'updated': updated_rows,
-        'store_id': str(store_id) if store_id else None,
-        'job_id': str(job_id) if job_id else None,
-        'user_triggered': user_triggered,
-        'listing_count': len(pm_list),
-    }
-
-    if job_id:
-        _finalize_vevor_scrape_job(
-            job_id, store_id,
-            stats={
-                'received': pos_rows,
-                'matched': matched,
-                'applied': updated_rows,
-            },
-        )
-
-    logger.info('Costway AU ingest summary: %s', result)
-    return result
-
 
 @shared_task(bind=True, max_retries=3, name='catalog.run_costway_au_ingest')
 def costway_au_ingest_task(self, store_id: str | None = None, job_id: str | None = None):

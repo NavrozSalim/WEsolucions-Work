@@ -19,6 +19,7 @@ from stores.credentials import marketplace_kind
 
 from . import csv_import
 from . import template_routing
+from .desktop_ingest import DESKTOP_RUNNER_VENDORS, desktop_runner_vendor, queue_desktop_runner_jobs
 from .errors import MarketplaceError
 from .etsy import listings as etsy_listings
 from .lasoo import mapper, validator
@@ -2573,6 +2574,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
     vevor_feed_error = ""
     costway_lookups = None
     costway_feed_error = ""
+    desktop_queued: dict = {}
     try:
         pending_writes = []
         pending_are_feed = True
@@ -2718,12 +2720,18 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
 
             page_listings = []
             feed_groups = {"costway": [], "vevor": [], "wallkoala": []}
+            desktop_groups = {code: [] for code in DESKTOP_RUNNER_VENDORS}
             for listing in listings:
                 kind = _feed_kind(listing)
                 if kind:
                     feed_groups[kind].append(listing)
+                    continue
+                runner = desktop_runner_vendor(listing)
+                if runner:
+                    desktop_groups[runner].append(listing)
                 else:
                     page_listings.append(listing)
+            desktop_queued = queue_desktop_runner_jobs(user, store, desktop_groups)
 
             rules_vendor_ids = {}
 
@@ -3251,9 +3259,14 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
 
     # Scrape only — leave status Scraped. Manual sync / schedule pushes to marketplace
     # (same flow as Reverb managed inventory).
+    waiting = "".join(
+        f"; {n} {code.upper()} listing(s) stay Pending until the desktop runner reports"
+        for code, n in desktop_queued.items()
+    )
     msg = (
         f"Scraped {scraped} listing(s)"
         + (f"; {failed} failed" if failed else "")
+        + waiting
         + ". Use Manual sync or your schedule to push price/stock to the marketplace."
     )
     _finish_progress(
@@ -3262,11 +3275,12 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
         message=msg,
     )
     return {
-        "ok": scraped > 0,
+        "ok": scraped > 0 or bool(desktop_queued),
         "message": msg,
         "scraped": scraped,
         "failed": failed,
         "pushed": 0,
+        "desktop_queued": desktop_queued,
         "rows": rows,
     }
 
