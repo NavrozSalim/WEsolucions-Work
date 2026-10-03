@@ -51,7 +51,7 @@ export default function SidebarActivityPanel({ activities, desktopCollapsed }) {
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -6 }}
                         transition={{ duration: 0.18 }}
-                        className={`mb-2 rounded-lg border px-3 py-2.5 text-left shadow-sm last:mb-0 ${
+                        className={`mb-2 rounded-lg border px-3 py-2.5 text-left shadow-xs last:mb-0 ${
                             dark
                                 ? 'border-slate-700/80 bg-slate-900/90 text-slate-200'
                                 : 'border-slate-200 bg-white text-slate-800'

@@ -62,7 +62,7 @@ function getPageItems(currentPage, totalPages) {
 function headerCellClass(column) {
   if (ID_COLUMNS.has(column)) return 'w-[150px] min-w-[150px] max-w-[180px]';
   if (column === 'url') return 'w-[82px] min-w-[82px] max-w-[82px]';
-  if (column === 'title') return 'min-w-[28rem]';
+  if (column === 'title') return 'min-w-md';
   if (NUMERIC_COLUMNS.has(column)) return 'w-[110px] min-w-[100px]';
   if (column === 'availability') return 'w-[130px] min-w-[120px]';
   if (column === 'category') return 'w-[180px] min-w-[160px]';
@@ -214,7 +214,7 @@ export default function ScrapingProducts() {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search title, id, or URL"
-            className="w-full rounded-md border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 outline-none transition focus:border-slate-300 focus:ring-2 focus:ring-slate-200/60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-slate-600 dark:focus:ring-slate-700/60"
+            className="w-full rounded-md border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 outline-hidden transition focus:border-slate-300 focus:ring-2 focus:ring-slate-200/60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-slate-600 dark:focus:ring-slate-700/60"
           />
         </label>
 
@@ -242,7 +242,7 @@ export default function ScrapingProducts() {
                   {columns.map((column) => (
                     <th
                       key={column}
-                      className={`sticky top-0 z-10 border-b border-slate-200 bg-slate-50/95 px-3 py-2.5 font-medium backdrop-blur dark:border-slate-700 dark:bg-slate-800/95 ${headerCellClass(column)} ${NUMERIC_COLUMNS.has(column) ? 'text-right' : 'text-left'}`}
+                      className={`sticky top-0 z-10 border-b border-slate-200 bg-slate-50/95 px-3 py-2.5 font-medium backdrop-blur-sm dark:border-slate-700 dark:bg-slate-800/95 ${headerCellClass(column)} ${NUMERIC_COLUMNS.has(column) ? 'text-right' : 'text-left'}`}
                     >
                       <span className="whitespace-nowrap">{columnLabel(column)}</span>
                     </th>
@@ -288,7 +288,7 @@ export default function ScrapingProducts() {
                           <td
                             key={column}
                             title={title}
-                            className="min-w-[28rem] whitespace-nowrap border-b border-slate-100 px-3 py-2.5 text-slate-800 dark:border-slate-800 dark:text-slate-100"
+                            className="min-w-md whitespace-nowrap border-b border-slate-100 px-3 py-2.5 text-slate-800 dark:border-slate-800 dark:text-slate-100"
                           >
                             {title || '—'}
                           </td>

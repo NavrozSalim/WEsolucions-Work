@@ -86,7 +86,7 @@ export function ReverbCategorySelect({ storeId, value, onChange, required = fals
                             value={query}
                             onChange={(e) => setQuery(e.target.value)}
                             placeholder="Type to search (e.g. Cables, Pedals)"
-                            className="w-full bg-transparent text-sm outline-none text-slate-900 dark:text-slate-100"
+                            className="w-full bg-transparent text-sm outline-hidden text-slate-900 dark:text-slate-100"
                         />
                         {loading && <Loader2 className="h-4 w-4 animate-spin text-slate-400" />}
                     </div>
@@ -166,7 +166,7 @@ export function ReverbConditionSelect({ storeId, value, onChange, required = fal
                     onChange?.(uuid, hit?.name || uuid);
                 }}
                 required={required}
-                className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-sm focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-none"
+                className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-hidden"
             >
                 {selectOptions.map((opt) => (
                     <option key={opt.value || 'empty'} value={opt.value} disabled={!opt.value}>

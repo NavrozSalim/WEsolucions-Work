@@ -16,7 +16,7 @@ export default function KPICard({ label, value, sub, icon: Icon, to, tone = 'def
         'block rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 sm:p-5',
         'transition-colors',
         to
-            ? 'hover:border-accent-400 dark:hover:border-accent-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500'
+            ? 'hover:border-accent-400 dark:hover:border-accent-500 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-accent-500'
             : '',
     ]
         .filter(Boolean)

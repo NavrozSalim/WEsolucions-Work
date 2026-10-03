@@ -15,7 +15,7 @@ import { BrandMark } from './Navbar';
 function FlowNode({ icon: Icon, label }) {
     return (
         <div className="flex flex-col items-center gap-1.5">
-            <span className="grid h-10 w-10 place-items-center rounded-xl border border-white/10 bg-white/[0.04] text-sky-300">
+            <span className="grid h-10 w-10 place-items-center rounded-xl border border-white/10 bg-white/4 text-sky-300">
                 <Icon className="h-5 w-5" />
             </span>
             <span className="text-[11px] font-medium text-slate-400">{label}</span>

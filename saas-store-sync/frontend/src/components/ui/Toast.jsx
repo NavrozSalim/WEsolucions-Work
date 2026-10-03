@@ -33,7 +33,7 @@ export default function Toast({ open, message, variant = 'info', duration = 4000
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 80 }}
             transition={{ type: 'spring', damping: 28, stiffness: 350 }}
-            className="fixed top-4 right-4 z-[100] w-full max-w-md"
+            className="fixed top-4 right-4 z-100 w-full max-w-md"
         >
             <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg overflow-hidden">
                 <div className="flex items-start gap-3 p-4">
@@ -44,7 +44,7 @@ export default function Toast({ open, message, variant = 'info', duration = 4000
                         {v === 'error' && <X className="h-5 w-5 stroke-[2.5]" />}
                         {v !== 'success' && v !== 'error' && <Info className="h-5 w-5 stroke-[2.5]" />}
                     </div>
-                    <p className="flex-1 text-sm font-medium text-slate-900 dark:text-slate-100 pt-0.5 break-words">
+                    <p className="flex-1 text-sm font-medium text-slate-900 dark:text-slate-100 pt-0.5 wrap-break-word">
                         {message}
                     </p>
                     <button

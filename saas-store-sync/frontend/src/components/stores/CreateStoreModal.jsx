@@ -906,12 +906,12 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} aria-hidden="true" />
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-xs" onClick={onClose} aria-hidden="true" />
             <div
                 className={`relative rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl overflow-hidden flex flex-col ${showSteps ? 'w-full max-w-6xl max-h-[90vh]' : 'w-full max-w-lg max-h-[90vh]'}`}
                 onClick={(e) => e.stopPropagation()}
             >
-                <div className="flex-shrink-0 border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-6 pt-5 pb-0">
+                <div className="shrink-0 border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-6 pt-5 pb-0">
                     <div className="flex items-start justify-between gap-4 mb-4">
                         <div>
                             <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
@@ -1241,7 +1241,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                         onChange={(e) => setForm((f) => ({ ...f, kogan_service_account_json: e.target.value }))}
                                                         placeholder="Paste the downloaded service account JSON here"
                                                         rows={8}
-                                                        className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-mono text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-none"
+                                                        className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-mono text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-hidden"
                                                     />
                                                     <div className="text-xs text-slate-500 dark:text-slate-400">
                                                         The sheet must be shared with the JSON&apos;s <span className="font-mono">client_email</span> (Editor access).
@@ -1324,7 +1324,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                         <select
                                                             value={form.schedule_hour}
                                                             onChange={(e) => setForm((f) => ({ ...f, schedule_hour: e.target.value }))}
-                                                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-none"
+                                                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-hidden"
                                                         >
                                                             {Array.from({ length: 24 }, (_, i) => (
                                                                 <option key={i} value={String(i)}>
@@ -1336,7 +1336,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                         <select
                                                             value={form.schedule_minute}
                                                             onChange={(e) => setForm((f) => ({ ...f, schedule_minute: e.target.value }))}
-                                                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-none"
+                                                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-hidden"
                                                         >
                                                             {['00', '15', '30', '45'].map((m) => (
                                                                 <option key={m} value={m}>{m}</option>
@@ -1597,7 +1597,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     </div>
                 </div>
 
-                <div className="flex-shrink-0 flex justify-between items-center border-t border-slate-200 dark:border-slate-700 px-6 py-4">
+                <div className="shrink-0 flex justify-between items-center border-t border-slate-200 dark:border-slate-700 px-6 py-4">
                     <Button
                         variant="ghost"
                         onClick={() => setStep((s) => s - 1)}

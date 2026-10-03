@@ -9,7 +9,7 @@ function FAQItem({ item, index, open, onToggle }) {
     const panelId = `spl-faq-panel-${index}`;
     const buttonId = `spl-faq-button-${index}`;
     return (
-        <div className="rounded-2xl border border-white/10 bg-white/[0.02]">
+        <div className="rounded-2xl border border-white/10 bg-white/2">
             <h3>
                 <button
                     id={buttonId}
@@ -17,7 +17,7 @@ function FAQItem({ item, index, open, onToggle }) {
                     aria-expanded={open}
                     aria-controls={panelId}
                     onClick={onToggle}
-                    className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#060910] rounded-2xl"
+                    className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#060910] rounded-2xl"
                 >
                     <span className="text-sm font-medium text-white sm:text-base">{item.q}</span>
                     <ChevronDown

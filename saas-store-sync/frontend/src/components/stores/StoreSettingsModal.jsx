@@ -623,9 +623,9 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} aria-hidden="true" />
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-xs" onClick={onClose} aria-hidden="true" />
             <div className="relative w-full max-w-6xl max-h-[90vh] flex flex-col rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl" onClick={(e) => e.stopPropagation()} style={{ scrollbarWidth: 'none' }}>
-                <div className="flex-shrink-0 border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-8 pt-5 pb-0">
+                <div className="shrink-0 border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-8 pt-5 pb-0">
                     <div className="flex items-start justify-between gap-4 mb-4">
                     <div>
                             <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">Edit Store</h2>
@@ -781,7 +781,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                                     onChange={(e) => setForm((f) => ({ ...f, kogan_service_account_json: e.target.value }))}
                                                     placeholder="Paste a new downloaded service account JSON here (optional)"
                                                     rows={6}
-                                                    className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-mono text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-none"
+                                                    className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-mono text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-hidden"
                                                 />
                                                 <p className="text-xs text-slate-500 dark:text-slate-400">
                                                     Leave JSON empty to keep the existing key unchanged. The sheet must be shared with the key&apos;s <span className="font-mono">client_email</span>.
@@ -819,7 +819,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                             onChange={(e) => setForm((f) => ({ ...f, schedule_enabled: e.target.checked }))}
                                             className="sr-only peer"
                                         />
-                                        <div className="w-9 h-5 bg-slate-300 dark:bg-slate-600 peer-focus:ring-2 peer-focus:ring-accent-400 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-accent-500"></div>
+                                        <div className="w-9 h-5 bg-slate-300 dark:bg-slate-600 peer-focus:ring-2 peer-focus:ring-accent-400 rounded-full peer peer-checked:after:translate-x-full peer-checked:rtl:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:inset-s-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-accent-500"></div>
                                     </label>
                                 </div>
                                 {form.schedule_enabled && (
@@ -844,7 +844,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                                         <select
                                                             value={form.schedule_hour}
                                                             onChange={(e) => setForm((f) => ({ ...f, schedule_hour: e.target.value }))}
-                                                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-none"
+                                                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-hidden"
                                                         >
                                                             {Array.from({ length: 24 }, (_, i) => (
                                                                 <option key={i} value={String(i)}>
@@ -856,7 +856,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                                         <select
                                                             value={form.schedule_minute}
                                                             onChange={(e) => setForm((f) => ({ ...f, schedule_minute: e.target.value }))}
-                                                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-none"
+                                                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-hidden"
                                                         >
                                                             {['00', '15', '30', '45'].map((m) => (
                                                                 <option key={m} value={m}>{m}</option>
@@ -1152,7 +1152,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                         </div>
                     )}
                 </div>
-                <div className="flex-shrink-0 flex justify-between items-center border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-8 py-5">
+                <div className="shrink-0 flex justify-between items-center border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-8 py-5">
                     <Button variant="ghost" onClick={() => setStep((s) => s - 1)} disabled={step === 1}>Back</Button>
                     <Button
                         variant="primary"

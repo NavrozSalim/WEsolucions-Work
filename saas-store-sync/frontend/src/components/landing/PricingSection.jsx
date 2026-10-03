@@ -30,8 +30,8 @@ export default function PricingSection() {
                             <div
                                 className={`relative flex h-full flex-col rounded-2xl border p-6 ${
                                     plan.highlight
-                                        ? 'border-sky-400/45 bg-sky-500/[0.08]'
-                                        : 'border-white/10 bg-white/[0.02]'
+                                        ? 'border-sky-400/45 bg-sky-500/8'
+                                        : 'border-white/10 bg-white/2'
                                 }`}
                             >
                                 {plan.highlight ? (
@@ -64,7 +64,7 @@ export default function PricingSection() {
                                 <button
                                     type="button"
                                     onClick={() => startPlan(plan)}
-                                    className={`mt-6 inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#060910] ${
+                                    className={`mt-6 inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#060910] ${
                                         plan.highlight
                                             ? 'bg-sky-500 text-white hover:bg-sky-400'
                                             : 'border border-white/15 bg-white/5 text-slate-100 hover:bg-white/10'
@@ -84,7 +84,7 @@ export default function PricingSection() {
 
                 {/* Enterprise */}
                 <Reveal delay={0.2}>
-                    <div className="mt-6 flex flex-col items-center justify-between gap-4 rounded-2xl border border-white/10 bg-white/[0.02] p-6 sm:flex-row sm:p-8">
+                    <div className="mt-6 flex flex-col items-center justify-between gap-4 rounded-2xl border border-white/10 bg-white/2 p-6 sm:flex-row sm:p-8">
                         <div className="flex items-start gap-4">
                             <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-white/10 bg-violet-500/10 text-violet-300">
                                 <Building2 className="h-5 w-5" />
@@ -100,7 +100,7 @@ export default function PricingSection() {
                         </div>
                         <a
                             href={SALES_MAILTO}
-                            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-5 py-2.5 text-sm font-semibold text-slate-100 transition-colors hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-5 py-2.5 text-sm font-semibold text-slate-100 transition-colors hover:bg-white/10 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400"
                         >
                             {t('landing.pricing.contactSales')} <ArrowRight className="h-4 w-4" />
                         </a>

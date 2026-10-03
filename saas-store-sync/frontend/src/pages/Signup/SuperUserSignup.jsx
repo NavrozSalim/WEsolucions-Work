@@ -8,7 +8,7 @@ import { useI18n } from '../../context/I18nContext';
 import { startSuperUserSignup, verifySuperUserOtp } from '../../services/authService';
 
 const fieldClass =
-    'block w-full rounded-xl border border-slate-500/40 bg-slate-800/65 px-3.5 py-2.5 text-sm text-white placeholder:text-slate-400 shadow-sm outline-none transition-colors focus:border-sky-400/60 focus:ring-2 focus:ring-sky-400/30';
+    'block w-full rounded-xl border border-slate-500/40 bg-slate-800/65 px-3.5 py-2.5 text-sm text-white placeholder:text-slate-400 shadow-xs outline-hidden transition-colors focus:border-sky-400/60 focus:ring-2 focus:ring-sky-400/30';
 
 const labelClass = 'mb-1.5 block text-sm font-medium text-slate-200';
 
@@ -91,7 +91,7 @@ export default function SuperUserSignup() {
             </header>
 
             <main className="relative z-10 mx-auto w-full max-w-md px-5 py-12 sm:py-16">
-                <div className="rounded-2xl border border-white/10 bg-[#0b1120]/90 p-6 shadow-2xl backdrop-blur sm:p-8">
+                <div className="rounded-2xl border border-white/10 bg-[#0b1120]/90 p-6 shadow-2xl backdrop-blur-sm sm:p-8">
                     <h1 className="font-display text-2xl font-semibold tracking-tight text-white">
                         {step === 'otp' ? t('signup.verifyTitle') : t('signup.title')}
                     </h1>
@@ -159,7 +159,7 @@ export default function SuperUserSignup() {
                             <button
                                 type="submit"
                                 disabled={busy}
-                                className="inline-flex w-full items-center justify-center rounded-xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white shadow-[0_8px_30px_-8px_rgba(56,189,248,0.6)] transition-colors hover:bg-sky-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 disabled:opacity-60"
+                                className="inline-flex w-full items-center justify-center rounded-xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white shadow-[0_8px_30px_-8px_rgba(56,189,248,0.6)] transition-colors hover:bg-sky-400 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 disabled:opacity-60"
                             >
                                 {busy ? t('signup.sending') : t('signup.sendCode')}
                             </button>
@@ -188,7 +188,7 @@ export default function SuperUserSignup() {
                             <button
                                 type="submit"
                                 disabled={busy}
-                                className="inline-flex w-full items-center justify-center rounded-xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white shadow-[0_8px_30px_-8px_rgba(56,189,248,0.6)] transition-colors hover:bg-sky-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 disabled:opacity-60"
+                                className="inline-flex w-full items-center justify-center rounded-xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white shadow-[0_8px_30px_-8px_rgba(56,189,248,0.6)] transition-colors hover:bg-sky-400 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 disabled:opacity-60"
                             >
                                 {busy ? t('signup.verifying') : t('signup.verify')}
                             </button>

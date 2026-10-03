@@ -34,7 +34,7 @@ export default function DashboardPreview() {
     return (
         <div className="overflow-hidden rounded-2xl border border-sky-400/15 bg-[#121a2b]/95 shadow-2xl">
             {/* Window chrome */}
-            <div className="flex items-center gap-2 border-b border-white/10 bg-white/[0.03] px-4 py-3">
+            <div className="flex items-center gap-2 border-b border-white/10 bg-white/3 px-4 py-3">
                 <span className="h-3 w-3 rounded-full bg-red-400/70" />
                 <span className="h-3 w-3 rounded-full bg-amber-400/70" />
                 <span className="h-3 w-3 rounded-full bg-emerald-400/70" />
@@ -99,7 +99,7 @@ export default function DashboardPreview() {
                                         </div>
                                         <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
                                             <div
-                                                className="h-full rounded-full bg-gradient-to-r from-sky-400 to-cyan-400"
+                                                className="h-full rounded-full bg-linear-to-r from-sky-400 to-cyan-400"
                                                 style={{ width: `${h.value}%` }}
                                             />
                                         </div>
@@ -116,9 +116,9 @@ export default function DashboardPreview() {
                                 <span className="tabular-nums text-slate-400">78%</span>
                             </div>
                             <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
-                                <div className="h-full w-[78%] rounded-full bg-gradient-to-r from-emerald-400 to-teal-400" />
+                                <div className="h-full w-[78%] rounded-full bg-linear-to-r from-emerald-400 to-teal-400" />
                             </div>
-                            <div className="mt-3 flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-[11px]">
+                            <div className="mt-3 flex items-center justify-between rounded-lg border border-white/10 bg-white/2 px-3 py-2 text-[11px]">
                                 <span className="text-slate-400">Pricing rule</span>
                                 <span className="inline-flex items-center gap-1 rounded-md bg-emerald-400/10 px-2 py-0.5 font-medium text-emerald-300">
                                     Active <ArrowRight className="h-3 w-3" />

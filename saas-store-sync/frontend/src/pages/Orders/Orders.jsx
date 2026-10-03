@@ -354,7 +354,7 @@ function ShippingModal({ open, onClose, onSubmit, order, loading, marketplaceCod
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} aria-hidden="true" />
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-xs" onClick={onClose} aria-hidden="true" />
             <div
                 className="relative w-full max-w-md overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl"
                 onClick={(e) => e.stopPropagation()}
@@ -526,7 +526,7 @@ function CancelOrderModal({ open, onClose, onSubmit, order, loading, storeId }) 
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} aria-hidden="true" />
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-xs" onClick={onClose} aria-hidden="true" />
             <div
                 className="relative w-full max-w-md overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl"
                 onClick={(e) => e.stopPropagation()}
@@ -612,7 +612,7 @@ function InfoRow({ label, children }) {
     return (
         <div className="grid grid-cols-[7.5rem_1fr] gap-x-3 gap-y-0.5 items-baseline">
             <dt className="text-slate-500 dark:text-slate-400">{label}</dt>
-            <dd className="text-right font-medium text-slate-900 dark:text-slate-100 break-words">{children}</dd>
+            <dd className="text-right font-medium text-slate-900 dark:text-slate-100 wrap-break-word">{children}</dd>
         </div>
     );
 }
@@ -1180,7 +1180,7 @@ export default function Orders() {
                     </div>
                 )}
                 {selectedStore && (
-                    <div className="w-full sm:max-w-[11rem]">
+                    <div className="w-full sm:max-w-44">
                         <Select
                             label="Status"
                             value={statusFilter}

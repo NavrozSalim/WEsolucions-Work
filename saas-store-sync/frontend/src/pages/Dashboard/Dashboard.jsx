@@ -405,7 +405,7 @@ export default function Dashboard() {
                         <select
                             value={selectedStore}
                             onChange={(e) => setSelectedStore(e.target.value)}
-                            className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 outline-none focus:border-accent-500 focus:ring-1 focus:ring-accent-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 sm:w-auto sm:min-w-[160px] sm:py-1.5"
+                            className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 outline-hidden focus:border-accent-500 focus:ring-1 focus:ring-accent-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 sm:w-auto sm:min-w-[160px] sm:py-1.5"
                         >
                             <option value="">All stores</option>
                             {stores.map((s) => (

@@ -65,7 +65,7 @@ export default function VendorScopeMenu({
             ref={menuRef}
             role="menu"
             style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, zIndex: 99999 }}
-            className="min-w-[15rem] rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40"
+            className="min-w-60 rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40"
         >
             {items.map((opt) => (
                 <button

@@ -197,7 +197,7 @@ export default function ListingPhotoUploader({
                         value={pasteText}
                         onChange={(e) => setPasteText(e.target.value)}
                         placeholder="https://…/a.jpg | https://…/b.jpg"
-                        className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-sm focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-none"
+                        className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-hidden"
                     />
                 </div>
                 <button

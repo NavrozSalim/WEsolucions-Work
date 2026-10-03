@@ -284,7 +284,7 @@ export default function Scraping() {
                 description="Upload category or product links for Amazon and eBay. Rules and duplicate removal run before the result file is written. US and AU jobs use separate workers."
             />
 
-            <form onSubmit={onSubmit} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
+            <form onSubmit={onSubmit} className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs dark:border-slate-700 dark:bg-slate-900">
                 <div className="grid gap-4 md:grid-cols-3">
                     <Select
                         label="Marketplace"

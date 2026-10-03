@@ -59,7 +59,7 @@ export default function Navbar() {
                             <a
                                 key={link.href}
                                 href={link.href}
-                                className="rounded-lg px-3 py-2 text-sm font-medium text-slate-300 transition-colors hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                                className="rounded-lg px-3 py-2 text-sm font-medium text-slate-300 transition-colors hover:text-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400"
                             >
                                 {link.label}
                             </a>
@@ -70,7 +70,7 @@ export default function Navbar() {
                         <LanguageSwitcher className="text-slate-200" />
                         <Link
                             to="/login/choose"
-                            className="rounded-lg px-3 py-2 text-sm font-semibold text-slate-200 transition-colors hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                            className="rounded-lg px-3 py-2 text-sm font-semibold text-slate-200 transition-colors hover:text-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400"
                         >
                             {t('nav.login')}
                         </Link>
@@ -82,7 +82,7 @@ export default function Navbar() {
                     <button
                         type="button"
                         onClick={() => setOpen(true)}
-                        className="grid h-10 w-10 place-items-center rounded-lg border border-white/10 text-slate-200 lg:hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                        className="grid h-10 w-10 place-items-center rounded-lg border border-white/10 text-slate-200 lg:hidden focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400"
                         aria-label="Open menu"
                     >
                         <Menu className="h-5 w-5" />
@@ -99,7 +99,7 @@ export default function Navbar() {
                         exit={{ opacity: 0 }}
                         transition={{ duration: reduce ? 0 : 0.2 }}
                     >
-                        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setOpen(false)} />
+                        <div className="absolute inset-0 bg-black/60 backdrop-blur-xs" onClick={() => setOpen(false)} />
                         <motion.div
                             className="absolute right-0 top-0 flex h-full w-[82%] max-w-sm flex-col gap-2 border-l border-white/10 bg-[#0b1120] p-5 shadow-2xl"
                             initial={{ x: reduce ? 0 : '100%' }}
@@ -112,7 +112,7 @@ export default function Navbar() {
                                 <button
                                     type="button"
                                     onClick={() => setOpen(false)}
-                                    className="grid h-10 w-10 place-items-center rounded-lg border border-white/10 text-slate-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                                    className="grid h-10 w-10 place-items-center rounded-lg border border-white/10 text-slate-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400"
                                     aria-label="Close menu"
                                 >
                                     <X className="h-5 w-5" />

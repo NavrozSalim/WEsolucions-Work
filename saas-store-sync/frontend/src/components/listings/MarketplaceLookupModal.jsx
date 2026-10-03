@@ -197,7 +197,7 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
                     onClick={() => { setMode('single'); setError(''); }}
                     className={`rounded px-3 py-1.5 text-xs font-semibold transition ${
                         mode === 'single'
-                            ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-sm'
+                            ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
                             : 'text-slate-500 dark:text-slate-400'
                     }`}
                 >
@@ -208,7 +208,7 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
                     onClick={() => { setMode('bulk'); setError(''); }}
                     className={`rounded px-3 py-1.5 text-xs font-semibold transition ${
                         mode === 'bulk'
-                            ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-sm'
+                            ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
                             : 'text-slate-500 dark:text-slate-400'
                     }`}
                 >
@@ -253,7 +253,7 @@ export default function MarketplaceLookupModal({ open, onClose, storeId, storeNa
                             }}
                             rows={5}
                             placeholder={"SKU-001\nSKU-002\nSKU-003"}
-                            className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-none"
+                            className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-hidden"
                             disabled={loading || jobActive}
                         />
                         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">

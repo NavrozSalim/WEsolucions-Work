@@ -22,7 +22,7 @@ function IntegrationBadge({ name, status, labels }) {
     };
     const s = styles[status] || styles.available;
     return (
-        <div className="mx-3 flex items-center gap-2.5 rounded-xl border border-white/10 bg-white/[0.03] px-4 py-2.5">
+        <div className="mx-3 flex items-center gap-2.5 rounded-xl border border-white/10 bg-white/3 px-4 py-2.5">
             <span className="font-display text-sm font-semibold text-slate-100">{name}</span>
             <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${s.className}`}>
                 <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
@@ -56,7 +56,7 @@ export default function IntegrationLogos() {
             </Container>
 
             <Reveal delay={0.1}>
-                <div className="spl-marquee-track relative mt-12 overflow-hidden [mask-image:linear-gradient(to_right,transparent,#000_8%,#000_92%,transparent)]">
+                <div className="spl-marquee-track relative mt-12 overflow-hidden mask-[linear-gradient(to_right,transparent,#000_8%,#000_92%,transparent)]">
                     <div className="spl-marquee py-1">
                         {loop.map((it, i) => (
                             <IntegrationBadge key={`${it.name}-${i}`} name={it.name} status={it.status} labels={labels} />

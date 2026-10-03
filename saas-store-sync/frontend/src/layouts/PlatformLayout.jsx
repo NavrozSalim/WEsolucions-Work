@@ -76,8 +76,8 @@ export default function PlatformLayout() {
     const shellBg = dark ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900';
     const asideBg = dark ? 'border-slate-800 bg-slate-950' : 'border-slate-200 bg-white';
     const headerBg = dark
-        ? 'border-slate-800 bg-slate-950/95 backdrop-blur'
-        : 'border-slate-200 bg-white/95 backdrop-blur';
+        ? 'border-slate-800 bg-slate-950/95 backdrop-blur-sm'
+        : 'border-slate-200 bg-white/95 backdrop-blur-sm';
 
     return (
         <div className={`min-h-screen ${shellBg}`}>

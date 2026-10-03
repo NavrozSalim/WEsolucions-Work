@@ -170,7 +170,7 @@ export default function UpdateWithFileModal({
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={handleClose} aria-hidden="true" />
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-xs" onClick={handleClose} aria-hidden="true" />
             <div
                 className="relative w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl"
                 onClick={(e) => e.stopPropagation()}

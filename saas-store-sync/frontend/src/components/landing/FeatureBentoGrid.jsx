@@ -83,9 +83,9 @@ export default function FeatureBentoGrid() {
                         const Icon = Icons[f.icon] || Icons.Sparkles;
                         return (
                             <Reveal key={f.title} delay={(i % 3) * 0.06} className={f.span || ''}>
-                                <div className="group relative h-full overflow-hidden rounded-2xl border border-white/10 bg-white/[0.02] p-6 transition-colors hover:border-sky-400/30">
+                                <div className="group relative h-full overflow-hidden rounded-2xl border border-white/10 bg-white/2 p-6 transition-colors hover:border-sky-400/30">
                                     <div className="pointer-events-none absolute -right-16 -top-16 h-40 w-40 rounded-full bg-sky-500/5 blur-2xl transition-opacity duration-300 group-hover:opacity-100 opacity-0" />
-                                    <span className="grid h-11 w-11 place-items-center rounded-xl border border-white/10 bg-gradient-to-br from-sky-400/15 to-cyan-400/10 text-sky-300">
+                                    <span className="grid h-11 w-11 place-items-center rounded-xl border border-white/10 bg-linear-to-br from-sky-400/15 to-cyan-400/10 text-sky-300">
                                         <Icon className="h-5 w-5" />
                                     </span>
                                     <h3 className="mt-5 font-display text-lg font-semibold text-white">{f.title}</h3>

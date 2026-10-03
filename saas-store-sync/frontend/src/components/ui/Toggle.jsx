@@ -20,7 +20,7 @@ export default function Toggle({ checked, onChange, disabled = false }) {
             <span
                 aria-hidden="true"
                 className={[
-                    'pointer-events-none inline-block h-[18px] w-[18px] rounded-full bg-white shadow-sm ring-0 transition-transform duration-200',
+                    'pointer-events-none inline-block h-[18px] w-[18px] rounded-full bg-white shadow-xs ring-0 transition-transform duration-200',
                     checked ? 'translate-x-[22px]' : 'translate-x-[2px]',
                 ].join(' ')}
             />

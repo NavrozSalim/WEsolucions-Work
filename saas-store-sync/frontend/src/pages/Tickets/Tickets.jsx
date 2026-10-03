@@ -281,7 +281,7 @@ export default function Tickets() {
             ) : loading ? (
                 <p className="text-sm text-slate-500 dark:text-slate-400">Loading tickets…</p>
             ) : (
-                <div className="grid gap-4 lg:grid-cols-[26rem_1fr] min-h-[28rem]">
+                <div className="grid gap-4 lg:grid-cols-[26rem_1fr] min-h-112">
                     <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden">
                         <div className="border-b border-slate-200 dark:border-slate-700 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
                             Inbox ({tickets.length})
@@ -292,7 +292,7 @@ export default function Tickets() {
                                 {isBunnings ? '.' : ' or “Create test ticket”.'}
                             </p>
                         ) : (
-                            <ul className="divide-y divide-slate-100 dark:divide-slate-800 max-h-[32rem] overflow-y-auto">
+                            <ul className="divide-y divide-slate-100 dark:divide-slate-800 max-h-128 overflow-y-auto">
                                 {tickets.map((t) => (
                                     <li key={t.id}>
                                         <button
@@ -334,7 +334,7 @@ export default function Tickets() {
                         )}
                     </div>
 
-                    <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 flex flex-col min-h-[28rem]">
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 flex flex-col min-h-112">
                         {!selected ? (
                             <div className="flex flex-1 items-center justify-center p-8 text-sm text-slate-500">
                                 Select a ticket to view the conversation.
@@ -377,7 +377,7 @@ export default function Tickets() {
                                     </div>
                                 </div>
 
-                                <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4 max-h-[22rem]">
+                                <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4 max-h-88">
                                     {(selected.messages || []).map((m) => {
                                         const outbound = m.direction === 'outbound';
                                         return (

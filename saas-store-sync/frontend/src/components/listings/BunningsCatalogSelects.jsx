@@ -85,7 +85,7 @@ export function BunningsCategorySelect({ storeId, value, onChange, required = fa
                             value={query}
                             onChange={(e) => setQuery(e.target.value)}
                             placeholder="Type a category name or code"
-                            className="w-full bg-transparent text-sm outline-none text-slate-900 dark:text-slate-100"
+                            className="w-full bg-transparent text-sm outline-hidden text-slate-900 dark:text-slate-100"
                         />
                         {loading && <Loader2 className="h-4 w-4 animate-spin text-slate-400" />}
                     </div>
@@ -248,7 +248,7 @@ export function BunningsCategoryMultiSelect({ storeId, values = [], onChange, re
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     placeholder="Search categories…"
-                    className="w-full bg-transparent text-sm outline-none text-slate-900 dark:text-slate-100"
+                    className="w-full bg-transparent text-sm outline-hidden text-slate-900 dark:text-slate-100"
                 />
                 {loading && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" />}
             </div>
@@ -365,7 +365,7 @@ export function BunningsLogisticSelect({ storeId, value, onChange, required = fa
                     onChange={(e) => onChange?.(e.target.value)}
                     required={required}
                     placeholder="e.g. SMALL"
-                    className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-sm focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-none"
+                    className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-hidden"
                 />
                 <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
                     {error || 'Enter the Mirakl logistic class code from shop settings.'}
@@ -395,7 +395,7 @@ export function BunningsLogisticSelect({ storeId, value, onChange, required = fa
                     onChange?.(code, hit?.name || code);
                 }}
                 required={required}
-                className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-sm focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-none"
+                className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-hidden"
             >
                 {selectOptions.map((opt) => (
                     <option key={opt.value || 'empty'} value={opt.value} disabled={!opt.value}>
@@ -549,7 +549,7 @@ export function BunningsAttributeFields({ storeId, hierarchy, value, onChange })
                                     value={selectedCode}
                                     required={!!field.required}
                                     onChange={(e) => setCode(field.code, e.target.value)}
-                                    className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-sm focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-none"
+                                    className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-hidden"
                                 >
                                     <option value="">Select…</option>
                                     {listValues.map((opt) => (
@@ -568,7 +568,7 @@ export function BunningsAttributeFields({ storeId, hierarchy, value, onChange })
                                 value={current[field.code] || ''}
                                 required={!!field.required}
                                 onChange={(e) => setCode(field.code, e.target.value)}
-                                className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-sm focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-none"
+                                className="block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs focus:border-accent-500 focus:ring-1 focus:ring-accent-500 px-3 py-2 text-sm outline-hidden"
                             />
                         </div>
                     );

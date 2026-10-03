@@ -52,7 +52,7 @@ export default function ComparisonSection() {
 
                 <div className="mt-12 grid gap-5 lg:grid-cols-2">
                     <Reveal>
-                        <div className="h-full rounded-2xl border border-white/10 bg-white/[0.02] p-6 sm:p-8">
+                        <div className="h-full rounded-2xl border border-white/10 bg-white/2 p-6 sm:p-8">
                             <h3 className="font-display text-lg font-semibold text-slate-300">
                                 {isEs ? 'Sin SellerPilot Hub' : 'Without SellerPilot Hub'}
                             </h3>
@@ -70,7 +70,7 @@ export default function ComparisonSection() {
                     </Reveal>
 
                     <Reveal delay={0.1}>
-                        <div className="relative h-full overflow-hidden rounded-2xl border border-sky-400/30 bg-gradient-to-b from-sky-500/[0.08] to-transparent p-6 sm:p-8">
+                        <div className="relative h-full overflow-hidden rounded-2xl border border-sky-400/30 bg-linear-to-b from-sky-500/8 to-transparent p-6 sm:p-8">
                             <div className="pointer-events-none absolute -right-20 -top-20 h-48 w-48 rounded-full bg-sky-500/10 blur-3xl" />
                             <h3 className="font-display text-lg font-semibold text-white">
                                 {isEs ? 'Con SellerPilot Hub' : 'With SellerPilot Hub'}

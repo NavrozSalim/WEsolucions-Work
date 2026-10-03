@@ -67,7 +67,7 @@ export default function Pricing() {
                         <LanguageSwitcher className="text-slate-200" />
                         <Link
                             to="/login/choose"
-                            className="rounded-lg px-3 py-2 text-sm font-semibold text-slate-200 transition-colors hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                            className="rounded-lg px-3 py-2 text-sm font-semibold text-slate-200 transition-colors hover:text-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400"
                         >
                             {t('nav.login')}
                         </Link>
@@ -103,8 +103,8 @@ export default function Pricing() {
                                     transition={{ delay: i * 0.06 }}
                                     className={`relative flex h-full flex-col rounded-2xl border p-6 ${
                                         popular
-                                            ? 'spl-shimmer-border border-sky-400/40 bg-sky-500/[0.06]'
-                                            : 'border-white/10 bg-white/[0.02]'
+                                            ? 'spl-shimmer-border border-sky-400/40 bg-sky-500/6'
+                                            : 'border-white/10 bg-white/2'
                                     }`}
                                 >
                                     {popular ? (
@@ -139,7 +139,7 @@ export default function Pricing() {
                                     </ul>
                                     <button
                                         type="button"
-                                        className={`mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                                        className={`mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 ${
                                             popular
                                                 ? 'bg-sky-500 text-white hover:bg-sky-400'
                                                 : 'border border-white/15 bg-white/5 text-slate-100 hover:bg-white/10'
@@ -176,7 +176,7 @@ export default function Pricing() {
                                                 },
                                             })
                                         }
-                                        className="rounded-full border border-white/10 bg-white/[0.03] px-3.5 py-2 text-sm font-medium text-slate-200 transition-colors hover:border-sky-400/40 hover:bg-sky-400/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                                        className="rounded-full border border-white/10 bg-white/3 px-3.5 py-2 text-sm font-medium text-slate-200 transition-colors hover:border-sky-400/40 hover:bg-sky-400/10 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400"
                                     >
                                         {plan.seats} — ${plan.price_usd}
                                     </button>
@@ -185,14 +185,14 @@ export default function Pricing() {
                         </div>
                     ) : null}
 
-                    <div className="mt-8 flex flex-col items-start justify-between gap-4 rounded-2xl border border-white/10 bg-white/[0.02] p-6 sm:flex-row sm:items-center">
+                    <div className="mt-8 flex flex-col items-start justify-between gap-4 rounded-2xl border border-white/10 bg-white/2 p-6 sm:flex-row sm:items-center">
                         <div>
                             <p className="font-display text-base font-semibold text-white">{t('pricing.enterprise')}</p>
                             <p className="mt-1 text-sm text-slate-400">{t('landing.pricing.enterpriseBody')}</p>
                         </div>
                         <a
                             href={SALES_MAILTO}
-                            className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-sm font-semibold text-slate-100 transition-colors hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                            className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-sm font-semibold text-slate-100 transition-colors hover:bg-white/10 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400"
                         >
                             {t('pricing.contactSales')} <ArrowRight className="h-4 w-4" />
                         </a>

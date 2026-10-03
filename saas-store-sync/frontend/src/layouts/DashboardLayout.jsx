@@ -212,8 +212,8 @@ function DashboardLayoutInner() {
                 <header
                     className={`sticky top-0 z-30 flex h-14 shrink-0 items-center gap-4 border-b px-4 lg:px-6 ${
                         dark
-                            ? 'border-slate-800 bg-slate-950/95 backdrop-blur'
-                            : 'border-slate-200 bg-white/95 backdrop-blur'
+                            ? 'border-slate-800 bg-slate-950/95 backdrop-blur-sm'
+                            : 'border-slate-200 bg-white/95 backdrop-blur-sm'
                     }`}
                 >
                     <button

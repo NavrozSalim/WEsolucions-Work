@@ -11,7 +11,7 @@ function PermissionToggle({ label, enabled, onToggle }) {
             role="switch"
             aria-checked={enabled}
             onClick={onToggle}
-            className="flex w-full items-center justify-between rounded-xl border border-white/10 bg-white/[0.02] px-4 py-3 text-left transition-colors hover:border-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            className="flex w-full items-center justify-between rounded-xl border border-white/10 bg-white/2 px-4 py-3 text-left transition-colors hover:border-white/20 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400"
         >
             <span className="text-sm font-medium text-slate-200">{label}</span>
             <span
@@ -82,7 +82,7 @@ export default function TeamPermissionsSection() {
                         <div className="rounded-2xl border border-white/10 bg-[#121a2b]/90 p-6 shadow-2xl">
                             <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-3">
-                                    <span className="grid h-10 w-10 place-items-center rounded-full bg-gradient-to-br from-sky-400/30 to-cyan-400/20 text-xs font-semibold text-sky-200">
+                                    <span className="grid h-10 w-10 place-items-center rounded-full bg-linear-to-br from-sky-400/30 to-cyan-400/20 text-xs font-semibold text-sky-200">
                                         PS
                                     </span>
                                     <div>

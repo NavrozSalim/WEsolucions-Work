@@ -645,7 +645,7 @@ function UsersSection({
                                     </Badge>
                                 </div>
                             </div>
-                            <ul className="mt-4 max-h-[28rem] space-y-2 overflow-y-auto">
+                            <ul className="mt-4 max-h-112 space-y-2 overflow-y-auto">
                                 {events.length === 0 ? (
                                     <li className="py-8 text-center text-sm text-slate-500">
                                         No login events yet.

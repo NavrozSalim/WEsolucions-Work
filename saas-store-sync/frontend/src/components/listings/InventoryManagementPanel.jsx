@@ -109,7 +109,7 @@ function JobProgressStrip({
     const stopLabel = isScrape ? 'Stop Scraping' : 'Stop Syncing';
 
     return (
-        <div className={`rounded-lg border ${border} p-4 mb-0 shadow-sm`}>
+        <div className={`rounded-lg border ${border} p-4 mb-0 shadow-xs`}>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                     <span className={`mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full ${isStopping ? 'bg-rose-500' : bar} animate-pulse`} />
@@ -665,7 +665,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         placeholder="Search SKU, title, vendor…"
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
-                        className="min-w-[12rem] flex-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm text-slate-900 dark:text-slate-100"
+                        className="min-w-48 flex-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm text-slate-900 dark:text-slate-100"
                     />
                     <select
                         className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-2 text-xs text-slate-900 dark:text-slate-100"

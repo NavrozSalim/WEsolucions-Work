@@ -67,7 +67,7 @@ const CTA_VARIANTS = {
 };
 
 const CTA_BASE =
-    'inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#060910] disabled:opacity-60';
+    'inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold transition-all duration-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#060910] disabled:opacity-60';
 
 // Polymorphic CTA: internal route (to), anchor (href), or button (onClick).
 export function CTAButton({ variant = 'primary', to, href, onClick, className = '', children, ...rest }) {

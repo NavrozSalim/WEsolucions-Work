@@ -66,7 +66,7 @@ export default function SecuritySection() {
                         const Icon = Icons[p.icon] || Icons.Shield;
                         return (
                             <Reveal key={p.title} delay={(i % 3) * 0.06}>
-                                <div className="h-full rounded-2xl border border-white/10 bg-white/[0.02] p-6">
+                                <div className="h-full rounded-2xl border border-white/10 bg-white/2 p-6">
                                     <span className="grid h-11 w-11 place-items-center rounded-xl border border-white/10 bg-emerald-400/10 text-emerald-300">
                                         <Icon className="h-5 w-5" />
                                     </span>

@@ -116,7 +116,7 @@ function ActionsDropdown({ store, conn, validatingId, updatingId, stoppingId, on
                 right: menuPos.right,
                 zIndex: 99999,
             }}
-            className="min-w-[13.5rem] rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40 overflow-visible"
+            className="min-w-54 rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40 overflow-visible"
         >
             {items.map((item, i) =>
                 item.divider ? (
@@ -152,7 +152,7 @@ function ActionsDropdown({ store, conn, validatingId, updatingId, stoppingId, on
                         return !o;
                     });
                 }}
-                className="inline-flex size-8 items-center justify-center rounded-lg text-slate-500 ring-offset-2 ring-offset-white transition hover:bg-slate-100 hover:text-slate-800 focus:outline-none focus:ring-2 focus:ring-accent-500 dark:text-slate-400 dark:ring-offset-slate-900 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                className="inline-flex size-8 items-center justify-center rounded-lg text-slate-500 ring-offset-2 ring-offset-white transition hover:bg-slate-100 hover:text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-accent-500 dark:text-slate-400 dark:ring-offset-slate-900 dark:hover:bg-slate-800 dark:hover:text-slate-200"
                 title="Actions"
             >
                 <MoreVertical className="h-4 w-4" />
@@ -364,7 +364,7 @@ export default function StoreSettings() {
                             placeholder="Search by name…"
                             value={search}
                             onChange={(e) => setSearch(e.target.value)}
-                            className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 py-2 pl-9 pr-3 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-none transition"
+                            className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 py-2 pl-9 pr-3 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-hidden transition"
                         />
                     </div>
                 </div>

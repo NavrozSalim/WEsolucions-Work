@@ -23,7 +23,7 @@ export default function ProblemSection() {
                         const Icon = p.icon;
                         return (
                             <Reveal key={p.title} delay={i * 0.08}>
-                                <div className="h-full rounded-2xl border border-white/10 bg-white/[0.02] p-6 transition-colors hover:border-white/20">
+                                <div className="h-full rounded-2xl border border-white/10 bg-white/2 p-6 transition-colors hover:border-white/20">
                                     <span className="grid h-11 w-11 place-items-center rounded-xl border border-red-400/20 bg-red-400/10 text-red-300">
                                         <Icon className="h-5 w-5" />
                                     </span>

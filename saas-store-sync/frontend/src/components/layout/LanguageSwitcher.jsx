@@ -9,7 +9,7 @@ export default function LanguageSwitcher({ className = '' }) {
             <select
                 value={locale}
                 onChange={(e) => setLocale(e.target.value)}
-                className="rounded-lg border border-white/15 bg-white/5 px-2.5 py-1.5 text-sm text-slate-100 outline-none backdrop-blur transition-colors hover:border-white/25 focus:ring-2 focus:ring-sky-400/60"
+                className="rounded-lg border border-white/15 bg-white/5 px-2.5 py-1.5 text-sm text-slate-100 outline-hidden backdrop-blur-sm transition-colors hover:border-white/25 focus:ring-2 focus:ring-sky-400/60"
                 aria-label={t('nav.language')}
             >
                 {locales.map((loc) => (

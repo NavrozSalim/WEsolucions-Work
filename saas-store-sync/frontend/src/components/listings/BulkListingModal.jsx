@@ -115,7 +115,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={handleClose} aria-hidden="true" />
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-xs" onClick={handleClose} aria-hidden="true" />
             <div
                 className="relative flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl"
                 onClick={(e) => e.stopPropagation()}

@@ -33,7 +33,7 @@ function CatalogPreview() {
         <div className="overflow-x-auto rounded-xl border border-white/10">
             <table className="w-full min-w-[720px] border-collapse text-left text-sm">
                 <thead>
-                    <tr className="border-b border-white/10 bg-white/[0.03] text-[11px] uppercase tracking-wide text-slate-400">
+                    <tr className="border-b border-white/10 bg-white/3 text-[11px] uppercase tracking-wide text-slate-400">
                         <th className="px-4 py-3 font-medium">Product</th>
                         <th className="px-4 py-3 font-medium">Supplier URL</th>
                         <th className="px-4 py-3 font-medium">Supplier</th>
@@ -101,7 +101,7 @@ const ANALYTICS_BARS = [42, 58, 51, 73, 66, 88, 79];
 function AnalyticsPreview() {
     return (
         <div className="grid gap-4 sm:grid-cols-3">
-            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-5 sm:col-span-2">
+            <div className="rounded-xl border border-white/10 bg-white/2 p-5 sm:col-span-2">
                 <div className="flex items-center justify-between">
                     <span className="text-sm font-medium text-slate-200">Updates per day</span>
                     <span className="inline-flex items-center gap-1 text-xs text-emerald-300">
@@ -112,7 +112,7 @@ function AnalyticsPreview() {
                     {ANALYTICS_BARS.map((h, i) => (
                         <div key={i} className="flex-1">
                             <div
-                                className="w-full rounded-t-md bg-gradient-to-t from-sky-500/40 to-cyan-400/80"
+                                className="w-full rounded-t-md bg-linear-to-t from-sky-500/40 to-cyan-400/80"
                                 style={{ height: `${h}%` }}
                             />
                         </div>
@@ -127,7 +127,7 @@ function AnalyticsPreview() {
                 ].map((s) => {
                     const Icon = s.icon;
                     return (
-                        <div key={s.label} className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
+                        <div key={s.label} className="rounded-xl border border-white/10 bg-white/2 p-4">
                             <div className="flex items-center justify-between">
                                 <span className="text-xs text-slate-400">{s.label}</span>
                                 <Icon className={`h-4 w-4 ${s.tone}`} />
@@ -152,7 +152,7 @@ function TeamAccessPreview() {
             {TEAM_ROWS.map((m) => (
                 <div key={m.name} className="flex items-center justify-between px-4 py-4">
                     <div className="flex items-center gap-3">
-                        <span className="grid h-9 w-9 place-items-center rounded-full bg-gradient-to-br from-sky-400/30 to-cyan-400/20 text-xs font-semibold text-sky-200">
+                        <span className="grid h-9 w-9 place-items-center rounded-full bg-linear-to-br from-sky-400/30 to-cyan-400/20 text-xs font-semibold text-sky-200">
                             {m.name.split(' ').map((n) => n[0]).join('')}
                         </span>
                         <div>
@@ -211,7 +211,7 @@ export default function ProductShowcase() {
                         <div
                             role="tablist"
                             aria-label={isEs ? 'Vistas del panel' : 'Dashboard views'}
-                            className="flex flex-wrap gap-1.5 rounded-xl border border-white/10 bg-white/[0.02] p-1.5"
+                            className="flex flex-wrap gap-1.5 rounded-xl border border-white/10 bg-white/2 p-1.5"
                         >
                             {tabs.map((item) => (
                                 <button
@@ -219,7 +219,7 @@ export default function ProductShowcase() {
                                     role="tab"
                                     aria-selected={tab === item.id}
                                     onClick={() => setTab(item.id)}
-                                    className={`relative rounded-lg px-3.5 py-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                                    className={`relative rounded-lg px-3.5 py-2 text-sm font-medium transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 ${
                                         tab === item.id ? 'text-white' : 'text-slate-400 hover:text-slate-200'
                                     }`}
                                 >

@@ -58,7 +58,7 @@ export default function LoginChooser() {
                                 >
                                     <Link
                                         to={opt.to}
-                                        className="group flex h-full flex-col rounded-2xl border border-white/10 bg-white/[0.02] p-6 transition-colors hover:border-sky-400/40 hover:bg-sky-400/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                                        className="group flex h-full flex-col rounded-2xl border border-white/10 bg-white/2 p-6 transition-colors hover:border-sky-400/40 hover:bg-sky-400/4 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400"
                                     >
                                         <span className="grid h-11 w-11 place-items-center rounded-xl border border-white/10 bg-sky-400/10 text-sky-300">
                                             <Icon className="h-5 w-5" />

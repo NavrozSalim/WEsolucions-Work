@@ -262,7 +262,7 @@ function CriticalActionDropdown({ disabled, loading, onSelectAction }) {
             ref={menuRef}
             role="menu"
             style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, zIndex: 99999 }}
-            className="min-w-[15rem] rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40"
+            className="min-w-60 rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40"
         >
             {CRITICAL_ACTION_OPTIONS.map((opt) => (
                 <button
@@ -299,7 +299,7 @@ function CriticalActionDropdown({ disabled, loading, onSelectAction }) {
                         return !o;
                     });
                 }}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-700 shadow-sm transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-rose-900 dark:bg-slate-800 dark:text-rose-300 dark:hover:bg-rose-950/40"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-700 shadow-xs transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-rose-900 dark:bg-slate-800 dark:text-rose-300 dark:hover:bg-rose-950/40"
             >
                 <AlertTriangle className={`h-4 w-4 ${loading ? 'animate-pulse' : ''}`} />
                 Critical action
@@ -349,7 +349,7 @@ function ResetPendingDropdown({ disabled, loading, onSelectScope }) {
             ref={menuRef}
             role="menu"
             style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, zIndex: 99999 }}
-            className="min-w-[15rem] rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40"
+            className="min-w-60 rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40"
         >
             {RESET_PENDING_OPTIONS.map((opt) => (
                 <button
@@ -386,7 +386,7 @@ function ResetPendingDropdown({ disabled, loading, onSelectScope }) {
                         return !o;
                     });
                 }}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700/80"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-xs transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700/80"
             >
                 <RotateCcw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
                 Reset status
@@ -480,7 +480,7 @@ function UploadActionsDropdown({ upload, storeId, syncing, scraping, syncingUplo
             ref={menuRef}
             role="menu"
             style={{ position: 'fixed', top: menuPos.top, right: menuPos.right, zIndex: 99999 }}
-            className="min-w-[14rem] rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40 overflow-visible"
+            className="min-w-56 rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40 overflow-visible"
         >
             {items.map((item, i) =>
                 item.divider ? (
@@ -516,7 +516,7 @@ function UploadActionsDropdown({ upload, storeId, syncing, scraping, syncingUplo
                         return !o;
                     });
                 }}
-                className="inline-flex size-8 items-center justify-center rounded-lg text-slate-500 ring-offset-2 ring-offset-white transition hover:bg-slate-100 hover:text-slate-800 focus:outline-none focus:ring-2 focus:ring-accent-500 dark:text-slate-400 dark:ring-offset-slate-900 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                className="inline-flex size-8 items-center justify-center rounded-lg text-slate-500 ring-offset-2 ring-offset-white transition hover:bg-slate-100 hover:text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-accent-500 dark:text-slate-400 dark:ring-offset-slate-900 dark:hover:bg-slate-800 dark:hover:text-slate-200"
                 title="Actions"
             >
                 <MoreVertical className="h-4 w-4" />
@@ -604,7 +604,7 @@ function ManagedUploadActionsDropdown({
             ref={menuRef}
             role="menu"
             style={{ position: 'fixed', top: menuPos.top, right: menuPos.right, zIndex: 99999 }}
-            className="min-w-[15rem] rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40 overflow-visible"
+            className="min-w-60 rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40 overflow-visible"
         >
             {items.map((item, i) =>
                 item.divider ? (
@@ -640,7 +640,7 @@ function ManagedUploadActionsDropdown({
                         return !o;
                     });
                 }}
-                className="inline-flex size-8 items-center justify-center rounded-lg text-slate-500 ring-offset-2 ring-offset-white transition hover:bg-slate-100 hover:text-slate-800 focus:outline-none focus:ring-2 focus:ring-accent-500 dark:text-slate-400 dark:ring-offset-slate-900 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                className="inline-flex size-8 items-center justify-center rounded-lg text-slate-500 ring-offset-2 ring-offset-white transition hover:bg-slate-100 hover:text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-accent-500 dark:text-slate-400 dark:ring-offset-slate-900 dark:hover:bg-slate-800 dark:hover:text-slate-200"
                 title="Actions"
             >
                 <MoreVertical className="h-4 w-4" />
@@ -770,7 +770,7 @@ function EditableNumericCell({ value, onSave, disabled = false, fieldLabel = 'va
                     else if (e.key === 'Escape') setEditing(false);
                 }}
                 disabled={saving}
-                className="w-20 rounded border border-slate-300 bg-white px-1.5 py-0.5 text-right text-xs font-mono text-slate-900 focus:border-accent-500 focus:outline-none focus:ring-1 focus:ring-accent-500 disabled:opacity-60 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                className="w-20 rounded border border-slate-300 bg-white px-1.5 py-0.5 text-right text-xs font-mono text-slate-900 focus:border-accent-500 focus:outline-hidden focus:ring-1 focus:ring-accent-500 disabled:opacity-60 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
                 aria-label={`Edit ${fieldLabel}`}
             />
         );
@@ -782,7 +782,7 @@ function EditableNumericCell({ value, onSave, disabled = false, fieldLabel = 'va
             onClick={startEditing}
             disabled={disabled}
             title={disabled ? undefined : `Click to edit ${fieldLabel}`}
-            className={`inline-block min-w-[3rem] rounded px-1.5 py-0.5 text-right font-mono text-xs tabular-nums ${
+            className={`inline-block min-w-12 rounded px-1.5 py-0.5 text-right font-mono text-xs tabular-nums ${
                 value == null
                     ? 'text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20'
                     : 'text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
@@ -994,7 +994,7 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
     }
 
     return (
-        <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4 mb-4 shadow-sm">
+        <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4 mb-4 shadow-xs">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-center gap-3">
                     <span className={`inline-flex h-2.5 w-2.5 rounded-full ${isActive ? 'bg-emerald-500 animate-pulse' : recent5 > 0 ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600'}`} />
@@ -1049,7 +1049,7 @@ function ServerCeleryScrapeStrip({ state, progressStoreId, selectedStoreId }) {
         : 'bg-sky-200 text-sky-900 dark:bg-sky-800 dark:text-sky-200';
 
     return (
-        <div className={`rounded-lg border p-4 mb-4 shadow-sm ${
+        <div className={`rounded-lg border p-4 mb-4 shadow-xs ${
             isStopping
                 ? 'border-rose-200 dark:border-rose-800 bg-rose-50/80 dark:bg-rose-950/30'
                 : 'border-sky-200 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/30'
@@ -1120,7 +1120,7 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId, onSt
                     : 'bg-emerald-500';
 
     return (
-        <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50/80 dark:bg-emerald-950/30 p-4 mb-4 shadow-sm">
+        <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50/80 dark:bg-emerald-950/30 p-4 mb-4 shadow-xs">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                 <span
@@ -2716,7 +2716,7 @@ export default function Catalog() {
 
             {/* When a store is selected: toolbar first, then uploads or products */}
             {selectedStore && selectedStoreData && (
-                <div className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/90 dark:bg-slate-800/60 px-4 py-3 shadow-sm">
+                <div className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/90 dark:bg-slate-800/60 px-4 py-3 shadow-xs">
                     <div className="flex w-full flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                             <button
@@ -2752,7 +2752,7 @@ export default function Catalog() {
                                     onClick={() => setViewMode('history')}
                                     className={`min-h-10 flex-1 rounded-md px-3 py-1.5 text-xs font-semibold transition sm:min-h-0 sm:flex-none ${
                                         viewMode === 'history'
-                                            ? 'bg-accent-500 text-white shadow-sm'
+                                            ? 'bg-accent-500 text-white shadow-xs'
                                             : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                                     }`}
                                 >
@@ -2763,7 +2763,7 @@ export default function Catalog() {
                                     onClick={handleViewProducts}
                                     className={`min-h-10 flex-1 rounded-md px-3 py-1.5 text-xs font-semibold transition sm:min-h-0 sm:flex-none ${
                                         viewMode === 'products'
-                                            ? 'bg-accent-500 text-white shadow-sm'
+                                            ? 'bg-accent-500 text-white shadow-xs'
                                             : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                                     }`}
                                 >
@@ -2775,7 +2775,7 @@ export default function Catalog() {
                                         onClick={() => setViewMode('created')}
                                         className={`min-h-10 flex-1 rounded-md px-2 py-1.5 text-xs font-semibold transition sm:min-h-0 sm:flex-none sm:px-3 ${
                                             viewMode === 'created'
-                                                ? 'bg-accent-500 text-white shadow-sm'
+                                                ? 'bg-accent-500 text-white shadow-xs'
                                                 : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                                         }`}
                                     >
@@ -2788,7 +2788,7 @@ export default function Catalog() {
                                     onClick={() => setViewMode('logs')}
                                     className={`min-h-10 flex-1 rounded-md px-3 py-1.5 text-xs font-semibold transition sm:min-h-0 sm:flex-none ${
                                         viewMode === 'logs'
-                                            ? 'bg-accent-500 text-white shadow-sm'
+                                            ? 'bg-accent-500 text-white shadow-xs'
                                             : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                                     }`}
                                 >
@@ -2854,7 +2854,7 @@ export default function Catalog() {
                                             <ChevronDown className="h-3 w-3 ml-1" />
                                         </Button>
                                         {mydealDownloadOpen && (
-                                            <div className="absolute right-0 top-full z-20 mt-1 min-w-[11rem] rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 py-1 shadow-lg">
+                                            <div className="absolute right-0 top-full z-20 mt-1 min-w-44 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 py-1 shadow-lg">
                                                 <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('price')}>Price CSV</button>
                                                 <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('inventory')}>Inventory CSV</button>
                                                 <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('both')}>Both (ZIP)</button>
@@ -3237,7 +3237,7 @@ export default function Catalog() {
                                 />
                                 <div className="flex items-center gap-1.5">
                                     <select
-                                        className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-2 text-xs text-slate-900 dark:text-slate-100 max-w-[10rem]"
+                                        className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-2 text-xs text-slate-900 dark:text-slate-100 max-w-40"
                                         value={exportScope}
                                         onChange={(e) => setExportScope(e.target.value)}
                                         title="What to include in the CSV export"
@@ -3347,17 +3347,17 @@ export default function Catalog() {
                                     </>
                                 );
                             })()}
-                            <div className="relative flex-1 min-w-[12rem] lg:max-w-xs">
+                            <div className="relative flex-1 min-w-48 lg:max-w-xs">
                                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                                 <input
-                                    className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 py-2 pl-9 pr-3 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-none"
+                                    className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 py-2 pl-9 pr-3 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-hidden"
                                     placeholder="Search SKU, title, vendor…"
                                     value={search}
                                     onChange={(e) => setSearch(e.target.value)}
                                 />
                             </div>
                             <select
-                                className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-none"
+                                className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-hidden"
                                 value={statusFilter}
                                 onChange={(e) => setStatusFilter(e.target.value)}
                             >
