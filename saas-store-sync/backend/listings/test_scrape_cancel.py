@@ -125,6 +125,42 @@ class ManagedListingScrapeCancelTests(TestCase):
         self.assertTrue(prog.get("cancelled"))
         self.assertEqual(prog.get("phase"), "cancelled")
 
+    def test_feed_banner_survives_status_poll(self):
+        row = self._listing("COW-1")
+        scrape_prog.begin_scrape_progress(
+            self.store.id,
+            total=1,
+            listing_ids=[row.id],
+            message="Worker started…",
+        )
+        scrape_prog.set_scrape_progress(
+            self.store.id,
+            phase="running",
+            current_sku="COW-OLD",
+            message="Scraping 1 of 1…",
+        )
+        scrape_prog.set_scrape_progress(
+            self.store.id,
+            phase="running",
+            processed=0,
+            current_sku="",
+            feed_batch=True,
+            message="Downloading Costway AU feed…",
+        )
+        stale = scrape_prog.set_scrape_progress(
+            self.store.id,
+            phase="running",
+            processed=0,
+            current_sku="COW-OLD",
+            message="Scraping 1 of 1…",
+        )
+        self.assertTrue(stale["message"].startswith("Downloading"))
+        self.assertEqual(stale.get("current_sku"), "")
+        live = scrape_prog.enrich_progress_from_listings(self.store.id)
+        self.assertTrue(live["active"])
+        self.assertTrue(live["message"].startswith("Downloading Costway"))
+        self.assertEqual(live.get("current_sku"), "")
+
     def test_enrich_closes_banner_when_stop_requested(self):
         rows = [self._listing("PEND-1"), self._listing("PEND-2")]
         scrape_prog.begin_scrape_progress(

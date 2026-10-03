@@ -119,6 +119,7 @@ def scrape_store_listings(self, user_id, store_id, listing_ids=None, job_generat
         active=True,
         phase="running",
         task_id=getattr(self.request, "id", None) or "",
+        current_sku="",
         message="Worker started…",
     )
     try:

@@ -46,7 +46,14 @@ def _empty_progress() -> dict:
         "cancel_requested": False,
         "cancelled": False,
         "generation": "",
+        "current_sku": "",
+        "feed_batch": False,
     }
+
+
+def is_feed_progress_message(message) -> bool:
+    """True for the vendor-file banner. The poll must not replace this text."""
+    return str(message or "").strip().lower().startswith(("downloading", "applying"))
 
 
 def get_scrape_progress(store_id) -> dict:
@@ -63,6 +70,20 @@ def set_scrape_progress(store_id, *, job_generation=None, **fields) -> dict:
     cur = get_scrape_progress(store_id)
     if job_generation is not None and _generation_mismatch(cur, job_generation):
         return cur
+    # The status poll counts Pending rows and writes "Scraping N of total".
+    # That write often lands after the worker has already stored the feed
+    # message, which put the old one-SKU sentence and Current SKU back.
+    fields = dict(fields)
+    feed_stays = bool(cur.get("feed_batch")) and fields.get("feed_batch") is not False
+    if feed_stays:
+        incoming = fields.get("message")
+        if (
+            incoming is not None
+            and not is_feed_progress_message(incoming)
+            and is_feed_progress_message(cur.get("message"))
+        ):
+            fields.pop("message", None)
+        fields["current_sku"] = ""
     prev_total = int(cur.get("total") or 0)
     prev_ids = cur.get("listing_ids") if isinstance(cur.get("listing_ids"), list) else []
     cur.update(fields)
@@ -106,6 +127,7 @@ def begin_scrape_progress(
         failed=0,
         pct=0,
         current_sku="",
+        feed_batch=False,
         message=message or "Starting scrape…",
         phase=phase or "running",
         listing_ids=ids,
@@ -123,6 +145,8 @@ def request_scrape_cancel(store_id) -> dict:
     cache.set(_cancel_key(store_id), True, _TTL)
     return set_scrape_progress(
         store_id,
+        feed_batch=False,
+        current_sku="",
         message="Stopping… finishing the current listing, then remaining stay Pending.",
     )
 
@@ -181,6 +205,7 @@ def finish_scrape_progress(
             max(0, min(100, round(100.0 * processed / total))) if total else 0
         ),
         current_sku="",
+        feed_batch=False,
         message=message or ("Scrape stopped." if cancelled else "Scrape finished."),
         phase="cancelled" if cancelled else "done",
         cancelled=bool(cancelled),
@@ -258,9 +283,18 @@ def enrich_progress_from_listings(store_id, job_generation=None) -> dict:
     if phase == "queued" and processed > 0:
         phase = "running"
 
-    worker_msg = (data.get("message") or "").strip()
+    # Re-read after the status counts. The worker may have stored the feed
+    # message while those queries were running.
+    latest = get_scrape_progress(store_id)
+    if job_generation is not None and _generation_mismatch(latest, job_generation):
+        return latest
+    if not latest.get("active"):
+        return latest
+
+    worker_msg = (latest.get("message") or data.get("message") or "").strip()
     # Keep the feed download / apply text. The default line counts one SKU at a time.
-    if worker_msg.lower().startswith(("downloading", "applying")):
+    feed_text = bool(latest.get("feed_batch")) or is_feed_progress_message(worker_msg)
+    if feed_text:
         msg = worker_msg
     else:
         msg = f"Scraping {min(processed + (1 if pending else 0), total)} of {total}…"
@@ -276,4 +310,5 @@ def enrich_progress_from_listings(store_id, job_generation=None) -> dict:
         phase=phase,
         message=msg,
         active=True,
+        **({"current_sku": ""} if feed_text else {}),
     )

@@ -105,7 +105,7 @@ function JobProgressStrip({
         : isScrape
             ? 'bg-sky-200 text-sky-900 dark:bg-sky-800 dark:text-sky-200'
             : 'bg-emerald-200 text-emerald-900 dark:bg-emerald-800 dark:text-emerald-200';
-    const sku = (progress?.current_sku || '').trim();
+    const sku = feedMsg ? '' : (progress?.current_sku || '').trim();
     const stopLabel = isScrape ? 'Stop Scraping' : 'Stop Syncing';
 
     return (
@@ -128,7 +128,9 @@ function JobProgressStrip({
                         <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-300">{detail}</p>
                         {isScrape ? (
                             <p className="mt-0.5 text-xs text-sky-700 dark:text-sky-300">
-                                You can leave this page; listing rows update as each item finishes. Use Stop Scraping to cancel.
+                                {feedMsg
+                                    ? 'The vendor file is applied in batches. You can leave this page. Use Stop Scraping to cancel.'
+                                    : 'You can leave this page; listing rows update as each item finishes. Use Stop Scraping to cancel.'}
                             </p>
                         ) : null}
                         {sku ? (

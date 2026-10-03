@@ -2518,6 +2518,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
             total=total,
             listing_ids=[str(x) for x in listing_ids_batch],
             phase="running",
+            current_sku="",
         )
     else:
         begun = scrape_prog.begin_scrape_progress(
@@ -2602,10 +2603,18 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     scraped=0,
                     failed=0,
                     phase="running",
+                    current_sku="",
+                    feed_batch=True,
                     message="Downloading Vevor AU feed…",
+                )
+                logger.info(
+                    "Downloading Vevor AU feed for managed scrape store=%s listings=%s",
+                    store.id,
+                    total,
                 )
                 try:
                     vevor_lookups = load_vevor_feed_lookups()
+                    logger.info("Vevor AU feed ready for managed scrape store=%s", store.id)
                 except Exception as feed_err:  # noqa: BLE001
                     logger.exception(
                         "Vevor AU feed unavailable for managed scrape store=%s", store.id,
@@ -2634,10 +2643,18 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     scraped=0,
                     failed=0,
                     phase="running",
+                    current_sku="",
+                    feed_batch=True,
                     message="Downloading Costway AU feed…",
+                )
+                logger.info(
+                    "Downloading Costway AU feed for managed scrape store=%s listings=%s",
+                    store.id,
+                    total,
                 )
                 try:
                     costway_lookups = load_costway_feed_lookups()
+                    logger.info("Costway AU feed ready for managed scrape store=%s", store.id)
                 except Exception as feed_err:  # noqa: BLE001
                     logger.exception(
                         "Costway AU feed unavailable for managed scrape store=%s", store.id,
@@ -2674,6 +2691,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     scraped=scraped,
                     failed=failed,
                     current_sku=sku,
+                    feed_batch=bool(feed),
                     message=message,
                 )
 
@@ -2828,6 +2846,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                         scraped=scraped,
                         failed=failed,
                         current_sku="",
+                        feed_batch=True,
                         message=f"Applying {label} prices… {scraped + failed} of {total}",
                     )
                     batch = []
@@ -2846,6 +2865,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                             scraped=scraped,
                             failed=failed,
                             current_sku="",
+                            feed_batch=True,
                             message=f"Applying {label} prices… {done} of {total}",
                         )
 
