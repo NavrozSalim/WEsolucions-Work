@@ -88,6 +88,32 @@ class ManagedListingCostwayScrapeTests(TestCase):
         self.assertEqual(listing.inventory, 5)
         self.assertEqual(listing.last_scrape_error, "")
 
+    @patch("listings.scrape_progress.scrape_job_state", return_value="")
+    @patch("stores.nora.load_store_nora_stock_map", return_value=None)
+    @patch("scrapers.close_amazon_session")
+    @patch("scrapers.get_price_and_stock")
+    @patch("scrapers.costway_au_ingest.load_costway_feed_lookups")
+    def test_costway_feed_does_not_poll_redis_per_sku(
+        self, mock_feed, mock_price, _close, _nora, mock_state,
+    ):
+        lookup = {}
+        for n in range(3):
+            sku = f"TP1000{n}"
+            lookup[sku] = {"Posted Price": 10 + n, "Posted Inventory": n + 1}
+            self._listing(sku, url=f"http://au.costway.com/{sku.lower()}.html", source="costwayau")
+        mock_feed.return_value = {
+            "lookup": lookup,
+            "lookup_compact": {},
+            "lookup_by_url": {},
+            "feed_rows": 3,
+        }
+        result = listing_service.scrape_listings(self.user, self.store)
+        self.assertEqual(result["scraped"], 3)
+        self.assertEqual(result["failed"], 0)
+        mock_price.assert_not_called()
+        # One check before the CSV download. The SKU loop does not call Redis.
+        self.assertEqual(mock_state.call_count, 1)
+
     @patch("stores.nora.load_store_nora_stock_map", return_value=None)
     @patch("scrapers.close_amazon_session")
     @patch("scrapers.get_price_and_stock")

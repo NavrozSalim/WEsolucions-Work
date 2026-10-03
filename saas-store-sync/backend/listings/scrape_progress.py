@@ -259,9 +259,8 @@ def enrich_progress_from_listings(store_id, job_generation=None) -> dict:
         phase = "running"
 
     worker_msg = (data.get("message") or "").strip()
-    # Keep "Downloading Costway AU feed…" until the first row is saved.
-    # Otherwise the bar says "Scraping 1" for the whole download.
-    if processed == 0 and worker_msg.lower().startswith("downloading"):
+    # Keep the feed download / apply text. The default line counts one SKU at a time.
+    if worker_msg.lower().startswith(("downloading", "applying")):
         msg = worker_msg
     else:
         msg = f"Scraping {min(processed + (1 if pending else 0), total)} of {total}…"

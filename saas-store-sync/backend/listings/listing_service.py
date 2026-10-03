@@ -314,7 +314,7 @@ _LISTING_SCRAPE_SAVE_FIELDS = (
     "inventory",
     "infinite_quantity",
 )
-_SCRAPE_WRITE_BATCH = 200
+_SCRAPE_WRITE_BATCH = 1000
 
 
 def _batch_needs_nora_inventory(qs) -> bool:
@@ -2574,6 +2574,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
     costway_feed_error = ""
     try:
         pending_writes = []
+        pending_are_feed = True
         last_sku = ""
 
         def _flush_writes():
@@ -2644,50 +2645,48 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     costway_feed_error = (
                         str(feed_err) or "Costway AU feed download failed."
                     )[:500]
-            def _flush_writes():
+            def _flush_writes(feed=None):
+                nonlocal pending_are_feed
+                if feed is None:
+                    feed = pending_are_feed
                 if not pending_writes:
+                    pending_are_feed = True
                     return
                 stamp = timezone.now()
                 for item in pending_writes:
                     item.updated_at = stamp
                 StoreListing.objects.bulk_update(pending_writes, list(_LISTING_SCRAPE_SAVE_FIELDS))
                 pending_writes.clear()
-                _set_progress(
-                    processed=scraped + failed,
-                    scraped=scraped,
-                    failed=failed,
-                    current_sku=last_sku,
-                    message=(
+                pending_are_feed = True
+                done = scraped + failed
+                if feed:
+                    message = f"Applying feed prices… {done} of {total}"
+                    sku = ""
+                else:
+                    message = (
                         f"Scraped {scraped} of {total}"
                         + (f" ({failed} failed)" if failed else "")
                         + "…"
-                    ),
+                    )
+                    sku = last_sku
+                _set_progress(
+                    processed=done,
+                    scraped=scraped,
+                    failed=failed,
+                    current_sku=sku,
+                    message=message,
                 )
 
             def _queue_write(listing, *, immediate=False):
                 nonlocal last_sku
-                last_sku = (listing.sku or listing.external_variant_key or "")[:80]
+                if immediate:
+                    last_sku = (listing.sku or listing.external_variant_key or "")[:80]
                 pending_writes.append(listing)
                 if immediate or len(pending_writes) >= _SCRAPE_WRITE_BATCH:
-                    _flush_writes()
+                    _flush_writes(feed=not immediate)
 
+            feed_since_check = 0
             for idx, listing in enumerate(listings):
-                loop_state = scrape_prog.scrape_job_state(store.id, my_gen)
-                if loop_state == "superseded":
-                    _flush_writes()
-                    return {
-                        "ok": True,
-                        "cancelled": True,
-                        "superseded": True,
-                        "message": "A newer scrape started; this worker stopped.",
-                        "scraped": scraped,
-                        "failed": failed,
-                        "pushed": 0,
-                        "rows": rows,
-                    }
-                if loop_state == "cancel":
-                    _flush_writes()
-                    return _cancel_result(scraped, failed, rows)
                 url = (listing.vendor_url or "").strip()
                 nora_key = (listing.vendor_id or "").strip()
                 src_code = (listing.source_vendor_code or "").strip()
@@ -2713,6 +2712,29 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                 uses_wallkoala = (not explicit_nora) and (not uses_vevor) and (not uses_costway) and (
                     is_wallkoala_vendor_code(src_code)
                 )
+                feed_only = uses_vevor or uses_costway or uses_wallkoala
+                # Feed rows are a CSV lookup. Checking Redis on every SKU is what
+                # made Costway look like one product page at a time.
+                if not feed_only or feed_since_check >= _SCRAPE_WRITE_BATCH:
+                    feed_since_check = 0
+                    loop_state = scrape_prog.scrape_job_state(store.id, my_gen)
+                    if loop_state == "superseded":
+                        _flush_writes(feed=feed_only)
+                        return {
+                            "ok": True,
+                            "cancelled": True,
+                            "superseded": True,
+                            "message": "A newer scrape started; this worker stopped.",
+                            "scraped": scraped,
+                            "failed": failed,
+                            "pushed": 0,
+                            "rows": rows,
+                        }
+                    if loop_state == "cancel":
+                        _flush_writes(feed=feed_only)
+                        return _cancel_result(scraped, failed, rows)
+                if feed_only:
+                    feed_since_check += 1
                 row = {
                     "id": str(listing.id),
                     "sku": listing.sku or listing.external_variant_key,

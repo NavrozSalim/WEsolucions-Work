@@ -81,16 +81,20 @@ function JobProgressStrip({
     const title = isScrape
         ? (phase === 'pushing' ? 'Pushing scraped prices…' : 'Fetching vendor prices…')
         : `Pushing price/stock to ${marketplaceLabel}…`;
+    const serverMsg = String(progress?.message || '').trim();
+    const feedMsg = /^(downloading|applying)\b/i.test(serverMsg);
     const detail = isScrape
-        ? (hasCounts
-            ? (
-                `Scraping ${Math.min(Math.max(processed, processed < total ? processed + (phase === 'running' ? 1 : 0) : processed), total).toLocaleString()} of ${total.toLocaleString()}`
-                + ` · ${processed.toLocaleString()}/${total.toLocaleString()} done`
-                + ` · ${scraped.toLocaleString()} ok`
-                + ` · ${failed.toLocaleString()} failed`
-                + `. Progress follows listing status (Pending → Scraped).`
-            )
-            : 'Starting scrape…')
+        ? (feedMsg
+            ? serverMsg
+            : (hasCounts
+                ? (
+                    `Scraping ${Math.min(Math.max(processed, processed < total ? processed + (phase === 'running' ? 1 : 0) : processed), total).toLocaleString()} of ${total.toLocaleString()}`
+                    + ` · ${processed.toLocaleString()}/${total.toLocaleString()} done`
+                    + ` · ${scraped.toLocaleString()} ok`
+                    + ` · ${failed.toLocaleString()} failed`
+                    + `. Progress follows listing status (Pending → Scraped).`
+                )
+                : 'Starting scrape…'))
         : `Updating ${count || 0} listing(s) on ${marketplaceLabel}. Keep this page open until it finishes.`;
     const border = isScrape
         ? 'border-sky-200 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/30'
