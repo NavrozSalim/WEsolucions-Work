@@ -3732,9 +3732,10 @@ def export_inventory_xlsx(user, store, sync_status: str = "") -> bytes:
     if sync_status in ("pending", "scraped", "synced", "failed"):
         qs = qs.filter(inventory_sync_status=sync_status)
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Inventory"
+    # Full rows plus an in-memory workbook ran past the 120s Gunicorn limit on
+    # ~5,000-listing stores. Read only the sheet columns and stream the rows.
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("Inventory")
     headers = [
         "SKU",
         "Title",
@@ -3749,19 +3750,36 @@ def export_inventory_xlsx(user, store, sync_status: str = "") -> bytes:
         "Scrape Error",
     ]
     ws.append(headers)
-    for listing in qs:
+    rows = qs.values_list(
+        "sku",
+        "external_variant_key",
+        "title",
+        "vendor_url",
+        "vendor_price",
+        "sale_price",
+        "inventory",
+        "inventory_sync_status",
+        "status",
+        "last_scrape_at",
+        "last_uploaded_at",
+        "last_scrape_error",
+    ).iterator(chunk_size=2000)
+    for (
+        sku, variant_key, title, vendor_url, vendor_price, sale_price, inventory,
+        sync, listing_status, last_scrape_at, last_uploaded_at, scrape_error,
+    ) in rows:
         ws.append([
-            listing.sku or listing.external_variant_key,
-            listing.title,
-            listing.vendor_url,
-            float(listing.vendor_price) if listing.vendor_price is not None else "",
-            float(listing.sale_price) if listing.sale_price is not None else "",
-            listing.inventory,
-            listing.inventory_sync_status,
-            listing.status,
-            listing.last_scrape_at.isoformat() if listing.last_scrape_at else "",
-            listing.last_uploaded_at.isoformat() if listing.last_uploaded_at else "",
-            listing.last_scrape_error or "",
+            sku or variant_key,
+            title,
+            vendor_url,
+            float(vendor_price) if vendor_price is not None else "",
+            float(sale_price) if sale_price is not None else "",
+            inventory,
+            sync,
+            listing_status,
+            last_scrape_at.isoformat() if last_scrape_at else "",
+            last_uploaded_at.isoformat() if last_uploaded_at else "",
+            scrape_error or "",
         ])
     from .export_xlsx import _workbook_response_bytes
     return _workbook_response_bytes(wb)
