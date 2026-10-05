@@ -113,6 +113,8 @@ HOSTS = {
     'ebay_au': 'https://www.ebay.com.au',
 }
 
+IMAGE_COLUMNS = tuple(f'image-{index:02d}' for index in range(1, 11))
+
 
 def is_amazon(marketplace: str) -> bool:
     return str(marketplace or '').startswith('amazon_')
@@ -147,11 +149,42 @@ def clean_columns(marketplace: str, mode: str, requested) -> list[str]:
     return chosen or list(default_columns(marketplace, mode))
 
 
+def fill_image_columns(row: dict) -> dict:
+    """Put up to ten image URLs in image-01 … image-10. Extra images are dropped."""
+    urls = []
+    seen = set()
+    for column in IMAGE_COLUMNS:
+        value = str(row.get(column) or '').strip()
+        if value and value not in seen:
+            seen.add(value)
+            urls.append(value)
+    if not urls:
+        raw = row.get('images') or ''
+        parts = raw if isinstance(raw, list) else str(raw).split('|')
+        for part in parts:
+            value = str(part).strip()
+            if value and value not in seen:
+                seen.add(value)
+                urls.append(value)
+    urls = urls[:len(IMAGE_COLUMNS)]
+    for index, column in enumerate(IMAGE_COLUMNS):
+        row[column] = urls[index] if index < len(urls) else ''
+    return row
+
+
 def output_columns(marketplace: str, selected: list[str]) -> list[str]:
-    """Always keep the product id and URL so the file can feed the next step."""
+    """Always keep the product id and URL so the file can feed the next step.
+
+    Selecting images writes image-01 through image-10 instead of one cell.
+    """
     required = [ID_FIELD[marketplace], 'url']
     ordered = []
     for column in required + list(selected):
+        if column == 'images':
+            for slot in IMAGE_COLUMNS:
+                if slot not in ordered:
+                    ordered.append(slot)
+            continue
         if column not in ordered:
             ordered.append(column)
     return ordered

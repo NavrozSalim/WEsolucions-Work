@@ -9,7 +9,7 @@ import requests
 from django.core.files.base import ContentFile
 from django.utils import timezone
 
-from .columns import HOSTS, clean_columns, is_amazon, is_ebay, output_columns
+from .columns import HOSTS, clean_columns, fill_image_columns, is_amazon, is_ebay, output_columns
 from .files import (
     looks_like_category_url,
     open_bytes,
@@ -541,6 +541,7 @@ def execute_job(job_id) -> None:
                     else _live_product_row(row, job.marketplace, errors, session)
                 )
                 if parsed:
+                    fill_image_columns(parsed)
                     table.add([parsed])
 
         kept_rows = [

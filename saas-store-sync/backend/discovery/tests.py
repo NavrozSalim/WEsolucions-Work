@@ -9,7 +9,7 @@ from django.test import TestCase, override_settings
 from openpyxl import load_workbook
 from rest_framework.test import APIClient
 
-from discovery.columns import ID_FIELD
+from discovery.columns import ID_FIELD, IMAGE_COLUMNS, output_columns
 from discovery.engine import _live_category_rows, execute_job
 from discovery.files import template_bytes, workbook_bytes
 from discovery.identity import dedupe_rows
@@ -22,6 +22,7 @@ from discovery.parsers import (
     parse_amazon_category,
     parse_amazon_product,
     parse_ebay_category,
+    parse_ebay_product,
 )
 from discovery.routing import QUEUE_DISCOVER_AU, QUEUE_DISCOVER_US, queue_for_marketplace
 from discovery.rules import apply_rules
@@ -72,6 +73,13 @@ class RuleAndDedupeTests(TestCase):
         self.assertEqual(queue_for_marketplace('ebay_us'), QUEUE_DISCOVER_US)
         self.assertEqual(queue_for_marketplace('amazon_au'), QUEUE_DISCOVER_AU)
         self.assertEqual(queue_for_marketplace('ebay_au'), QUEUE_DISCOVER_AU)
+
+    def test_images_column_expands_to_ten_slots(self):
+        columns = output_columns('amazon_us', ['title', 'images', 'brand'])
+        self.assertEqual(columns[:4], ['asin', 'url', 'title', 'image-01'])
+        self.assertEqual(columns[3:13], list(IMAGE_COLUMNS))
+        self.assertEqual(columns[-1], 'brand')
+        self.assertNotIn('images', columns)
 
 
 class ParserTests(TestCase):
@@ -127,6 +135,60 @@ class ParserTests(TestCase):
         self.assertEqual(row['category'], 'Kitchen')
         self.assertEqual(row['inventory'], 3)
         self.assertIn('Oven safe', row['bullets'])
+
+    def test_amazon_product_keeps_ten_high_res_images(self):
+        hires = [
+            f'https://m.media-amazon.com/images/I/71IMAGE{index:04d}.jpg'
+            for index in range(1, 13)
+        ]
+        script = ','.join(
+            '{"hiRes":"%s","thumb":"%s","large":"%s"}' % (
+                url,
+                url.replace('.jpg', '._AC_US40_.jpg'),
+                url.replace('.jpg', '._AC_SL1500_.jpg'),
+            )
+            for url in hires
+        )
+        thumbs = ''.join(
+            f'<img src="{url.replace(".jpg", "._AC_US40_.jpg")}" />'
+            for url in hires
+        )
+        html = f'''
+        <script>"colorImages":{{"initial":[{script}]}}</script>
+        <div id="altImages">{thumbs}</div>
+        <img id="landingImage" src="{hires[0].replace(".jpg", "._AC_SX679_.jpg")}" />
+        '''
+        row = parse_amazon_product(html, 'https://www.amazon.com/dp/B0SAMPLE01')
+        self.assertEqual(row['image-01'], hires[0])
+        self.assertEqual(row['image-10'], hires[9])
+        self.assertNotIn(hires[10], row.values())
+        self.assertNotIn('._AC_US40_', ' '.join(row[name] for name in IMAGE_COLUMNS))
+
+    def test_amazon_product_upgrades_thumbnails_and_leaves_empty_slots(self):
+        html = '''
+        <div id="altImages">
+          <img src="https://m.media-amazon.com/images/I/71ONLYTHUMB._AC_US40_.jpg" />
+        </div>
+        <img id="landingImage" src="https://m.media-amazon.com/images/I/71ONLYTHUMB._AC_SX38_.jpg" />
+        '''
+        row = parse_amazon_product(html, 'https://www.amazon.com/dp/B0SAMPLE01')
+        self.assertEqual(row['image-01'], 'https://m.media-amazon.com/images/I/71ONLYTHUMB.jpg')
+        self.assertEqual(row['image-02'], '')
+        self.assertEqual(row['image-10'], '')
+
+    def test_ebay_product_keeps_zoom_images_only(self):
+        html = '''
+        <div class="ux-image-carousel">
+          <img src="https://i.ebayimg.com/images/g/abc/s-l64.jpg"
+               data-zoom-src="https://i.ebayimg.com/images/g/abc/s-l1600.jpg" />
+          <img src="https://i.ebayimg.com/images/g/def/s-l96.jpg" />
+          <img src="https://i.ebayimg.com/images/g/abc/s-l500.jpg" />
+        </div>
+        '''
+        row = parse_ebay_product(html, 'https://www.ebay.com/itm/100000000001')
+        self.assertEqual(row['image-01'], 'https://i.ebayimg.com/images/g/abc/s-l1600.jpg')
+        self.assertEqual(row['image-02'], 'https://i.ebayimg.com/images/g/def/s-l1600.jpg')
+        self.assertEqual(row['image-03'], '')
 
     def test_amazon_total_and_price_band(self):
         html = '<span>1-48 of over 50,000 results</span>'
@@ -395,6 +457,36 @@ class DiscoveryJobTests(TestCase):
         self.assertEqual(headers[0], ID_FIELD['ebay_au'])
         self.assertIn('title', headers)
         self.assertNotIn('description', headers)
+
+    def test_selected_images_fill_ten_columns(self):
+        filename, payload = template_bytes('amazon_us', 'product')
+        response = self.client.post(
+            '/api/v1/discovery/jobs/',
+            {
+                'marketplace': 'amazon_us',
+                'mode': 'product',
+                'use_sample': 'true',
+                'rules': '{}',
+                'columns': __import__('json').dumps(['images']),
+                'file': ContentFile(payload, name=filename),
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        job = DiscoveryJob.objects.get(id=response.data['id'])
+        execute_job(job.id)
+        job.refresh_from_db()
+        self.assertEqual(job.status, DiscoveryJob.Status.SUCCEEDED, job.error_message)
+        workbook = load_workbook(io.BytesIO(job.result_file.read()))
+        headers = [cell.value for cell in next(workbook.active.iter_rows(max_row=1))]
+        self.assertEqual(headers[2:12], list(IMAGE_COLUMNS))
+        self.assertNotIn('images', headers)
+        first = next(workbook.active.iter_rows(min_row=2, values_only=True))
+        values = dict(zip(headers, first))
+        self.assertEqual(values['image-01'], 'https://example.com/cookware.jpg')
+        self.assertEqual(values['image-02'], 'https://example.com/cookware-2.jpg')
+        self.assertFalse(values['image-03'])
+        self.assertFalse(values['image-10'])
 
     def test_rows_table_and_delete(self):
         job = self._run_template(

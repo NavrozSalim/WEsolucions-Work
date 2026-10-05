@@ -7,12 +7,13 @@ jobs do not use this module.
 
 from __future__ import annotations
 
+import json
 import re
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
-from .columns import HOSTS, is_amazon
+from .columns import HOSTS, IMAGE_COLUMNS, fill_image_columns, is_amazon
 from .identity import extract_asin, extract_ebay_item_id
 
 _PRICE_RE = re.compile(r'(?:US\s*)?(?:AU\s*)?\$?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)')
@@ -22,6 +23,11 @@ _INVENTORY_RE = re.compile(
     r'only\s+(\d+)\s+left in stock|(\d+)\s+left in stock|more than\s+(\d+)\s+available|(\d+)\s+available|last one',
     re.I,
 )
+_AMAZON_HIRES_RE = re.compile(r'"hiRes"\s*:\s*"(https:[^"\\]+)"')
+_AMAZON_LARGE_RE = re.compile(r'"large"\s*:\s*"(https:[^"\\]+)"')
+_AMAZON_MODIFIER_RE = re.compile(r'\._[^./]+_\.(jpe?g|png|webp)', re.I)
+_AMAZON_ID_RE = re.compile(r'/images/I/([^./?]+)', re.I)
+_EBAY_SIZE_RE = re.compile(r'/s-l\d+(?=\.)', re.I)
 
 
 def _soup(html: str) -> BeautifulSoup:
@@ -63,6 +69,96 @@ def _inventory_count(*parts) -> int | None:
         if group:
             return int(group.replace(',', ''))
     return None
+
+
+def _amazon_full_url(url: str) -> str:
+    """Product photo at full size. Thumbnail size tokens are removed."""
+    text = (url or '').replace('\\u0026', '&').replace('\\/', '/').split('?', 1)[0].strip()
+    if not text.startswith('http') or '/images/I/' not in text:
+        return ''
+    return _AMAZON_MODIFIER_RE.sub(r'.\1', text)
+
+
+def _remember_image(urls: list[str], seen: set[str], url: str, key: str) -> None:
+    if len(urls) >= 10 or not url or not key or key in seen:
+        return
+    seen.add(key)
+    urls.append(url)
+
+
+def _add_amazon_image(urls: list[str], seen: set[str], url: str) -> None:
+    full = _amazon_full_url(url)
+    if not full:
+        return
+    match = _AMAZON_ID_RE.search(full)
+    _remember_image(urls, seen, full, (match.group(1) if match else full).upper())
+
+
+def _amazon_product_images(html: str, soup) -> list[str]:
+    """High-resolution gallery only, in page order, capped at 10."""
+    urls: list[str] = []
+    seen: set[str] = set()
+    text = html or ''
+    for pattern in (_AMAZON_HIRES_RE, _AMAZON_LARGE_RE):
+        for match in pattern.finditer(text):
+            _add_amazon_image(urls, seen, match.group(1))
+    landing = soup.select_one('#landingImage')
+    if landing is not None:
+        _add_amazon_image(urls, seen, landing.get('data-old-hires') or '')
+        raw_dynamic = landing.get('data-a-dynamic-image') or ''
+        try:
+            mapping = json.loads(raw_dynamic) if raw_dynamic else {}
+        except (TypeError, ValueError):
+            mapping = {}
+        if isinstance(mapping, dict):
+            best: dict[str, tuple[int, str]] = {}
+            for candidate, size in mapping.items():
+                full = _amazon_full_url(str(candidate))
+                if not full:
+                    continue
+                match = _AMAZON_ID_RE.search(full)
+                key = (match.group(1) if match else full).upper()
+                width = size[0] if isinstance(size, list) and size else 0
+                try:
+                    width = int(width)
+                except (TypeError, ValueError):
+                    width = 0
+                if key not in best or width > best[key][0]:
+                    best[key] = (width, full)
+            for _key, (_width, full) in best.items():
+                _add_amazon_image(urls, seen, full)
+    for image in soup.select('#altImages img, #landingImage'):
+        _add_amazon_image(urls, seen, image.get('src') or '')
+    return urls[:10]
+
+
+def _ebay_full_url(url: str) -> str:
+    text = (url or '').split('?', 1)[0].strip()
+    if not text.startswith('http') or 'ebayimg.com' not in text.lower():
+        return ''
+    return _EBAY_SIZE_RE.sub('/s-l1600', text)
+
+
+def _ebay_product_images(soup) -> list[str]:
+    """High-resolution gallery only, capped at 10."""
+    urls: list[str] = []
+    seen: set[str] = set()
+    for image in soup.select('.ux-image-carousel img, img#icImg'):
+        src = image.get('data-zoom-src') or image.get('data-src') or image.get('src') or ''
+        full = _ebay_full_url(src)
+        if not full:
+            continue
+        _remember_image(urls, seen, full, _EBAY_SIZE_RE.sub('/s-l', full))
+    return urls[:10]
+
+
+def _with_image_slots(row: dict, urls: list[str]) -> dict:
+    row['images'] = list(urls)
+    fill_image_columns(row)
+    stored = [row.get(name) or '' for name in IMAGE_COLUMNS if row.get(name)]
+    row['images'] = ' | '.join(stored)
+    row['image'] = stored[0] if stored else ''
+    return row
 
 
 def _amazon_host(page_url: str) -> str:
@@ -315,16 +411,12 @@ def parse_amazon_product(html: str, page_url: str) -> dict:
         for node in soup.select('#wayfinding-breadcrumbs_feature_div a')
         if _text(node)
     ]
-    images = []
-    for image in soup.select('#altImages img, #landingImage'):
-        src = image.get('src') or ''
-        if src and src not in images:
-            images.append(src)
+    images = _amazon_product_images(html, soup)
     availability = _text(soup.select_one('#availability'))
     quantity = soup.select_one('#quantity')
     inventory = _inventory_count(availability, _text(quantity))
     seller = _text(soup.select_one('#sellerProfileTriggerId')) or _text(soup.select_one('#merchant-info'))
-    return {
+    row = {
         'asin': asin,
         'url': page_url,
         'title': title,
@@ -336,11 +428,10 @@ def parse_amazon_product(html: str, page_url: str) -> dict:
         'inventory': inventory,
         'description': description,
         'bullets': ' | '.join(bullets),
-        'images': ' | '.join(images),
-        'image': images[0] if images else '',
         'category': ' > '.join(crumbs),
         'seller': seller,
     }
+    return _with_image_slots(row, images)
 
 
 def _ebay_next_price(card) -> float | None:
@@ -394,14 +485,10 @@ def parse_ebay_product(html: str, page_url: str) -> dict:
         if label and value:
             specifics.append(f'{label}: {value}')
     description = _text(soup.select_one('#desc_ifr, .d-item-description'))
-    images = []
-    for image in soup.select('.ux-image-carousel img, img#icImg'):
-        src = image.get('src') or ''
-        if src and src not in images:
-            images.append(src)
+    images = _ebay_product_images(soup)
     availability = _text(soup.select_one('.x-quantity__availability'))
     inventory = _inventory_count(availability)
-    return {
+    row = {
         'item_id': item_id,
         'url': page_url,
         'title': title,
@@ -414,11 +501,10 @@ def parse_ebay_product(html: str, page_url: str) -> dict:
         'condition': condition,
         'description': description,
         'bullets': ' | '.join(specifics),
-        'images': ' | '.join(images),
-        'image': images[0] if images else '',
         'category': ' > '.join(crumbs),
         'seller': seller,
     }
+    return _with_image_slots(row, images)
 
 
 def next_page_url(html: str, page_url: str) -> str:
