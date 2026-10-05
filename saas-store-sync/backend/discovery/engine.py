@@ -38,7 +38,6 @@ from .sample_data import sample_by_key, sample_catalog
 logger = logging.getLogger(__name__)
 
 MAX_CATEGORY_URLS = 50
-MAX_PRODUCT_URLS = 200
 # Per search URL. Amazon repeats the same cards after a few hundred, so a
 # department-sized category is split by price instead of stopping there.
 MAX_CATEGORY_PAGES = 500
@@ -227,7 +226,6 @@ class _LiveTable:
         self.removed_by_rules = 0
         self.scraped = 0
         self.warning = ''
-        self.skipped_over_limit = 0
 
     def publish(self) -> None:
         self.job.stats = {
@@ -238,7 +236,6 @@ class _LiveTable:
             'kept': max(0, len(self.seen) - self.removed_by_rules),
             'errors': [],
             'warning': self.warning,
-            'skipped_over_limit': self.skipped_over_limit,
         }
         self.job.save(update_fields=['stats'])
 
@@ -530,14 +527,6 @@ def execute_job(job_id) -> None:
             stamped = [stamp_identity(job.marketplace, row) for row in inputs]
             unique_inputs, pre_dupes = dedupe_rows(job.marketplace, stamped)
             table.duplicates += pre_dupes
-            if len(unique_inputs) > MAX_PRODUCT_URLS:
-                table.skipped_over_limit = len(unique_inputs) - MAX_PRODUCT_URLS
-                unique_inputs = unique_inputs[:MAX_PRODUCT_URLS]
-                table.warning = (
-                    f'Only the first {MAX_PRODUCT_URLS} products are scraped. '
-                    f'{table.skipped_over_limit} more were left out after duplicates were removed.'
-                )
-                table.publish()
             for row in unique_inputs:
                 if row_has_rule_fields(row, rules) and row_removed(row, rules):
                     key = product_key(job.marketplace, row)
@@ -588,7 +577,6 @@ def execute_job(job_id) -> None:
             'kept': len(kept_rows),
             'errors': errors[:20],
             'warning': warning,
-            'skipped_over_limit': table.skipped_over_limit,
         }
         job.status = DiscoveryJob.Status.SUCCEEDED
         job.finished_at = timezone.now()
