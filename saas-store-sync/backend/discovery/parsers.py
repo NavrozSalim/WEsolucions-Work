@@ -26,6 +26,8 @@ _INVENTORY_RE = re.compile(
 _AMAZON_HIRES_RE = re.compile(r'"hiRes"\s*:\s*"(https:[^"\\]+)"')
 _AMAZON_LARGE_RE = re.compile(r'"large"\s*:\s*"(https:[^"\\]+)"')
 _AMAZON_MODIFIER_RE = re.compile(r'\._[^./]+_\.(jpe?g|png|webp)', re.I)
+_AMAZON_EXT_RE = re.compile(r'\.(jpe?g|png|webp)$', re.I)
+_AMAZON_HIRES_SUFFIX = '._US_1500_.jpg'
 _AMAZON_ID_RE = re.compile(r'/images/I/([^./?]+)', re.I)
 _EBAY_SIZE_RE = re.compile(r'/s-l\d+(?=\.)', re.I)
 
@@ -72,11 +74,14 @@ def _inventory_count(*parts) -> int | None:
 
 
 def _amazon_full_url(url: str) -> str:
-    """Product photo at full size. Thumbnail size tokens are removed."""
+    """Product photo with the high-resolution ._US_1500_.jpg suffix."""
     text = (url or '').replace('\\u0026', '&').replace('\\/', '/').split('?', 1)[0].strip()
     if not text.startswith('http') or '/images/I/' not in text:
         return ''
-    return _AMAZON_MODIFIER_RE.sub(r'.\1', text)
+    text = _AMAZON_MODIFIER_RE.sub(r'.\1', text)
+    if not _AMAZON_EXT_RE.search(text):
+        return ''
+    return _AMAZON_EXT_RE.sub(_AMAZON_HIRES_SUFFIX, text)
 
 
 def _remember_image(urls: list[str], seen: set[str], url: str, key: str) -> None:

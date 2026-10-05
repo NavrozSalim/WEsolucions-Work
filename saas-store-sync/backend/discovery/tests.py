@@ -159,10 +159,11 @@ class ParserTests(TestCase):
         <img id="landingImage" src="{hires[0].replace(".jpg", "._AC_SX679_.jpg")}" />
         '''
         row = parse_amazon_product(html, 'https://www.amazon.com/dp/B0SAMPLE01')
-        self.assertEqual(row['image-01'], hires[0])
-        self.assertEqual(row['image-10'], hires[9])
-        self.assertNotIn(hires[10], row.values())
+        self.assertEqual(row['image-01'], hires[0].replace('.jpg', '._US_1500_.jpg'))
+        self.assertEqual(row['image-10'], hires[9].replace('.jpg', '._US_1500_.jpg'))
+        self.assertNotIn(hires[10].replace('.jpg', '._US_1500_.jpg'), row.values())
         self.assertNotIn('._AC_US40_', ' '.join(row[name] for name in IMAGE_COLUMNS))
+        self.assertTrue(all(not row[name] or row[name].endswith('._US_1500_.jpg') for name in IMAGE_COLUMNS))
 
     def test_amazon_product_upgrades_thumbnails_and_leaves_empty_slots(self):
         html = '''
@@ -172,7 +173,7 @@ class ParserTests(TestCase):
         <img id="landingImage" src="https://m.media-amazon.com/images/I/71ONLYTHUMB._AC_SX38_.jpg" />
         '''
         row = parse_amazon_product(html, 'https://www.amazon.com/dp/B0SAMPLE01')
-        self.assertEqual(row['image-01'], 'https://m.media-amazon.com/images/I/71ONLYTHUMB.jpg')
+        self.assertEqual(row['image-01'], 'https://m.media-amazon.com/images/I/71ONLYTHUMB._US_1500_.jpg')
         self.assertEqual(row['image-02'], '')
         self.assertEqual(row['image-10'], '')
 
