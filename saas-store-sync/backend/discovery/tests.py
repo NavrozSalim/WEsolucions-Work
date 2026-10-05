@@ -10,7 +10,7 @@ from openpyxl import load_workbook
 from rest_framework.test import APIClient
 
 from discovery.columns import ID_FIELD
-from discovery.engine import _live_category_rows, execute_job
+from discovery.engine import MAX_PRODUCT_URLS, _live_category_rows, execute_job
 from discovery.files import template_bytes, workbook_bytes
 from discovery.identity import dedupe_rows
 from discovery.models import DiscoveryJob
@@ -437,6 +437,32 @@ class DiscoveryJobTests(TestCase):
         self.assertEqual(child.stats['kept'], 1)
         self.assertEqual(child.stats['input_rows'], 1)
         self.assertTrue(child.source_bytes)
+
+    def test_product_file_over_the_limit_scrapes_the_first_batch(self):
+        rows = [
+            {'url': f'https://www.amazon.com/dp/B{index:09d}'}
+            for index in range(1, MAX_PRODUCT_URLS + 2)
+        ]
+        payload = workbook_bytes(['url'], rows)
+        job = DiscoveryJob(
+            owner=self.user,
+            marketplace='amazon_us',
+            mode=DiscoveryJob.Mode.PRODUCT,
+            original_filename='amazon_us-from-category.xlsx',
+            use_sample=True,
+            zip_code='10001',
+            source_bytes=payload,
+        )
+        job.source_file.save('products.xlsx', ContentFile(payload), save=False)
+        job.save()
+        execute_job(job.id)
+        job.refresh_from_db()
+        self.assertEqual(job.status, DiscoveryJob.Status.SUCCEEDED, job.error_message)
+        self.assertEqual(job.error_message, '')
+        self.assertEqual(job.stats['kept'], MAX_PRODUCT_URLS)
+        self.assertEqual(job.stats['skipped_over_limit'], 1)
+        self.assertIn(str(MAX_PRODUCT_URLS), job.stats['warning'])
+        self.assertEqual(job.products.count(), MAX_PRODUCT_URLS)
 
     def test_scrape_reads_the_database_copy_when_the_disk_file_is_missing(self):
         filename, payload = template_bytes('amazon_us', 'product')

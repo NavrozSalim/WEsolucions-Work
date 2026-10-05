@@ -226,6 +226,21 @@ class _LiveTable:
         self.duplicates = 0
         self.removed_by_rules = 0
         self.scraped = 0
+        self.warning = ''
+        self.skipped_over_limit = 0
+
+    def publish(self) -> None:
+        self.job.stats = {
+            'input_rows': self.input_count,
+            'scraped': self.scraped,
+            'duplicates_removed': self.duplicates,
+            'removed_by_rules': self.removed_by_rules,
+            'kept': max(0, len(self.seen) - self.removed_by_rules),
+            'errors': [],
+            'warning': self.warning,
+            'skipped_over_limit': self.skipped_over_limit,
+        }
+        self.job.save(update_fields=['stats'])
 
     def add(self, batch: list[dict]) -> None:
         fresh = []
@@ -250,16 +265,7 @@ class _LiveTable:
             ))
         if fresh:
             DiscoveryProduct.objects.bulk_create(fresh, ignore_conflicts=True)
-        self.job.stats = {
-            'input_rows': self.input_count,
-            'scraped': self.scraped,
-            'duplicates_removed': self.duplicates,
-            'removed_by_rules': self.removed_by_rules,
-            'kept': max(0, len(self.seen) - self.removed_by_rules),
-            'errors': [],
-            'warning': '',
-        }
-        self.job.save(update_fields=['stats'])
+        self.publish()
 
 
 def _paginate_amazon(grid, session, errors, seen_asins, rows, on_batch, note_empty):
@@ -525,7 +531,13 @@ def execute_job(job_id) -> None:
             unique_inputs, pre_dupes = dedupe_rows(job.marketplace, stamped)
             table.duplicates += pre_dupes
             if len(unique_inputs) > MAX_PRODUCT_URLS:
-                raise DiscoveryError(f'Product files are limited to {MAX_PRODUCT_URLS} products after duplicates are removed.')
+                table.skipped_over_limit = len(unique_inputs) - MAX_PRODUCT_URLS
+                unique_inputs = unique_inputs[:MAX_PRODUCT_URLS]
+                table.warning = (
+                    f'Only the first {MAX_PRODUCT_URLS} products are scraped. '
+                    f'{table.skipped_over_limit} more were left out after duplicates were removed.'
+                )
+                table.publish()
             for row in unique_inputs:
                 if row_has_rule_fields(row, rules) and row_removed(row, rules):
                     key = product_key(job.marketplace, row)
@@ -557,7 +569,7 @@ def execute_job(job_id) -> None:
             logger.warning('discovery job %s result stayed in the database', job_id)
         job.columns = columns
         job.rules = rules
-        warning = ''
+        warning = table.warning
         if (
             not job.use_sample
             and job.mode == DiscoveryJob.Mode.CATEGORY
@@ -576,6 +588,7 @@ def execute_job(job_id) -> None:
             'kept': len(kept_rows),
             'errors': errors[:20],
             'warning': warning,
+            'skipped_over_limit': table.skipped_over_limit,
         }
         job.status = DiscoveryJob.Status.SUCCEEDED
         job.finished_at = timezone.now()
