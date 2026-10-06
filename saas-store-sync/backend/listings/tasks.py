@@ -306,8 +306,10 @@ def publish_store_listings(self, user_id, store_id, listing_ids=None):
     name="listings.push_store_inventory",
     bind=True,
     ignore_result=False,
-    soft_time_limit=7200,
-    time_limit=7500,
+    # 5 hours, with 15 minutes to shut down. Redis redelivers a task that is
+    # still running at the 6-hour visibility timeout, so this stays under that.
+    soft_time_limit=18000,
+    time_limit=18900,
 )
 def push_store_inventory(self, user_id, store_id, listing_ids=None, vendor_code=None):
     """Background Lasoo inventory push on the ingest queue."""
