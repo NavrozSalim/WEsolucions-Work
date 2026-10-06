@@ -3324,6 +3324,15 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
 
 
 
+# Publish stores the whole BulkUpsert body on every row. Loading thousands of
+# those JSON blobs into the ingest worker is what SIGKILL (signal 9) was.
+_LASOO_PUSH_DEFER = (
+    "marketplace_request_json",
+    "marketplace_response_json",
+    "validation_errors_json",
+)
+
+
 def _lasoo_uploaded_qs(user, store, listing_ids=None, vendor_code=None):
     qs = StoreListing.objects.filter(
         user=user,
@@ -3449,28 +3458,76 @@ def _upsert_lasoo_inventory_group(client, listings: list, state: dict) -> tuple[
     return 0, len(listings), last_error, stop
 
 
-def _push_lasoo_inventory(user, store, listings: list) -> dict:
-    """Search then upsert uploaded Lasoo rows in small batches.
+def _mark_lasoo_inventory_ids(ids, *, ok: bool, message: str):
+    """Update sync badges for rows that were never loaded into memory."""
+    if not ids:
+        return
+    now = timezone.now()
+    if ok:
+        StoreListing.objects.filter(id__in=list(ids)).update(
+            inventory_sync_status=InventorySyncStatus.SYNCED,
+            last_uploaded_at=now,
+            updated_at=now,
+        )
+        return
+    note = f"Lasoo push: {(message or '').strip() or 'Lasoo rejected the inventory update.'}"[:500]
+    StoreListing.objects.filter(id__in=list(ids)).update(
+        inventory_sync_status=InventorySyncStatus.FAILED,
+        last_scrape_error=note,
+        updated_at=now,
+    )
+
+
+def _load_lasoo_push_page(page_ids) -> list:
+    """One inventory batch, without the stored Lasoo request/response JSON."""
+    if not page_ids:
+        return []
+    return list(
+        StoreListing.objects.filter(id__in=list(page_ids))
+        .select_related("store", "store__marketplace")
+        .defer(*_LASOO_PUSH_DEFER)
+        .order_by("id")
+    )
+
+
+def _push_lasoo_inventory(user, store, listings) -> dict:
+    """Search then upsert uploaded Lasoo rows one small page at a time.
 
     Search failures are not treated as "SKU missing". Missing SKUs are skipped
     and are not created. Listing status stays uploaded either way.
+
+    ``listings`` may be a queryset. Only primary keys are read up front; each
+    page is loaded, pushed, and dropped so an 8,000-row catalog does not sit
+    in the ingest worker at once.
     """
     environment = store.lasoo_environment or Environment.STAGING
     client = LasooClient(store, environment)
-    queued = len(listings)
+    if isinstance(listings, list):
+        ids = [row.id for row in listings]
+    else:
+        ids = list(listings.order_by("id").values_list("id", flat=True))
+    if not ids:
+        raise MarketplaceError(
+            "No marketplace listings to push. Publish from Created products first."
+        )
+    queued = len(ids)
     pushed = 0
     failed = 0
     skipped: list[str] = []
     last_error = ""
-    chunks = list(_iter_chunks(listings, LASOO_INVENTORY_CHUNK))
-    batches = len(chunks) or 1
+    page_size = LASOO_INVENTORY_CHUNK
+    batches = max(1, (queued + page_size - 1) // page_size)
     state = {"single_transient": 0}
     stop_remaining = False
 
-    for batch_i, chunk in enumerate(chunks, start=1):
+    for batch_i, start in enumerate(range(0, queued, page_size), start=1):
         if stop_remaining:
             break
         ensure_db_connection()
+        page_ids = ids[start:start + page_size]
+        chunk = _load_lasoo_push_page(page_ids) if not isinstance(listings, list) else [
+            row for row in listings if row.id in set(page_ids)
+        ]
         confirmed = []
         for listing in chunk:
             sku = (listing.sku or listing.external_variant_key or "").strip() or str(listing.id)
@@ -3498,14 +3555,15 @@ def _push_lasoo_inventory(user, store, listings: list) -> dict:
                     store.id, batch_i, batches, last_error,
                 )
         if stop_remaining:
-            remaining = [row for more in chunks[batch_i:] for row in more]
-            if remaining:
-                _mark_lasoo_inventory_push(
-                    remaining,
+            rest_ids = ids[start + page_size:]
+            if rest_ids:
+                _mark_lasoo_inventory_ids(
+                    rest_ids,
                     ok=False,
                     message=last_error or "Lasoo inventory push stopped.",
                 )
-                failed += len(remaining)
+                failed += len(rest_ids)
+        del chunk
         _tick_lasoo_inventory_push(
             store,
             processed=pushed + failed + len(skipped),
@@ -3554,7 +3612,7 @@ def _push_lasoo_inventory(user, store, listings: list) -> dict:
     }
 
 
-def _enqueue_lasoo_inventory_push(user, store, listing_ids: list[str], *, queued: int) -> dict:
+def _enqueue_lasoo_inventory_push(user, store, listing_ids, *, vendor_code: str = "", queued: int) -> dict:
     from . import publish_progress as pub_prog
     from .tasks import push_store_inventory
 
@@ -3566,7 +3624,7 @@ def _enqueue_lasoo_inventory_push(user, store, listing_ids: list[str], *, queued
         )
     try:
         async_res = push_store_inventory.apply_async(
-            args=[user.id, str(store.id), listing_ids],
+            args=[user.id, str(store.id), listing_ids, vendor_code or ""],
             queue="ingest",
         )
     except Exception as exc:
@@ -3611,17 +3669,22 @@ def push_inventory(user, store, listing_ids=None, vendor_code=None, *, allow_asy
     if kind == "lasoo":
         qs = _lasoo_uploaded_qs(user, store, listing_ids, vendor_code)
         if allow_async:
-            id_strs = [str(pk) for pk in qs.values_list("id", flat=True)]
-            if not id_strs:
+            count = qs.count()
+            if not count:
                 raise MarketplaceError(empty_push)
-            if len(id_strs) >= LASOO_PUSH_ASYNC_MIN:
-                return _enqueue_lasoo_inventory_push(user, store, id_strs, queued=len(id_strs))
-            listings = list(qs)
-        else:
-            listings = list(qs)
-            if not listings:
-                raise MarketplaceError(empty_push)
-        return _push_lasoo_inventory(user, store, listings)
+            if count >= LASOO_PUSH_ASYNC_MIN:
+                # Do not put thousands of SKUs in the broker message. The worker
+                # re-reads the same uploaded rows one page at a time.
+                return _enqueue_lasoo_inventory_push(
+                    user,
+                    store,
+                    [str(pk) for pk in listing_ids] if listing_ids else None,
+                    vendor_code=vendor_code or "",
+                    queued=count,
+                )
+        elif not qs.exists():
+            raise MarketplaceError(empty_push)
+        return _push_lasoo_inventory(user, store, qs)
     if kind == "mydeal":
         from .mydeal import products as mydeal_products
 

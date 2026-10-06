@@ -309,7 +309,7 @@ def publish_store_listings(self, user_id, store_id, listing_ids=None):
     soft_time_limit=7200,
     time_limit=7500,
 )
-def push_store_inventory(self, user_id, store_id, listing_ids=None):
+def push_store_inventory(self, user_id, store_id, listing_ids=None, vendor_code=None):
     """Background Lasoo inventory push on the ingest queue."""
     from . import listing_service
     from . import publish_progress as pub_prog
@@ -334,7 +334,11 @@ def push_store_inventory(self, user_id, store_id, listing_ids=None):
     try:
         try:
             result = listing_service.push_inventory(
-                user, store, listing_ids, allow_async=False,
+                user,
+                store,
+                listing_ids,
+                vendor_code=vendor_code or None,
+                allow_async=False,
             )
         except MarketplaceError as exc:
             pub_prog.finish_publish_progress(
