@@ -229,6 +229,7 @@ class LasooPublishAsyncServiceTests(TestCase):
 
     def tearDown(self):
         pub_prog.clear_publish_progress(self.store.id)
+        pub_prog.clear_publish_progress(self.store.id, scope="inventory_push")
 
     @patch("listings.listing_service._publish_lasoo")
     @patch("listings.listing_service._collect_publishable")
@@ -265,3 +266,15 @@ class LasooPublishAsyncServiceTests(TestCase):
         self.assertEqual(res.status_code, 202)
         self.assertTrue(res.data["async"])
         self.assertEqual(res.data["queued"], 1)
+
+    @patch("listings.tasks.push_store_inventory.apply_async")
+    def test_lasoo_inventory_push_api_returns_202_when_queued(self, mock_apply):
+        self.listing.status = ListingStatus.UPLOADED_PRODUCTION
+        self.listing.save(update_fields=["status"])
+        mock_apply.return_value = MagicMock(id="push-job")
+        with patch.object(listing_service, "LASOO_PUSH_ASYNC_MIN", 1):
+            res = self.client.post(f"/api/v1/stores/{self.store.id}/listings/push-inventory/", {}, format="json")
+        self.assertEqual(res.status_code, 202)
+        self.assertTrue(res.data["async"])
+        self.assertEqual(res.data["queued"], 1)
+        self.assertEqual(res.data["job_id"], "push-job")

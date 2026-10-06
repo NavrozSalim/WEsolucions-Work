@@ -1262,6 +1262,109 @@ class ListingServiceTests(TestCase):
         keys = {v.get("externalVariantKey") for v in variants}
         self.assertIn(present.sku, keys)
         self.assertNotIn("U-Z1618", keys)
+        present.refresh_from_db()
+        self.assertEqual(present.status, ListingStatus.UPLOADED_STAGING)
+        self.assertEqual(present.inventory_sync_status, "synced")
+
+    @patch("listings.listing_service.LasooClient")
+    def test_push_inventory_keeps_uploaded_status_when_lasoo_rejects(self, mock_client_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        listing.status = ListingStatus.UPLOADED_PRODUCTION
+        listing.save(update_fields=["status"])
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+
+        def send(endpoint, payload=None, *args, **kwargs):
+            if endpoint == "variants_search":
+                key = (payload or {}).get("data", {}).get("externalVariantKey") or listing.sku
+                return LasooResult(
+                    ok=True,
+                    message="ok",
+                    data={"results": {"variants": [{"externalProductKey": key, "externalVariantKey": key}]}},
+                )
+            return LasooResult(ok=False, message="Category could not be mapped", status=400, error={"error": "map"})
+
+        mock_client.send.side_effect = send
+        result = listing_service.push_inventory(self.user, self.store)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["pushed"], 0)
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.UPLOADED_PRODUCTION)
+        self.assertEqual(listing.inventory_sync_status, "failed")
+        self.assertTrue((listing.last_scrape_error or "").startswith("Lasoo push:"))
+
+    @patch("listings.listing_service.LasooClient")
+    def test_push_inventory_search_outage_is_not_missing_sku(self, mock_client_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        listing.status = ListingStatus.UPLOADED_PRODUCTION
+        listing.save(update_fields=["status"])
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        mock_client.send.return_value = LasooResult(
+            ok=False,
+            message="Can't reach database server",
+            status=500,
+            error={"error": "prisma"},
+        )
+        result = listing_service.push_inventory(self.user, self.store)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["failed"], 1)
+        self.assertNotIn("do not exist", result["message"].lower())
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.UPLOADED_PRODUCTION)
+        upserts = [c for c in mock_client.send.call_args_list if c[0][0] == "bulk_upsert"]
+        self.assertEqual(upserts, [])
+
+    @patch("listings.listing_service.LasooClient")
+    def test_push_inventory_splits_transient_bulk_failure(self, mock_client_cls):
+        first = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        second = self._extra_lasoo_row("TSHIRT-002-BLACK-M")
+        for row in (first, second):
+            row.status = ListingStatus.UPLOADED_PRODUCTION
+            row.save(update_fields=["status"])
+        mock_client = mock_client_cls.return_value
+        mock_client.auth_key = "key"
+        upserts = {"n": 0}
+
+        def send(endpoint, payload=None, *args, **kwargs):
+            if endpoint == "variants_search":
+                key = (payload or {}).get("data", {}).get("externalVariantKey") or ""
+                return LasooResult(
+                    ok=True,
+                    message="ok",
+                    data={"results": {"variants": [{"externalProductKey": key, "externalVariantKey": key}]}},
+                )
+            upserts["n"] += 1
+            if upserts["n"] == 1:
+                return LasooResult(ok=False, message="Lasoo 502", status=502, error={"raw": "502"})
+            return LasooResult(ok=True, message="ok", data={"success": True}, status=200)
+
+        mock_client.send.side_effect = send
+        with patch.object(listing_service, "LASOO_INVENTORY_CHUNK", 2):
+            result = listing_service.push_inventory(self.user, self.store)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["pushed"], 2)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(upserts["n"], 3)
+        for row in (first, second):
+            row.refresh_from_db()
+            self.assertEqual(row.status, ListingStatus.UPLOADED_PRODUCTION)
+            self.assertEqual(row.inventory_sync_status, "synced")
+
+    @patch("listings.tasks.push_store_inventory.apply_async")
+    def test_large_lasoo_inventory_push_enqueues(self, mock_apply):
+        listing = listing_service.create(self.user, self.store, dict(VALID_DATA))
+        listing.status = ListingStatus.UPLOADED_PRODUCTION
+        listing.save(update_fields=["status"])
+        mock_apply.return_value = MagicMock(id="push-job")
+        with patch.object(listing_service, "LASOO_PUSH_ASYNC_MIN", 1):
+            result = listing_service.push_inventory(self.user, self.store, allow_async=True)
+        self.assertTrue(result["async"])
+        self.assertEqual(result["queued"], 1)
+        self.assertEqual(result["job_id"], "push-job")
+        mock_apply.assert_called_once()
+        self.assertEqual(mock_apply.call_args.kwargs.get("queue"), "ingest")
 
     def test_bulk_import_rejects_wrong_marketplace_name(self):
         content = (

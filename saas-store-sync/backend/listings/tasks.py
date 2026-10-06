@@ -300,3 +300,83 @@ def publish_store_listings(self, user_id, store_id, listing_ids=None):
         live = pub_prog.get_publish_progress(store_id)
         if live.get("active") and (not my_id or live.get("job_id") == my_id):
             pub_prog.finish_publish_progress(store_id, job_id=my_id)
+
+
+@shared_task(
+    name="listings.push_store_inventory",
+    bind=True,
+    ignore_result=False,
+    soft_time_limit=7200,
+    time_limit=7500,
+)
+def push_store_inventory(self, user_id, store_id, listing_ids=None):
+    """Background Lasoo inventory push on the ingest queue."""
+    from . import listing_service
+    from . import publish_progress as pub_prog
+    from .models import ListingAction, ListingUpload
+
+    scope = listing_service.LASOO_INVENTORY_PUSH_SCOPE
+    my_id = str(getattr(getattr(self, "request", None), "id", "") or "")
+    User = get_user_model()
+    try:
+        user = User.objects.get(pk=user_id)
+        store = Store.objects.select_related("marketplace", "user").get(pk=store_id)
+    except (User.DoesNotExist, Store.DoesNotExist):
+        pub_prog.finish_publish_progress(
+            store_id,
+            scope=scope,
+            job_id=my_id,
+            error="not_found",
+            message="Store or user not found.",
+        )
+        return {"ok": False, "error": "not_found", "message": "Store or user not found."}
+
+    try:
+        try:
+            result = listing_service.push_inventory(
+                user, store, listing_ids, allow_async=False,
+            )
+        except MarketplaceError as exc:
+            pub_prog.finish_publish_progress(
+                store_id, scope=scope, job_id=my_id, error=str(exc), message=str(exc),
+            )
+            return {"ok": False, "error": str(exc), "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Inventory push task failed store=%s", store_id)
+            msg = str(exc) or "Inventory push failed."
+            pub_prog.finish_publish_progress(
+                store_id, scope=scope, job_id=my_id, error=msg, message=msg,
+            )
+            return {"ok": False, "error": str(exc), "message": msg}
+
+        pushed = int(result.get("pushed") or 0)
+        failed = int(result.get("failed") or 0)
+        listing_service.record_activity(
+            user,
+            store,
+            action=ListingAction.CREATE,
+            source=ListingUpload.Source.SINGLE,
+            filename="Push inventory to marketplace",
+            total=pushed + failed,
+            success=pushed,
+            errors=failed,
+            message=result.get("message") or "",
+        )
+        pub_prog.finish_publish_progress(
+            store_id,
+            scope=scope,
+            job_id=my_id,
+            message=result.get("message") or "",
+            result={
+                "ok": result.get("ok"),
+                "pushed": pushed,
+                "failed": failed,
+                "skipped": result.get("skipped") or 0,
+                "message": result.get("message") or "",
+            },
+        )
+        return result
+    finally:
+        live = pub_prog.get_publish_progress(store_id, scope=scope)
+        if live.get("active") and (not my_id or live.get("job_id") == my_id):
+            pub_prog.finish_publish_progress(store_id, scope=scope, job_id=my_id)

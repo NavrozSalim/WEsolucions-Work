@@ -1138,9 +1138,12 @@ class StoreListingPushInventoryView(APIView):
         try:
             result = listing_service.push_inventory(
                 request.user, store, listing_ids, vendor_code=vendor_code or None,
+                allow_async=True,
             )
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if result.get('async'):
+            return Response(result, status=status.HTTP_202_ACCEPTED)
         code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY
         if result.get('pushed'):
             listing_service.record_activity(
@@ -1154,6 +1157,21 @@ class StoreListingPushInventoryView(APIView):
                 message=result.get('message') or '',
             )
         return Response(result, status=code)
+
+
+class StoreListingPushInventoryProgressView(APIView):
+    """Live Inventory Manual sync banner (survives reload and leaving the page)."""
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ProgressReadRateThrottle]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        from . import publish_progress as pub_prog
+        data = pub_prog.enrich_publish_progress(
+            store.id, scope=listing_service.LASOO_INVENTORY_PUSH_SCOPE,
+        )
+        data['store_id'] = str(store.id)
+        return Response(data)
 
 
 class StoreListingResetInventoryView(APIView):

@@ -7,6 +7,7 @@ import {
     deleteListing,
     exportListingInventory,
     getInventoryListings,
+    getListingInventoryPushProgress,
     getListingScrapeProgress,
     pushListingInventory,
     resetListingInventory,
@@ -70,12 +71,19 @@ function JobProgressStrip({
         Number(progress?.total ?? 0) || 0,
         Number(count ?? 0) || 0,
     );
+    const pushTotal = Math.max(
+        Number(progress?.queued ?? 0) || 0,
+        Number(progress?.total ?? 0) || 0,
+        Number(count ?? 0) || 0,
+    );
+    const displayTotal = isScrape ? total : pushTotal;
+    const displayProcessed = isScrape ? processed : Number(progress?.processed ?? 0);
     const scraped = Number(progress?.scraped ?? 0);
     const failed = Number(progress?.failed ?? 0);
-    const pct = total > 0
-        ? Math.max(0, Math.min(100, Number(progress?.pct ?? Math.round((100 * processed) / total))))
+    const pct = displayTotal > 0
+        ? Math.max(0, Math.min(100, Number(progress?.pct ?? Math.round((100 * displayProcessed) / displayTotal))))
         : 0;
-    const hasCounts = isScrape && total > 0;
+    const hasCounts = isScrape ? total > 0 : Boolean(progress) && pushTotal > 0;
     const phase = progress?.phase || '';
     const isStopping = Boolean(stopping || progress?.cancel_requested);
     const title = isScrape
@@ -95,7 +103,9 @@ function JobProgressStrip({
                     + `. Progress follows listing status (Pending → Scraped).`
                 )
                 : 'Starting scrape…'))
-        : `Updating ${count || 0} listing(s) on ${marketplaceLabel}. Keep this page open until it finishes.`;
+        : (hasCounts
+            ? `Updating ${Math.min(displayProcessed, displayTotal).toLocaleString()} of ${displayTotal.toLocaleString()} listing(s) on ${marketplaceLabel}. ${Number(failed) > 0 ? `${Number(failed).toLocaleString()} failed. ` : ''}You can leave this page.`
+            : `Updating ${count || 0} listing(s) on ${marketplaceLabel}.`);
     const border = isScrape
         ? 'border-sky-200 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/30'
         : 'border-emerald-200 dark:border-emerald-800 bg-emerald-50/80 dark:bg-emerald-950/30';
@@ -121,7 +131,7 @@ function JobProgressStrip({
                             </span>
                             {hasCounts ? (
                                 <span className="ml-2 text-xs font-semibold tabular-nums text-slate-600 dark:text-slate-300">
-                                    {processed}/{total}
+                                    {displayProcessed}/{displayTotal}
                                 </span>
                             ) : null}
                         </h3>
@@ -166,7 +176,7 @@ function JobProgressStrip({
             </div>
             {hasCounts ? (
                 <p className="mt-1 text-xs tabular-nums text-slate-500 dark:text-slate-400">
-                    {pct}% complete ({processed} of {total})
+                    {pct}% complete ({displayProcessed} of {displayTotal})
                 </p>
             ) : null}
             <style>{`
@@ -205,6 +215,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     const [scraping, setScraping] = useState(false);
     const [stoppingScrape, setStoppingScrape] = useState(false);
     const [pushing, setPushing] = useState(false);
+    const [pushProgress, setPushProgress] = useState(null);
     const [resetting, setResetting] = useState(false);
     const [criticalLoading, setCriticalLoading] = useState(false);
     const [exporting, setExporting] = useState(false);
@@ -216,6 +227,8 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     const [jobCount, setJobCount] = useState(0);
     const [scrapeProgress, setScrapeProgress] = useState(null);
     const scrapeWasActiveRef = useRef(false);
+    const pushWasActiveRef = useRef(false);
+    const pushStartingRef = useRef(false);
     const ignoreServerActiveRef = useRef(false);
     const scrapeStartingRef = useRef(false);
     const onMessageRef = useRef(onMessage);
@@ -371,10 +384,67 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
         };
     }, [storeId, debouncedSearch, syncFilter, load, applyInventoryPage]);
 
+    // Poll Lasoo (and any queued) inventory push so bulk Manual sync survives reload.
+    useEffect(() => {
+        if (!storeId) return undefined;
+        let cancelled = false;
+        let refreshTick = 0;
+        const tick = () => {
+            getListingInventoryPushProgress(storeId)
+                .then((res) => {
+                    if (cancelled) return;
+                    const data = res.data || {};
+                    const active = Boolean(data.active);
+                    if (pushStartingRef.current && !active) return;
+                    if (pushStartingRef.current && active) pushStartingRef.current = false;
+                    const wasActive = pushWasActiveRef.current;
+                    if (wasActive && !active) {
+                        const result = data.result && typeof data.result === 'object' ? data.result : {};
+                        const ok = result.ok !== false && !data.error;
+                        const msg = data.message
+                            || result.message
+                            || data.error
+                            || (ok ? 'Manual sync finished.' : 'Push failed.');
+                        onMessageRef.current?.(msg, ok ? 'success' : 'error');
+                        setPushing(false);
+                        setPushProgress(null);
+                        setJobCount(0);
+                        load();
+                    }
+                    pushWasActiveRef.current = active;
+                    if (active) {
+                        setPushing(true);
+                        setPushProgress(data);
+                        setJobCount(Number(data.queued) || 0);
+                        refreshTick += 1;
+                        if (refreshTick % 3 !== 0) return;
+                        getInventoryListings(storeId, {
+                            page: pageRef.current,
+                            pageSize: PAGE_SIZE,
+                            search: debouncedSearch || undefined,
+                            syncStatus: syncFilter,
+                        })
+                            .then((r) => {
+                                if (!cancelled) applyInventoryPage(r);
+                            })
+                            .catch(() => {});
+                    }
+                })
+                .catch(() => { /* ignore transient poll errors */ });
+        };
+        tick();
+        const id = setInterval(tick, 3500);
+        return () => {
+            cancelled = true;
+            clearInterval(id);
+        };
+    }, [storeId, debouncedSearch, syncFilter, load, applyInventoryPage]);
+
     const withVendor = scrapeableCount;
 
     const serverScraping = Boolean(scrapeProgress?.active) && scrapeProgress?.phase !== 'cancelled';
     const scrapeBusy = (scraping || serverScraping) && scrapeProgress?.phase !== 'cancelled';
+    const pushBusy = pushing || Boolean(pushProgress?.active);
 
     const storeVendors = Array.isArray(vendors) ? vendors : [];
 
@@ -464,18 +534,46 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
         const targetCount = ids?.length || totalCount;
         setJobCount(targetCount);
         setPushing(true);
+        setPushProgress({
+            active: true,
+            queued: targetCount,
+            processed: 0,
+            failed: 0,
+            message: 'Starting inventory push…',
+        });
+        pushStartingRef.current = true;
+        pushWasActiveRef.current = true;
         pushListingInventory(storeId, ids, ids ? null : vendorCode)
             .then((res) => {
+                if (res.data?.async || res.data?.job_id) {
+                    const queued = Number(res.data?.queued) || targetCount;
+                    setJobCount(queued);
+                    setPushProgress({
+                        active: true,
+                        queued,
+                        processed: 0,
+                        failed: 0,
+                        message: res.data?.message || '',
+                    });
+                    onMessage?.(res.data?.message || 'Manual sync started. You can leave this page.', 'success');
+                    return;
+                }
+                pushStartingRef.current = false;
+                pushWasActiveRef.current = false;
                 onMessage?.(res.data?.message || 'Manual sync finished.', res.data?.ok ? 'success' : 'error');
+                setPushing(false);
+                setPushProgress(null);
+                setJobCount(0);
                 load();
             })
             .catch((err) => {
+                pushStartingRef.current = false;
+                pushWasActiveRef.current = false;
                 onMessage?.(err.response?.data?.detail || err.response?.data?.message || 'Push failed.', 'error');
-                load();
-            })
-            .finally(() => {
                 setPushing(false);
+                setPushProgress(null);
                 setJobCount(0);
+                load();
             });
     };
 
@@ -496,6 +594,20 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
         setCriticalLoading(true);
         criticalZeroListingInventory(storeId)
             .then((res) => {
+                if (res.data?.async || res.data?.job_id) {
+                    const queued = Number(res.data?.queued) || totalCount;
+                    pushStartingRef.current = true;
+                    pushWasActiveRef.current = true;
+                    setPushing(true);
+                    setJobCount(queued);
+                    setPushProgress({
+                        active: true,
+                        queued,
+                        processed: 0,
+                        failed: 0,
+                        message: res.data?.message || '',
+                    });
+                }
                 onMessage?.(res.data?.message || 'Critical action finished.', res.data?.ok ? 'success' : 'error');
                 load();
             })
@@ -528,7 +640,7 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
             });
     };
 
-    const busy = scrapeBusy || pushing || resetting || criticalLoading;
+    const busy = scrapeBusy || pushBusy || resetting || criticalLoading;
     const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE) || 1);
     const safePage = Math.min(Math.max(1, page), totalPages);
     const rangeStart = totalCount === 0 ? 0 : (safePage - 1) * PAGE_SIZE + 1;
@@ -536,12 +648,12 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
 
     return (
         <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
-            {(scrapeBusy || pushing) && (
+            {(scrapeBusy || pushBusy) && (
                 <div className="border-b border-slate-200 dark:border-slate-700 p-4">
                     <JobProgressStrip
                         mode={scrapeBusy ? 'scrape' : 'push'}
                         count={jobCount}
-                        progress={scrapeBusy ? scrapeProgress : null}
+                        progress={scrapeBusy ? scrapeProgress : pushProgress}
                         marketplaceLabel={marketplaceLabel}
                         onStop={scrapeBusy ? handleStopScrape : null}
                         stopping={stoppingScrape}

@@ -181,6 +181,10 @@ export const getListingScrapeProgress = (storeId) =>
 export const cancelListingScrape = (storeId) =>
     api.post(`/stores/${storeId}/listings/scrape/cancel/`, {});
 
+/** Live Inventory Manual sync banner (survives reload and leaving the page). */
+export const getListingInventoryPushProgress = (storeId) =>
+    api.get(`/stores/${storeId}/listings/push-inventory/progress/`);
+
 /** Push local price/stock to marketplace for already-uploaded listings. */
 export const pushListingInventory = (storeId, listingIds = null, vendorCode = null) => {
     const body = {};

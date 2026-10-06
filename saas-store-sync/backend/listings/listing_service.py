@@ -1641,6 +1641,14 @@ def _collect_publishable(store, listings: list) -> list:
 # 353 in a single call has worked; keep chunks well under that.
 LASOO_PUBLISH_CHUNK = 100
 LASOO_PUBLISH_ASYNC_MIN = 15
+# Inventory Manual sync sends the same BulkUpsert body. Keep batches smaller
+# than publish, and run large jobs on the ingest worker — one HTTP request
+# that searches every uploaded SKU dies in Gunicorn.
+LASOO_INVENTORY_CHUNK = 25
+LASOO_PUSH_ASYNC_MIN = 15
+LASOO_INVENTORY_PUSH_SCOPE = "inventory_push"
+# Stop hammering Connect after this many single-SKU transient failures in a row.
+LASOO_INVENTORY_TRANSIENT_STOP = 3
 
 
 def _iter_chunks(items: list, size: int):
@@ -3316,7 +3324,283 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
 
 
 
-def push_inventory(user, store, listing_ids=None, vendor_code=None) -> dict:
+def _lasoo_uploaded_qs(user, store, listing_ids=None, vendor_code=None):
+    qs = StoreListing.objects.filter(
+        user=user,
+        store=store,
+        status__in=[
+            ListingStatus.UPLOADED_STAGING,
+            ListingStatus.UPLOADED_PRODUCTION,
+        ],
+    )
+    if listing_ids:
+        qs = qs.filter(id__in=listing_ids)
+    return _filter_qs_by_source_vendor(qs, vendor_code)
+
+
+def _lasoo_transient_failure(result) -> bool:
+    """Connect/gateway blip. Splitting the batch can still update the SKUs."""
+    if _lasoo_auth_failure(result):
+        return False
+    status = int(getattr(result, "status", 0) or 0)
+    if status in (0, 429, 500, 502, 503, 504):
+        return True
+    msg = (getattr(result, "message", None) or "").lower()
+    needles = (
+        "prisma",
+        "can't reach database",
+        "cannot reach database",
+        "timed out",
+        "timeout",
+        "bad gateway",
+        "gateway timeout",
+    )
+    return any(needle in msg for needle in needles)
+
+
+def _mark_lasoo_inventory_push(listings: list, *, ok: bool, message: str):
+    """Record a price/stock push without taking the row out of Inventory.
+
+    Publish uses ``_apply_lasoo_chunk``, which sets status to failed. That is
+    correct for Created products. Inventory rows are already on Connect; a
+    rejected batch must stay uploaded and show Failed on the sync badge.
+    """
+    now = timezone.now()
+    err = (message or "").strip() or "Lasoo rejected the inventory update."
+    note = f"Lasoo push: {err}"[:500]
+    for listing in listings:
+        fields = ["inventory_sync_status", "last_scrape_error", "updated_at"]
+        if ok:
+            listing.inventory_sync_status = InventorySyncStatus.SYNCED
+            listing.last_uploaded_at = now
+            fields.append("last_uploaded_at")
+            if (listing.last_scrape_error or "").startswith("Lasoo push:"):
+                listing.last_scrape_error = ""
+        else:
+            listing.inventory_sync_status = InventorySyncStatus.FAILED
+            listing.last_scrape_error = note
+        listing.save(update_fields=fields)
+
+
+def _tick_lasoo_inventory_push(store, *, processed: int, failed: int, queued: int, batch: int, batches: int):
+    from . import publish_progress as pub_prog
+
+    live = pub_prog.get_publish_progress(store.id, scope=LASOO_INVENTORY_PUSH_SCOPE)
+    if not live.get("active"):
+        return
+    pub_prog.tick_publish_progress(
+        store.id,
+        scope=LASOO_INVENTORY_PUSH_SCOPE,
+        processed=processed,
+        failed=failed,
+        queued=queued,
+        message=(
+            f"Pushing {processed} of {queued} listing(s) to Lasoo "
+            f"(batch {batch}/{batches})…"
+        ),
+    )
+
+
+def _upsert_lasoo_inventory_group(client, listings: list, state: dict) -> tuple[int, int, str, bool]:
+    """BulkUpsert one group. Transient failures split down to a single SKU.
+
+    Returns ``(pushed, failed, last_error, stop_remaining)``.
+    ``stop_remaining`` is set on auth failure or after repeated single-SKU
+    Connect outages so the rest of the catalog is not hammered.
+    """
+    if not listings:
+        return 0, 0, "", False
+    variants = [_listing_to_data(listing) for listing in listings]
+    payload = mapper.build_bulk_upsert_payload(variants, client.auth_key)
+    result = client.send("bulk_upsert", payload)
+    ok, mapping_message, _mapping_errors = interpret_bulk_upsert(result)
+    if ok:
+        state["single_transient"] = 0
+        _mark_lasoo_inventory_push(listings, ok=True, message="")
+        return len(listings), 0, "", False
+
+    last_error = mapping_message or getattr(result, "message", None) or "Lasoo rejected the inventory update."
+    if _lasoo_auth_failure(result):
+        _mark_lasoo_inventory_push(listings, ok=False, message=last_error)
+        return 0, len(listings), last_error, True
+
+    transient = _lasoo_transient_failure(result)
+    if transient and len(listings) > 1 and state["single_transient"] < LASOO_INVENTORY_TRANSIENT_STOP:
+        mid = max(1, len(listings) // 2)
+        pushed_a, failed_a, err_a, stop_a = _upsert_lasoo_inventory_group(
+            client, listings[:mid], state,
+        )
+        if stop_a:
+            rest = listings[mid:]
+            if rest:
+                _mark_lasoo_inventory_push(rest, ok=False, message=err_a or last_error)
+            return pushed_a, failed_a + len(rest), err_a or last_error, True
+        pushed_b, failed_b, err_b, stop_b = _upsert_lasoo_inventory_group(
+            client, listings[mid:], state,
+        )
+        return pushed_a + pushed_b, failed_a + failed_b, err_b or err_a or last_error, stop_b
+
+    if transient and len(listings) == 1:
+        state["single_transient"] += 1
+    else:
+        state["single_transient"] = 0
+    _mark_lasoo_inventory_push(listings, ok=False, message=last_error)
+    stop = state["single_transient"] >= LASOO_INVENTORY_TRANSIENT_STOP
+    return 0, len(listings), last_error, stop
+
+
+def _push_lasoo_inventory(user, store, listings: list) -> dict:
+    """Search then upsert uploaded Lasoo rows in small batches.
+
+    Search failures are not treated as "SKU missing". Missing SKUs are skipped
+    and are not created. Listing status stays uploaded either way.
+    """
+    environment = store.lasoo_environment or Environment.STAGING
+    client = LasooClient(store, environment)
+    queued = len(listings)
+    pushed = 0
+    failed = 0
+    skipped: list[str] = []
+    last_error = ""
+    chunks = list(_iter_chunks(listings, LASOO_INVENTORY_CHUNK))
+    batches = len(chunks) or 1
+    state = {"single_transient": 0}
+    stop_remaining = False
+
+    for batch_i, chunk in enumerate(chunks, start=1):
+        if stop_remaining:
+            break
+        ensure_db_connection()
+        confirmed = []
+        for listing in chunk:
+            sku = (listing.sku or listing.external_variant_key or "").strip() or str(listing.id)
+            searched = _search_lasoo_listing(store, listing)
+            if searched.get("found"):
+                confirmed.append(listing)
+            elif searched.get("ok"):
+                skipped.append(sku)
+            else:
+                reason = (searched.get("message") or "Could not verify this SKU on Lasoo.").strip()
+                _mark_lasoo_inventory_push([listing], ok=False, message=reason)
+                failed += 1
+                last_error = reason
+        if confirmed and not stop_remaining:
+            group_pushed, group_failed, group_error, stop_remaining = _upsert_lasoo_inventory_group(
+                client, confirmed, state,
+            )
+            pushed += group_pushed
+            failed += group_failed
+            if group_error:
+                last_error = group_error
+            if stop_remaining:
+                logger.warning(
+                    "Lasoo inventory push stopped early store=%s batch=%s/%s msg=%s",
+                    store.id, batch_i, batches, last_error,
+                )
+        if stop_remaining:
+            remaining = [row for more in chunks[batch_i:] for row in more]
+            if remaining:
+                _mark_lasoo_inventory_push(
+                    remaining,
+                    ok=False,
+                    message=last_error or "Lasoo inventory push stopped.",
+                )
+                failed += len(remaining)
+        _tick_lasoo_inventory_push(
+            store,
+            processed=pushed + failed + len(skipped),
+            failed=failed,
+            queued=queued,
+            batch=batch_i,
+            batches=batches,
+        )
+
+    if not pushed and not failed:
+        sample = ", ".join(skipped[:8])
+        raise MarketplaceError(
+            "None of these listings exist in Lasoo Connect seller inventory. "
+            "Inventory sync will not create new SKUs. Use Create + Publish for new "
+            "products, or fix Hub SKUs to match Connect."
+            + (f" Skipped: {sample}." if sample else "")
+        )
+
+    extra = ""
+    if skipped:
+        extra = (
+            f" Skipped {len(skipped)} SKU(s) not in Connect"
+            f" ({', '.join(skipped[:8])}"
+            f"{'…' if len(skipped) > 8 else ''})."
+        )
+    if pushed and failed:
+        message = (
+            f"Pushed {pushed} listing(s) to Lasoo {environment}; {failed} failed."
+            + (f" {last_error}" if last_error else "")
+            + extra
+        )
+    elif pushed:
+        message = f"Pushed {pushed} listing(s) to Lasoo {environment}.{extra}"
+    else:
+        message = (last_error or "Lasoo did not update inventory.") + extra
+    return {
+        "ok": pushed > 0 and failed == 0,
+        "message": message,
+        "pushed": pushed,
+        "published": pushed,
+        "uploaded": pushed,
+        "failed": failed,
+        "skipped": len(skipped),
+        "rows": [],
+        "environment": environment,
+    }
+
+
+def _enqueue_lasoo_inventory_push(user, store, listing_ids: list[str], *, queued: int) -> dict:
+    from . import publish_progress as pub_prog
+    from .tasks import push_store_inventory
+
+    live = pub_prog.enrich_publish_progress(store.id, scope=LASOO_INVENTORY_PUSH_SCOPE)
+    if live.get("active"):
+        raise MarketplaceError(
+            "An inventory push is already running for this store. Wait for it to finish — "
+            "the Inventory progress bar stays visible if you leave and come back."
+        )
+    try:
+        async_res = push_store_inventory.apply_async(
+            args=[user.id, str(store.id), listing_ids],
+            queue="ingest",
+        )
+    except Exception as exc:
+        logger.exception("Failed to enqueue Lasoo inventory push store=%s", store.id)
+        raise MarketplaceError(
+            "Could not start the inventory push worker. Try again in a moment."
+        ) from exc
+
+    job_id = str(getattr(async_res, "id", "") or "")
+    message = (
+        f"Updating {queued} listing(s) on Lasoo. This can take a while. "
+        "You can leave this page — progress stays on Inventory management."
+    )
+    pub_prog.begin_publish_progress(
+        store.id,
+        scope=LASOO_INVENTORY_PUSH_SCOPE,
+        job_id=job_id,
+        queued=queued,
+        message=message,
+    )
+    return {
+        "ok": True,
+        "async": True,
+        "job_id": job_id,
+        "queued": queued,
+        "pushed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "message": message,
+        "rows": [],
+    }
+
+
+def push_inventory(user, store, listing_ids=None, vendor_code=None, *, allow_async=False) -> dict:
     """Push local price/stock to the marketplace (Manual sync for managed stores)."""
     kind = marketplace_kind(store.marketplace)
     empty_push = (
@@ -3325,62 +3609,19 @@ def push_inventory(user, store, listing_ids=None, vendor_code=None) -> dict:
         else "No marketplace listings to push. Publish from Created products first."
     )
     if kind == "lasoo":
-        qs = StoreListing.objects.filter(
-            user=user,
-            store=store,
-            status__in=[
-                ListingStatus.UPLOADED_STAGING,
-                ListingStatus.UPLOADED_PRODUCTION,
-            ],
-        )
-        if listing_ids:
-            qs = qs.filter(id__in=listing_ids)
-        qs = _filter_qs_by_source_vendor(qs, vendor_code)
-        listings = list(qs)
-        if not listings:
-            raise MarketplaceError(
-                empty_push
-            )
-        confirmed = []
-        skipped = []
-        for listing in listings:
-            sku = (listing.sku or listing.external_variant_key or "").strip()
-            searched = _search_lasoo_listing(store, listing)
-            if searched.get("ok") and searched.get("found"):
-                confirmed.append(listing)
-            else:
-                skipped.append(sku or str(listing.id))
-        if not confirmed:
-            sample = ", ".join(skipped[:8])
-            raise MarketplaceError(
-                "None of these listings exist in Lasoo Connect seller inventory. "
-                "Inventory sync will not create new SKUs. Use Create + Publish for new "
-                "products, or fix Hub SKUs to match Connect."
-                + (f" Skipped: {sample}." if sample else "")
-            )
-        pub = _publish_lasoo(user, store, confirmed)
-        if pub.get("ok"):
-            StoreListing.objects.filter(id__in=[l.id for l in confirmed]).update(
-                inventory_sync_status=InventorySyncStatus.SYNCED,
-            )
-        extra = ""
-        if skipped:
-            extra = (
-                f" Skipped {len(skipped)} SKU(s) not in Connect"
-                f" ({', '.join(skipped[:8])}"
-                f"{'…' if len(skipped) > 8 else ''})."
-            )
-        return {
-            "ok": bool(pub.get("ok")),
-            "message": (
-                (pub.get("message") or f"Pushed {len(confirmed)} listing(s) to Lasoo.")
-                + extra
-            ),
-            "pushed": pub.get("published") or (len(confirmed) if pub.get("ok") else 0),
-            "failed": 0 if pub.get("ok") else len(confirmed),
-            "skipped": len(skipped),
-            "rows": [],
-        }
+        qs = _lasoo_uploaded_qs(user, store, listing_ids, vendor_code)
+        if allow_async:
+            id_strs = [str(pk) for pk in qs.values_list("id", flat=True)]
+            if not id_strs:
+                raise MarketplaceError(empty_push)
+            if len(id_strs) >= LASOO_PUSH_ASYNC_MIN:
+                return _enqueue_lasoo_inventory_push(user, store, id_strs, queued=len(id_strs))
+            listings = list(qs)
+        else:
+            listings = list(qs)
+            if not listings:
+                raise MarketplaceError(empty_push)
+        return _push_lasoo_inventory(user, store, listings)
     if kind == "mydeal":
         from .mydeal import products as mydeal_products
 
@@ -3703,7 +3944,24 @@ def critical_zero_inventory(user, store) -> dict:
         listing.infinite_quantity = False
         listing.save(update_fields=["inventory", "infinite_quantity", "updated_at"])
 
-    push_result = push_inventory(user, store, listing_ids=[str(l.id) for l in listings])
+    push_result = push_inventory(
+        user, store, listing_ids=[str(l.id) for l in listings], allow_async=True,
+    )
+    if push_result.get("async"):
+        return {
+            "ok": True,
+            "async": True,
+            "job_id": push_result.get("job_id") or "",
+            "message": (
+                f"Set stock to 0 on {len(listings)} listing(s). "
+                + (push_result.get("message") or "")
+            ),
+            "zeroed": len(listings),
+            "pushed": 0,
+            "queued": push_result.get("queued") or len(listings),
+            "failed": 0,
+            "rows": [],
+        }
     return {
         "ok": push_result.get("ok"),
         "message": (

@@ -14,15 +14,16 @@ logger = logging.getLogger(__name__)
 
 _TTL = 6 * 60 * 60  # 6 hours — matches frontend publish poll ceiling
 _DONE_TTL = 10 * 60
-_KEY = "listings:publish_progress:{store_id}"
 
 
 def _sid(store_id) -> str:
     return str(store_id)
 
 
-def _key(store_id) -> str:
-    return _KEY.format(store_id=_sid(store_id))
+def _key(store_id, scope: str = "publish") -> str:
+    # scope "publish" keeps the original cache key. "inventory_push" is separate
+    # so a Manual sync banner does not clear a Created-products publish.
+    return f"listings:{scope}_progress:{_sid(store_id)}"
 
 
 def _empty_progress() -> dict:
@@ -39,8 +40,8 @@ def _empty_progress() -> dict:
     }
 
 
-def get_publish_progress(store_id) -> dict:
-    data = cache.get(_key(store_id))
+def get_publish_progress(store_id, *, scope: str = "publish") -> dict:
+    data = cache.get(_key(store_id, scope))
     if not isinstance(data, dict):
         return _empty_progress()
     out = _empty_progress()
@@ -61,7 +62,7 @@ def get_publish_progress(store_id) -> dict:
     return out
 
 
-def begin_publish_progress(store_id, *, job_id, queued, message="") -> dict:
+def begin_publish_progress(store_id, *, job_id, queued, message="", scope: str = "publish") -> dict:
     data = {
         "active": True,
         "job_id": str(job_id or ""),
@@ -73,45 +74,45 @@ def begin_publish_progress(store_id, *, job_id, queued, message="") -> dict:
         "error": "",
         "result": None,
     }
-    cache.set(_key(store_id), data, _TTL)
+    cache.set(_key(store_id, scope), data, _TTL)
     return data
 
 
-def tick_publish_progress(store_id, **fields) -> dict:
+def tick_publish_progress(store_id, *, scope: str = "publish", **fields) -> dict:
     """Update an in-flight publish banner (chunk progress). Ignores idle jobs."""
-    cur = get_publish_progress(store_id)
+    cur = get_publish_progress(store_id, scope=scope)
     if not cur.get("active"):
         return cur
     if fields.get("job_id") and cur.get("job_id") and str(fields["job_id"]) != str(cur["job_id"]):
         return cur
     cur.update(fields)
     cur["active"] = True
-    cache.set(_key(store_id), cur, _TTL)
+    cache.set(_key(store_id, scope), cur, _TTL)
     return cur
 
 
-def finish_publish_progress(store_id, **fields) -> dict:
-    cur = get_publish_progress(store_id)
+def finish_publish_progress(store_id, *, scope: str = "publish", **fields) -> dict:
+    cur = get_publish_progress(store_id, scope=scope)
     if fields.get("job_id") and cur.get("job_id") and str(fields["job_id"]) != str(cur["job_id"]):
         return cur
     cur.update(fields)
     cur["active"] = False
-    cache.set(_key(store_id), cur, _DONE_TTL)
+    cache.set(_key(store_id, scope), cur, _DONE_TTL)
     return cur
 
 
-def clear_publish_progress(store_id) -> None:
-    cache.delete(_key(store_id))
+def clear_publish_progress(store_id, *, scope: str = "publish") -> None:
+    cache.delete(_key(store_id, scope))
 
 
-def enrich_publish_progress(store_id) -> dict:
+def enrich_publish_progress(store_id, *, scope: str = "publish") -> dict:
     """Mark the banner idle if the Celery job already finished."""
-    data = get_publish_progress(store_id)
+    data = get_publish_progress(store_id, scope=scope)
     if not data.get("active"):
         return data
     job_id = (data.get("job_id") or "").strip()
     if not job_id:
-        return finish_publish_progress(store_id, message="Publish job missing.")
+        return finish_publish_progress(store_id, scope=scope, message="Publish job missing.")
     try:
         from celery.result import AsyncResult
 
@@ -138,6 +139,7 @@ def enrich_publish_progress(store_id) -> dict:
             }
         return finish_publish_progress(
             store_id,
+            scope=scope,
             job_id=job_id,
             message=message,
             error=err,
