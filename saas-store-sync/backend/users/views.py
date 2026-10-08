@@ -6,6 +6,7 @@ from django.shortcuts import redirect
 from django.http import HttpResponseRedirect
 from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.throttling import AnonRateThrottle
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.contrib.auth import get_user_model
@@ -55,6 +56,7 @@ class LoginView(APIView):
 class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     permission_classes = (AllowAny,)
+    throttle_classes = [AnonRateThrottle]
     serializer_class = UserSerializer
 
 class UserProfileView(APIView):
@@ -68,6 +70,7 @@ class UserProfileView(APIView):
 class GoogleLoginView(APIView):
     """Redirect to Google OAuth. Frontend should open this URL or redirect user."""
     permission_classes = (AllowAny,)
+    throttle_classes = [AnonRateThrottle]
 
     def get(self, request):
         client_id = getattr(settings, 'GOOGLE_CLIENT_ID', None) or os.getenv('GOOGLE_CLIENT_ID')
@@ -104,6 +107,7 @@ class GoogleLoginView(APIView):
 class GoogleCallbackView(APIView):
     """Google OAuth callback for Super User accounts only. Issues JWT via frontend redirect."""
     permission_classes = (AllowAny,)
+    throttle_classes = [AnonRateThrottle]
 
     def get(self, request):
         client_id = getattr(settings, 'GOOGLE_CLIENT_ID', None) or os.getenv('GOOGLE_CLIENT_ID')

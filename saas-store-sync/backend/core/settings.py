@@ -303,6 +303,7 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',
     ),
     'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
         'rest_framework.throttling.UserRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
@@ -314,6 +315,8 @@ REST_FRAMEWORK = {
         'sync_trigger': '10/minute',
         # Progress/scrape/job polls during multi-hour sync (UI polls ~every 15s).
         'progress_read': '600/minute',
+        # Desktop ingest: poll ~every 30s plus batched result posts. Not the anon cap.
+        'ingest': '120/minute',
     },
 }
 

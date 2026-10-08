@@ -28,6 +28,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from catalog.models import HebScrapeJob, IngestToken, ProductMapping
+from core.throttles import IngestRateThrottle
 from listings.desktop_ingest import apply_runner_result_to_listings
 from products.models import Product
 from vendor.models import Vendor, VendorPrice
@@ -318,6 +319,7 @@ class VendorIngestView(APIView):
     vendor filter, and the URL host check differ.
     """
 
+    throttle_classes = [IngestRateThrottle]
     permission_classes = [AllowAny]
     authentication_classes = []
 
@@ -495,6 +497,7 @@ class VendorIngestUrlsView(APIView):
         ?limit=<int>      - optional cap (default no cap)
     """
 
+    throttle_classes = [IngestRateThrottle]
     permission_classes = [AllowAny]
     authentication_classes = []
 
@@ -696,6 +699,7 @@ class VendorIngestNextJobView(APIView):
     - If nothing is pending for that vendor, returns ``{"job_id": null}``.
     """
 
+    throttle_classes = [IngestRateThrottle]
     permission_classes = [AllowAny]
     authentication_classes = []
 
@@ -763,6 +767,7 @@ class VendorIngestJobStatusView(APIView):
     Route: ``GET /api/v1/ingest/<vendor>/jobs/<job_id>/``
     """
 
+    throttle_classes = [IngestRateThrottle]
     permission_classes = [AllowAny]
     authentication_classes = []
 
@@ -805,6 +810,7 @@ class VendorIngestCompleteJobView(APIView):
     Route: ``POST /api/v1/ingest/<vendor>/jobs/<job_id>/complete/``
     """
 
+    throttle_classes = [IngestRateThrottle]
     permission_classes = [AllowAny]
     authentication_classes = []
 
