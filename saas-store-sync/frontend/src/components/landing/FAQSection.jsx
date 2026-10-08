@@ -53,8 +53,8 @@ export default function FAQSection() {
         {
             q: isEs ? '¿Qué marketplaces puedo conectar?' : 'Which marketplaces can I connect?',
             a: isEs
-                ? 'Puedes conectar Walmart, Reverb, Sears y Etsy.'
-                : 'You can connect Walmart, Reverb, Sears, and Etsy.',
+                ? 'Puedes vender en Reverb, Etsy, Lasoo, MyDeal, Bunnings, Temu, Walmart, Sears y Kogan. Las fuentes de proveedor son Amazon, eBay, Vevor, CostwayAU, AliExpress y HEB.'
+                : 'You can sell on Reverb, Etsy, Lasoo, MyDeal, Bunnings, Temu, Walmart, Sears, and Kogan. Supplier sources are Amazon, eBay, Vevor, CostwayAU, AliExpress, and HEB.',
         },
         {
             q: isEs ? '¿Cómo funciona el mapeo de productos?' : 'How does product mapping work?',

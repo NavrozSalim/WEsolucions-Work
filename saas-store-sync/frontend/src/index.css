@@ -678,6 +678,9 @@ layer(base);
 .spl-marquee-track:hover .spl-marquee {
     animation-play-state: paused;
 }
+.spl-marquee-reverse {
+    animation-direction: reverse;
+}
 @keyframes spl-marquee-scroll {
     from { transform: translateX(0); }
     to { transform: translateX(-50%); }
@@ -690,6 +693,25 @@ layer(base);
 }
 @keyframes spl-beam-flow {
     to { stroke-dashoffset: -20; }
+}
+
+.spl-packet {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    width: 7px;
+    height: 7px;
+    margin-top: -3.5px;
+    border-radius: 999px;
+    background: #7dd3fc;
+    box-shadow: 0 0 12px #38bdf8;
+    animation: spl-packet-move 1.6s linear infinite;
+}
+@keyframes spl-packet-move {
+    0% { transform: translateX(0); opacity: 0; }
+    12% { opacity: 1; }
+    88% { opacity: 1; }
+    100% { transform: translateX(44px); opacity: 0; }
 }
 
 /* Slow float for hero status cards */
@@ -744,6 +766,7 @@ layer(base);
     .spl-aurora,
     .spl-marquee,
     .spl-beam,
+    .spl-packet,
     .spl-float,
     .spl-float-slow,
     .spl-pulse-dot::after,

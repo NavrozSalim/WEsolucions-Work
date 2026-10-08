@@ -11,13 +11,103 @@ export const NAV_LINKS = [
 export const SALES_EMAIL = 'sales@sellerpilothub.com';
 export const SALES_MAILTO = `mailto:${SALES_EMAIL}?subject=SellerPilot%20Hub%20Demo`;
 
-// Landing marquee: sell-to marketplaces only (no vendors / AU).
+// Sell-side stores and supplier sources the product actually supports.
 export const INTEGRATIONS = [
-    { name: 'Walmart', status: 'available' },
-    { name: 'Reverb', status: 'available' },
-    { name: 'Sears', status: 'available' },
-    { name: 'Etsy', status: 'available' },
+    {
+        name: 'Reverb',
+        group: 'store',
+        tag: 'publish',
+        detail: 'Connect the store, publish listings, push price and stock, and sync orders.',
+    },
+    {
+        name: 'Etsy',
+        group: 'store',
+        tag: 'publish',
+        detail: 'Connect the store, publish listings, push price and stock, and sync orders.',
+    },
+    {
+        name: 'Lasoo',
+        group: 'store',
+        tag: 'publish',
+        detail: 'Connect staging or production, publish listings, and push price and stock.',
+    },
+    {
+        name: 'MyDeal',
+        group: 'store',
+        tag: 'publish',
+        detail: 'Connect with the seller API, publish listings, and push price and stock.',
+    },
+    {
+        name: 'Bunnings',
+        group: 'store',
+        tag: 'publish',
+        detail: 'Connect with a Mirakl shop key, publish listings, and push price and stock.',
+    },
+    {
+        name: 'Temu',
+        group: 'store',
+        tag: 'publish',
+        detail: 'Connect the seller app, publish listings, and push price and stock.',
+    },
+    {
+        name: 'Walmart',
+        group: 'store',
+        tag: 'catalog',
+        detail: 'Connect the store, ingest the catalog, and push price and stock after a scrape.',
+    },
+    {
+        name: 'Sears',
+        group: 'store',
+        tag: 'catalog',
+        detail: 'Connect the store, ingest the catalog, and push price and stock after a scrape.',
+    },
+    {
+        name: 'Kogan',
+        group: 'store',
+        tag: 'sheet',
+        detail: 'Connect through a Google Sheet. This is not a full publish store.',
+    },
+    {
+        name: 'Amazon',
+        group: 'supplier',
+        tag: 'source',
+        detail: 'Supplier source. Scrape Amazon US and Amazon AU, then map those product URLs to catalog rows.',
+    },
+    {
+        name: 'eBay',
+        group: 'supplier',
+        tag: 'source',
+        detail: 'Supplier source. Scrape eBay US and eBay AU, then map those product URLs to catalog rows.',
+    },
+    {
+        name: 'Vevor',
+        group: 'supplier',
+        tag: 'source',
+        detail: 'Supplier source monitored for price and stock changes.',
+    },
+    {
+        name: 'CostwayAU',
+        group: 'supplier',
+        tag: 'source',
+        detail: 'Supplier source monitored for price and stock changes.',
+    },
+    {
+        name: 'AliExpress',
+        group: 'supplier',
+        tag: 'source',
+        detail: 'Supplier source monitored for price and stock changes.',
+    },
+    {
+        name: 'HEB',
+        group: 'supplier',
+        tag: 'source',
+        detail: 'Supplier source monitored for price and stock changes.',
+    },
 ];
+
+export const DEMO_SUPPLIERS = ['Amazon', 'eBay', 'Vevor', 'AliExpress'];
+export const DEMO_STORES = ['Bunnings', 'Reverb', 'MyDeal', 'Temu', 'Etsy', 'Lasoo'];
+export const SYNC_PHASES = ['scrape', 'rule', 'push', 'done'];
 
 export const STATUS_STYLES = {
     available: {

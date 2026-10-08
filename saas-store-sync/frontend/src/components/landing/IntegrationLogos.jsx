@@ -1,46 +1,59 @@
+import { useState } from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { Container, GridBackground, Reveal, Section, SectionHeading } from './primitives';
 import { INTEGRATIONS } from './landingContent';
 import { useI18n } from '../../context/I18nContext';
 
-function IntegrationBadge({ name, status, labels }) {
-    const styles = {
-        available: {
-            label: labels.available,
-            className: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300',
-            dot: 'bg-emerald-400',
-        },
-        beta: {
-            label: labels.beta,
-            className: 'border-amber-400/30 bg-amber-400/10 text-amber-300',
-            dot: 'bg-amber-400',
-        },
-        planned: {
-            label: labels.planned,
-            className: 'border-slate-400/30 bg-slate-400/10 text-slate-300',
-            dot: 'bg-slate-400',
-        },
-    };
-    const s = styles[status] || styles.available;
+const TAG_TONE = {
+    publish: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300',
+    catalog: 'border-sky-400/30 bg-sky-400/10 text-sky-300',
+    sheet: 'border-amber-400/30 bg-amber-400/10 text-amber-300',
+    source: 'border-violet-400/30 bg-violet-400/10 text-violet-300',
+};
+
+function tickerLoop(items) {
+    const half = [];
+    while (half.length < 14) half.push(...items);
+    return [...half, ...half];
+}
+
+function Ticker({ items, selectedName, tagLabel, onSelect, reverse = false }) {
+    const loop = tickerLoop(items);
     return (
-        <div className="mx-3 flex items-center gap-2.5 rounded-xl border border-white/10 bg-white/3 px-4 py-2.5">
-            <span className="font-display text-sm font-semibold text-slate-100">{name}</span>
-            <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${s.className}`}>
-                <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
-                {s.label}
-            </span>
+        <div className="spl-marquee-track relative overflow-hidden py-1 mask-[linear-gradient(to_right,transparent,#000_6%,#000_94%,transparent)]">
+            <div className={`spl-marquee ${reverse ? 'spl-marquee-reverse' : ''}`} style={{ animationDuration: '42s' }}>
+                {loop.map((item, index) => {
+                    const selected = selectedName === item.name;
+                    return (
+                        <button
+                            key={`${item.name}-${index}`}
+                            type="button"
+                            onClick={() => onSelect(item.name)}
+                            aria-pressed={selected}
+                            className={`mx-2 inline-flex items-center gap-2 rounded-full border px-4 py-2 transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                                selected ? 'border-sky-400/60 bg-sky-400/15' : 'border-white/10 bg-white/4 hover:border-white/25'
+                            }`}
+                        >
+                            <span className="font-display text-sm font-semibold text-slate-100">{item.name}</span>
+                            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${TAG_TONE[item.tag]}`}>
+                                {tagLabel(item.tag)}
+                            </span>
+                        </button>
+                    );
+                })}
+            </div>
         </div>
     );
 }
 
 export default function IntegrationLogos() {
     const { t } = useI18n();
-    const labels = {
-        available: t('landing.integrations.available'),
-        beta: t('landing.integrations.beta'),
-        planned: t('landing.integrations.planned'),
-    };
-    const marketplaces = INTEGRATIONS.filter((it) => it.status === 'available');
-    const loop = [...marketplaces, ...marketplaces];
+    const reduce = useReducedMotion();
+    const [selectedName, setSelectedName] = useState(INTEGRATIONS[0].name);
+    const selected = INTEGRATIONS.find((item) => item.name === selectedName) || INTEGRATIONS[0];
+    const stores = INTEGRATIONS.filter((item) => item.group === 'store');
+    const suppliers = INTEGRATIONS.filter((item) => item.group === 'supplier');
+    const tagLabel = (tag) => t(`landing.integrations.${tag}`);
 
     return (
         <Section id="integrations">
@@ -55,25 +68,78 @@ export default function IntegrationLogos() {
                 </Reveal>
             </Container>
 
-            <Reveal delay={0.1}>
-                <div className="spl-marquee-track relative mt-12 overflow-hidden mask-[linear-gradient(to_right,transparent,#000_8%,#000_92%,transparent)]">
-                    <div className="spl-marquee py-1">
-                        {loop.map((it, i) => (
-                            <IntegrationBadge key={`${it.name}-${i}`} name={it.name} status={it.status} labels={labels} />
-                        ))}
-                    </div>
+            <div className="relative mt-12 space-y-6">
+                <div>
+                    <p className="mb-3 text-center text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                        {t('landing.integrations.sellOn')}
+                    </p>
+                    {reduce ? (
+                        <Container>
+                            <div className="flex flex-wrap justify-center gap-2">
+                                {stores.map((item) => (
+                                    <button
+                                        key={item.name}
+                                        type="button"
+                                        onClick={() => setSelectedName(item.name)}
+                                        className="rounded-full border border-white/10 bg-white/4 px-4 py-2 text-sm font-semibold text-slate-100"
+                                    >
+                                        {item.name}
+                                    </button>
+                                ))}
+                            </div>
+                        </Container>
+                    ) : (
+                        <Ticker items={stores} selectedName={selectedName} tagLabel={tagLabel} onSelect={setSelectedName} />
+                    )}
                 </div>
-            </Reveal>
+                <div>
+                    <p className="mb-3 text-center text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                        {t('landing.integrations.sourceFrom')}
+                    </p>
+                    {reduce ? (
+                        <Container>
+                            <div className="flex flex-wrap justify-center gap-2">
+                                {suppliers.map((item) => (
+                                    <button
+                                        key={item.name}
+                                        type="button"
+                                        onClick={() => setSelectedName(item.name)}
+                                        className="rounded-full border border-white/10 bg-white/4 px-4 py-2 text-sm font-semibold text-slate-100"
+                                    >
+                                        {item.name}
+                                    </button>
+                                ))}
+                            </div>
+                        </Container>
+                    ) : (
+                        <Ticker
+                            items={suppliers}
+                            selectedName={selectedName}
+                            tagLabel={tagLabel}
+                            onSelect={setSelectedName}
+                            reverse
+                        />
+                    )}
+                </div>
+            </div>
 
             <Container className="relative">
-                <Reveal delay={0.15}>
-                    <div className="mt-8 flex flex-wrap items-center justify-center gap-4 text-xs text-slate-500">
-                        <span className="inline-flex items-center gap-1.5">
-                            <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                            {labels.available}
+                <AnimatePresence mode="wait">
+                    <motion.div
+                        key={selected.name}
+                        initial={reduce ? false : { opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={reduce ? {} : { opacity: 0, y: -8 }}
+                        transition={{ duration: 0.22 }}
+                        className="mx-auto mt-8 max-w-xl rounded-2xl border border-white/10 bg-[#0b1120] px-6 py-5 text-center"
+                    >
+                        <span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${TAG_TONE[selected.tag]}`}>
+                            {tagLabel(selected.tag)}
                         </span>
-                    </div>
-                </Reveal>
+                        <h3 className="mt-3 font-display text-2xl font-semibold text-white">{selected.name}</h3>
+                        <p className="mt-2 text-sm leading-relaxed text-slate-400">{selected.detail}</p>
+                    </motion.div>
+                </AnimatePresence>
             </Container>
         </Section>
     );
