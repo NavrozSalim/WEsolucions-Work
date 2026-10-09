@@ -69,6 +69,9 @@ _AU_UNSELLABLE_ERROR_MARKERS = (
     "temporarily out of stock",
     "currently unavailable",
     "out of stock",
+    # Amazon Global / imported offer. Page still says "In stock", but the
+    # goods are not the local product. Match any country prefix.
+    "imports may differ from local products",
 )
 
 
@@ -84,14 +87,19 @@ def _au_error_span_is_unsellable(text: str) -> bool:
 
 
 def apply_au_error_stock(soup: BeautifulSoup, stock):
-    """Force stock to 0 when Amazon AU shows an unsellable red error.
+    """Force stock to 0 when Amazon AU shows an unsellable offer.
 
-    Matches ``.a-spacing-base span.a-color-error`` or any ``span.a-color-error``
-    whose text indicates shipping coverage / unavailable. Price is unchanged.
+    Matches ``.a-spacing-base span.a-color-error``, any ``span.a-color-error``
+    whose text indicates shipping coverage / unavailable, or the import
+    disclaimer "imports may differ from local products" anywhere on the page
+    (it is plain buy-box text, not a red error). Price is unchanged.
     """
     try:
         if soup is None:
             return stock
+        page_text = " ".join(soup.get_text(" ", strip=True).lower().split())
+        if "imports may differ from local products" in page_text:
+            return 0
         if soup.select_one(AU_OOS_ERROR_SELECTOR) is not None:
             return 0
         for el in soup.select(AU_COLOR_ERROR_SELECTOR):

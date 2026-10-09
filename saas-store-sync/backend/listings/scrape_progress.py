@@ -48,6 +48,7 @@ def _empty_progress() -> dict:
         "generation": "",
         "current_sku": "",
         "feed_batch": False,
+        "vendor_label": "",
     }
 
 
@@ -115,6 +116,7 @@ def begin_scrape_progress(
     message: str = "",
     listing_ids=None,
     phase: str = "running",
+    vendor_label: str = "",
 ) -> dict:
     cache.delete(_cancel_key(store_id))
     ids = [str(x) for x in (listing_ids or [])]
@@ -128,6 +130,7 @@ def begin_scrape_progress(
         pct=0,
         current_sku="",
         feed_batch=False,
+        vendor_label=(vendor_label or "").strip(),
         message=message or "Starting scrape…",
         phase=phase or "running",
         listing_ids=ids,
@@ -292,12 +295,17 @@ def enrich_progress_from_listings(store_id, job_generation=None) -> dict:
         return latest
 
     worker_msg = (latest.get("message") or data.get("message") or "").strip()
+    vendor_label = (latest.get("vendor_label") or data.get("vendor_label") or "").strip()
     # Keep the feed download / apply text. The default line counts one SKU at a time.
     feed_text = bool(latest.get("feed_batch")) or is_feed_progress_message(worker_msg)
     if feed_text:
         msg = worker_msg
     else:
-        msg = f"Scraping {min(processed + (1 if pending else 0), total)} of {total}…"
+        shown = min(processed + (1 if pending else 0), total)
+        if vendor_label:
+            msg = f"Scraping {vendor_label} · {shown} of {total}…"
+        else:
+            msg = f"Scraping {shown} of {total}…"
 
     return set_scrape_progress(
         store_id,
@@ -309,6 +317,7 @@ def enrich_progress_from_listings(store_id, job_generation=None) -> dict:
         pct=pct,
         phase=phase,
         message=msg,
+        vendor_label=vendor_label,
         active=True,
         **({"current_sku": ""} if feed_text else {}),
     )

@@ -413,11 +413,27 @@ def _bulk_append_rows(
                     CatalogUploadRow.objects.bulk_create(buffer, batch_size=500)
                 total_valid += len(buffer)
                 buffer = []
+                _touch_ingest_progress(upload, total_valid)
     if buffer:
         with transaction.atomic():
             CatalogUploadRow.objects.bulk_create(buffer, batch_size=500)
         total_valid += len(buffer)
+        _touch_ingest_progress(upload, total_valid)
     return total_valid, errors
+
+
+def _touch_ingest_progress(upload: CatalogUpload, total_valid: int) -> None:
+    """Publish row progress so Upload history does not sit on 0 until the file finishes."""
+    from django.core.cache import cache
+
+    CatalogUpload.objects.filter(
+        pk=upload.pk,
+        status=CatalogUpload.Status.INGESTING,
+    ).update(processed_rows=total_valid)
+    try:
+        cache.set(f'catalog-ingest-lock:{upload.pk}', '1', timeout=180)
+    except Exception:
+        pass
 
 
 def ingest_stored_catalog_file(upload_id) -> dict:
@@ -509,6 +525,7 @@ def ingest_stored_catalog_file(upload_id) -> dict:
         return {'error': str(e), 'upload_id': str(upload_id)}
 
     upload.total_rows = total_valid
+    upload.processed_rows = total_valid
     if row_errors:
         upload.error_summary = _error_summary_for_display(row_errors)
     else:

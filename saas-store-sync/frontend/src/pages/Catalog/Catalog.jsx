@@ -64,6 +64,12 @@ import EmptyState from '../../components/design/EmptyState';
 import Badge from '../../components/design/Badge';
 import UpdateWithFileModal from '../../components/catalog/UpdateWithFileModal';
 import VendorScopeMenu from '../../components/catalog/VendorScopeMenu';
+import {
+    CRITICAL_ACTION_OPTIONS,
+    RESET_PENDING_OPTIONS,
+    CriticalActionDropdown,
+    ResetPendingDropdown,
+} from '../../components/catalog/InventoryActionMenus';
 import { getListingUploads, downloadListingUploadErrors, exportListingUpload, deleteListingUpload } from '../../services/listingService';
 import { useSidebarActivity } from '../../context/SidebarActivityContext';
 import { placeFixedMenu } from '../../utils/fixedMenuPosition';
@@ -89,9 +95,16 @@ const uploadStatusVariant = {
 };
 const uploadStatusLabel = {
     synced: 'Success', validated: 'Success', pending: 'Pending',
+    ingesting: 'Ingesting',
     processing: 'Processing', partial: 'Partial', failed: 'Failed',
     completed: 'Success',
 };
+
+function catalogFileReadyMessage(upload) {
+    const n = Number(upload?.total_rows) || 0;
+    return `File processed${n ? ` (${n.toLocaleString()} row${n === 1 ? '' : 's'})` : ''}. `
+        + 'Use Ready to Upload to create products.';
+}
 /** Managed-store Upload history status badge text. */
 function managedUploadStatusText(u) {
     if (u.status === 'pending' || u.status === 'processing') {
@@ -178,223 +191,6 @@ function formatCatalogError(err) {
     if (status === 500) return 'Something went wrong on our side. Please try again in a moment.';
     if (err.code === 'ECONNABORTED') return 'The request took too long. Check your connection and try again.';
     return err.message || 'Something went wrong. Please try again.';
-}
-
-const CRITICAL_ACTION_OPTIONS = [
-    {
-        id: 'failed_zero',
-        label: 'Zero inventory against failed products',
-        modalTitle: 'Zero failed listing inventory',
-        modalMessage:
-            'Every active listing with status Failed or Needs attention will have local stock set to 0 and inventory pushed to the marketplace (where connected). Synced listings are not changed and the store stays active.',
-        confirmLabel: 'Yes, zero failed listings',
-    },
-    {
-        id: 'full_critical',
-        label: 'Critical option',
-        modalTitle: 'Critical action',
-        modalMessage:
-            'If you click Yes, all listing inventory for this store will be set to 0 on the marketplace (where possible), local stock will be cleared, and this store will be deactivated including its scheduled sync toggle. Only use this if something went wrong and you need an immediate stop.',
-        confirmLabel: 'Yes, zero inventory and deactivate',
-    },
-];
-
-const RESET_PENDING_OPTIONS = [
-    {
-        scope: 'failed',
-        label: 'Reset failed products',
-        modalTitle: 'Reset failed products',
-        modalMessage:
-            'Every active listing with status Failed will be marked Pending. Scrape errors are cleared so you can run Start Scraping again. Synced listings are not changed.',
-    },
-    {
-        scope: 'needs_attention',
-        label: 'Reset needs-attention products',
-        modalTitle: 'Reset needs-attention products',
-        modalMessage:
-            'Every active listing with status Needs attention will be marked Pending. Scrape errors are cleared so you can run Start Scraping again. Other listings are not changed.',
-    },
-    {
-        scope: 'all',
-        label: 'Reset all to pending',
-        modalTitle: 'Reset all to Pending',
-        modalMessage:
-            'Every active product listing for this store will be marked Pending (scraped/synced rows included). This clears scrape errors so you can run Start Scraping again. It does not fetch prices by itself.',
-    },
-];
-
-function CriticalActionDropdown({ disabled, loading, onSelectAction }) {
-    const [open, setOpen] = useState(false);
-    const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
-    const triggerRef = useRef(null);
-    const menuRef = useRef(null);
-
-    const updatePosition = useCallback(() => {
-        setMenuPos(placeFixedMenu(triggerRef.current, menuRef.current, { align: 'left' }));
-    }, []);
-
-    useLayoutEffect(() => {
-        if (!open) return;
-        updatePosition();
-        const id = requestAnimationFrame(() => updatePosition());
-        const onScroll = () => updatePosition();
-        window.addEventListener('scroll', onScroll, true);
-        window.addEventListener('resize', onScroll);
-        return () => {
-            cancelAnimationFrame(id);
-            window.removeEventListener('scroll', onScroll, true);
-            window.removeEventListener('resize', onScroll);
-        };
-    }, [open, updatePosition]);
-
-    useEffect(() => {
-        if (!open) return;
-        const handler = (e) => {
-            if (triggerRef.current?.contains(e.target) || menuRef.current?.contains(e.target)) return;
-            setOpen(false);
-        };
-        document.addEventListener('mousedown', handler);
-        return () => document.removeEventListener('mousedown', handler);
-    }, [open]);
-
-    const menu = open && createPortal(
-        <div
-            ref={menuRef}
-            role="menu"
-            style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, zIndex: 99999 }}
-            className="min-w-60 rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40"
-        >
-            {CRITICAL_ACTION_OPTIONS.map((opt) => (
-                <button
-                    key={opt.id}
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                        setOpen(false);
-                        onSelectAction(opt);
-                    }}
-                    className="flex w-full items-center gap-3 whitespace-nowrap px-4 py-2.5 text-left text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-800/90"
-                >
-                    <AlertTriangle className="h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
-                    <span>{opt.label}</span>
-                </button>
-            ))}
-        </div>,
-        document.body,
-    );
-
-    return (
-        <>
-            <button
-                ref={triggerRef}
-                type="button"
-                aria-haspopup="menu"
-                aria-expanded={open}
-                disabled={disabled}
-                title="Emergency inventory actions"
-                onClick={() => {
-                    if (disabled) return;
-                    setOpen((o) => {
-                        if (!o) setMenuPos(placeFixedMenu(triggerRef.current, null, { align: 'left' }));
-                        return !o;
-                    });
-                }}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-700 shadow-xs transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-rose-900 dark:bg-slate-800 dark:text-rose-300 dark:hover:bg-rose-950/40"
-            >
-                <AlertTriangle className={`h-4 w-4 ${loading ? 'animate-pulse' : ''}`} />
-                Critical action
-                <ChevronDown className="h-4 w-4 opacity-70" />
-            </button>
-            {menu}
-        </>
-    );
-}
-
-function ResetPendingDropdown({ disabled, loading, onSelectScope }) {
-    const [open, setOpen] = useState(false);
-    const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
-    const triggerRef = useRef(null);
-    const menuRef = useRef(null);
-
-    const updatePosition = useCallback(() => {
-        setMenuPos(placeFixedMenu(triggerRef.current, menuRef.current, { align: 'left' }));
-    }, []);
-
-    useLayoutEffect(() => {
-        if (!open) return;
-        updatePosition();
-        const id = requestAnimationFrame(() => updatePosition());
-        const onScroll = () => updatePosition();
-        window.addEventListener('scroll', onScroll, true);
-        window.addEventListener('resize', onScroll);
-        return () => {
-            cancelAnimationFrame(id);
-            window.removeEventListener('scroll', onScroll, true);
-            window.removeEventListener('resize', onScroll);
-        };
-    }, [open, updatePosition]);
-
-    useEffect(() => {
-        if (!open) return;
-        const handler = (e) => {
-            if (triggerRef.current?.contains(e.target) || menuRef.current?.contains(e.target)) return;
-            setOpen(false);
-        };
-        document.addEventListener('mousedown', handler);
-        return () => document.removeEventListener('mousedown', handler);
-    }, [open]);
-
-    const menu = open && createPortal(
-        <div
-            ref={menuRef}
-            role="menu"
-            style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, zIndex: 99999 }}
-            className="min-w-60 rounded-xl border border-slate-200/90 bg-white py-1.5 shadow-xl shadow-slate-900/10 dark:border-slate-600 dark:bg-slate-900 dark:shadow-black/40"
-        >
-            {RESET_PENDING_OPTIONS.map((opt) => (
-                <button
-                    key={opt.scope}
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                        setOpen(false);
-                        onSelectScope(opt);
-                    }}
-                    className="flex w-full items-center gap-3 whitespace-nowrap px-4 py-2.5 text-left text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-800/90"
-                >
-                    <RotateCcw className="h-4 w-4 shrink-0" />
-                    <span>{opt.label}</span>
-                </button>
-            ))}
-        </div>,
-        document.body,
-    );
-
-    return (
-        <>
-            <button
-                ref={triggerRef}
-                type="button"
-                aria-haspopup="menu"
-                aria-expanded={open}
-                disabled={disabled}
-                title="Reset listing status so you can scrape again"
-                onClick={() => {
-                    if (disabled) return;
-                    setOpen((o) => {
-                        if (!o) setMenuPos(placeFixedMenu(triggerRef.current, null, { align: 'left' }));
-                        return !o;
-                    });
-                }}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-xs transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700/80"
-            >
-                <RotateCcw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-                Reset status
-                <ChevronDown className="h-4 w-4 opacity-70" />
-            </button>
-            {menu}
-        </>
-    );
 }
 
 function UploadActionsDropdown({ upload, storeId, syncing, scraping, syncingUploadId, scrapingUploadId, deletingUploadId, onSync, onScrape, onDelete, onDownload, onDownloadErrors, onError }) {
@@ -1190,18 +986,35 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId, onSt
     );
 }
 
+const CATALOG_VIEWS = new Set(['stores', 'history', 'products', 'logs', 'created']);
+
+/** Read Catalog filters from the query string so a reload reopens the same store and search. */
+function catalogQueryState(searchParams) {
+    const store = searchParams.get('store') || '';
+    const q = (searchParams.get('q') || '').trim();
+    const status = searchParams.get('status') || '';
+    const viewParam = searchParams.get('view') || '';
+    const view = CATALOG_VIEWS.has(viewParam) ? viewParam : (store ? 'products' : 'stores');
+    const pageRaw = Number.parseInt(searchParams.get('page') || '1', 10);
+    const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
+    return { store, q, status, view, page };
+}
+
 export default function Catalog() {
-    const [searchParams] = useSearchParams();
-    const deepLinkAppliedRef = useRef(false);
+    const [searchParams, setSearchParams] = useSearchParams();
+    const initialQueryRef = useRef(null);
+    if (initialQueryRef.current === null) initialQueryRef.current = catalogQueryState(searchParams);
+    /** Skip one URL→state pass after we write the query string ourselves. */
+    const skipUrlApplyRef = useRef(false);
     const [storeList, setStoreList] = useState([]);
     const [marketplaces, setMarketplaces] = useState([]);
-    const [selectedStore, setSelectedStore] = useState('');
+    const [selectedStore, setSelectedStore] = useState(() => initialQueryRef.current.store);
     const [selectedMarketplace, setSelectedMarketplace] = useState('');
-    const [viewMode, setViewMode] = useState('stores'); // 'stores' | 'history' | 'products' | 'logs'
+    const [viewMode, setViewMode] = useState(() => initialQueryRef.current.view);
     const [uploads, setUploads] = useState([]);
     const [products, setProducts] = useState([]);
-    const [search, setSearch] = useState('');
-    const [statusFilter, setStatusFilter] = useState('');
+    const [search, setSearch] = useState(() => initialQueryRef.current.q.trim());
+    const [statusFilter, setStatusFilter] = useState(() => initialQueryRef.current.status);
     const [loading, setLoading] = useState(true);
     const [uploadsLoading, setUploadsLoading] = useState(false);
     const [uploadsError, setUploadsError] = useState('');
@@ -1236,15 +1049,17 @@ export default function Catalog() {
     const [modalFile, setModalFile] = useState(null);
     const [progress, setProgress] = useState(0);
     const progressRef = useRef(null);
-    const [currentPage, setCurrentPage] = useState(1);
+    const [currentPage, setCurrentPage] = useState(() => initialQueryRef.current.page);
     const PRODUCTS_PER_PAGE = 25;
     const [totalProductCount, setTotalProductCount] = useState(0);
     /** Bumped after catalog sync so the Products tab refetches (even if you stayed on this tab). */
     const [catalogMutationNonce, setCatalogMutationNonce] = useState(0);
-    const [debouncedSearch, setDebouncedSearch] = useState('');
+    const [debouncedSearch, setDebouncedSearch] = useState(() => initialQueryRef.current.q.trim());
     const productsFetchGenRef = useRef(0);
-    /** When store / search / status filter change, clear rows; page-only changes keep prior rows (stale-while-revalidate). */
+    /** Last store|search|status key. A change requests page 1; only a store change clears rows. */
     const productsListBaseKeyRef = useRef('');
+    /** Page used for the last products request. Distinguishes a filter change from a URL page change. */
+    const lastRequestedPageRef = useRef(initialQueryRef.current.page);
     /** Increments each merged live poll (used to throttle store-list refetch). */
     const livePollBurstRef = useRef(0);
     const [exportScope, setExportScope] = useState('all');
@@ -1255,7 +1070,9 @@ export default function Catalog() {
     const [criticalLoading, setCriticalLoading] = useState(false);
     const [resetPendingModalOpen, setResetPendingModalOpen] = useState(false);
     const [resetPendingLoading, setResetPendingLoading] = useState(false);
-    const [resetPendingChoice, setResetPendingChoice] = useState(RESET_PENDING_OPTIONS[2]);
+    const [resetPendingChoice, setResetPendingChoice] = useState(
+        () => RESET_PENDING_OPTIONS.find((opt) => opt.scope === 'all'),
+    );
     const [activityLogs, setActivityLogs] = useState([]);
     const [logsLoading, setLogsLoading] = useState(false);
     const [liveRefreshUntil, setLiveRefreshUntil] = useState(0);
@@ -1296,6 +1113,9 @@ export default function Catalog() {
     // (CatalogStoresView) exposes this via ``has_fixed_tier`` so we don't
     // need a separate round-trip to the pricing-settings endpoint.
     const showFixedColumns = Boolean(selectedStoreData?.has_fixed_tier);
+    // Store id can come from the URL before the store list returns. Wait until
+    // the record is loaded so a managed store does not flash the vendor table.
+    const catalogProductsReady = Boolean(selectedStoreData) && !isManagedStore;
 
     useEffect(
         () => () => {
@@ -1310,10 +1130,12 @@ export default function Catalog() {
     // product across every page.
     const refreshProducts = useCallback(() => {
         if (!selectedStore || viewMode !== 'products') return;
-        productsFetchGenRef.current += 1;
+        // Do not bump the generation. A search/status fetch owns the generation
+        // and must win over a live-scrape poll that started with older filters.
         const gen = productsFetchGenRef.current;
+        const page = currentPage;
         getProducts(selectedStore, {
-            page: currentPage,
+            page,
             pageSize: PRODUCTS_PER_PAGE,
             q: debouncedSearch,
             status: statusFilter,
@@ -1323,7 +1145,10 @@ export default function Catalog() {
                 setProducts(Array.isArray(res.data) ? res.data : []);
                 setTotalProductCount(Number.isFinite(res.count) ? res.count : 0);
             })
-            .catch(() => { /* silent — next scheduled re-fetch will retry */ });
+            .catch((err) => {
+                if (gen !== productsFetchGenRef.current) return;
+                if (err.response?.status === 404 && page > 1) setCurrentPage(1);
+            });
     }, [selectedStore, viewMode, currentPage, debouncedSearch, statusFilter]);
 
     const refreshActivityLogs = useCallback(() => {
@@ -1428,19 +1253,51 @@ export default function Catalog() {
             .finally(() => setLoading(false));
     }, [selectedMarketplace]);
 
-    // Deep link from Dashboard: /catalog?store=<id>&status=needs_attention|pending|failed
+    // Keep store, search, status, tab, and page in the URL so reload and back/forward
+    // reopen the same filtered product list. Dashboard links use ?store=&status=.
     useEffect(() => {
-        if (deepLinkAppliedRef.current || loading || !storeList.length) return;
-        const storeId = searchParams.get('store');
-        if (!storeId) return;
-        const match = storeList.find((s) => String(s.id) === String(storeId));
-        if (!match) return;
-        deepLinkAppliedRef.current = true;
-        setSelectedStore(match.id);
-        setViewMode('products');
-        const status = searchParams.get('status') || '';
-        if (status) setStatusFilter(status);
-    }, [loading, storeList, searchParams]);
+        if (skipUrlApplyRef.current) {
+            skipUrlApplyRef.current = false;
+            return;
+        }
+        const next = catalogQueryState(searchParams);
+        setSelectedStore((prev) => (String(prev) === String(next.store) ? prev : next.store));
+        setSearch((prev) => (prev === next.q ? prev : next.q));
+        setDebouncedSearch((prev) => (prev === next.q.trim() ? prev : next.q.trim()));
+        setStatusFilter((prev) => (prev === next.status ? prev : next.status));
+        setViewMode((prev) => (prev === next.view ? prev : next.view));
+        setCurrentPage((prev) => (prev === next.page ? prev : next.page));
+    }, [searchParams]);
+
+    useEffect(() => {
+        if (!selectedStore || !storeList.length) return;
+        const match = storeList.find((s) => String(s.id) === String(selectedStore));
+        if (match && selectedStore !== match.id) setSelectedStore(match.id);
+    }, [selectedStore, storeList]);
+
+    useEffect(() => {
+        const next = new URLSearchParams(searchParams);
+        const setOrDelete = (key, value) => {
+            if (value) next.set(key, String(value));
+            else next.delete(key);
+        };
+        if (selectedStore) {
+            setOrDelete('store', selectedStore);
+            setOrDelete('q', debouncedSearch);
+            setOrDelete('status', statusFilter);
+            setOrDelete('view', viewMode === 'stores' ? '' : viewMode);
+            setOrDelete('page', viewMode === 'products' && currentPage > 1 ? String(currentPage) : '');
+        } else {
+            next.delete('store');
+            next.delete('q');
+            next.delete('status');
+            next.delete('view');
+            next.delete('page');
+        }
+        if (next.toString() === searchParams.toString()) return;
+        skipUrlApplyRef.current = true;
+        setSearchParams(next, { replace: true });
+    }, [selectedStore, debouncedSearch, statusFilter, viewMode, currentPage, searchParams, setSearchParams]);
 
     useEffect(() => {
         if (!selectedStore || viewMode !== 'history') return undefined;
@@ -1453,6 +1310,10 @@ export default function Catalog() {
         isManagedStore
         && uploads.some((u) => u.status === 'pending' || u.status === 'processing'),
     );
+    const catalogIngestPending = Boolean(
+        !isManagedStore
+        && uploads.some((u) => u.status === 'ingesting' || u.status === 'processing'),
+    );
 
     useEffect(() => {
         if (!selectedStore || !listingUploadPending) return undefined;
@@ -1464,18 +1325,47 @@ export default function Catalog() {
         return () => clearInterval(id);
     }, [selectedStore, listingUploadPending, fetchUploadHistory]);
 
-    // Debounce the search box so typing doesn't fire a request per keystroke.
+    // Catalog file ingest returns immediately and finishes on a worker.
+    // Keep Upload history moving so Ingesting does not look frozen at 0 items.
     useEffect(() => {
-        const t = setTimeout(() => setDebouncedSearch(search.trim()), 250);
-        return () => clearTimeout(t);
-    }, [search]);
+        if (!selectedStore || viewMode !== 'history' || !catalogIngestPending) return undefined;
+        const tick = () => fetchUploadHistory(selectedStore, undefined, { silent: true });
+        const id = setInterval(tick, 3000);
+        return () => clearInterval(id);
+    }, [selectedStore, viewMode, catalogIngestPending, fetchUploadHistory]);
 
-    // Reset to page 1 whenever the filter criteria or store change. Without
-    // this, switching from "all" to a narrow filter could leave ``currentPage``
-    // pointing beyond the new result set and flash an empty table.
+    const seenIngestingIdsRef = useRef(new Set());
     useEffect(() => {
-        setCurrentPage(1);
-    }, [debouncedSearch, statusFilter, selectedStore]);
+        const ingestingNow = new Set(
+            uploads.filter((u) => u.status === 'ingesting').map((u) => u.id),
+        );
+        const finishedIds = [...seenIngestingIdsRef.current].filter((id) => !ingestingNow.has(id));
+        if (finishedIds.length > 0) {
+            const finished = uploads.filter((u) => finishedIds.includes(u.id));
+            const failed = finished.find((u) => u.status === 'failed');
+            const ready = finished.find((u) => u.status === 'validated' || u.status === 'pending');
+            if (failed) {
+                setFlowStatus('failed');
+                setMessage(failed.error_summary || 'File processing failed. Check Upload history for the reason.');
+            } else if (ready) {
+                setFlowStatus('ready to sync');
+                setMessage(catalogFileReadyMessage(ready));
+            }
+        }
+        seenIngestingIdsRef.current = ingestingNow;
+    }, [uploads]);
+
+    // Debounce the search box so typing doesn't fire a request per keystroke.
+    // Page resets in the same update so the fetch never uses the previous page.
+    useEffect(() => {
+        const next = search.trim();
+        if (next === debouncedSearch) return undefined;
+        const t = setTimeout(() => {
+            setDebouncedSearch(next);
+            setCurrentPage(1);
+        }, 250);
+        return () => clearTimeout(t);
+    }, [search, debouncedSearch]);
 
     // Fetch one page of products from the server — this is the hot path
     // that used to take 40+ seconds because the old code looped through
@@ -1483,19 +1373,32 @@ export default function Catalog() {
     // PRODUCTS_PER_PAGE rows, push search / status filters down to SQL,
     // and show the page as soon as it arrives.
     useEffect(() => {
-        if (!selectedStore || viewMode !== 'products') return undefined;
+        if (!selectedStore || viewMode !== 'products' || !catalogProductsReady) return undefined;
         const listBaseKey = `${selectedStore}|${debouncedSearch}|${statusFilter}`;
-        if (productsListBaseKeyRef.current !== listBaseKey) {
+        const previousKey = productsListBaseKeyRef.current;
+        let page = currentPage;
+        if (previousKey !== listBaseKey) {
+            const previousStore = previousKey ? previousKey.slice(0, previousKey.indexOf('|')) : '';
+            if (previousStore && previousStore !== String(selectedStore)) {
+                setProducts([]);
+                setTotalProductCount(0);
+            }
             productsListBaseKeyRef.current = listBaseKey;
-            setProducts([]);
-            setTotalProductCount(0);
+            // Same page number as the previous filter means the page was not
+            // updated with this filter (stale page). Request page 1. A URL
+            // back/forward that changes the filter and the page together is honored.
+            if (previousKey && currentPage === lastRequestedPageRef.current) {
+                page = 1;
+                if (currentPage !== 1) setCurrentPage(1);
+            }
         }
+        lastRequestedPageRef.current = page;
 
         const gen = ++productsFetchGenRef.current;
         const ac = new AbortController();
         setProductsFetching(true);
         getProducts(selectedStore, {
-            page: currentPage,
+            page,
             pageSize: PRODUCTS_PER_PAGE,
             q: debouncedSearch,
             status: statusFilter,
@@ -1507,21 +1410,33 @@ export default function Catalog() {
                 setTotalProductCount(Number.isFinite(res.count) ? res.count : 0);
             })
             .catch((err) => {
-                if (ac.signal.aborted) return;
+                if (ac.signal.aborted || err.code === 'ERR_CANCELED' || err.name === 'CanceledError' || err.name === 'AbortError') return;
                 if (gen !== productsFetchGenRef.current) return;
+                if (err.response?.status === 404 && page > 1) {
+                    setCurrentPage(1);
+                    return;
+                }
                 if (err.response?.status === 429) {
                     setMessage(formatCatalogError(err));
                     return;
                 }
-                setProducts([]);
-                setTotalProductCount(0);
                 setMessage(formatCatalogError(err));
             })
             .finally(() => {
                 if (gen === productsFetchGenRef.current) setProductsFetching(false);
             });
         return () => ac.abort();
-    }, [selectedStore, viewMode, currentPage, debouncedSearch, statusFilter, catalogMutationNonce]);
+    }, [selectedStore, viewMode, currentPage, debouncedSearch, statusFilter, catalogMutationNonce, catalogProductsReady]);
+
+    // Back-forward cache restores the page without remounting. Re-read the list
+    // with the filters already on screen.
+    useEffect(() => {
+        const onPageShow = (event) => {
+            if (event.persisted) refreshProducts();
+        };
+        window.addEventListener('pageshow', onPageShow);
+        return () => window.removeEventListener('pageshow', onPageShow);
+    }, [refreshProducts]);
 
     useEffect(() => {
         if (!selectedStore || viewMode !== 'logs') return;
@@ -1948,20 +1863,27 @@ export default function Catalog() {
                 setUploadModalOpen(false);
                 setModalFile(null);
                 return getCatalogUploads(selectedStore).then((r) => {
-                    setUploads(Array.isArray(r.data) ? r.data : []);
-                    return res;
+                    const rows = Array.isArray(r.data) ? r.data : [];
+                    setUploads(rows);
+                    return { res, rows };
                 });
             })
-            .then((res) => {
-                setFlowStatus('ready to sync');
-                const isAsync = res?.status === 202 || res?.data?.status === 'ingesting';
-                setMessage(
-                    isAsync
-                        ? (res?.data?.message
-                            || 'File received. Rows are being processed in the background — wait until upload status is "validated" in Upload history, then use Ready to Upload.')
-                        : 'Catalog uploaded. Open Upload history and click Ready to Upload to create products. '
-                        + 'Vendor prices update when you click Start Scraping or when your schedule runs.',
-                );
+            .then(({ rows }) => {
+                const latest = rows[0];
+                const stillReading = latest && (latest.status === 'ingesting' || latest.status === 'processing');
+                if (stillReading) {
+                    setFlowStatus('');
+                    setMessage('Reading the file and saving rows. This list updates on its own. Ready to Upload appears when this file is ready.');
+                } else if (latest && (latest.status === 'validated' || latest.status === 'pending')) {
+                    setFlowStatus('ready to sync');
+                    setMessage(catalogFileReadyMessage(latest));
+                } else if (latest?.status === 'failed') {
+                    setFlowStatus('failed');
+                    setMessage(latest.error_summary || 'File processing failed. Check Upload history for the reason.');
+                } else {
+                    setFlowStatus('ready to sync');
+                    setMessage('Catalog uploaded. Use Ready to Upload to create products.');
+                }
                 getCatalogStores(selectedMarketplace || null).then((r) => setStoreList(Array.isArray(r.data) ? r.data : []));
             })
             .catch((err) => {
@@ -2553,7 +2475,9 @@ export default function Catalog() {
                     ? 'listing'
                     : scope === 'failed'
                         ? 'failed listing'
-                        : 'needs-attention listing';
+                        : scope === 'scraped'
+                            ? 'scraped listing'
+                            : 'needs-attention listing';
                 setMessage(
                     `${n.toLocaleString()} ${scopeHint}${n === 1 ? '' : 's'} set to Pending. `
                     + 'Run Start Scraping when you want fresh vendor prices.',
@@ -2617,8 +2541,8 @@ export default function Catalog() {
     };
 
     const handleSyncFromModal = () => {
-        const latest = uploads.find((u) => ['pending', 'validated'].includes(u.status));
-        if (latest) handleSync(latest.id);
+        const latest = uploads[0];
+        if (latest && ['pending', 'validated'].includes(latest.status)) handleSync(latest.id);
         else handleSync();
     };
 
@@ -2689,7 +2613,13 @@ export default function Catalog() {
     const paginatedProducts = filteredProducts;
     const hasActiveFilters = Boolean(debouncedSearch || statusFilter);
 
-    const hasPendingUpload = uploads.some((u) => ['pending', 'validated'].includes(u.status));
+    const latestCatalogUpload = !isManagedStore ? uploads[0] : null;
+    const showReadyToUpload = Boolean(
+        latestCatalogUpload
+        && ['pending', 'validated'].includes(latestCatalogUpload.status)
+        && !catalogIngestPending
+        && flowStatus === 'ready to sync',
+    );
 
     return (
         <div className="space-y-6">
@@ -2910,7 +2840,9 @@ export default function Catalog() {
                         <p className="text-xs text-slate-500 dark:text-slate-400">
                             {isManagedStore
                                 ? 'Bulk Create / Mapped / Delete files and single Create / Delete. Edit, publish, and inventory push are under Logs.'
-                                : 'Files uploaded for this store; sync or scrape per row.'}
+                                : catalogIngestPending
+                                    ? 'Reading the file and saving rows. This list updates on its own — you can stay on this page.'
+                                    : 'Files uploaded for this store; sync or scrape per row.'}
                         </p>
                     </div>
 
@@ -3085,9 +3017,13 @@ export default function Catalog() {
                                                 {u.marketplace || '—'}
                                             </td>
                                             <td className="text-right text-sm tabular-nums align-middle whitespace-nowrap">
-                                                {u.status === 'processing' && (u.total_rows ?? 0) > 0
-                                                    ? `${u.processed_rows} / ${u.total_rows}`
-                                                    : (u.total_rows ?? '—')}
+                                                {u.status === 'ingesting'
+                                                    ? (Number(u.processed_rows) > 0
+                                                        ? `${Number(u.processed_rows).toLocaleString()}…`
+                                                        : 'Reading…')
+                                                    : u.status === 'processing' && (u.total_rows ?? 0) > 0
+                                                        ? `${u.processed_rows} / ${u.total_rows}`
+                                                        : (u.total_rows ?? '—')}
                                             </td>
                                             <td className="text-sm text-slate-600 dark:text-slate-400 align-middle whitespace-nowrap" title={u.reason || undefined}>
                                                 {u.reason || '—'}
@@ -3120,7 +3056,7 @@ export default function Catalog() {
                         )}
                     </div>
 
-                    {hasPendingUpload && flowStatus === 'ready to sync' && (
+                    {showReadyToUpload && (
                         <div className="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 space-y-2">
                             <p className="text-xs text-slate-500 dark:text-slate-400">
                                 Ready to Upload creates listings in your store from your file. Use Start Scraping (or your schedule) when you want vendor prices and stock.
@@ -3147,7 +3083,7 @@ export default function Catalog() {
             )}
 
             {/* Server-side Celery catalog scrape (Amazon, eBay, …) — inventory-only stores */}
-            {selectedStore && viewMode === 'products' && !isManagedStore && (
+            {catalogProductsReady && viewMode === 'products' && (
                 <ServerCeleryScrapeStrip
                     state={scrapeProgress?.server_celery_scrape}
                     progressStoreId={scrapeProgress?.store_id}
@@ -3155,7 +3091,7 @@ export default function Catalog() {
                 />
             )}
 
-            {selectedStore && viewMode === 'products' && !isManagedStore && (
+            {catalogProductsReady && viewMode === 'products' && (
                 <ManualSyncProgressStrip
                     state={pushListingsProgress}
                     progressStoreId={pushListingsProgress?.store_id}
@@ -3168,7 +3104,7 @@ export default function Catalog() {
             {/* Desktop-runner ingest status strips — one per vendor the store
                 uses (HEB, Costco, …). Backend exposes them uniformly under
                 ``scrapeProgress.vendors``. */}
-            {selectedStore && viewMode === 'products' && !isManagedStore
+            {catalogProductsReady && viewMode === 'products'
                 && getVendorSummaries(scrapeProgress).map((vendor) => (
                     <VendorProgressStrip
                         key={vendor.code}
@@ -3180,7 +3116,7 @@ export default function Catalog() {
                 ))}
 
             {/* Product table (inventory-only stores) */}
-            {selectedStore && viewMode === 'products' && !isManagedStore && (
+            {catalogProductsReady && viewMode === 'products' && (
                 <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden">
                     <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between border-b border-slate-200 dark:border-slate-700">
                         <div>
@@ -3359,7 +3295,10 @@ export default function Catalog() {
                             <select
                                 className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-hidden"
                                 value={statusFilter}
-                                onChange={(e) => setStatusFilter(e.target.value)}
+                                onChange={(e) => {
+                                    setStatusFilter(e.target.value);
+                                    setCurrentPage(1);
+                                }}
                             >
                                 <option value="">All statuses</option>
                                 <option value="synced">Synced</option>
@@ -3380,16 +3319,24 @@ export default function Catalog() {
                                 </div>
                             </div>
                         ) : !productsFetching && filteredProducts.length === 0 ? (
-                            <EmptyState
-                                icon={Package}
-                                title="No products"
-                                description="Upload a catalog, use Ready to Upload in upload history, then Start Scraping for vendor data."
-                                action={
-                                    <Button variant="secondary" size="sm" onClick={handleBackToHistory}>
-                                        View upload history
-                                    </Button>
-                                }
-                            />
+                            hasActiveFilters ? (
+                                <EmptyState
+                                    icon={Search}
+                                    title="No matching products"
+                                    description="Nothing in this store matches the current search or status. Change the filter or clear the search to see every product."
+                                />
+                            ) : (
+                                <EmptyState
+                                    icon={Package}
+                                    title="No products"
+                                    description="Upload a catalog, use Ready to Upload in upload history, then Start Scraping for vendor data."
+                                    action={
+                                        <Button variant="secondary" size="sm" onClick={handleBackToHistory}>
+                                            View upload history
+                                        </Button>
+                                    }
+                                />
+                            )
                         ) : (
                             <div className="relative">
                                 <table className="table-base">
@@ -3675,6 +3622,7 @@ export default function Catalog() {
                                     onClick={() => {
                                         setSelectedStore(s.id);
                                         setViewMode('history');
+                                        setCurrentPage(1);
                                     }}
                                     className="flex min-w-0 flex-1 items-center gap-3 text-left"
                                 >

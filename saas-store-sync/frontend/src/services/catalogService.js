@@ -57,7 +57,7 @@ export const updateProductMapping = (storeId, productId, patch) =>
 
 export const clearCatalog = (storeId) => api.delete(`/stores/${storeId}/catalog/clear/`);
 
-/** Reset listings to Pending. scope: 'all' | 'failed' | 'needs_attention'. Does not start scraping. */
+/** Reset listings to Pending. scope: 'all' | 'failed' | 'scraped' | 'needs_attention'. Does not start scraping. */
 export const resetCatalogListingsPending = (storeId, scope = 'all') =>
     api.post(`/stores/${storeId}/catalog/reset-pending/`, { confirm: true, scope });
 

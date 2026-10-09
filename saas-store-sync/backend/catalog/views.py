@@ -472,6 +472,11 @@ class CatalogUploadListView(APIView):
         vendor_by_id, error_by_id, reason_by_id = _catalog_upload_history_extras(
             [u.id for u in uploads]
         )
+        try:
+            from catalog.tasks import requeue_stale_catalog_ingests
+            requeue_stale_catalog_ingests(uploads)
+        except Exception:
+            logger.exception('catalog upload list: stale ingest requeue failed')
         data = []
         for u in uploads:
             error_row_count = int(error_by_id.get(u.id) or 0)
@@ -1920,6 +1925,7 @@ class CatalogPushListingsCancelView(APIView):
 _RESET_PENDING_SCOPE_LABELS = {
     'all': 'all active listings',
     'failed': 'failed listings',
+    'scraped': 'scraped listings',
     'needs_attention': 'needs-attention listings',
 }
 
@@ -1927,7 +1933,7 @@ _RESET_PENDING_SCOPE_LABELS = {
 class CatalogResetListingsPendingView(APIView):
     """Set store listings to Pending (clears scrape retry state).
 
-    Body: ``{"confirm": true, "scope": "all"|"failed"|"needs_attention"}`` (scope defaults to ``all``).
+    Body: ``{"confirm": true, "scope": "all"|"failed"|"scraped"|"needs_attention"}`` (scope defaults to ``all``).
     Does not start a scrape — use Start Scraping afterward.
     """
     permission_classes = [IsAuthenticated]
@@ -1941,13 +1947,15 @@ class CatalogResetListingsPendingView(APIView):
         scope = (request.data.get('scope') or 'all').strip().lower()
         if scope not in _RESET_PENDING_SCOPE_LABELS:
             return Response(
-                {'error': 'scope must be one of: all, failed, needs_attention'},
+                {'error': 'scope must be one of: all, failed, scraped, needs_attention'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         store = get_store_for_user(request.user, store_pk)
         qs = ProductMapping.objects.filter(store=store, is_active=True)
         if scope == 'failed':
             qs = qs.filter(sync_status='failed')
+        elif scope == 'scraped':
+            qs = qs.filter(sync_status='scraped')
         elif scope == 'needs_attention':
             qs = qs.filter(sync_status='needs_attention')
 

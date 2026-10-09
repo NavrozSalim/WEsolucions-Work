@@ -966,6 +966,22 @@ class CatalogResetPendingScopeTests(TestCase):
         self.assertEqual(attention.sync_status, 'pending')
         self.assertIsNone(attention.scrape_error)
 
+    def test_reset_scraped_scope_only(self):
+        scraped = self._pm('SCRAPE-1', 'scraped')
+        synced = self._pm('SYNC-2', 'synced')
+        failed = self._pm('FAIL-3', 'failed')
+
+        resp = self.client.post(self.url, {'confirm': True, 'scope': 'scraped'}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['listings_reset'], 1)
+
+        scraped.refresh_from_db()
+        synced.refresh_from_db()
+        failed.refresh_from_db()
+        self.assertEqual(scraped.sync_status, 'pending')
+        self.assertEqual(synced.sync_status, 'synced')
+        self.assertEqual(failed.sync_status, 'failed')
+
 
 @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
 class CatalogFailedZeroViewTests(TestCase):

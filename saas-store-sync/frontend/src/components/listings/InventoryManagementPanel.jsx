@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, FileDown, Pencil, Play, RefreshCw, Send, Square, Trash2 } from 'lucide-react';
+import { FileDown, Pencil, Play, RefreshCw, Send, Square, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
+import ConfirmModal from '../ui/ConfirmModal';
+import {
+    CRITICAL_ACTION_OPTIONS,
+    CriticalActionDropdown,
+    ResetPendingDropdown,
+    resetOptionsForConnection,
+} from '../catalog/InventoryActionMenus';
 import {
     cancelListingScrape,
     criticalZeroListingInventory,
@@ -24,6 +31,15 @@ const SYNC_STYLES = {
     synced: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300',
     failed: 'bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300',
 };
+
+const NAMED_SCRAPE_VENDORS = ['Costway', 'Vevor', 'Wallkoala', 'Nora', 'HEB', 'Costco', 'Amazon', 'eBay'];
+
+function scrapeVendorLabel(progress) {
+    const explicit = String(progress?.vendor_label || '').trim();
+    if (explicit) return explicit;
+    const message = String(progress?.message || '');
+    return NAMED_SCRAPE_VENDORS.find((name) => message.includes(name)) || '';
+}
 
 const SYNC_LABELS = {
     pending: 'Pending',
@@ -86,23 +102,30 @@ function JobProgressStrip({
     const hasCounts = isScrape ? total > 0 : Boolean(progress) && pushTotal > 0;
     const phase = progress?.phase || '';
     const isStopping = Boolean(stopping || progress?.cancel_requested);
+    const vendorLabel = isScrape ? scrapeVendorLabel(progress) : '';
     const title = isScrape
-        ? (phase === 'pushing' ? 'Pushing scraped prices…' : 'Fetching vendor prices…')
+        ? (phase === 'pushing'
+            ? (vendorLabel ? `Pushing ${vendorLabel} prices…` : 'Pushing scraped prices…')
+            : (vendorLabel ? `Fetching ${vendorLabel} prices…` : 'Fetching vendor prices…'))
         : `Pushing price/stock to ${marketplaceLabel}…`;
     const serverMsg = String(progress?.message || '').trim();
     const feedMsg = /^(loading|downloading|applying)\b/i.test(serverMsg);
+    const shown = Math.min(
+        Math.max(processed, processed < total ? processed + (phase === 'running' ? 1 : 0) : processed),
+        total,
+    );
     const detail = isScrape
         ? (feedMsg
             ? serverMsg
             : (hasCounts
                 ? (
-                    `Scraping ${Math.min(Math.max(processed, processed < total ? processed + (phase === 'running' ? 1 : 0) : processed), total).toLocaleString()} of ${total.toLocaleString()}`
+                    `Scraping ${vendorLabel ? `${vendorLabel} · ` : ''}${shown.toLocaleString()} of ${total.toLocaleString()}`
                     + ` · ${processed.toLocaleString()}/${total.toLocaleString()} done`
                     + ` · ${scraped.toLocaleString()} ok`
                     + ` · ${failed.toLocaleString()} failed`
                     + `. Progress follows listing status (Pending → Scraped).`
                 )
-                : 'Starting scrape…'))
+                : (vendorLabel ? `Starting ${vendorLabel} scrape…` : 'Starting scrape…')))
         : (hasCounts
             ? `Updating ${Math.min(displayProcessed, displayTotal).toLocaleString()} of ${displayTotal.toLocaleString()} listing(s) on ${marketplaceLabel}. ${Number(failed) > 0 ? `${Number(failed).toLocaleString()} failed. ` : ''}You can leave this page.`
             : `Updating ${count || 0} listing(s) on ${marketplaceLabel}.`);
@@ -217,8 +240,14 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     const [pushing, setPushing] = useState(false);
     const [pushProgress, setPushProgress] = useState(null);
     const [resetting, setResetting] = useState(false);
+    const [resetModalOpen, setResetModalOpen] = useState(false);
+    const [resetChoice, setResetChoice] = useState(null);
     const [criticalLoading, setCriticalLoading] = useState(false);
+    const [criticalModalOpen, setCriticalModalOpen] = useState(false);
+    const [criticalChoice, setCriticalChoice] = useState(CRITICAL_ACTION_OPTIONS[1]);
     const [exporting, setExporting] = useState(false);
+    const [exportScope, setExportScope] = useState('all');
+    const listingResetOptions = resetOptionsForConnection('full_store');
     const [editListing, setEditListing] = useState(null);
     const [editOpen, setEditOpen] = useState(false);
     const [search, setSearch] = useState('');
@@ -577,22 +606,46 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
             });
     };
 
-    const handleReset = (scope) => {
+    const handleResetOption = (option) => {
+        setResetChoice(option);
+        setResetModalOpen(true);
+    };
+
+    const handleResetConfirm = () => {
+        if (!storeId || !resetChoice) return;
+        const scope = resetChoice.scope;
         setResetting(true);
         resetListingInventory(storeId, scope)
             .then((res) => {
-                onMessage?.(res.data?.message || 'Status reset.', 'success');
+                const n = Number(res.data?.updated);
+                const hint = scope === 'all'
+                    ? 'listing'
+                    : scope === 'failed'
+                        ? 'failed listing'
+                        : 'scraped listing';
+                setResetModalOpen(false);
+                onMessage?.(
+                    Number.isFinite(n)
+                        ? `${n.toLocaleString()} ${hint}${n === 1 ? '' : 's'} set to Pending. Run Start Scraping when you want fresh vendor prices.`
+                        : (res.data?.message || 'Status reset.'),
+                    'success',
+                );
                 load();
             })
             .catch((err) => onMessage?.(err.response?.data?.detail || 'Reset failed.', 'error'))
             .finally(() => setResetting(false));
     };
 
-    const handleCriticalZero = () => {
-        const label = marketplaceLabel.charAt(0).toUpperCase() + marketplaceLabel.slice(1);
-        if (!window.confirm(`Set stock to 0 on all marketplace listings and push to ${label}?`)) return;
+    const handleCriticalOption = (option) => {
+        setCriticalChoice(option);
+        setCriticalModalOpen(true);
+    };
+
+    const handleCriticalConfirm = () => {
+        if (!storeId || !criticalChoice) return;
         setCriticalLoading(true);
-        criticalZeroListingInventory(storeId)
+        const action = criticalChoice.id === 'failed_zero' ? 'failed_zero' : 'zero_inventory';
+        criticalZeroListingInventory(storeId, action)
             .then((res) => {
                 if (res.data?.async || res.data?.job_id) {
                     const queued = Number(res.data?.queued) || totalCount;
@@ -608,7 +661,21 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         message: res.data?.message || '',
                     });
                 }
-                onMessage?.(res.data?.message || 'Critical action finished.', res.data?.ok ? 'success' : 'error');
+                setCriticalModalOpen(false);
+                const d = res.data || {};
+                if (criticalChoice.id === 'failed_zero') {
+                    onMessage?.(
+                        d.message
+                            || `Failed listings zeroed: ${d.local_zeroed ?? d.zeroed ?? 0} local, ${d.marketplace_push_ok ?? d.pushed ?? 0} marketplace update(s) ok. The store stays active.`,
+                        d.ok === false ? 'error' : 'success',
+                    );
+                } else {
+                    onMessage?.(
+                        d.message
+                            || `Critical action finished: local stock set to 0; ${d.marketplace_push_ok ?? d.pushed ?? 0} marketplace update(s) ok. Store and schedule are deactivated.`,
+                        d.ok === false ? 'error' : 'success',
+                    );
+                }
                 load();
             })
             .catch((err) => onMessage?.(err.response?.data?.detail || 'Critical action failed.', 'error'))
@@ -616,8 +683,16 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
     };
 
     const handleExport = () => {
+        let status = '';
+        if (exportScope === 'failed') status = 'failed';
+        else if (exportScope === 'filter') {
+            if (syncFilter === 'all') {
+                onMessage?.('Choose a status in the filter, or switch export scope to “All products”.', 'error');
+                return;
+            }
+            status = syncFilter;
+        }
         setExporting(true);
-        const status = syncFilter === 'all' ? '' : syncFilter;
         exportListingInventory(storeId, status)
             .then(() => onMessage?.('Inventory exported.', 'success'))
             .catch((err) => onMessage?.(err.message || 'Export failed.', 'error'))
@@ -699,42 +774,34 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                         </Button>
                     )}
 
-                    <div className="relative">
-                        <Button
-                            variant="secondary"
-                            size="sm"
-                            disabled={busy || totalCount === 0}
-                            className="border-rose-300 text-rose-700 dark:border-rose-700 dark:text-rose-300"
-                            onClick={handleCriticalZero}
+                    <CriticalActionDropdown
+                        disabled={busy || !storeId}
+                        loading={criticalLoading}
+                        options={CRITICAL_ACTION_OPTIONS}
+                        onSelectAction={handleCriticalOption}
+                    />
+                    <ResetPendingDropdown
+                        disabled={busy || !storeId}
+                        loading={resetting}
+                        options={listingResetOptions}
+                        onSelectScope={handleResetOption}
+                    />
+                    <div className="flex items-center gap-1.5">
+                        <select
+                            className="max-w-40 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-2 text-xs text-slate-900 dark:text-slate-100"
+                            value={exportScope}
+                            onChange={(e) => setExportScope(e.target.value)}
+                            title="What to include in the export"
                         >
-                            <AlertTriangle className="mr-1.5 h-4 w-4" />
-                            {criticalLoading ? 'Working…' : 'Critical action'}
+                            <option value="all">Export: all products</option>
+                            <option value="filter">Export: current filter</option>
+                            <option value="failed">Export: failed only</option>
+                        </select>
+                        <Button variant="secondary" size="sm" onClick={handleExport} disabled={exporting || !storeId}>
+                            <FileDown className="mr-1.5 h-4 w-4" />
+                            {exporting ? 'Exporting…' : 'Export'}
                         </Button>
                     </div>
-
-                    <select
-                        className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-2 text-xs text-slate-900 dark:text-slate-100"
-                        disabled={busy}
-                        defaultValue=""
-                        onChange={(e) => {
-                            const v = e.target.value;
-                            e.target.value = '';
-                            if (v) handleReset(v);
-                        }}
-                        title="Set badges to Pending without fetching prices, then Start Scraping."
-                    >
-                        <option value="" disabled>
-                            {resetting ? 'Resetting…' : 'Reset status'}
-                        </option>
-                        <option value="failed">Reset failed → Pending</option>
-                        <option value="scraped">Reset scraped → Pending</option>
-                        <option value="all">Reset all → Pending</option>
-                    </select>
-
-                    <Button variant="secondary" size="sm" onClick={handleExport} disabled={exporting || !storeId}>
-                        <FileDown className="mr-1.5 h-4 w-4" />
-                        {exporting ? 'Exporting…' : 'Export'}
-                    </Button>
 
                     {!scrapeBusy && storeVendors.length > 1 && (
                         <VendorScopeMenu
@@ -979,6 +1046,28 @@ export default function InventoryManagementPanel({ storeId, marketplaceCode = ''
                 storeId={storeId}
                 marketplaceCode={marketplaceCode}
                 listing={editListing}
+            />
+            <ConfirmModal
+                open={criticalModalOpen}
+                title={criticalChoice?.modalTitle || 'Critical action'}
+                message={criticalChoice?.modalMessage || ''}
+                confirmLabel={criticalChoice?.confirmLabel || 'Confirm'}
+                cancelLabel="Cancel"
+                variant="danger"
+                loading={criticalLoading}
+                onConfirm={handleCriticalConfirm}
+                onCancel={() => !criticalLoading && setCriticalModalOpen(false)}
+            />
+            <ConfirmModal
+                open={resetModalOpen}
+                title={resetChoice?.modalTitle || 'Reset to Pending'}
+                message={resetChoice?.modalMessage || ''}
+                confirmLabel="Reset to Pending"
+                cancelLabel="Cancel"
+                variant="primary"
+                loading={resetting}
+                onConfirm={handleResetConfirm}
+                onCancel={() => !resetting && setResetModalOpen(false)}
             />
         </div>
     );

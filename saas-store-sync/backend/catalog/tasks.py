@@ -799,15 +799,66 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
     }
 
 
+def _catalog_ingest_lock_key(upload_id) -> str:
+    return f'catalog-ingest-lock:{upload_id}'
+
+
+def requeue_stale_catalog_ingests(uploads) -> None:
+    """Enqueue ingest again when a file is still Ingesting and no worker holds the lock.
+
+    The upload request already queued the task. If that message was lost, or the
+    worker died before finishing, Upload history would stay on Ingesting with 0 items.
+    A running ingest holds the cache lock, so this does not start a second parser.
+    """
+    from django.core.cache import cache
+    from django.utils import timezone
+
+    from catalog.models import CatalogUpload
+
+    now = timezone.now()
+    for upload in uploads:
+        if upload.status != CatalogUpload.Status.INGESTING or not upload.source_file:
+            continue
+        if cache.get(_catalog_ingest_lock_key(upload.id)):
+            continue
+        age = (now - upload.created_at).total_seconds() if upload.created_at else 0
+        # processed_rows moves once the first chunk is saved. Zero rows for a
+        # short time is normal while the worker opens the file.
+        if upload.processed_rows:
+            stale = age > 180
+        else:
+            stale = age > 45
+        if not stale:
+            continue
+        if not cache.add(f'catalog-ingest-requeue:{upload.id}', '1', timeout=120):
+            continue
+        try:
+            catalog_ingest_upload_file_task.delay(str(upload.id))
+            logger.info('Re-queued stale catalog ingest upload_id=%s age=%ss', upload.id, int(age))
+        except Exception:
+            logger.exception('Could not re-queue catalog ingest upload_id=%s', upload.id)
+
+
 @shared_task(bind=True, name='catalog.ingest_upload_file', max_retries=2, default_retry_delay=90)
 def catalog_ingest_upload_file_task(self, upload_id: str):
     """
     Parse stored CSV/XLSX in chunks (bulk_create rows). Replaces request-time ingest.
     """
+    from django.core.cache import cache
+
     from catalog.models import CatalogUpload
 
     from .services import ingest_stored_catalog_file
 
+    lock_key = _catalog_ingest_lock_key(upload_id)
+    try:
+        got_lock = cache.add(lock_key, '1', timeout=180)
+    except Exception:
+        logger.warning('catalog ingest lock unavailable; continuing upload_id=%s', upload_id)
+        got_lock = True
+    if not got_lock:
+        logger.info('catalog ingest already running upload_id=%s', upload_id)
+        return {'skipped': 'already_running', 'upload_id': str(upload_id)}
     try:
         return ingest_stored_catalog_file(upload_id)
     except CatalogUpload.DoesNotExist:
@@ -826,6 +877,11 @@ def catalog_ingest_upload_file_task(self, upload_id: str):
         except CatalogUpload.DoesNotExist:
             pass
         return {'error': str(exc), 'upload_id': str(upload_id)}
+    finally:
+        try:
+            cache.delete(lock_key)
+        except Exception:
+            pass
 
 
 @shared_task(bind=True, max_retries=3)

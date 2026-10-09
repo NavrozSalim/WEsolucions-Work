@@ -307,6 +307,84 @@ def _is_wallkoala_listing(listing) -> bool:
     return is_wallkoala_vendor_code(getattr(listing, "source_vendor_code", None))
 
 
+def progress_vendor_label(
+    *,
+    source_vendor_code: str = "",
+    vendor_url: str = "",
+    vendor_id: str = "",
+    sku: str = "",
+    variant_key: str = "",
+    product_key: str = "",
+) -> str:
+    """Short name for the Inventory scrape banner (Costway, Vevor, Amazon, …)."""
+    from scrapers.costway_au_ingest import is_costway_feed_listing
+    from scrapers.nora_au_ingest import is_nora_vendor_code
+    from scrapers.vevor_au_ingest import is_vevor_product_url, is_vevor_vendor_code
+    from scrapers.wallkoala_ingest import is_wallkoala_vendor_code
+
+    from .template_routing import is_nora_like
+
+    src = (source_vendor_code or "").strip()
+    url = (vendor_url or "").strip()
+    url_l = url.lower()
+    src_l = src.lower()
+    if is_costway_feed_listing(
+        source_vendor_code=src,
+        vendor_url=url,
+        vendor_id=vendor_id or "",
+        sku=sku or "",
+        variant_key=variant_key or "",
+        product_key=product_key or "",
+    ):
+        return "Costway"
+    if is_vevor_vendor_code(src) or is_vevor_product_url(url):
+        return "Vevor"
+    if is_wallkoala_vendor_code(src):
+        return "Wallkoala"
+    if is_nora_like(src) or is_nora_vendor_code(src):
+        return "Nora"
+    if "heb.com" in url_l or src_l.startswith("heb"):
+        return "HEB"
+    if "costco." in url_l or src_l.startswith("costco"):
+        return "Costco"
+    if "amazon." in url_l or src_l.startswith("amazon"):
+        return "Amazon"
+    if "ebay." in url_l or src_l.startswith("ebay"):
+        return "eBay"
+    return src
+
+
+def listing_progress_vendor_label(listing) -> str:
+    return progress_vendor_label(
+        source_vendor_code=getattr(listing, "source_vendor_code", None) or "",
+        vendor_url=getattr(listing, "vendor_url", None) or "",
+        vendor_id=getattr(listing, "vendor_id", None) or "",
+        sku=getattr(listing, "sku", None) or "",
+        variant_key=getattr(listing, "external_variant_key", None) or "",
+        product_key=getattr(listing, "external_product_key", None) or "",
+    )
+
+
+def join_vendor_labels(labels) -> str:
+    ordered = []
+    seen = set()
+    for label in labels:
+        text = (label or "").strip()
+        key = text.casefold()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(text)
+    if not ordered:
+        return ""
+    if len(ordered) == 1:
+        return ordered[0]
+    if len(ordered) <= 3:
+        return ", ".join(ordered[:-1]) + " and " + ordered[-1]
+    extra = len(ordered) - 3
+    return ", ".join(ordered[:3]) + f" +{extra} more"
+
+
 _LISTING_SCRAPE_SAVE_FIELDS = (
     "updated_at",
     "inventory_sync_status",
@@ -2283,9 +2361,18 @@ def start_scrape_async(user, store, listing_ids=None, vendor_code=None) -> dict:
             nora_map = None
 
     batch = []
+    vendor_labels = []
     for listing in qs.only(*_SCRAPE_LISTING_ONLY):
         if _listing_is_scrapeable(listing, nora_map):
             batch.append(listing)
+            vendor_labels.append(progress_vendor_label(
+                source_vendor_code=listing.source_vendor_code,
+                vendor_url=listing.vendor_url,
+                vendor_id=listing.vendor_id,
+                sku=listing.sku,
+                variant_key=listing.external_variant_key,
+            ))
+    vendor_label = join_vendor_labels(vendor_labels)
 
     if not batch:
         if store_wide and (vendor_code or "").strip():
@@ -2317,7 +2404,12 @@ def start_scrape_async(user, store, listing_ids=None, vendor_code=None) -> dict:
         total=total,
         listing_ids=batch_ids,
         phase="queued",
-        message=f"Scraping 0 of {total}…",
+        vendor_label=vendor_label,
+        message=(
+            f"Scraping {vendor_label} · 0 of {total}…"
+            if vendor_label
+            else f"Scraping 0 of {total}…"
+        ),
     )
     job_generation = begun.get("generation")
 
@@ -2358,7 +2450,12 @@ def start_scrape_async(user, store, listing_ids=None, vendor_code=None) -> dict:
         "ok": True,
         "total": total,
         "processed": 0,
-        "message": f"Scrape started for {total} listing(s). Progress updates as each listing finishes.",
+        "message": (
+            f"Scrape started for {total} {vendor_label} listing(s). Progress updates as each listing finishes."
+            if vendor_label
+            else f"Scrape started for {total} listing(s). Progress updates as each listing finishes."
+        ),
+        "vendor_label": vendor_label,
     }
 
 
@@ -2478,11 +2575,17 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
 
     from . import scrape_progress as scrape_prog
 
+    queued = scrape_prog.get_scrape_progress(store.id)
+    queued_vendor = (queued.get("vendor_label") or "").strip()
     scrape_prog.set_scrape_progress(
         store.id,
         job_generation=job_generation,
         current_sku="",
-        message="Loading listings…",
+        message=(
+            f"Loading {queued_vendor} listings…"
+            if queued_vendor
+            else "Loading listings…"
+        ),
     )
     logger.info("Managed scrape loading listings store=%s", store.id)
     listings = [
@@ -2491,6 +2594,9 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
         if _listing_is_scrapeable(listing, nora_map)
     ]
     logger.info("Managed scrape loaded %s listing(s) store=%s", len(listings), store.id)
+    run_vendor_label = join_vendor_labels(
+        listing_progress_vendor_label(listing) for listing in listings
+    )
 
     wallkoala_feed = None
     wallkoala_vendor_pk = None
@@ -2555,6 +2661,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
             listing_ids=[str(x) for x in listing_ids_batch],
             phase="running",
             current_sku="",
+            vendor_label=run_vendor_label or queued_vendor,
         )
     else:
         begun = scrape_prog.begin_scrape_progress(
@@ -2562,7 +2669,12 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
             total=total,
             listing_ids=listing_ids_batch,
             phase="running",
-            message=f"Scraping 0 of {total}…",
+            vendor_label=run_vendor_label,
+            message=(
+                f"Scraping {run_vendor_label} · 0 of {total}…"
+                if run_vendor_label
+                else f"Scraping 0 of {total}…"
+            ),
         )
         job_generation = job_generation or begun.get("generation")
 
@@ -2642,6 +2754,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     phase="running",
                     current_sku="",
                     feed_batch=True,
+                    vendor_label="Vevor",
                     message="Downloading Vevor AU feed…",
                 )
                 logger.info(
@@ -2682,6 +2795,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     phase="running",
                     current_sku="",
                     feed_batch=True,
+                    vendor_label="Costway",
                     message="Downloading Costway AU feed…",
                 )
                 logger.info(
@@ -2892,6 +3006,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                         failed=failed,
                         current_sku="",
                         feed_batch=True,
+                        vendor_label=label,
                         message=f"Applying {label} prices… {scraped + failed} of {total}",
                     )
                     batch = []
@@ -2911,6 +3026,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                             failed=failed,
                             current_sku="",
                             feed_batch=True,
+                            vendor_label=label,
                             message=f"Applying {label} prices… {done} of {total}",
                         )
 
@@ -3988,8 +4104,23 @@ def reset_inventory_status(user, store, scope: str = "failed") -> dict:
     }
 
 
-def critical_zero_inventory(user, store) -> dict:
-    """Set stock to 0 on all marketplace listings, then push to the marketplace."""
+def _deactivate_store_and_schedule(store) -> None:
+    """Stop a complete-store connection and its schedule after a full critical zero."""
+    from stores.models import Store
+    from sync.models import SyncSchedule
+
+    Store.objects.filter(pk=store.pk).update(is_active=False)
+    SyncSchedule.objects.filter(store=store).update(is_active=False)
+    store.is_active = False
+
+
+def critical_zero_inventory(user, store, *, failed_only: bool = False) -> dict:
+    """Set stock to 0 and push it.
+
+    ``failed_only`` zeros Failed listings and leaves the store active.
+    The full action zeros every marketplace listing, then deactivates the store
+    and its schedule — the same emergency stop as inventory-only Critical option.
+    """
     qs = StoreListing.objects.filter(
         user=user,
         store=store,
@@ -3998,8 +4129,21 @@ def critical_zero_inventory(user, store) -> dict:
             ListingStatus.UPLOADED_PRODUCTION,
         ],
     )
+    if failed_only:
+        qs = qs.filter(inventory_sync_status=InventorySyncStatus.FAILED)
     listings = list(qs)
     if not listings:
+        if failed_only:
+            return {
+                "ok": True,
+                "message": "No failed listings to zero. The store stays active.",
+                "zeroed": 0,
+                "pushed": 0,
+                "failed": 0,
+                "rows": [],
+                "store_deactivated": False,
+                "schedule_deactivated": False,
+            }
         raise MarketplaceError("No marketplace listings to zero.")
 
     for listing in listings:
@@ -4010,6 +4154,12 @@ def critical_zero_inventory(user, store) -> dict:
     push_result = push_inventory(
         user, store, listing_ids=[str(l.id) for l in listings], allow_async=True,
     )
+    deactivated = False
+    if not failed_only:
+        _deactivate_store_and_schedule(store)
+        deactivated = True
+    deact_note = " Store and schedule are deactivated." if deactivated else " The store stays active."
+
     if push_result.get("async"):
         return {
             "ok": True,
@@ -4018,23 +4168,34 @@ def critical_zero_inventory(user, store) -> dict:
             "message": (
                 f"Set stock to 0 on {len(listings)} listing(s). "
                 + (push_result.get("message") or "")
+                + deact_note
             ),
             "zeroed": len(listings),
+            "local_zeroed": len(listings),
+            "marketplace_push_ok": 0,
             "pushed": 0,
             "queued": push_result.get("queued") or len(listings),
             "failed": 0,
             "rows": [],
+            "store_deactivated": deactivated,
+            "schedule_deactivated": deactivated,
         }
+    pushed = push_result.get("pushed", 0)
     return {
         "ok": push_result.get("ok"),
         "message": (
             f"Set stock to 0 on {len(listings)} listing(s). "
             + (push_result.get("message") or "")
+            + deact_note
         ),
         "zeroed": len(listings),
-        "pushed": push_result.get("pushed", 0),
+        "local_zeroed": len(listings),
+        "marketplace_push_ok": pushed,
+        "pushed": pushed,
         "failed": push_result.get("failed", 0),
         "rows": push_result.get("rows") or [],
+        "store_deactivated": deactivated,
+        "schedule_deactivated": deactivated,
     }
 
 

@@ -197,9 +197,9 @@ export const pushListingInventory = (storeId, listingIds = null, vendorCode = nu
 export const resetListingInventory = (storeId, scope = 'failed') =>
     api.post(`/stores/${storeId}/listings/reset-inventory/`, { scope });
 
-/** Critical: zero stock on marketplace listings and push. */
-export const criticalZeroListingInventory = (storeId) =>
-    api.post(`/stores/${storeId}/listings/critical-inventory/`, { action: 'zero_inventory' });
+/** Critical inventory. action: 'zero_inventory' (all + deactivate) | 'failed_zero' (failed only). */
+export const criticalZeroListingInventory = (storeId, action = 'zero_inventory') =>
+    api.post(`/stores/${storeId}/listings/critical-inventory/`, { action });
 
 /** Download managed inventory Excel. */
 export const exportListingInventory = (storeId, syncStatus = '') =>

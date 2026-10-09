@@ -161,6 +161,23 @@ class ManagedListingScrapeCancelTests(TestCase):
         self.assertTrue(live["message"].startswith("Downloading Costway"))
         self.assertEqual(live.get("current_sku"), "")
 
+    def test_progress_keeps_vendor_label_on_the_count_line(self):
+        row = self._listing("COW-96472013-TP10394YW-New")
+        scrape_prog.begin_scrape_progress(
+            self.store.id,
+            total=1,
+            listing_ids=[row.id],
+            vendor_label="Costway",
+            message="Scraping Costway · 0 of 1…",
+        )
+        live = scrape_prog.enrich_progress_from_listings(self.store.id)
+        self.assertEqual(live.get("vendor_label"), "Costway")
+        self.assertIn("Costway", live["message"])
+        self.assertEqual(
+            listing_service.progress_vendor_label(sku="COW-96472013-TP10394YW-New"),
+            "Costway",
+        )
+
     def test_enrich_closes_banner_when_stop_requested(self):
         rows = [self._listing("PEND-1"), self._listing("PEND-2")]
         scrape_prog.begin_scrape_progress(

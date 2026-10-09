@@ -1193,13 +1193,15 @@ class StoreListingCriticalInventoryView(APIView):
     def post(self, request, store_pk):
         store = _get_store(request, store_pk)
         action = (request.data.get('action') or 'zero_inventory').strip().lower()
-        if action != 'zero_inventory':
+        if action not in ('zero_inventory', 'failed_zero'):
             return Response(
-                {'detail': 'Supported action: zero_inventory'},
+                {'detail': 'Supported actions: zero_inventory, failed_zero'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         try:
-            result = listing_service.critical_zero_inventory(request.user, store)
+            result = listing_service.critical_zero_inventory(
+                request.user, store, failed_only=(action == 'failed_zero'),
+            )
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY
