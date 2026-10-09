@@ -29,7 +29,7 @@ const navItems = [
     { path: '/app', labelKey: 'navApp.dashboard', icon: LayoutDashboard, permission: 'dashboard' },
     { path: '/store-settings', labelKey: 'navApp.stores', icon: Store, permission: 'stores' },
     { path: '/catalog', labelKey: 'navApp.catalog', icon: Package, permission: 'catalog' },
-    { path: '/scraping', labelKey: 'navApp.scraping', icon: ScanSearch, permission: 'catalog' },
+    { path: '/scraping', labelKey: 'navApp.scraping', icon: ScanSearch, permission: 'scraping' },
     { path: '/orders', labelKey: 'navApp.orders', icon: ShoppingCart, permission: 'orders' },
     { path: '/tickets', labelKey: 'navApp.tickets', icon: MessageSquare, permission: 'tickets' },
     { path: '/team', labelKey: 'navApp.team', icon: Users, permission: 'team' },

@@ -43,6 +43,7 @@ export default function TeamPermissionsSection() {
             dashboard: 'Dashboard',
             stores: 'Tiendas',
             catalog: 'Catálogo',
+            scraping: 'Scraping',
             orders: 'Pedidos',
             tickets: 'Tickets',
             team: 'Equipo',

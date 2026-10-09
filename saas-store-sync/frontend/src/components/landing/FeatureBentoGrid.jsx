@@ -48,8 +48,8 @@ export default function FeatureBentoGrid() {
             icon: 'Users',
             title: isEs ? 'Permisos de equipo' : 'Team Permissions',
             body: isEs
-                ? 'Crea cuentas y controla acceso a dashboard, stores, catalog, orders, tickets y team.'
-                : 'Create user accounts and control access to dashboard, stores, catalog, orders, tickets, and team.',
+                ? 'Crea cuentas y controla acceso a dashboard, tiendas, catálogo, scraping, pedidos y tickets. Equipo queda con el Super User.'
+                : 'Create user accounts and control access to dashboard, stores, catalog, scraping, orders, and tickets. Team stays with the Super User.',
         },
         {
             icon: 'Activity',

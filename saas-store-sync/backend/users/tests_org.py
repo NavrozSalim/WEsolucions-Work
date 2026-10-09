@@ -1,7 +1,7 @@
 from django.test import TestCase
 
 from users.email_utils import validate_real_email
-from users.permissions_defs import price_for_seats, seat_plan_options
+from users.permissions_defs import normalize_permissions, price_for_seats, seat_plan_options
 
 
 class SeatPricingTests(TestCase):
@@ -23,6 +23,17 @@ class SeatPricingTests(TestCase):
         self.assertEqual(plans[0]['price_usd'], 0)
         self.assertEqual(plans[1]['price_usd'], 10)
         self.assertEqual(plans[2]['price_usd'], 20)
+
+
+class PermissionNormalizeTests(TestCase):
+    def test_missing_scraping_keeps_access(self):
+        perms = normalize_permissions({'catalog': True, 'dashboard': True})
+        self.assertTrue(perms['scraping'])
+        self.assertFalse(perms['team'])
+
+    def test_explicit_scraping_false_sticks(self):
+        perms = normalize_permissions({'scraping': False, 'catalog': True})
+        self.assertFalse(perms['scraping'])
 
 
 class EmailValidationTests(TestCase):

@@ -6,6 +6,7 @@ PERMISSION_KEYS = (
     'dashboard',
     'stores',
     'catalog',
+    'scraping',
     'orders',
     'tickets',
     'team',
@@ -15,6 +16,7 @@ PERMISSION_LABELS = {
     'dashboard': 'Dashboard',
     'stores': 'Store settings',
     'catalog': 'Catalog & listings',
+    'scraping': 'Scraping',
     'orders': 'Orders',
     'tickets': 'Tickets',
     'team': 'Team management',
@@ -26,6 +28,7 @@ DEFAULT_MEMBER_PERMISSIONS = {
     'dashboard': True,
     'stores': False,
     'catalog': True,
+    'scraping': True,
     'orders': True,
     'tickets': True,
     'team': False,
@@ -39,7 +42,11 @@ PRICE_PER_PACK_USD = 10
 def normalize_permissions(raw) -> dict[str, bool]:
     if not isinstance(raw, dict):
         raw = {}
-    return {key: bool(raw.get(key, False)) for key in PERMISSION_KEYS}
+    out = {key: bool(raw.get(key, False)) for key in PERMISSION_KEYS}
+    # Accounts saved before Scraping was its own page keep the access they already had.
+    if 'scraping' not in raw:
+        out['scraping'] = True
+    return out
 
 
 def price_for_seats(seats: int) -> int:

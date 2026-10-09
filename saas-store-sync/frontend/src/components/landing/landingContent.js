@@ -176,7 +176,7 @@ export const FEATURES = [
     {
         icon: 'Users',
         title: 'Team Permissions',
-        body: 'Create user accounts and control access to dashboard, stores, catalog, orders, tickets, and team.',
+        body: 'Create user accounts and control access to dashboard, stores, catalog, scraping, orders, and tickets. Team stays with the Super User.',
     },
     {
         icon: 'Activity',
@@ -236,6 +236,7 @@ export const PERMISSION_MODULES = [
     { key: 'dashboard', label: 'Dashboard', enabled: true },
     { key: 'stores', label: 'Stores', enabled: true },
     { key: 'catalog', label: 'Catalog', enabled: true },
+    { key: 'scraping', label: 'Scraping', enabled: true },
     { key: 'orders', label: 'Orders', enabled: true },
     { key: 'tickets', label: 'Tickets', enabled: false },
     { key: 'team', label: 'Team', enabled: false },
@@ -332,7 +333,7 @@ export const FAQS = [
     },
     {
         q: 'Can I invite team members?',
-        a: 'Yes. A Super User creates user accounts and assigns per-module permissions for dashboard, stores, catalog, orders, tickets, and team.',
+        a: 'Yes. A Super User creates user accounts and assigns per-module permissions for dashboard, stores, catalog, scraping, orders, and tickets. The Team page stays with the Super User.',
     },
     {
         q: 'How are marketplace credentials protected?',

@@ -16,6 +16,7 @@ const EMPTY_PERMS = {
     dashboard: true,
     stores: false,
     catalog: true,
+    scraping: true,
     orders: true,
     tickets: true,
     team: false,

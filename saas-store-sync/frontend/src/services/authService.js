@@ -138,7 +138,7 @@ export const hasPermission = (user, key) => {
 const HOME_CANDIDATES = [
     { path: '/app', permission: 'dashboard' },
     { path: '/catalog', permission: 'catalog' },
-    { path: '/scraping', permission: 'catalog' },
+    { path: '/scraping', permission: 'scraping' },
     { path: '/orders', permission: 'orders' },
     { path: '/tickets', permission: 'tickets' },
     { path: '/store-settings', permission: 'stores' },

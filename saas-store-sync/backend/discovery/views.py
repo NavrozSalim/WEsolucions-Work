@@ -33,7 +33,7 @@ class CanUseDiscovery(BasePermission):
             return False
         if user.is_staff:
             return True
-        return user.has_product_permission('catalog')
+        return user.has_product_permission('scraping')
 
 
 def _jobs_for(user):

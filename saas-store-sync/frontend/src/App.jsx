@@ -71,7 +71,7 @@ function App() {
                                             }
                                         />
                                     </Route>
-                                    <Route element={<PermissionRoute permission="catalog" />}>
+                                    <Route element={<PermissionRoute permission="scraping" />}>
                                         <Route
                                             path="/scraping/:jobId"
                                             element={

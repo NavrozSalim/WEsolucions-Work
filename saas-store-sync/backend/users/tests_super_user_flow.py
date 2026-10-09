@@ -77,7 +77,9 @@ class SuperUserFlowTests(TestCase):
         )
         self.assertEqual(r.status_code, 200, r.data)
         self.assertTrue(r.data['user']['permissions']['catalog'])
+        self.assertTrue(r.data['user']['permissions']['scraping'])
         self.assertFalse(r.data['user']['permissions']['orders'])
+        self.assertFalse(r.data['user']['permissions']['team'])
 
         r = member.post(
             '/api/v1/auth/login/',
