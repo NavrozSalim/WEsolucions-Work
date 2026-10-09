@@ -244,6 +244,10 @@ class ManagedListingCostwayScrapeTests(TestCase):
             vendor_id="TP10562",
             source="",
         )
+        listing.inventory = 12
+        listing.infinite_quantity = True
+        listing.sale_price = 49.99
+        listing.save(update_fields=["inventory", "infinite_quantity", "sale_price"])
         result = listing_service.scrape_listings(self.user, self.store)
         self.assertEqual(result["scraped"], 0)
         self.assertEqual(result["failed"], 1)
@@ -252,6 +256,32 @@ class ManagedListingCostwayScrapeTests(TestCase):
         self.assertEqual(listing.inventory_sync_status, InventorySyncStatus.FAILED)
         self.assertIn("No price", listing.last_scrape_error)
         self.assertIsNone(listing.vendor_price)
+        self.assertEqual(listing.inventory, 0)
+        self.assertFalse(listing.infinite_quantity)
+        self.assertEqual(float(listing.sale_price), 49.99)
+
+    @patch("stores.nora.load_store_nora_stock_map", return_value=None)
+    @patch("scrapers.close_amazon_session")
+    @patch("scrapers.get_price_and_stock")
+    @patch("scrapers.costway_au_ingest.load_costway_feed_lookups")
+    def test_costway_missing_sku_zeros_inventory(self, mock_feed, mock_price, _close, _nora):
+        mock_feed.return_value = self._feed("OTHER", price=109.95, stock=5)
+        listing = self._listing(
+            "TP-MISSING",
+            url="http://au.costway.com/missing.html",
+            source="costwayau",
+        )
+        listing.inventory = 8
+        listing.sale_price = 30
+        listing.save(update_fields=["inventory", "sale_price"])
+        result = listing_service.scrape_listings(self.user, self.store)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["scraped"], 0)
+        listing.refresh_from_db()
+        self.assertEqual(listing.inventory_sync_status, InventorySyncStatus.FAILED)
+        self.assertIn("not in Costway", listing.last_scrape_error)
+        self.assertEqual(listing.inventory, 0)
+        self.assertEqual(float(listing.sale_price), 30.0)
 
     @patch("catalog.tasks._costco_au_runs_on_server", return_value=True)
     @patch("stores.nora.load_store_nora_stock_map", return_value=None)

@@ -3064,6 +3064,10 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                             listing.inventory_sync_status = InventorySyncStatus.FAILED
                             listing.last_scrape_at = now
                             listing.last_scrape_error = (err or "No price or stock returned.")[:500]
+                            if kind == "costway":
+                                listing.inventory = 0
+                                listing.infinite_quantity = False
+                                row["inventory"] = 0
                             row["error"] = listing.last_scrape_error
                             failed += 1
                             rows.append(row)
@@ -3188,6 +3192,10 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     listing.inventory_sync_status = InventorySyncStatus.FAILED
                     listing.last_scrape_at = now
                     listing.last_scrape_error = (message or "Scrape failed.")[:500]
+                    if uses_costway:
+                        listing.inventory = 0
+                        listing.infinite_quantity = False
+                        row["inventory"] = 0
                     row["error"] = listing.last_scrape_error
                     failed += 1
                     rows.append(row)
