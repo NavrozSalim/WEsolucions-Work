@@ -66,6 +66,11 @@ export async function cancelDiscoveryJob(jobId) {
     return response.data;
 }
 
+export async function resumeDiscoveryJob(jobId) {
+    const response = await api.post(`/discovery/jobs/${jobId}/resume/`);
+    return response.data;
+}
+
 export async function clearDiscoveryJobs() {
     const response = await api.delete('/discovery/jobs/clear/');
     return response.data;

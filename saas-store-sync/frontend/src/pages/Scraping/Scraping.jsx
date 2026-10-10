@@ -12,6 +12,7 @@ import {
     clearDiscoveryJobs,
     continueDiscoveryJob,
     createDiscoveryJob,
+    resumeDiscoveryJob,
     deleteDiscoveryJob,
     downloadDiscoveryIds,
     downloadDiscoveryResult,
@@ -291,6 +292,21 @@ export default function Scraping() {
         }
     };
 
+    const onResume = async (job) => {
+        setError('');
+        setNotice('');
+        setSubmitting(true);
+        try {
+            await resumeDiscoveryJob(job.id);
+            setNotice('Scraping will continue from the last saved product.');
+            await refreshJobs();
+        } catch (err) {
+            setError(err.response?.data?.detail || 'Could not continue this scrape.');
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
     const onContinue = async (job) => {
         setError('');
         setNotice('');
@@ -531,6 +547,18 @@ export default function Scraping() {
                                                     ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                                                     : <Square className="mr-2 h-4 w-4" />}
                                                 Stop
+                                            </Button>
+                                        )}
+                                        {job.status === 'cancelled' && (
+                                            <Button
+                                                type="button"
+                                                size="sm"
+                                                className="shrink-0 whitespace-nowrap"
+                                                disabled={submitting}
+                                                onClick={() => onResume(job)}
+                                            >
+                                                <Play className="mr-2 h-4 w-4" />
+                                                Continue
                                             </Button>
                                         )}
                                         {(job.status === 'succeeded' || job.status === 'cancelled' || Number(stats.kept) > 0) && (

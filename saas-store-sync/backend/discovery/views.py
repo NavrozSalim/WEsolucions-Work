@@ -324,6 +324,33 @@ class DiscoveryJobCancelView(APIView):
         return Response(_job_payload(job))
 
 
+class DiscoveryJobResumeView(APIView):
+    """Continue a stopped scrape from the last product already saved."""
+
+    permission_classes = [IsAuthenticated, CanUseDiscovery]
+
+    def post(self, request, job_id):
+        job = _jobs_for(request.user).filter(id=job_id).first()
+        if job is None:
+            return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if job.status != DiscoveryJob.Status.CANCELLED:
+            return Response(
+                {'detail': 'Continue is available after you stop a scrape.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        stats = dict(job.stats or {})
+        stats['resume'] = True
+        job.stats = stats
+        job.cancel_requested = False
+        job.status = DiscoveryJob.Status.QUEUED
+        job.error_message = ''
+        job.finished_at = None
+        job.save(update_fields=['stats', 'cancel_requested', 'status', 'error_message', 'finished_at'])
+        _enqueue(job)
+        job.refresh_from_db()
+        return Response(_job_payload(job))
+
+
 class DiscoveryJobClearView(APIView):
     """Drop this account's scrape history so the next upload starts clean."""
 

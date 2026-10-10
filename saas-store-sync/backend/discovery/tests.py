@@ -716,3 +716,55 @@ class DiscoveryJobTests(TestCase):
         text = b''.join(csv_download.streaming_content).decode('utf-8-sig')
         self.assertIn('Lampshade', text)
         self.assertNotIn('\x00', text)
+
+    def test_resume_continues_from_the_last_saved_product(self):
+        rows = [
+            {'url': f'https://www.amazon.com/dp/B{index:09d}'}
+            for index in range(1, 4)
+        ]
+        payload = workbook_bytes(['url'], rows)
+        job = DiscoveryJob(
+            owner=self.user,
+            marketplace='amazon_us',
+            mode=DiscoveryJob.Mode.PRODUCT,
+            original_filename='amazon_us-product-template.xlsx',
+            use_sample=True,
+            zip_code='10001',
+            source_bytes=payload,
+        )
+        job.source_file.save('products.xlsx', ContentFile(payload), save=False)
+        job.save()
+        state = {'checks': 0}
+
+        def stop_after_first(_job_id):
+            state['checks'] += 1
+            return state['checks'] >= 2
+
+        with patch('discovery.engine._should_stop', side_effect=stop_after_first):
+            execute_job(job.id)
+        job.refresh_from_db()
+        self.assertEqual(job.status, DiscoveryJob.Status.CANCELLED)
+        self.assertEqual(job.products.count(), 1)
+        first_key = job.products.get().product_key
+        response = self.client.post(f'/api/v1/discovery/jobs/{job.id}/resume/')
+        self.assertEqual(response.status_code, 200, response.content)
+        from discovery.engine import _sample_product_row as original_sample
+        from discovery.identity import product_key
+
+        fetched = []
+
+        def spy(job_obj, row):
+            fetched.append(product_key('amazon_us', row))
+            return original_sample(job_obj, row)
+
+        with patch('discovery.engine._should_stop', return_value=False), patch(
+            'discovery.engine._sample_product_row',
+            side_effect=spy,
+        ):
+            execute_job(job.id)
+        job.refresh_from_db()
+        self.assertEqual(job.status, DiscoveryJob.Status.SUCCEEDED, job.error_message)
+        self.assertEqual(job.products.count(), 3)
+        self.assertTrue(job.products.filter(product_key=first_key).exists())
+        self.assertNotIn(first_key, fetched)
+        self.assertEqual(len(fetched), 2)

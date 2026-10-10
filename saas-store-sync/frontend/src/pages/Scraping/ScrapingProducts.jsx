@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, ChevronLeft, ChevronRight, Download, Loader2, Search, Square } from 'lucide-react';
+import { ArrowLeft, ChevronLeft, ChevronRight, Download, Loader2, Play, Search, Square } from 'lucide-react';
 
 import Badge from '../../components/design/Badge';
 import PageHeader from '../../components/design/PageHeader';
@@ -8,6 +8,7 @@ import Button from '../../components/ui/Button';
 import {
   cancelDiscoveryJob,
   downloadDiscoveryResult,
+  resumeDiscoveryJob,
   getDiscoveryJob,
   getDiscoveryRows,
 } from '../../services/scrapingService';
@@ -89,6 +90,7 @@ export default function ScrapingProducts() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [stopping, setStopping] = useState(false);
+  const [resuming, setResuming] = useState(false);
 
   const searchRef = useRef(search);
 
@@ -206,6 +208,24 @@ export default function ScrapingProducts() {
                 >
                   {stopping ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Square className="mr-2 h-4 w-4" />}
                   Stop
+                </Button>
+              )}
+              {job.status === 'cancelled' && (
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={resuming}
+                  onClick={() => {
+                    setResuming(true);
+                    setError('');
+                    resumeDiscoveryJob(jobId)
+                      .then(() => load())
+                      .catch((err) => setError(err.response?.data?.detail || 'Could not continue this scrape.'))
+                      .finally(() => setResuming(false));
+                  }}
+                >
+                  {resuming ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
+                  Continue
                 </Button>
               )}
               {(total > 0 || job.status === 'succeeded' || job.status === 'cancelled') && (

@@ -236,6 +236,7 @@ class _LiveTable:
         self.rules = rules
         self.input_count = input_count
         self.seen = set()
+        self.resumed = set()
         self.duplicates = 0
         self.removed_by_rules = 0
         self.scraped = 0
@@ -247,7 +248,7 @@ class _LiveTable:
             'scraped': self.scraped,
             'duplicates_removed': self.duplicates,
             'removed_by_rules': self.removed_by_rules,
-            'kept': max(0, len(self.seen) - self.removed_by_rules),
+            'kept': self.job.products.count(),
             'errors': [],
             'warning': self.warning,
         }
@@ -256,8 +257,10 @@ class _LiveTable:
     def add(self, batch: list[dict]) -> None:
         fresh = []
         for row in batch:
-            self.scraped += 1
             key = product_key(self.job.marketplace, row)
+            if key and key in self.resumed:
+                continue
+            self.scraped += 1
             if key and key in self.seen:
                 self.duplicates += 1
                 continue
@@ -513,11 +516,17 @@ def execute_job(job_id) -> None:
         job.finished_at = timezone.now()
         job.save(update_fields=['status', 'error_message', 'finished_at'])
         return
+    previous = dict(job.stats or {})
+    resume = bool(previous.pop('resume', False))
     job.status = DiscoveryJob.Status.RUNNING
     job.started_at = timezone.now()
     job.error_message = ''
-    job.products.all().delete()
-    job.save(update_fields=['status', 'started_at', 'error_message'])
+    job.finished_at = None
+    if resume:
+        job.stats = previous
+    else:
+        job.products.all().delete()
+    job.save(update_fields=['status', 'started_at', 'error_message', 'finished_at', 'stats'])
 
     errors: list[str] = []
     columns = list(job.columns or [])
@@ -532,6 +541,15 @@ def execute_job(job_id) -> None:
         job.save(update_fields=['columns'])
         input_count = len(inputs)
         table = _LiveTable(job, rules, input_count)
+        if resume:
+            saved_keys = {
+                key for key in job.products.values_list('product_key', flat=True) if key
+            }
+            table.seen.update(saved_keys)
+            table.resumed.update(saved_keys)
+            table.scraped = int(previous.get('scraped') or 0)
+            table.duplicates = int(previous.get('duplicates_removed') or 0)
+            table.removed_by_rules = int(previous.get('removed_by_rules') or 0)
         stop = lambda: _should_stop(job.id)
         session = None
         if not job.use_sample and is_amazon(job.marketplace):
@@ -561,9 +579,13 @@ def execute_job(job_id) -> None:
         else:
             stamped = [stamp_identity(job.marketplace, row) for row in inputs]
             unique_inputs, pre_dupes = dedupe_rows(job.marketplace, stamped)
-            table.duplicates += pre_dupes
+            if not resume:
+                table.duplicates += pre_dupes
             for row in unique_inputs:
                 _raise_if_stopped(job.id)
+                done_key = product_key(job.marketplace, row)
+                if done_key and done_key in table.resumed:
+                    continue
                 if row_has_rule_fields(row, rules) and row_removed(row, rules):
                     key = product_key(job.marketplace, row)
                     if key:
