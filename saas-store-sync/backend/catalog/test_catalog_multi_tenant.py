@@ -404,7 +404,12 @@ class CostwayIngestTenantTests(TestCase):
             user=user, name='Costway Apply', region='AU', api_token='tok-cw3', marketplace=mp,
         )
         vendor, _ = Vendor.objects.get_or_create(code='costwayau', defaults={'name': 'CostwayAU'})
-        product = Product.objects.create(vendor=vendor, vendor_sku='TP10003', owner=user)
+        product = Product.objects.create(
+            vendor=vendor,
+            vendor_sku='TP10003',
+            inventory_vendor_id='73982054-TP10003',
+            owner=user,
+        )
         pm = ProductMapping.objects.create(
             store=store, product=product, marketplace_id='MID-CW-3', sync_status='pending', is_active=True,
         )

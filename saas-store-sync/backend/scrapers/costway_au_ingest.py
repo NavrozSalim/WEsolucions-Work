@@ -15,10 +15,10 @@ Feed columns (Dropship-AU.csv):
 
   SKU | Item NO. | Title | Description | Price | Category | Link | QTY | Weight | Image
 
-Only **SKU** (match key), **Price** (vendor cost) and **QTY** (stock) are applied.
-**Item NO.** is a secondary ID. **Link** is used only when the Vendor ID / SKU is
-not in the file, so a shared page cannot replace that SKU's price. Weight is
-never treated as qty.
+Price (vendor cost) and QTY (stock) are applied only when Vendor ID equals
+Item NO. + "-" + SKU (for example ``73982054-TP10003``). The same SKU with a
+different Item NO. is a different product and is left unchanged. A product
+Link is used only when the row has no Vendor ID. Weight is never treated as qty.
 """
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ def normalize_costway_product_url(url: str | None) -> str:
 
 
 # Kogan listing SKU: COW-{item number}-{Vendor ID}-New. Vendor ID may contain hyphens.
-_KOGAN_COSTWAY_SKU_RE = re.compile(r"^COW-\d+-(.+)-New$", re.IGNORECASE)
+_KOGAN_COSTWAY_SKU_RE = re.compile(r"^COW-(\d+)-(.+)-New$", re.IGNORECASE)
 
 
 def costway_vendor_id_from_listing_sku(value) -> str:
@@ -114,7 +114,15 @@ def costway_vendor_id_from_listing_sku(value) -> str:
     match = _KOGAN_COSTWAY_SKU_RE.match(clean_id(value))
     if not match:
         return ""
-    return clean_id(match.group(1))
+    return clean_id(match.group(2))
+
+
+def costway_pair_from_listing_sku(value) -> str:
+    """Return Item NO. + '-' + SKU embedded in ``COW-{item}-{vendorId}-New``."""
+    match = _KOGAN_COSTWAY_SKU_RE.match(clean_id(value))
+    if not match:
+        return ""
+    return costway_feed_key(match.group(1), match.group(2))
 
 
 def is_costway_feed_listing(
@@ -138,6 +146,15 @@ def is_costway_feed_listing(
         if costway_vendor_id_from_listing_sku(val):
             return True
     return False
+
+
+def costway_feed_key(item_no: str | None, sku: str | None) -> str:
+    """Vendor ID the scrape matches: Item NO. + '-' + SKU."""
+    item = clean_id(item_no)
+    code = clean_id(sku)
+    if not item or not code:
+        return ""
+    return f"{item}-{code}"
 
 
 def costway_identity_candidates(
@@ -169,6 +186,8 @@ def costway_identity_candidates(
         keys.append(s)
 
     raw_values = (vendor_id, sku, variant_key, product_key)
+    for val in raw_values:
+        add(costway_pair_from_listing_sku(val))
     add(vendor_id)
     for val in raw_values:
         add(costway_vendor_id_from_listing_sku(val))
@@ -195,11 +214,30 @@ def lookup_costway_price_stock(
     product_key: str = "",
     vendor_url: str = "",
 ) -> dict | None:
-    """Find a feed row by Vendor ID / SKU first, then by product Link.
+    """Find a feed row by Vendor ID, which is Item NO. + '-' + SKU.
 
-    Link is only used when none of those IDs are in the feed. A shared page
-    must not replace the price of a Vendor ID that has its own CSV row.
+    A saved Vendor ID is matched on its own. A bare SKU, a shared Item NO., or
+    the product page must not apply another item's price after Costway reuses
+    the SKU. Link is used only when Vendor ID is empty and no other id hits.
     """
+    explicit = clean_id(vendor_id)
+    if explicit:
+        return lookup_sku(lookup, lookup_compact, explicit)
+    named_pairs: list[str] = []
+    seen_pairs: set[str] = set()
+    for val in (sku, variant_key, product_key):
+        pair = costway_pair_from_listing_sku(val)
+        marker = pair.lower()
+        if not pair or marker in seen_pairs:
+            continue
+        seen_pairs.add(marker)
+        named_pairs.append(pair)
+    if named_pairs:
+        for pair in named_pairs:
+            hit = lookup_sku(lookup, lookup_compact, pair)
+            if hit:
+                return hit
+        return None
     for key in costway_identity_candidates(
         vendor_id=vendor_id,
         sku=sku,
@@ -397,7 +435,9 @@ def load_costway_via_csv(path: str) -> tuple[dict, dict, int]:
                 continue
             pos_rows += 1
             sku = clean_id(_cell(row, sku_idx))
-            if not sku:
+            item_no = clean_id(_cell(row, item_no_idx))
+            pair = costway_feed_key(item_no, sku)
+            if not pair:
                 continue
             parsed = _row_price_qty_link(row, price_idx, qty_idx, link_idx)
             if parsed is None:
@@ -409,16 +449,10 @@ def load_costway_via_csv(path: str) -> tuple[dict, dict, int]:
             entry = {"Posted Price": price, "Posted Inventory": int(stock)}
             if link:
                 entry["Product Link"] = link
-            lookup[sku] = entry
-            ckey = compact_id(sku)
+            lookup[pair] = entry
+            ckey = compact_id(pair)
             if ckey:
                 lookup_compact[ckey] = entry
-            item_no = clean_id(_cell(row, item_no_idx))
-            if item_no and item_no.lower() != sku.lower():
-                lookup.setdefault(item_no, entry)
-                citem = compact_id(item_no)
-                if citem:
-                    lookup_compact.setdefault(citem, entry)
 
     if lookup and priced_rows == 0:
         logger.warning(
@@ -545,6 +579,8 @@ __all__ = [
     "is_costway_vendor_code",
     "is_costway_product_url",
     "normalize_costway_product_url",
+    "costway_feed_key",
+    "costway_pair_from_listing_sku",
     "costway_identity_candidates",
     "lookup_costway_price_stock",
     "build_costway_url_index",

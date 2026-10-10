@@ -108,35 +108,36 @@ class LoadCostwayCsvTests(unittest.TestCase):
     def test_price_and_qty_from_named_columns(self):
         lookup, _, rows = load_costway_via_csv(self.path)
         self.assertEqual(rows, 3)
-        entry = lookup['TP10003']
+        entry = lookup['73982054-TP10003']
         self.assertEqual(entry['Posted Price'], 109.95)
         self.assertEqual(entry['Posted Inventory'], 5)
 
     def test_weight_is_not_used_as_qty(self):
         lookup, _, _ = load_costway_via_csv(self.path)
-        self.assertEqual(lookup['TP10003']['Posted Inventory'], 5)
-        self.assertEqual(lookup['TW10004C']['Posted Inventory'], 407)
+        self.assertEqual(lookup['73982054-TP10003']['Posted Inventory'], 5)
+        self.assertEqual(lookup['98032174-TW10004C']['Posted Inventory'], 407)
 
     def test_quoted_description_commas_do_not_shift_columns(self):
         lookup, _, _ = load_costway_via_csv(self.path)
-        self.assertEqual(lookup['TP10003']['Posted Price'], 109.95)
+        self.assertEqual(lookup['73982054-TP10003']['Posted Price'], 109.95)
 
-    def test_item_no_is_secondary_key(self):
+    def test_item_no_alone_is_not_a_match_key(self):
         lookup, compact, _ = load_costway_via_csv(self.path)
-        hit = lookup_sku(lookup, compact, '73982054')
-        self.assertIsNotNone(hit)
+        self.assertIsNone(lookup_sku(lookup, compact, '73982054'))
+        self.assertIsNone(lookup_sku(lookup, compact, 'TP10003'))
+        hit = lookup_sku(lookup, compact, '73982054-TP10003')
         self.assertEqual(hit['Posted Price'], 109.95)
 
     def test_zero_qty_still_indexed(self):
         lookup, _, _ = load_costway_via_csv(self.path)
-        self.assertEqual(lookup['ZEROSTOCK']['Posted Inventory'], 0)
-        self.assertEqual(lookup['ZEROSTOCK']['Posted Price'], 56.95)
+        self.assertEqual(lookup['111-ZEROSTOCK']['Posted Inventory'], 0)
+        self.assertEqual(lookup['111-ZEROSTOCK']['Posted Price'], 56.95)
 
     def test_link_lookup_strips_query(self):
         lookup, compact, _ = load_costway_via_csv(self.path)
         by_url = {
             normalize_costway_product_url('http://au.costway.com/tp10003.html'):
-            lookup['TP10003'],
+            lookup['73982054-TP10003'],
         }
         hit = lookup_costway_price_stock(
             lookup, compact, by_url,
@@ -151,20 +152,38 @@ class LoadCostwayCsvTests(unittest.TestCase):
         )
         self.assertIsNone(miss)
 
-    def test_sku_lookup_when_listing_sku_matches_feed(self):
+    def test_vendor_id_is_item_no_and_sku(self):
         lookup, compact, _ = load_costway_via_csv(self.path)
-        hit = lookup_costway_price_stock(lookup, compact, {}, sku='TW10004C')
+        bare = lookup_costway_price_stock(lookup, compact, {}, sku='TW10004C')
+        self.assertIsNone(bare)
+        hit = lookup_costway_price_stock(
+            lookup, compact, {}, vendor_id='98032174-TW10004C',
+        )
         self.assertEqual(hit['Posted Price'], 262.95)
         self.assertEqual(hit['Posted Inventory'], 407)
+
+    def test_changed_item_no_does_not_use_the_old_sku_or_page(self):
+        from scrapers.costway_au_ingest import build_costway_url_index
+
+        lookup, compact, _ = load_costway_via_csv(self.path)
+        by_url = build_costway_url_index(lookup)
+        hit = lookup_costway_price_stock(
+            lookup, compact, by_url,
+            vendor_id='111-TW10004C',
+            sku='TW10004C',
+            vendor_url='https://au.costway.com/tw.html',
+        )
+        self.assertIsNone(hit)
 
     def test_vendor_id_wins_over_a_different_product_link(self):
         lookup, compact, _ = load_costway_via_csv(self.path)
         by_url = {
             normalize_costway_product_url('http://au.costway.com/tp10003.html'):
-            lookup['ZEROSTOCK'],
+            lookup['111-ZEROSTOCK'],
         }
         hit = lookup_costway_price_stock(
             lookup, compact, by_url,
+            vendor_id='73982054-TP10003',
             sku='TP10003',
             vendor_url='http://au.costway.com/tp10003.html',
         )
@@ -188,23 +207,43 @@ class LoadCostwayCsvTests(unittest.TestCase):
         )
         self.assertEqual(hit['Posted Price'], 109.95)
         self.assertEqual(hit['Posted Inventory'], 5)
-        by_vendor_id = lookup_costway_price_stock(
+        old_sku_only = lookup_costway_price_stock(
             lookup,
             compact,
             {},
             vendor_id='TP10003',
-            sku='73982054',
+            sku='COW-73982054-TP10003-New',
         )
-        self.assertEqual(by_vendor_id['Posted Price'], 109.95)
-        sibling = lookup_costway_price_stock(
+        self.assertIsNone(old_sku_only)
+        by_vendor_id = lookup_costway_price_stock(
             lookup,
             compact,
             {},
-            product_key='COW-111-TW10004C-New',
+            vendor_id='73982054-TP10003',
             sku='73982054',
         )
-        self.assertEqual(sibling['Posted Price'], 262.95)
-        lookup['T-JH10016WH'] = {'Posted Price': 59.95, 'Posted Inventory': 4}
+        self.assertEqual(by_vendor_id['Posted Price'], 109.95)
+        by_url = {
+            normalize_costway_product_url('https://au.costway.com/tw.html'):
+            lookup['98032174-TW10004C'],
+        }
+        sibling = lookup_costway_price_stock(
+            lookup,
+            compact,
+            by_url,
+            product_key='COW-111-TW10004C-New',
+            sku='73982054',
+            vendor_url='https://au.costway.com/tw.html',
+        )
+        self.assertIsNone(sibling)
+        same_item = lookup_costway_price_stock(
+            lookup,
+            compact,
+            {},
+            product_key='COW-98032174-TW10004C-New',
+        )
+        self.assertEqual(same_item['Posted Price'], 262.95)
+        lookup['83902741-T-JH10016WH'] = {'Posted Price': 59.95, 'Posted Inventory': 4}
         hyphenated = lookup_costway_price_stock(
             lookup,
             compact,
@@ -228,7 +267,7 @@ class BrokenDescriptionTests(unittest.TestCase):
             lookup, _, _ = load_costway_via_csv(tmp.name)
         finally:
             os.unlink(tmp.name)
-        entry = lookup["HV10438DK"]
+        entry = lookup["8295416-HV10438DK"]
         self.assertEqual(entry["Posted Price"], 95.95)
         self.assertEqual(entry["Posted Inventory"], 12)
         self.assertIn("modern-entertainment-center", entry["Product Link"])
@@ -245,8 +284,8 @@ class BomAndDelimiterTests(unittest.TestCase):
             lookup, _, _ = load_costway_via_csv(path)
         finally:
             os.unlink(path)
-        self.assertEqual(lookup['BOM-SKU']['Posted Price'], 12.50)
-        self.assertEqual(lookup['BOM-SKU']['Posted Inventory'], 3)
+        self.assertEqual(lookup['1-BOM-SKU']['Posted Price'], 12.50)
+        self.assertEqual(lookup['1-BOM-SKU']['Posted Inventory'], 3)
 
     def test_semicolon_delimited(self):
         path = _write_csv([
@@ -258,7 +297,7 @@ class BomAndDelimiterTests(unittest.TestCase):
         finally:
             os.unlink(path)
         self.assertEqual(rows, 1)
-        self.assertEqual(lookup['SEMI-SKU']['Posted Inventory'], 8)
+        self.assertEqual(lookup['2-SEMI-SKU']['Posted Inventory'], 8)
 
 
 class IdentityTests(unittest.TestCase):
