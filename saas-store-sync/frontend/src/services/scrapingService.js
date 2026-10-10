@@ -61,6 +61,16 @@ export async function deleteDiscoveryJob(jobId) {
     await api.delete(`/discovery/jobs/${jobId}/`);
 }
 
+export async function cancelDiscoveryJob(jobId) {
+    const response = await api.post(`/discovery/jobs/${jobId}/cancel/`);
+    return response.data;
+}
+
+export async function clearDiscoveryJobs() {
+    const response = await api.delete('/discovery/jobs/clear/');
+    return response.data;
+}
+
 export async function downloadDiscoveryIds(jobId) {
     const response = await api.get(`/discovery/jobs/${jobId}/ids/`, {
         responseType: 'blob',
@@ -72,13 +82,14 @@ export async function downloadDiscoveryIds(jobId) {
     saveBlob(response.data, filename);
 }
 
-export async function downloadDiscoveryResult(jobId) {
+export async function downloadDiscoveryResult(jobId, format = 'xlsx') {
     const response = await api.get(`/discovery/jobs/${jobId}/download/`, {
+        params: { format },
         responseType: 'blob',
     });
     const filename = filenameFromContentDisposition(
         response.headers['content-disposition'],
-        `discovery-${jobId}.xlsx`,
+        `discovery-${jobId}.${format === 'csv' ? 'csv' : 'xlsx'}`,
     );
     saveBlob(response.data, filename);
 }

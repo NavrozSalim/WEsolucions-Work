@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Download, Loader2, Play, ScanSearch, Table2, Trash2 } from 'lucide-react';
+import { Download, Loader2, Play, ScanSearch, Square, Table2, Trash2 } from 'lucide-react';
 import Button from '../../components/ui/Button';
 import ConfirmModal from '../../components/ui/ConfirmModal';
 import Select from '../../components/ui/Select';
@@ -8,6 +8,8 @@ import PageHeader from '../../components/design/PageHeader';
 import Badge from '../../components/design/Badge';
 import EmptyState from '../../components/design/EmptyState';
 import {
+    cancelDiscoveryJob,
+    clearDiscoveryJobs,
     continueDiscoveryJob,
     createDiscoveryJob,
     deleteDiscoveryJob,
@@ -32,6 +34,7 @@ const STATUS_VARIANT = {
     running: 'accent',
     succeeded: 'success',
     failed: 'error',
+    cancelled: 'default',
 };
 
 function columnLabel(column) {
@@ -136,6 +139,9 @@ export default function Scraping() {
     const [excludeCategories, setExcludeCategories] = useState('');
     const [deleteTarget, setDeleteTarget] = useState(null);
     const [deleting, setDeleting] = useState(false);
+    const [stoppingId, setStoppingId] = useState('');
+    const [clearOpen, setClearOpen] = useState(false);
+    const [clearing, setClearing] = useState(false);
 
     const availableColumns = options?.columns?.[marketplace]?.[mode] || [];
     const defaultColumns = options?.defaults?.[marketplace]?.[mode] || [];
@@ -251,6 +257,37 @@ export default function Scraping() {
             setError(err.response?.data?.detail || 'Could not delete that scrape.');
         } finally {
             setDeleting(false);
+        }
+    };
+
+    const onStop = async (job) => {
+        setStoppingId(job.id);
+        setError('');
+        try {
+            await cancelDiscoveryJob(job.id);
+            setNotice('Stop requested. Products already collected stay in the list.');
+            await refreshJobs();
+        } catch (err) {
+            setError(err.response?.data?.detail || 'Could not stop that scrape.');
+        } finally {
+            setStoppingId('');
+        }
+    };
+
+    const onClear = async () => {
+        setClearing(true);
+        setError('');
+        try {
+            await clearDiscoveryJobs();
+            setClearOpen(false);
+            setFile(null);
+            setFileKey((value) => value + 1);
+            setNotice('Previous scrapes were cleared.');
+            await refreshJobs();
+        } catch (err) {
+            setError(err.response?.data?.detail || 'Could not clear scrapes.');
+        } finally {
+            setClearing(false);
         }
     };
 
@@ -429,8 +466,13 @@ export default function Scraping() {
             </form>
 
             <section className="rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
-                <div className="border-b border-slate-100 px-5 py-4 dark:border-slate-800">
+                <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800">
                     <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Jobs</h2>
+                    {jobs.length > 0 && (
+                        <Button type="button" size="sm" variant="secondary" onClick={() => setClearOpen(true)}>
+                            New data
+                        </Button>
+                    )}
                 </div>
                 {jobs.length === 0 ? (
                     <EmptyState
@@ -476,17 +518,44 @@ export default function Scraping() {
                                             <Table2 className="mr-2 h-4 w-4" />
                                             View products
                                         </Link>
-                                        {job.status === 'succeeded' && (
+                                        {(job.status === 'queued' || job.status === 'running') && (
                                             <Button
                                                 type="button"
                                                 size="sm"
                                                 variant="secondary"
                                                 className="shrink-0 whitespace-nowrap"
-                                                onClick={() => downloadDiscoveryResult(job.id).catch(() => setError('Could not download the file.'))}
+                                                disabled={stoppingId === job.id}
+                                                onClick={() => onStop(job)}
                                             >
-                                                <Download className="mr-2 h-4 w-4" />
-                                                Download
+                                                {stoppingId === job.id
+                                                    ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                                    : <Square className="mr-2 h-4 w-4" />}
+                                                Stop
                                             </Button>
+                                        )}
+                                        {(job.status === 'succeeded' || job.status === 'cancelled' || Number(stats.kept) > 0) && (
+                                            <>
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant="secondary"
+                                                    className="shrink-0 whitespace-nowrap"
+                                                    onClick={() => downloadDiscoveryResult(job.id, 'xlsx').catch(() => setError('Could not download the Excel file.'))}
+                                                >
+                                                    <Download className="mr-2 h-4 w-4" />
+                                                    Excel
+                                                </Button>
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant="secondary"
+                                                    className="shrink-0 whitespace-nowrap"
+                                                    onClick={() => downloadDiscoveryResult(job.id, 'csv').catch(() => setError('Could not download the CSV file.'))}
+                                                >
+                                                    <Download className="mr-2 h-4 w-4" />
+                                                    CSV
+                                                </Button>
+                                            </>
                                         )}
                                         {job.mode === 'category' && job.status === 'succeeded' && (
                                             <Button
@@ -525,6 +594,15 @@ export default function Scraping() {
                 loading={deleting}
                 onClose={() => setDeleteTarget(null)}
                 onConfirm={onDelete}
+            />
+            <ConfirmModal
+                open={clearOpen}
+                title="Start with new data"
+                message="This deletes every scrape in the list, including results already collected. A running scrape is stopped first."
+                confirmLabel="Clear scrapes"
+                loading={clearing}
+                onClose={() => setClearOpen(false)}
+                onConfirm={onClear}
             />
         </div>
     );

@@ -35,6 +35,7 @@ AMAZON_PRODUCT = (
     'review_count',
     'availability',
     'inventory',
+    'delivery_date',
     'description',
     'bullets',
     'images',
@@ -64,6 +65,7 @@ EBAY_PRODUCT = (
     'review_count',
     'availability',
     'inventory',
+    'delivery_date',
     'condition',
     'description',
     'bullets',
@@ -85,11 +87,11 @@ COLUMNS = {
 # Category output is meant to feed the product-details step.
 _AMAZON_CATEGORY_DEFAULT = ('asin', 'url', 'title', 'price', 'rating', 'review_count', 'category')
 _AMAZON_PRODUCT_DEFAULT = (
-    'asin', 'url', 'title', 'brand', 'price', 'rating', 'review_count', 'category', 'availability', 'inventory',
+    'asin', 'url', 'title', 'brand', 'price', 'rating', 'review_count', 'category', 'availability', 'inventory', 'delivery_date', 'description',
 )
 _EBAY_CATEGORY_DEFAULT = ('item_id', 'url', 'title', 'price', 'rating', 'review_count', 'category')
 _EBAY_PRODUCT_DEFAULT = (
-    'item_id', 'url', 'title', 'brand', 'price', 'rating', 'review_count', 'category', 'availability', 'inventory',
+    'item_id', 'url', 'title', 'brand', 'price', 'rating', 'review_count', 'category', 'availability', 'inventory', 'delivery_date',
 )
 
 DEFAULTS = {

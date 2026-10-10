@@ -37,6 +37,20 @@ from .sample_data import sample_by_key, sample_catalog
 
 logger = logging.getLogger(__name__)
 
+
+class DiscoveryCancelled(Exception):
+    """The user stopped this job."""
+
+
+def _should_stop(job_id) -> bool:
+    row = DiscoveryJob.objects.filter(pk=job_id).values_list('cancel_requested', flat=True).first()
+    return row is None or bool(row)
+
+
+def _raise_if_stopped(job_id) -> None:
+    if _should_stop(job_id):
+        raise DiscoveryCancelled()
+
 MAX_CATEGORY_URLS = 50
 # Per search URL. Amazon repeats the same cards after a few hundred, so a
 # department-sized category is split by price instead of stopping there.
@@ -265,7 +279,7 @@ class _LiveTable:
         self.publish()
 
 
-def _paginate_amazon(grid, session, errors, seen_asins, rows, on_batch, note_empty):
+def _paginate_amazon(grid, session, errors, seen_asins, rows, on_batch, note_empty, stop=None):
     """Walk a search URL until a page adds no new ASINs.
 
     Follows Amazon's own Next link, then ``page=`` if that link is missing.
@@ -280,6 +294,8 @@ def _paginate_amazon(grid, session, errors, seen_asins, rows, on_batch, note_emp
     current = with_page(grid, 1)
     seen_pages = set()
     for step in range(1, MAX_CATEGORY_PAGES + 1):
+        if stop and stop():
+            raise DiscoveryCancelled()
         if len(rows) >= MAX_CATEGORY_PRODUCTS:
             recycled = True
             break
@@ -339,7 +355,9 @@ def _amazon_band_can_split(low: int | None, high: int | None, depth: int) -> boo
     return high - low > _AMAZON_MIN_BAND_CENTS
 
 
-def _collect_amazon(grid, low, high, depth, session, errors, seen_asins, rows, on_batch):
+def _collect_amazon(grid, low, high, depth, session, errors, seen_asins, rows, on_batch, stop=None):
+    if stop and stop():
+        raise DiscoveryCancelled()
     if len(rows) >= MAX_CATEGORY_PRODUCTS:
         return
     target = grid if low is None else amazon_with_price(grid, low, high)
@@ -353,6 +371,7 @@ def _collect_amazon(grid, low, high, depth, session, errors, seen_asins, rows, o
         rows,
         on_batch,
         note_empty=low is None and not rows and before == 0,
+        stop=stop,
     )
     if blocked:
         return
@@ -369,8 +388,8 @@ def _collect_amazon(grid, low, high, depth, session, errors, seen_asins, rows, o
     mid = low + (high - low) // 2
     if mid <= low or mid >= high:
         return
-    _collect_amazon(grid, low, mid, depth + 1, session, errors, seen_asins, rows, on_batch)
-    _collect_amazon(grid, mid + 1, high, depth + 1, session, errors, seen_asins, rows, on_batch)
+    _collect_amazon(grid, low, mid, depth + 1, session, errors, seen_asins, rows, on_batch, stop)
+    _collect_amazon(grid, mid + 1, high, depth + 1, session, errors, seen_asins, rows, on_batch, stop)
 
 
 def _live_category_rows(
@@ -380,6 +399,7 @@ def _live_category_rows(
     on_batch=None,
     session: requests.Session | None = None,
     zip_code: str = '',
+    stop=None,
 ) -> list[dict]:
     """Walk every results page of a category link.
 
@@ -391,7 +411,7 @@ def _live_category_rows(
     rows = []
     if is_amazon(marketplace):
         grid = amazon_results_url(url) or url
-        _collect_amazon(grid, None, None, 0, session, errors, set(), rows, on_batch)
+        _collect_amazon(grid, None, None, 0, session, errors, set(), rows, on_batch, stop)
         return rows[:MAX_CATEGORY_PRODUCTS]
 
     pages = [_with_ebay_zip(url, zip_code)]
@@ -399,6 +419,8 @@ def _live_category_rows(
     seen_ids = set()
     discovered_follows = False
     while pages and len(seen_urls) < MAX_CATEGORY_PAGES and len(rows) < MAX_CATEGORY_PRODUCTS:
+        if stop and stop():
+            raise DiscoveryCancelled()
         current = pages.pop(0)
         if not current or current in seen_urls:
             continue
@@ -481,7 +503,16 @@ def _category_urls(job: DiscoveryJob, inputs: list[dict]) -> list[str]:
 
 
 def execute_job(job_id) -> None:
-    job = DiscoveryJob.objects.get(id=job_id)
+    try:
+        job = DiscoveryJob.objects.get(id=job_id)
+    except DiscoveryJob.DoesNotExist:
+        return
+    if job.cancel_requested:
+        job.status = DiscoveryJob.Status.CANCELLED
+        job.error_message = 'Stopped.'
+        job.finished_at = timezone.now()
+        job.save(update_fields=['status', 'error_message', 'finished_at'])
+        return
     job.status = DiscoveryJob.Status.RUNNING
     job.started_at = timezone.now()
     job.error_message = ''
@@ -489,6 +520,7 @@ def execute_job(job_id) -> None:
     job.save(update_fields=['status', 'started_at', 'error_message'])
 
     errors: list[str] = []
+    columns = list(job.columns or [])
     try:
         inputs = _load_inputs(job)
         rules = normalize_rules(job.rules)
@@ -500,6 +532,7 @@ def execute_job(job_id) -> None:
         job.save(update_fields=['columns'])
         input_count = len(inputs)
         table = _LiveTable(job, rules, input_count)
+        stop = lambda: _should_stop(job.id)
         session = None
         if not job.use_sample and is_amazon(job.marketplace):
             session = _amazon_session(job.marketplace, (job.zip_code or '').strip())
@@ -512,6 +545,7 @@ def execute_job(job_id) -> None:
                 table.add(_sample_category_rows(job, urls))
             else:
                 for url in urls:
+                    _raise_if_stopped(job.id)
                     if not looks_like_category_url(url):
                         errors.append(f'{url}: this looks like a product URL, not a category URL')
                         continue
@@ -522,12 +556,14 @@ def execute_job(job_id) -> None:
                         on_batch=table.add,
                         session=session,
                         zip_code=(job.zip_code or '').strip(),
+                        stop=stop,
                     )
         else:
             stamped = [stamp_identity(job.marketplace, row) for row in inputs]
             unique_inputs, pre_dupes = dedupe_rows(job.marketplace, stamped)
             table.duplicates += pre_dupes
             for row in unique_inputs:
+                _raise_if_stopped(job.id)
                 if row_has_rule_fields(row, rules) and row_removed(row, rules):
                     key = product_key(job.marketplace, row)
                     if key:
@@ -547,6 +583,7 @@ def execute_job(job_id) -> None:
         kept_rows = [
             item.data for item in job.products.order_by('created_at')
         ]
+        _raise_if_stopped(job.id)
         if not job.use_sample and not kept_rows and errors and table.scraped == 0:
             raise DiscoveryError(errors[0])
 
@@ -580,6 +617,33 @@ def execute_job(job_id) -> None:
             'warning': warning,
         }
         job.status = DiscoveryJob.Status.SUCCEEDED
+        job.finished_at = timezone.now()
+        job.save()
+    except DiscoveryCancelled:
+        try:
+            job.refresh_from_db()
+        except DiscoveryJob.DoesNotExist:
+            return
+        kept_rows = [item.data for item in job.products.order_by('created_at')]
+        try:
+            payload = workbook_bytes(columns, [_project(row, columns) for row in kept_rows])
+            job.result_bytes = payload
+            try:
+                job.result_file.save(
+                    f'{job.marketplace}-{job.mode}-{job.id}.xlsx',
+                    ContentFile(payload),
+                    save=False,
+                )
+            except OSError:
+                logger.warning('discovery job %s partial result stayed in the database', job_id)
+        except Exception:
+            logger.exception('discovery job %s could not save a partial result', job_id)
+        stats = dict(job.stats or {})
+        stats['errors'] = errors[:20]
+        stats['kept'] = len(kept_rows)
+        job.stats = stats
+        job.status = DiscoveryJob.Status.CANCELLED
+        job.error_message = 'Stopped.'
         job.finished_at = timezone.now()
         job.save()
     except Exception as exc:

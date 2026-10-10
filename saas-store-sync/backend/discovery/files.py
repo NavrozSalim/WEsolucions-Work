@@ -179,6 +179,18 @@ def read_result_sheet(uploaded) -> tuple[list[str], list[dict]]:
     return columns, rows
 
 
+def csv_bytes(columns: list[str], rows: list[dict]) -> bytes:
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=list(columns), extrasaction='ignore')
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({
+            column: '' if row.get(column) is None else row.get(column)
+            for column in columns
+        })
+    return buffer.getvalue().encode('utf-8-sig')
+
+
 def workbook_bytes(columns: list[str], rows: list[dict]) -> bytes:
     workbook = Workbook()
     sheet = workbook.active

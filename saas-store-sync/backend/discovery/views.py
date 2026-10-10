@@ -12,6 +12,7 @@ from rest_framework.views import APIView
 from .columns import ID_FIELD, options_payload
 from .files import (
     SpreadsheetError,
+    csv_bytes,
     open_bytes,
     read_result_sheet,
     read_spreadsheet,
@@ -86,7 +87,44 @@ def _enqueue(job: DiscoveryJob) -> None:
     queue = queue_for_marketplace(job.marketplace)
     job.queue_name = queue
     job.save(update_fields=['queue_name'])
-    run_discovery_job.apply_async(args=[str(job.id)], queue=queue)
+    result = run_discovery_job.apply_async(args=[str(job.id)], queue=queue)
+    task_id = getattr(result, 'id', '') or ''
+    if isinstance(task_id, str) and task_id:
+        job.celery_task_id = task_id[:255]
+        job.save(update_fields=['celery_task_id'])
+
+
+def _revoke_task(task_id: str) -> None:
+    if not task_id:
+        return
+    try:
+        from core.celery import app as celery_app
+
+        celery_app.control.revoke(task_id)
+    except Exception:
+        return
+
+
+def _delete_job(job: DiscoveryJob) -> None:
+    if job.source_file:
+        job.source_file.delete(save=False)
+    if job.result_file:
+        job.result_file.delete(save=False)
+    job.delete()
+
+
+def _export_table(job: DiscoveryJob) -> tuple[list, list]:
+    stored = list(job.products.order_by('created_at'))
+    if stored:
+        columns = list(job.columns or []) or list(stored[0].data.keys())
+        return columns, [item.data for item in stored]
+    try:
+        blob = job.read_result()
+    except FileNotFoundError:
+        blob = b''
+    if blob:
+        return read_result_sheet(io.BytesIO(blob))
+    return list(job.columns or []), []
 
 
 class DiscoveryOptionsView(APIView):
@@ -177,11 +215,7 @@ class DiscoveryJobDetailView(APIView):
         job = _jobs_for(request.user).filter(id=job_id).first()
         if job is None:
             return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if job.source_file:
-            job.source_file.delete(save=False)
-        if job.result_file:
-            job.result_file.delete(save=False)
-        job.delete()
+        _delete_job(job)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -237,16 +271,53 @@ class DiscoveryJobDownloadView(APIView):
         job = _jobs_for(request.user).filter(id=job_id).first()
         if job is None:
             return Response({'detail': 'Result file is not ready.'}, status=status.HTTP_404_NOT_FOUND)
-        try:
-            payload = job.read_result()
-        except FileNotFoundError:
-            payload = b''
-        if not payload:
+        columns, rows = _export_table(job)
+        if not rows:
             return Response({'detail': 'Result file is not ready.'}, status=status.HTTP_404_NOT_FOUND)
-        filename = f'{job.marketplace}-{job.mode}-results.xlsx'
+        export_format = (request.query_params.get('format') or 'xlsx').strip().lower()
+        if export_format == 'csv':
+            payload = csv_bytes(columns, rows)
+            filename = f'{job.marketplace}-{job.mode}-results.csv'
+            content_type = 'text/csv; charset=utf-8'
+        else:
+            payload = workbook_bytes(columns, rows)
+            filename = f'{job.marketplace}-{job.mode}-results.xlsx'
+            content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         response = FileResponse(ContentFile(payload), as_attachment=True, filename=filename)
-        response['Content-Type'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        response['Content-Type'] = content_type
         return response
+
+
+class DiscoveryJobCancelView(APIView):
+    permission_classes = [IsAuthenticated, CanUseDiscovery]
+
+    def post(self, request, job_id):
+        job = _jobs_for(request.user).filter(id=job_id).first()
+        if job is None:
+            return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if job.status not in (DiscoveryJob.Status.QUEUED, DiscoveryJob.Status.RUNNING):
+            return Response({'detail': 'This scrape is not running.'}, status=status.HTTP_400_BAD_REQUEST)
+        job.cancel_requested = True
+        job.save(update_fields=['cancel_requested'])
+        _revoke_task(job.celery_task_id)
+        job.refresh_from_db()
+        return Response(_job_payload(job))
+
+
+class DiscoveryJobClearView(APIView):
+    """Drop this account's scrape history so the next upload starts clean."""
+
+    permission_classes = [IsAuthenticated, CanUseDiscovery]
+
+    def delete(self, request):
+        jobs = list(_jobs_for(request.user))
+        for job in jobs:
+            if job.status in (DiscoveryJob.Status.QUEUED, DiscoveryJob.Status.RUNNING):
+                job.cancel_requested = True
+                job.save(update_fields=['cancel_requested'])
+                _revoke_task(job.celery_task_id)
+            _delete_job(job)
+        return Response({'deleted': len(jobs)})
 
 
 class DiscoveryJobIdsDownloadView(APIView):

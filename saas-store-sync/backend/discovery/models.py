@@ -20,6 +20,7 @@ class DiscoveryJob(models.Model):
         RUNNING = 'running', 'Running'
         SUCCEEDED = 'succeeded', 'Succeeded'
         FAILED = 'failed', 'Failed'
+        CANCELLED = 'cancelled', 'Cancelled'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     owner = models.ForeignKey(
@@ -52,6 +53,8 @@ class DiscoveryJob(models.Model):
     use_sample = models.BooleanField(default=False)
     zip_code = models.CharField(max_length=12, blank=True)
     queue_name = models.CharField(max_length=32, blank=True)
+    celery_task_id = models.CharField(max_length=255, blank=True, default='')
+    cancel_requested = models.BooleanField(default=False)
     stats = models.JSONField(default=dict, blank=True)
     error_message = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

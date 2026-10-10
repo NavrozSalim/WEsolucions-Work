@@ -73,6 +73,106 @@ def _inventory_count(*parts) -> int | None:
     return None
 
 
+def _clean_prose(text: str) -> str:
+    """Drop soft hyphens and bullet dashes. Keep hyphens inside words like 10-piece."""
+    text = (text or '').replace('\u00ad', '').replace('\xa0', ' ')
+    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r'(?:^|\s)[\-\u2013\u2014•·]+\s+', ' ', text)
+    return re.sub(r'\s+', ' ', text).strip(' -')
+
+
+def _amazon_title(soup) -> str:
+    """Full product title. Amazon nests a shortened copy beside the full one."""
+    node = soup.select_one('#productTitle') or soup.select_one('#title')
+    if node is None:
+        return ''
+    full = node.select_one('.a-truncate-full')
+    if full is not None and _text(full):
+        return _text(full)
+    spans = []
+    for span in node.find_all('span'):
+        classes = span.get('class') or []
+        if 'a-truncate-cut' in classes or span.get('aria-hidden') == 'true':
+            continue
+        text = _text(span)
+        if text and not text.endswith(('…', '...')):
+            spans.append(text)
+    if spans:
+        return max(spans, key=len)
+    return _text(node)
+
+
+def _review_count(*sources) -> int | None:
+    """Read a review total from visible text or an aria-label such as “1,234 Reviews”."""
+    blobs = []
+    for source in sources:
+        if source is None:
+            continue
+        if hasattr(source, 'get_text'):
+            blobs.append(source.get('aria-label') or '')
+            blobs.append(source.get('title') or '')
+            blobs.append(_text(source))
+        else:
+            blobs.append(str(source))
+    for blob in blobs:
+        match = _REVIEWS_RE.search(blob or '')
+        if match:
+            return int(match.group(1).replace(',', ''))
+    for blob in blobs:
+        match = re.fullmatch(r'([\d,]{1,12})', (blob or '').strip())
+        if not match:
+            continue
+        value = int(match.group(1).replace(',', ''))
+        if value > 0:
+            return value
+    return None
+
+
+_DELIVERY_RE = re.compile(
+    r'(?:free\s+)?(?:delivery|arrives|get it(?:\s+as soon as)?|get it by)\s+'
+    r'((?:tomorrow|today|[A-Za-z]{3,9})'
+    r'(?:,\s*[A-Za-z]{3,9}\s+\d{1,2})?'
+    r'(?:\s*[\-–]\s*(?:[A-Za-z]{3,9}\s+)?\d{1,2})?)',
+    re.I,
+)
+
+
+def _delivery_date(*nodes) -> str:
+    for node in nodes:
+        text = _text(node)
+        if not text:
+            continue
+        text = re.split(r'\.\s+', text, maxsplit=1)[0]
+        text = re.sub(r'\s*order within.*$', '', text, flags=re.I).strip()
+        match = _DELIVERY_RE.search(text)
+        if match:
+            return re.sub(r'\s+', ' ', match.group(1)).strip(' ,.-')
+    return ''
+
+
+def _amazon_inventory(soup) -> tuple[str, int | None]:
+    """Stock phrase from the buy box. “Only 7 left in stock” is often outside #availability."""
+    selectors = (
+        '#availability',
+        '#availabilityInsideBuyBox_feature_div',
+        '#quantityRelocate_feature_div',
+        '#desktop_buybox',
+        '#buybox',
+        '#outOfStock',
+    )
+    availability = ''
+    for selector in selectors:
+        text = _text(soup.select_one(selector))
+        if not text:
+            continue
+        if not availability and selector.startswith('#availability'):
+            availability = text
+        count = _inventory_count(text)
+        if count is not None:
+            return availability or text, count
+    return availability, None
+
+
 def _amazon_full_url(url: str) -> str:
     """Product photo with the high-resolution ._US_1500_.jpg suffix."""
     text = (url or '').replace('\\u0026', '&').replace('\\/', '/').split('?', 1)[0].strip()
@@ -389,7 +489,7 @@ def parse_amazon_product(html: str, page_url: str) -> dict:
     canonical = soup.select_one('link[rel="canonical"]')
     if canonical and canonical.get('href'):
         asin = extract_asin(canonical['href']) or asin
-    title = _text(soup.select_one('#productTitle'))
+    title = _amazon_title(soup)
     price_node = soup.select_one('.a-price .a-offscreen') or soup.select_one('#corePrice_feature_div')
     rating_node = soup.select_one('#acrPopover')
     rating = None
@@ -397,29 +497,40 @@ def parse_amazon_product(html: str, page_url: str) -> dict:
     match = _RATING_RE.search(rating_text)
     if match:
         rating = float(match.group(1))
-    review_text = _text(soup.select_one('#acrCustomerReviewText'))
-    reviews = None
-    review_match = _REVIEWS_RE.search(review_text)
-    if review_match:
-        reviews = int(review_match.group(1).replace(',', ''))
+    reviews = _review_count(
+        soup.select_one('#acrCustomerReviewText'),
+        soup.select_one('#acrCustomerReviewLink'),
+        soup.select_one('[data-hook="total-review-count"]'),
+    )
     brand = _text(soup.select_one('#bylineInfo'))
     brand = re.sub(r'^(Brand:\s*|Visit the\s+)', '', brand, flags=re.I).strip()
     brand = re.sub(r'\s+Store$', '', brand).strip()
-    bullets = [
-        _text(node)
-        for node in soup.select('#feature-bullets li span.a-list-item')
-        if _text(node)
-    ]
-    description = _text(soup.select_one('#productDescription'))
+    bullets = []
+    for node in soup.select('#feature-bullets li span.a-list-item'):
+        if node.select('span.a-list-item'):
+            continue
+        text = _clean_prose(_text(node))
+        if text and text not in bullets:
+            bullets.append(text)
+    description = _clean_prose(
+        _text(soup.select_one('#productDescription'))
+        or _text(soup.select_one('#productDescription_feature_div'))
+    )
     crumbs = [
         _text(node)
         for node in soup.select('#wayfinding-breadcrumbs_feature_div a')
         if _text(node)
     ]
     images = _amazon_product_images(html, soup)
-    availability = _text(soup.select_one('#availability'))
-    quantity = soup.select_one('#quantity')
-    inventory = _inventory_count(availability, _text(quantity))
+    availability, inventory = _amazon_inventory(soup)
+    if inventory is None:
+        inventory = _inventory_count(_text(soup.select_one('#quantity')))
+    delivery = _delivery_date(
+        soup.select_one('#deliveryBlockMessage'),
+        soup.select_one('#mir-layout-DELIVERY_BLOCK'),
+        soup.select_one('#delivery-message'),
+        soup.select_one('#deliveryBlock_feature_div'),
+    )
     seller = _text(soup.select_one('#sellerProfileTriggerId')) or _text(soup.select_one('#merchant-info'))
     row = {
         'asin': asin,
@@ -431,6 +542,7 @@ def parse_amazon_product(html: str, page_url: str) -> dict:
         'review_count': reviews,
         'availability': availability,
         'inventory': inventory,
+        'delivery_date': delivery,
         'description': description,
         'bullets': ' | '.join(bullets),
         'category': ' > '.join(crumbs),
@@ -489,10 +601,18 @@ def parse_ebay_product(html: str, page_url: str) -> dict:
         value = _text(row.select_one('.ux-labels-values__values'))
         if label and value:
             specifics.append(f'{label}: {value}')
-    description = _text(soup.select_one('#desc_ifr, .d-item-description'))
+    description = _clean_prose(_text(soup.select_one('.d-item-description')))
     images = _ebay_product_images(soup)
     availability = _text(soup.select_one('.x-quantity__availability'))
     inventory = _inventory_count(availability)
+    reviews = _review_count(
+        soup.select_one('.x-review-ratings'),
+        soup.select_one('.ux-summary__count'),
+    )
+    delivery = _delivery_date(
+        soup.select_one('.ux-labels-values--shipping'),
+        soup.select_one('#vi-acc-del-range'),
+    )
     row = {
         'item_id': item_id,
         'url': page_url,
@@ -500,12 +620,13 @@ def parse_ebay_product(html: str, page_url: str) -> dict:
         'brand': '',
         'price': price,
         'rating': None,
-        'review_count': None,
+        'review_count': reviews,
         'availability': availability,
         'inventory': inventory,
+        'delivery_date': delivery,
         'condition': condition,
         'description': description,
-        'bullets': ' | '.join(specifics),
+        'bullets': ' | '.join(_clean_prose(item) for item in specifics if _clean_prose(item)),
         'category': ' > '.join(crumbs),
         'seller': seller,
     }

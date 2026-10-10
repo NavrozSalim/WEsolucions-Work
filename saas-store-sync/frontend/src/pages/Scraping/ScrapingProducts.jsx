@@ -1,16 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, ChevronLeft, ChevronRight, Loader2, Search } from 'lucide-react';
+import { ArrowLeft, ChevronLeft, ChevronRight, Download, Loader2, Search, Square } from 'lucide-react';
 
 import Badge from '../../components/design/Badge';
 import PageHeader from '../../components/design/PageHeader';
-import { getDiscoveryJob, getDiscoveryRows } from '../../services/scrapingService';
+import Button from '../../components/ui/Button';
+import {
+  cancelDiscoveryJob,
+  downloadDiscoveryResult,
+  getDiscoveryJob,
+  getDiscoveryRows,
+} from '../../services/scrapingService';
 
 const STATUS_VARIANT = {
   queued: 'warning',
   running: 'accent',
   succeeded: 'success',
   failed: 'error',
+  cancelled: 'default',
 };
 
 function columnLabel(column) {
@@ -81,6 +88,7 @@ export default function ScrapingProducts() {
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [stopping, setStopping] = useState(false);
 
   const searchRef = useRef(search);
 
@@ -179,9 +187,49 @@ export default function ScrapingProducts() {
         }
         actions={
           job && (
-            <span className="inline-flex items-center gap-2">
+            <span className="inline-flex flex-wrap items-center justify-end gap-2">
               {live && <Loader2 className="h-4 w-4 animate-spin text-slate-500" />}
               <Badge variant={STATUS_VARIANT[job.status] || 'default'}>{job.status}</Badge>
+              {live && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  disabled={stopping}
+                  onClick={() => {
+                    setStopping(true);
+                    cancelDiscoveryJob(jobId)
+                      .then(() => load())
+                      .catch((err) => setError(err.response?.data?.detail || 'Could not stop this scrape.'))
+                      .finally(() => setStopping(false));
+                  }}
+                >
+                  {stopping ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Square className="mr-2 h-4 w-4" />}
+                  Stop
+                </Button>
+              )}
+              {(total > 0 || job.status === 'succeeded' || job.status === 'cancelled') && (
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => downloadDiscoveryResult(jobId, 'xlsx').catch(() => setError('Could not download the Excel file.'))}
+                  >
+                    <Download className="mr-2 h-4 w-4" />
+                    Excel
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => downloadDiscoveryResult(jobId, 'csv').catch(() => setError('Could not download the CSV file.'))}
+                  >
+                    <Download className="mr-2 h-4 w-4" />
+                    CSV
+                  </Button>
+                </>
+              )}
             </span>
           )
         }
@@ -288,7 +336,7 @@ export default function ScrapingProducts() {
                           <td
                             key={column}
                             title={title}
-                            className="min-w-md whitespace-nowrap border-b border-slate-100 px-3 py-2.5 text-slate-800 dark:border-slate-800 dark:text-slate-100"
+                            className="min-w-md max-w-xl whitespace-normal border-b border-slate-100 px-3 py-2.5 text-slate-800 dark:border-slate-800 dark:text-slate-100"
                           >
                             {title || '—'}
                           </td>

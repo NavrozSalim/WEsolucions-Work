@@ -136,6 +136,29 @@ class ParserTests(TestCase):
         self.assertEqual(row['inventory'], 3)
         self.assertIn('Oven safe', row['bullets'])
 
+    def test_amazon_product_reads_the_current_page(self):
+        html = '''
+        <span id="productTitle">
+          <span class="a-truncate-full">Steel Cookware Set With Glass Lid</span>
+          <span class="a-truncate-cut" aria-hidden="true">Steel Cookware…</span>
+        </span>
+        <span id="acrCustomerReviewText" aria-label="1,234 Reviews">1,234</span>
+        <div id="availability"><span>In Stock.</span></div>
+        <div id="desktop_buybox"><span>Only 7 left in stock - order soon.</span></div>
+        <div id="deliveryBlockMessage">FREE delivery Tomorrow, October 11. Order within 3 hrs 12 mins</div>
+        <div id="productDescription">- Dishwasher safe - 10-piece set.</div>
+        <div id="feature-bullets"><li><span class="a-list-item">- Oven safe</span></li></div>
+        '''
+        row = parse_amazon_product(html, 'https://www.amazon.com/dp/B0SAMPLE01')
+        self.assertEqual(row['title'], 'Steel Cookware Set With Glass Lid')
+        self.assertNotIn('…', row['title'])
+        self.assertEqual(row['review_count'], 1234)
+        self.assertEqual(row['inventory'], 7)
+        self.assertEqual(row['delivery_date'], 'Tomorrow, October 11')
+        self.assertEqual(row['description'], 'Dishwasher safe 10-piece set.')
+        self.assertEqual(row['bullets'], 'Oven safe')
+        self.assertNotIn(' - ', row['description'])
+
     def test_amazon_product_keeps_ten_high_res_images(self):
         hires = [
             f'https://m.media-amazon.com/images/I/71IMAGE{index:04d}.jpg'
