@@ -239,6 +239,52 @@ def _delivery_date(*nodes) -> str:
     return ''
 
 
+def _delivery_nodes(soup):
+    return (
+        soup.select_one('#deliveryBlockMessage'),
+        soup.select_one('#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE'),
+        soup.select_one('#mir-layout-DELIVERY_BLOCK'),
+        soup.select_one('#delivery-message'),
+        soup.select_one('#deliveryBlock_feature_div'),
+        soup.select_one('[data-csa-c-delivery-time]'),
+    )
+
+
+def _free_delivery_node(node) -> str:
+    """Yes when this block says FREE delivery. No when it shows a delivery price."""
+    prices = []
+    own = (node.get('data-csa-c-delivery-price') or '').strip()
+    if own:
+        prices.append(own)
+    for marked in node.select('[data-csa-c-delivery-price]'):
+        value = (marked.get('data-csa-c-delivery-price') or '').strip()
+        if value:
+            prices.append(value)
+    for price in prices:
+        if price.casefold() == 'free':
+            return 'Yes'
+        if re.search(r'\d', price):
+            return 'No'
+    text = _text(node)
+    if re.search(r'\bfree\s+(?:delivery|shipping)\b', text, re.I):
+        return 'Yes'
+    if re.search(r'\$\s*\d+(?:\.\d{2})?\s+(?:delivery|shipping)\b', text, re.I):
+        return 'No'
+    if re.search(r'\b(?:delivery|shipping)\b\s+\$\s*\d', text, re.I):
+        return 'No'
+    return ''
+
+
+def _free_delivery(*nodes) -> str:
+    for node in nodes:
+        if node is None or not hasattr(node, 'select'):
+            continue
+        verdict = _free_delivery_node(node)
+        if verdict:
+            return verdict
+    return ''
+
+
 def _amazon_quantity_max(soup) -> int | None:
     """Highest number in the buy-box quantity list. “21+” counts as 21."""
     best = None
@@ -691,14 +737,9 @@ def parse_amazon_product(html: str, page_url: str) -> dict:
         inventory = min(stated, dropdown)
     else:
         inventory = dropdown if dropdown is not None else stated
-    delivery = _delivery_date(
-        soup.select_one('#deliveryBlockMessage'),
-        soup.select_one('#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE'),
-        soup.select_one('#mir-layout-DELIVERY_BLOCK'),
-        soup.select_one('#delivery-message'),
-        soup.select_one('#deliveryBlock_feature_div'),
-        soup.select_one('[data-csa-c-delivery-time]'),
-    )
+    delivery_nodes = _delivery_nodes(soup)
+    delivery = _delivery_date(*delivery_nodes)
+    free_delivery = _free_delivery(*delivery_nodes)
     ships_from, sold_by = _amazon_buybox_parties(soup)
     row = {
         'asin': asin,
@@ -711,6 +752,7 @@ def parse_amazon_product(html: str, page_url: str) -> dict:
         'availability': availability,
         'inventory': inventory,
         'delivery_date': delivery,
+        'free_delivery': free_delivery,
         'ships_from': ships_from,
         'sold_by': sold_by,
         'description': description,

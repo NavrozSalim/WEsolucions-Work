@@ -155,6 +155,7 @@ class ParserTests(TestCase):
         self.assertEqual(row['review_count'], 1234)
         self.assertEqual(row['inventory'], 7)
         self.assertEqual(row['delivery_date'], 'Tomorrow, October 11')
+        self.assertEqual(row['free_delivery'], 'Yes')
         self.assertEqual(row['description'], 'Dishwasher safe 10-piece set.')
         self.assertEqual(row['bullets'], 'Oven safe')
         self.assertNotIn(' - ', row['description'])
@@ -201,7 +202,14 @@ class ParserTests(TestCase):
         self.assertEqual(row['sold_by'], 'SY Super Bang')
         self.assertEqual(row['seller'], 'SY Super Bang')
         self.assertEqual(row['delivery_date'], 'Thursday, October 15')
+        self.assertEqual(row['free_delivery'], 'Yes')
         self.assertEqual(row['inventory'], 21)
+        paid = parse_amazon_product(
+            '<div id="deliveryBlockMessage">$4.99 delivery Friday, October 16</div>',
+            'https://www.amazon.com/dp/B0SAMPLE01',
+        )
+        self.assertEqual(paid['free_delivery'], 'No')
+        self.assertEqual(paid['delivery_date'], 'Friday, October 16')
         first_line = '5PCS Halloween Witch/Ghost/Shoes Decoration for Indoor Home Table Decor'
         wrapped = parse_amazon_product(
             f'<span id="productTitle">{first_line}</span>'
