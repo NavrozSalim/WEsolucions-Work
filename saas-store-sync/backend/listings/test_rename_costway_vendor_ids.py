@@ -139,6 +139,22 @@ class RenameCostwayVendorIdsTests(TestCase):
         self.assertEqual(nora_listing.vendor_id, "TP10003")
         self.assertEqual(other_listing.vendor_id, "TP10004")
 
+    def test_old_vendor_id_with_new_suffix_matches_the_saved_id(self):
+        listing = self._listing(self.store_a, "COW-94723608-TY326396-New", "TY326396")
+        path = _workbook({
+            "Store A": [("COW-94723608-TY326396-New", "TY326396-New", "94723608-TY326396")],
+        })
+        try:
+            call_command(
+                "rename_costway_vendor_ids",
+                email="afraaz.prettyandpractical@gmail.com",
+                file=path,
+            )
+        finally:
+            os.unlink(path)
+        listing.refresh_from_db()
+        self.assertEqual(listing.vendor_id, "94723608-TY326396")
+
     def test_wrong_old_vendor_id_is_left_unchanged(self):
         listing = self._listing(self.store_a, "LASOO-A", "TP10003")
         path = _workbook({

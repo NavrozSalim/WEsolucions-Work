@@ -2,7 +2,9 @@
 
 Each sheet is named for the store. Columns are SKU, Old Vendor ID, and New
 Vendor ID. A row updates the Costway product on that store whose SKU matches,
-and only when the saved Vendor ID is still the Old Vendor ID.
+and only when the saved Vendor ID is still the Old Vendor ID. A trailing
+``-New`` on the Old Vendor ID is ignored, so ``PV10568-New`` matches a saved
+Vendor ID of ``PV10568``. The SKU column is still compared exactly.
 
 Usage (inside the backend container on the main server):
 
@@ -40,6 +42,19 @@ def _header_token(value) -> str:
 
 def _norm(value) -> str:
     return clean_id(value).lower()
+
+
+def _old_vendor_matches(saved, file_old) -> bool:
+    """True when the saved Vendor ID is the file's Old Vendor ID.
+
+    Pretty & Practical stores the bare code (``PV10568``) while the sheet
+    appends ``-New`` (``PV10568-New``). That suffix is not part of the saved id.
+    """
+    saved_key = _norm(saved)
+    file_key = _norm(file_old)
+    if saved_key == file_key:
+        return True
+    return file_key.endswith("-new") and saved_key == file_key[:-4]
 
 
 def _label(value) -> str:
@@ -273,7 +288,6 @@ class Command(BaseCommand):
             listing_count = 0
             for sku, old_id, new_id in parsed:
                 sku_key = _norm(sku)
-                old_key = _norm(old_id)
                 listing_hits = listings_by_store[store.id].get(sku_key, [])
                 mapping_hits = mappings_by_store[store.id].get(sku_key, [])
                 costway_listings = [row for row in listing_hits if _listing_is_costway(row)]
@@ -282,11 +296,11 @@ class Command(BaseCommand):
                     if row.product_id and _is_costway_product(row.product)
                 ]
                 matched_listings = [
-                    row for row in costway_listings if _norm(row.vendor_id) == old_key
+                    row for row in costway_listings if _old_vendor_matches(row.vendor_id, old_id)
                 ]
                 matched_mappings = [
                     row for row in costway_mappings
-                    if _norm(_saved_vendor_id(row.product)) == old_key
+                    if _old_vendor_matches(_saved_vendor_id(row.product), old_id)
                 ]
                 if not matched_listings and not matched_mappings:
                     if costway_listings or costway_mappings:
