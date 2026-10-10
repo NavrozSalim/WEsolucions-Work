@@ -1,5 +1,5 @@
 import api from './api';
-import { filenameFromContentDisposition, saveBlob } from '../utils/downloadFile';
+import { apiDownload, filenameFromContentDisposition, saveBlob } from '../utils/downloadFile';
 
 export async function getDiscoveryOptions() {
     const response = await api.get('/discovery/options/');
@@ -83,13 +83,12 @@ export async function downloadDiscoveryIds(jobId) {
 }
 
 export async function downloadDiscoveryResult(jobId, format = 'xlsx') {
-    const response = await api.get(`/discovery/jobs/${jobId}/download/`, {
-        params: { format },
-        responseType: 'blob',
+    const ext = format === 'csv' ? 'csv' : 'xlsx';
+    return apiDownload(api, `/discovery/jobs/${jobId}/download/`, {
+        params: { format: ext },
+        fallbackFilename: `discovery-${jobId}.${ext}`,
+        mimeType: ext === 'csv'
+            ? 'text/csv;charset=utf-8'
+            : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
-    const filename = filenameFromContentDisposition(
-        response.headers['content-disposition'],
-        `discovery-${jobId}.${format === 'csv' ? 'csv' : 'xlsx'}`,
-    );
-    saveBlob(response.data, filename);
 }

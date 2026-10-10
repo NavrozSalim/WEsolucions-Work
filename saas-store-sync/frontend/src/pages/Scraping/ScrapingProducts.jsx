@@ -214,7 +214,7 @@ export default function ScrapingProducts() {
                     type="button"
                     size="sm"
                     variant="secondary"
-                    onClick={() => downloadDiscoveryResult(jobId, 'xlsx').catch(() => setError('Could not download the Excel file.'))}
+                    onClick={() => downloadDiscoveryResult(jobId, 'xlsx').catch((err) => setError(err.message || 'Could not download the Excel file.'))}
                   >
                     <Download className="mr-2 h-4 w-4" />
                     Excel
@@ -223,7 +223,7 @@ export default function ScrapingProducts() {
                     type="button"
                     size="sm"
                     variant="secondary"
-                    onClick={() => downloadDiscoveryResult(jobId, 'csv').catch(() => setError('Could not download the CSV file.'))}
+                    onClick={() => downloadDiscoveryResult(jobId, 'csv').catch((err) => setError(err.message || 'Could not download the CSV file.'))}
                   >
                     <Download className="mr-2 h-4 w-4" />
                     CSV

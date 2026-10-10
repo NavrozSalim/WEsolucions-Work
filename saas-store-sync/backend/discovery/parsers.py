@@ -81,24 +81,94 @@ def _clean_prose(text: str) -> str:
     return re.sub(r'\s+', ' ', text).strip(' -')
 
 
-def _amazon_title(soup) -> str:
-    """Full product title. Amazon nests a shortened copy beside the full one."""
-    node = soup.select_one('#productTitle') or soup.select_one('#title')
+def _looks_cut(text: str) -> bool:
+    return (text or '').endswith(('…', '...'))
+
+
+def _title_from_node(node) -> str:
     if node is None:
         return ''
-    full = node.select_one('.a-truncate-full')
-    if full is not None and _text(full):
-        return _text(full)
+    fulls = [_text(span) for span in node.select('.a-truncate-full')]
+    fulls = [text for text in fulls if text and not _looks_cut(text)]
+    if fulls:
+        return max(fulls, key=len)
     spans = []
     for span in node.find_all('span'):
         classes = span.get('class') or []
         if 'a-truncate-cut' in classes or span.get('aria-hidden') == 'true':
             continue
         text = _text(span)
-        if text and not text.endswith(('…', '...')):
+        if text and not _looks_cut(text):
             spans.append(text)
     if spans:
         return max(spans, key=len)
+    text = _text(node)
+    if _looks_cut(text):
+        return ''
+    return text
+
+
+def _amazon_document_title(soup) -> str:
+    raw = _text(soup.find('title'))
+    if not raw:
+        meta = soup.select_one('meta[property="og:title"]') or soup.select_one('meta[name="title"]')
+        raw = (meta.get('content') if meta else '') or ''
+    started_amazon = bool(re.match(r'Amazon\.com(?:\.au)?\b', raw, re.I))
+    raw = re.sub(r'^Amazon\.com(?:\.au)?\s*[:|\-]\s*', '', raw, flags=re.I).strip()
+    raw = re.sub(r'\s*[|\-]\s*Amazon\.com(?:\.au)?$', '', raw, flags=re.I).strip()
+    if started_amazon and ' : ' in raw:
+        left, right = raw.rsplit(' : ', 1)
+        if len(left) >= 15 and len(right.split()) <= 6:
+            raw = left.strip()
+    return raw
+
+
+def _jsonld_product_names(payload) -> list[str]:
+    found = []
+    if isinstance(payload, list):
+        for item in payload:
+            found.extend(_jsonld_product_names(item))
+        return found
+    if not isinstance(payload, dict):
+        return found
+    kinds = payload.get('@type') or ''
+    if not isinstance(kinds, list):
+        kinds = [kinds]
+    name = payload.get('name')
+    if any(str(kind).lower() == 'product' for kind in kinds) and isinstance(name, str) and name.strip():
+        found.append(' '.join(name.split()))
+    if payload.get('@graph'):
+        found.extend(_jsonld_product_names(payload.get('@graph')))
+    return found
+
+
+def _amazon_title(soup) -> str:
+    """Full product title, including the second line Amazon tucks into the page title."""
+    visible = _title_from_node(soup.select_one('#productTitle') or soup.select_one('#title'))
+    extras = []
+    for script in soup.select('script[type="application/ld+json"]'):
+        try:
+            payload = json.loads(script.string or '')
+        except (TypeError, json.JSONDecodeError):
+            continue
+        extras.extend(_jsonld_product_names(payload))
+    document = _amazon_document_title(soup)
+    if document:
+        extras.append(document)
+    best = visible
+    for extra in extras:
+        if not extra or _looks_cut(extra):
+            continue
+        if visible and not _looks_cut(visible):
+            if not extra.startswith(visible):
+                continue
+            if len(extra[len(visible):].strip()) < 40:
+                continue
+        if len(extra) > len(best):
+            best = extra
+    if best:
+        return best
+    node = soup.select_one('#productTitle') or soup.select_one('#title')
     return _text(node)
 
 
@@ -137,17 +207,108 @@ _DELIVERY_RE = re.compile(
 )
 
 
+_DATE_RE = re.compile(
+    r'\b((?:tomorrow|today|(?:mon|tues|wednes|thurs|fri|satur|sun)day)'
+    r'(?:,\s*[A-Za-z]{3,9}\s+\d{1,2})?)',
+    re.I,
+)
+
+
+def _clean_delivery(text: str) -> str:
+    return re.sub(r'\s+', ' ', text or '').strip(' ,.-')
+
+
 def _delivery_date(*nodes) -> str:
     for node in nodes:
+        if node is None or not hasattr(node, 'get'):
+            continue
+        stamped = node.get('data-csa-c-delivery-time') or ''
+        if not stamped:
+            marked = node.select_one('[data-csa-c-delivery-time]')
+            stamped = (marked.get('data-csa-c-delivery-time') if marked else '') or ''
+        if stamped:
+            return _clean_delivery(stamped)
         text = _text(node)
         if not text:
             continue
         text = re.split(r'\.\s+', text, maxsplit=1)[0]
         text = re.sub(r'\s*order within.*$', '', text, flags=re.I).strip()
-        match = _DELIVERY_RE.search(text)
+        match = _DELIVERY_RE.search(text) or _DATE_RE.search(text)
         if match:
-            return re.sub(r'\s+', ' ', match.group(1)).strip(' ,.-')
+            return _clean_delivery(match.group(1))
     return ''
+
+
+def _amazon_quantity_max(soup) -> int | None:
+    """Highest number in the buy-box quantity list. “21+” counts as 21."""
+    best = None
+    for select in soup.select('select#quantity, select[name="quantity"]'):
+        for option in select.find_all('option'):
+            raw = f"{option.get('value') or ''} {option.get_text(' ', strip=True)}"
+            match = re.search(r'\d[\d,]*', raw)
+            if not match:
+                continue
+            number = int(match.group().replace(',', ''))
+            if number > 0 and (best is None or number > best):
+                best = number
+    return best
+
+
+def _offer_value(root, label: str) -> str:
+    wanted = label.casefold()
+    for node in root.find_all(True):
+        own = ' '.join(
+            piece.strip() for piece in node.find_all(string=True, recursive=False)
+        )
+        own = ' '.join(own.split()).casefold().rstrip(':')
+        whole = _text(node).casefold().rstrip(':')
+        if own != wanted and whole != wanted:
+            continue
+        sibling = node.find_next_sibling()
+        while sibling is not None and not getattr(sibling, 'name', None):
+            sibling = sibling.find_next_sibling()
+        if sibling is None and node.parent is not None:
+            sibling = node.parent.find_next_sibling()
+        if sibling is None:
+            continue
+        value = _text(sibling)
+        if value and value.casefold().rstrip(':') != wanted:
+            return value
+    blob = _text(root)
+    match = re.search(
+        rf'{re.escape(label)}\s*:?\s*(.+?)(?=\s+(?:ships from|sold by)\b|$)',
+        blob,
+        re.I,
+    )
+    if not match:
+        return ''
+    return ' '.join(match.group(1).split()).strip(' :')
+
+
+def _amazon_buybox_parties(soup) -> tuple[str, str]:
+    """Ships from and Sold by, as two separate buy-box values."""
+    ships = ''
+    sold = ''
+    roots = []
+    for selector in (
+        '#fulfillerInfoFeature_feature_div',
+        '#merchantInfoFeature_feature_div',
+        '#tabular-buybox',
+        '#merchant-info',
+        '#desktop_buybox',
+        '#buybox',
+    ):
+        node = soup.select_one(selector)
+        if node is not None and node not in roots:
+            roots.append(node)
+    for root in roots:
+        if not ships:
+            ships = _offer_value(root, 'ships from')
+        if not sold:
+            sold = _offer_value(root, 'sold by')
+    if not sold:
+        sold = _text(soup.select_one('#sellerProfileTriggerId'))
+    return ships, sold
 
 
 def _amazon_inventory(soup) -> tuple[str, int | None]:
@@ -522,16 +683,23 @@ def parse_amazon_product(html: str, page_url: str) -> dict:
         if _text(node)
     ]
     images = _amazon_product_images(html, soup)
-    availability, inventory = _amazon_inventory(soup)
-    if inventory is None:
-        inventory = _inventory_count(_text(soup.select_one('#quantity')))
+    availability, stated = _amazon_inventory(soup)
+    if stated is None:
+        stated = _inventory_count(_text(soup.select_one('#quantity')))
+    dropdown = _amazon_quantity_max(soup)
+    if stated is not None and dropdown is not None:
+        inventory = min(stated, dropdown)
+    else:
+        inventory = dropdown if dropdown is not None else stated
     delivery = _delivery_date(
         soup.select_one('#deliveryBlockMessage'),
+        soup.select_one('#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE'),
         soup.select_one('#mir-layout-DELIVERY_BLOCK'),
         soup.select_one('#delivery-message'),
         soup.select_one('#deliveryBlock_feature_div'),
+        soup.select_one('[data-csa-c-delivery-time]'),
     )
-    seller = _text(soup.select_one('#sellerProfileTriggerId')) or _text(soup.select_one('#merchant-info'))
+    ships_from, sold_by = _amazon_buybox_parties(soup)
     row = {
         'asin': asin,
         'url': page_url,
@@ -543,10 +711,12 @@ def parse_amazon_product(html: str, page_url: str) -> dict:
         'availability': availability,
         'inventory': inventory,
         'delivery_date': delivery,
+        'ships_from': ships_from,
+        'sold_by': sold_by,
         'description': description,
         'bullets': ' | '.join(bullets),
         'category': ' > '.join(crumbs),
-        'seller': seller,
+        'seller': sold_by,
     }
     return _with_image_slots(row, images)
 

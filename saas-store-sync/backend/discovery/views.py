@@ -5,8 +5,10 @@ import re
 from django.core.files.base import ContentFile
 from django.http import FileResponse
 from rest_framework import status
+from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.utils.mediatypes import media_type_matches, order_by_precedence
 from rest_framework.views import APIView
 
 from .columns import ID_FIELD, options_payload
@@ -264,8 +266,22 @@ class DiscoveryJobRowsView(APIView):
         })
 
 
+class _SpreadsheetNegotiation(DefaultContentNegotiation):
+    """`?format=xlsx` chooses the spreadsheet, not a REST renderer."""
+
+    def select_renderer(self, request, renderers, format_suffix=None):
+        accepts = self.get_accept_list(request)
+        for media_type_set in order_by_precedence(accepts):
+            for renderer in renderers:
+                for media_type in media_type_set:
+                    if media_type_matches(renderer.media_type, media_type):
+                        return renderer, media_type.split(';')[0]
+        return renderers[0], renderers[0].media_type
+
+
 class DiscoveryJobDownloadView(APIView):
     permission_classes = [IsAuthenticated, CanUseDiscovery]
+    content_negotiation_class = _SpreadsheetNegotiation
 
     def get(self, request, job_id):
         job = _jobs_for(request.user).filter(id=job_id).first()
@@ -273,7 +289,11 @@ class DiscoveryJobDownloadView(APIView):
             return Response({'detail': 'Result file is not ready.'}, status=status.HTTP_404_NOT_FOUND)
         columns, rows = _export_table(job)
         if not rows:
-            return Response({'detail': 'Result file is not ready.'}, status=status.HTTP_404_NOT_FOUND)
+            if job.status in (DiscoveryJob.Status.QUEUED, DiscoveryJob.Status.RUNNING):
+                detail = 'No products have been saved yet. Try again in a moment.'
+            else:
+                detail = 'Result file is not ready.'
+            return Response({'detail': detail}, status=status.HTTP_404_NOT_FOUND)
         export_format = (request.query_params.get('format') or 'xlsx').strip().lower()
         if export_format == 'csv':
             payload = csv_bytes(columns, rows)

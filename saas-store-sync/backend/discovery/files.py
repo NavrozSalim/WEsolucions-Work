@@ -12,6 +12,31 @@ from openpyxl import Workbook, load_workbook
 from .columns import HOSTS, ID_FIELD, is_amazon
 from .identity import extract_asin, extract_ebay_item_id
 
+# Excel rejects these control characters and any cell longer than this.
+_ILLEGAL_XLSX = re.compile(r'[\000-\010]|[\013-\014]|[\016-\037]')
+_XLSX_CELL_LIMIT = 32767
+
+
+def _sheet_value(value):
+    """Value openpyxl can write. Scraped text often includes characters Excel rejects."""
+    if value is None or value == '':
+        return ''
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value != value or value in (float('inf'), float('-inf')):
+            return ''
+        return value
+    if not isinstance(value, str):
+        value = str(value)
+    value = _ILLEGAL_XLSX.sub('', value)
+    if len(value) > _XLSX_CELL_LIMIT:
+        value = value[:_XLSX_CELL_LIMIT]
+    return value
+
+
 _HEADER_ALIASES = {
     'url': 'url',
     'link': 'url',
@@ -185,7 +210,7 @@ def csv_bytes(columns: list[str], rows: list[dict]) -> bytes:
     writer.writeheader()
     for row in rows:
         writer.writerow({
-            column: '' if row.get(column) is None else row.get(column)
+            column: _sheet_value(row.get(column, ''))
             for column in columns
         })
     return buffer.getvalue().encode('utf-8-sig')
@@ -195,15 +220,9 @@ def workbook_bytes(columns: list[str], rows: list[dict]) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = 'Results'
-    sheet.append(list(columns))
+    sheet.append([_sheet_value(column) for column in columns])
     for row in rows:
-        values = []
-        for column in columns:
-            value = row.get(column, '')
-            if value is None:
-                value = ''
-            values.append(value)
-        sheet.append(values)
+        sheet.append([_sheet_value(row.get(column, '')) for column in columns])
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()

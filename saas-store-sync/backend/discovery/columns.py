@@ -36,6 +36,8 @@ AMAZON_PRODUCT = (
     'availability',
     'inventory',
     'delivery_date',
+    'ships_from',
+    'sold_by',
     'description',
     'bullets',
     'images',
@@ -87,7 +89,7 @@ COLUMNS = {
 # Category output is meant to feed the product-details step.
 _AMAZON_CATEGORY_DEFAULT = ('asin', 'url', 'title', 'price', 'rating', 'review_count', 'category')
 _AMAZON_PRODUCT_DEFAULT = (
-    'asin', 'url', 'title', 'brand', 'price', 'rating', 'review_count', 'category', 'availability', 'inventory', 'delivery_date', 'description',
+    'asin', 'url', 'title', 'brand', 'price', 'rating', 'review_count', 'category', 'availability', 'inventory', 'delivery_date', 'ships_from', 'sold_by', 'description',
 )
 _EBAY_CATEGORY_DEFAULT = ('item_id', 'url', 'title', 'price', 'rating', 'review_count', 'category')
 _EBAY_PRODUCT_DEFAULT = (

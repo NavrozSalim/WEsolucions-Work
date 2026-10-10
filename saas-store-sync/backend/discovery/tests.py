@@ -13,7 +13,7 @@ from discovery.columns import ID_FIELD, IMAGE_COLUMNS, output_columns
 from discovery.engine import _live_category_rows, execute_job
 from discovery.files import template_bytes, workbook_bytes
 from discovery.identity import dedupe_rows
-from discovery.models import DiscoveryJob
+from discovery.models import DiscoveryJob, DiscoveryProduct
 from discovery.parsers import (
     amazon_reported_total,
     amazon_results_url,
@@ -158,6 +158,57 @@ class ParserTests(TestCase):
         self.assertEqual(row['description'], 'Dishwasher safe 10-piece set.')
         self.assertEqual(row['bullets'], 'Oven safe')
         self.assertNotIn(' - ', row['description'])
+
+    def test_amazon_product_reads_full_title_seller_delivery_and_quantity(self):
+        full = (
+            '5PCS Halloween Witch/Ghost/Shoes Decoration for Indoor Home Table Decor '
+            'Halloween Wooden Tabletop Centerpiece Craft Decorations for Holiday Party '
+            "Decor Supplies Kid's Gift"
+        )
+        html = f'''
+        <title>Amazon.com: {full} : Home &amp; Kitchen</title>
+        <span id="productTitle">
+          <span class="a-truncate-cut" aria-hidden="true">5PCS Halloween Witch/Ghost/Shoes Decoration for Indoor…</span>
+        </span>
+        <div id="fulfillerInfoFeature_feature_div">
+          <div class="a-row">
+            <span>Ships from</span>
+            <span class="offer-display-feature-text-message">Amazon</span>
+          </div>
+        </div>
+        <div id="merchantInfoFeature_feature_div">
+          <div class="a-row">
+            <span>Sold by</span>
+            <a id="sellerProfileTriggerId">SY Super Bang</a>
+          </div>
+        </div>
+        <div id="availability"><span>In Stock.</span></div>
+        <select id="quantity" name="quantity">
+          <option value="1">1</option>
+          <option value="20">20</option>
+          <option value="21">21+</option>
+        </select>
+        <div id="deliveryBlockMessage">
+          <span data-csa-c-delivery-time="Thursday, October 15">
+            FREE delivery <span class="a-text-bold">Thursday, October 15</span>
+            on orders shipped by Amazon over $35
+          </span>
+        </div>
+        '''
+        row = parse_amazon_product(html, 'https://www.amazon.com/dp/B0SAMPLE01')
+        self.assertEqual(row['title'], full)
+        self.assertEqual(row['ships_from'], 'Amazon')
+        self.assertEqual(row['sold_by'], 'SY Super Bang')
+        self.assertEqual(row['seller'], 'SY Super Bang')
+        self.assertEqual(row['delivery_date'], 'Thursday, October 15')
+        self.assertEqual(row['inventory'], 21)
+        first_line = '5PCS Halloween Witch/Ghost/Shoes Decoration for Indoor Home Table Decor'
+        wrapped = parse_amazon_product(
+            f'<span id="productTitle">{first_line}</span>'
+            f'<title>Amazon.com: {full} : Home &amp; Kitchen</title>',
+            'https://www.amazon.com/dp/B0SAMPLE01',
+        )
+        self.assertEqual(wrapped['title'], full)
 
     def test_amazon_product_keeps_ten_high_res_images(self):
         hires = [
@@ -607,3 +658,53 @@ class DiscoveryJobTests(TestCase):
         self.assertEqual(download.status_code, 200)
         sheet = load_workbook(io.BytesIO(b''.join(download.streaming_content))).active
         self.assertEqual([cell.value for cell in next(sheet.iter_rows(max_row=1))][0], 'asin')
+
+    def test_download_includes_products_saved_while_the_scrape_is_running(self):
+        filename, payload = template_bytes('amazon_us', 'product')
+        response = self.client.post(
+            '/api/v1/discovery/jobs/',
+            {
+                'marketplace': 'amazon_us',
+                'mode': 'product',
+                'use_sample': 'true',
+                'rules': '{}',
+                'columns': '[]',
+                'file': ContentFile(payload, name=filename),
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        job = DiscoveryJob.objects.get(id=response.data['id'])
+        job.status = DiscoveryJob.Status.RUNNING
+        job.columns = ['asin', 'url', 'title', 'description']
+        job.stats = {'kept': 1}
+        job.save(update_fields=['status', 'columns', 'stats'])
+        DiscoveryProduct.objects.create(
+            job=job,
+            product_key='B000000001',
+            data={
+                'asin': 'B000000001',
+                'url': 'https://www.amazon.com/dp/B000000001',
+                'title': 'Lamp\x00shade',
+                'description': ('Safe 10-piece set. ' * 3000) + '\x0b',
+            },
+        )
+        self.assertFalse(job.result_bytes)
+        download = self.client.get(
+            f'/api/v1/discovery/jobs/{job.id}/download/',
+            {'format': 'xlsx'},
+        )
+        self.assertEqual(download.status_code, 200, getattr(download, 'content', b'')[:500])
+        sheet = load_workbook(io.BytesIO(b''.join(download.streaming_content))).active
+        self.assertEqual(sheet['A2'].value, 'B000000001')
+        self.assertEqual(sheet['C2'].value, 'Lampshade')
+        self.assertNotIn('\x0b', sheet['D2'].value)
+        self.assertLessEqual(len(sheet['D2'].value), 32767)
+        csv_download = self.client.get(
+            f'/api/v1/discovery/jobs/{job.id}/download/',
+            {'format': 'csv'},
+        )
+        self.assertEqual(csv_download.status_code, 200)
+        text = b''.join(csv_download.streaming_content).decode('utf-8-sig')
+        self.assertIn('Lampshade', text)
+        self.assertNotIn('\x00', text)
