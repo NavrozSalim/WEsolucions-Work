@@ -214,7 +214,16 @@ class LoadCostwayCsvTests(unittest.TestCase):
             vendor_id='TP10003',
             sku='COW-73982054-TP10003-New',
         )
-        self.assertIsNone(old_sku_only)
+        self.assertEqual(old_sku_only['Posted Price'], 109.95)
+        self.assertEqual(old_sku_only['Posted Inventory'], 5)
+        changed_item = lookup_costway_price_stock(
+            lookup,
+            compact,
+            {},
+            vendor_id='111-TP10003',
+            sku='COW-73982054-TP10003-New',
+        )
+        self.assertIsNone(changed_item)
         by_vendor_id = lookup_costway_price_stock(
             lookup,
             compact,

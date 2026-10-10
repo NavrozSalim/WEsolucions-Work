@@ -125,6 +125,35 @@ def costway_pair_from_listing_sku(value) -> str:
     return costway_feed_key(match.group(1), match.group(2))
 
 
+def costway_effective_vendor_id(
+    *,
+    vendor_id: str = "",
+    sku: str = "",
+    variant_key: str = "",
+    product_key: str = "",
+) -> str:
+    """Vendor ID to match, and to store when the saved one is only the bare SKU.
+
+    ``COW-72618359-NP10497-New`` with Vendor ID ``NP10497`` (or ``NP10497-New``)
+    is the old value. The feed key is ``72618359-NP10497``. A Vendor ID that is
+    already a different string, including another Item NO., is left unchanged.
+    """
+    saved = clean_id(vendor_id)
+    pair = ""
+    bare = ""
+    for val in (sku, variant_key, product_key):
+        if not pair:
+            pair = costway_pair_from_listing_sku(val)
+        if not bare:
+            bare = costway_vendor_id_from_listing_sku(val)
+    if pair and bare:
+        saved_l = saved.lower()
+        bare_l = bare.lower()
+        if not saved or saved_l == bare_l or saved_l == f"{bare_l}-new":
+            return pair
+    return saved
+
+
 def is_costway_feed_listing(
     *,
     source_vendor_code: str = "",
@@ -216,11 +245,17 @@ def lookup_costway_price_stock(
 ) -> dict | None:
     """Find a feed row by Vendor ID, which is Item NO. + '-' + SKU.
 
-    A saved Vendor ID is matched on its own. A bare SKU, a shared Item NO., or
-    the product page must not apply another item's price after Costway reuses
-    the SKU. Link is used only when Vendor ID is empty and no other id hits.
+    A saved Vendor ID is matched on its own. When that saved value is only the
+    bare SKU inside ``COW-{item}-{sku}-New``, the match key is Item NO. plus
+    that SKU. A different Vendor ID is not replaced by the SKU. Link is used
+    only when Vendor ID is empty and the row has no Kogan item-sku pair.
     """
-    explicit = clean_id(vendor_id)
+    explicit = costway_effective_vendor_id(
+        vendor_id=vendor_id,
+        sku=sku,
+        variant_key=variant_key,
+        product_key=product_key,
+    )
     if explicit:
         return lookup_sku(lookup, lookup_compact, explicit)
     named_pairs: list[str] = []
@@ -581,6 +616,7 @@ __all__ = [
     "normalize_costway_product_url",
     "costway_feed_key",
     "costway_pair_from_listing_sku",
+    "costway_effective_vendor_id",
     "costway_identity_candidates",
     "lookup_costway_price_stock",
     "build_costway_url_index",

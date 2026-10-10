@@ -2530,6 +2530,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
     from scrapers import close_amazon_session, get_price_and_stock
     from scrapers.nora_au_ingest import is_nora_vendor_code
     from scrapers.costway_au_ingest import (
+        costway_effective_vendor_id,
         is_costway_product_url,
         is_costway_vendor_code,
         load_costway_feed_lookups,
@@ -2926,6 +2927,14 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                 if kind == "costway":
                     if costway_feed_error:
                         return None, None, costway_feed_error
+                    effective = costway_effective_vendor_id(
+                        vendor_id=listing.vendor_id or "",
+                        sku=listing.sku or "",
+                        variant_key=listing.external_variant_key or "",
+                        product_key=listing.external_product_key or "",
+                    )
+                    if effective and effective != (listing.vendor_id or "").strip():
+                        listing.vendor_id = effective[:255]
                     entry = lookup_costway_price_stock(
                         (costway_lookups or {}).get("lookup") or {},
                         (costway_lookups or {}).get("lookup_compact") or {},
@@ -3017,7 +3026,10 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                         stamp = timezone.now()
                         for item in batch:
                             item.updated_at = stamp
-                        StoreListing.objects.bulk_update(batch, list(_LISTING_SCRAPE_SAVE_FIELDS))
+                        fields = list(_LISTING_SCRAPE_SAVE_FIELDS)
+                        if kind == "costway":
+                            fields.append("vendor_id")
+                        StoreListing.objects.bulk_update(batch, fields)
                         batch.clear()
                         done = scraped + failed
                         _set_progress(
