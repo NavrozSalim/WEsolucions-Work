@@ -275,33 +275,97 @@ class ParserTests(TestCase):
 
     def test_ebay_product_reads_brand_rating_reviews_specifics_and_sold(self):
         html = '''
-        <div class="x-star-rating" aria-label="4.8 out of 5 stars"></div>
-        <a href="#rwid"><span class="ux-textspans">1,234 product ratings</span></a>
+        <h1 class="x-item-title__mainTitle"><span class="ux-textspans">DEWALT 20V Drill</span></h1>
+        <div class="x-price-primary"><span class="ux-textspans">US $129.00</span></div>
         <div class="x-quantity__availability">
           <span class="ux-textspans">8 available</span>
-          <span class="ux-textspans">142 sold</span>
+          <span class="ux-textspans ux-textspans--SECONDARY">142 sold</span>
         </div>
-        <div class="ux-labels-values ux-labels-values--shipping">
-          <div class="ux-labels-values__labels"><span>Shipping</span></div>
+        <div class="ux-labels-values col-12 ux-labels-values--shipping">
+          <div class="ux-labels-values__labels"><span>Shipping:</span></div>
           <div class="ux-labels-values__values"><span>Free</span></div>
         </div>
-        <div class="ux-labels-values">
-          <div class="ux-labels-values__labels-content"><span class="ux-textspans">Brand</span></div>
-          <div class="ux-labels-values__values-content"><span class="ux-textspans">DEWALT</span></div>
+        <div class="ux-labels-values col-12 ux-labels-values--importCharges">
+          <div class="ux-labels-values__labels"><span>Import charges:</span></div>
+          <div class="ux-labels-values__values"><span>Est. GBP 71.49</span></div>
         </div>
-        <div class="ux-labels-values">
-          <div class="ux-labels-values__labels"><span>Color</span></div>
-          <div class="ux-labels-values__values"><span>Yellow</span></div>
+        <div class="vim x-about-this-item" data-testid="x-about-this-item">
+          <dl class="ux-layout-section-evo__item">
+            <div class="ux-layout-section-evo__col">
+              <dt class="ux-labels-values__labels"><span class="ux-textspans">Condition</span></dt>
+              <dd class="ux-labels-values__values">
+                <span class="ux-textspans">New: brand-new item ... </span>
+                <span data-testid="viewMore"><button><span class="ux-textspans">Read more</span></button></span>
+                <span aria-hidden="true" class="hide"><span class="ux-textspans">New: brand-new item, full text</span></span>
+              </dd>
+            </div>
+            <div class="ux-layout-section-evo__col">
+              <dt class="ux-labels-values__labels"><span class="ux-textspans">Brand</span></dt>
+              <dd class="ux-labels-values__values"><span class="ux-textspans">DEWALT</span></dd>
+            </div>
+            <div class="ux-layout-section-evo__col">
+              <dt class="ux-labels-values__labels"><span class="ux-textspans">Type</span></dt>
+              <dd class="ux-labels-values__values"><span class="ux-textspans">Type: Hammer Drill</span></dd>
+            </div>
+            <div class="ux-layout-section-evo__col">
+              <dt class="ux-labels-values__labels"><span class="ux-textspans">Voltage</span></dt>
+              <dd class="ux-labels-values__values"><span class="ux-textspans">20 V</span></dd>
+            </div>
+          </dl>
+        </div>
+        <div class="ux-summary">
+          <span class="ux-summary__start--rating" data-testid="review--start--rating"><span class="ux-textspans">4.8</span></span>
+          <div class="vim ux-star-rating" data-testid="ux-star-rating">
+            <div role="img" aria-label="4.8 out of 5 stars based on 1,234 product ratings"></div>
+          </div>
+          <span class="ux-summary__count"><span class="ux-textspans">1,234 product ratings</span></span>
+        </div>
+        <div class="fdbk-detail-seller-rating">
+          <span class="fb-clipped">4.1 out of 5 stars</span>
         </div>
         '''
         row = parse_ebay_product(html, 'https://www.ebay.com/itm/100000000001')
+        self.assertEqual(row['title'], 'DEWALT 20V Drill')
+        self.assertEqual(row['price'], 129.0)
         self.assertEqual(row['brand'], 'DEWALT')
         self.assertEqual(row['rating'], 4.8)
         self.assertEqual(row['review_count'], 1234)
         self.assertEqual(row['sold'], 142)
-        self.assertEqual(row['item_specifications'], 'Brand: DEWALT | Color: Yellow')
+        self.assertEqual(
+            row['item_specifications'],
+            'Condition: New: brand-new item ... | Brand: DEWALT | Type: Hammer Drill | Voltage: 20 V',
+        )
+
+    def test_ebay_brand_value_that_starts_with_the_label_is_kept(self):
+        html = '''
+        <h1 class="x-item-title__mainTitle"><span>Drill</span></h1>
+        <div data-testid="x-about-this-item">
+          <dt class="ux-labels-values__labels"><span>Brand</span></dt>
+          <dd class="ux-labels-values__values"><span>Branded</span></dd>
+        </div>
+        '''
+        row = parse_ebay_product(html, 'https://www.ebay.com/itm/100000000001')
+        self.assertEqual(row['brand'], 'Branded')
         self.assertEqual(row['bullets'], row['item_specifications'])
+        self.assertNotIn('Import', row['item_specifications'])
         self.assertNotIn('Shipping', row['item_specifications'])
+
+    def test_ebay_seller_feedback_stars_are_not_a_product_rating(self):
+        html = '''
+        <h1 class="x-item-title__mainTitle"><span>Drill</span></h1>
+        <div class="fdbk-detail-seller-rating">
+          <span class="fdbk-detail-seller-rating__value"><span class="fb-clipped">4.7 out of 5 stars</span></span>
+        </div>
+        '''
+        row = parse_ebay_product(html, 'https://www.ebay.com/itm/100000000001')
+        self.assertIsNone(row['rating'])
+        self.assertIsNone(row['review_count'])
+
+    def test_ebay_challenge_page_is_not_a_product(self):
+        html = '<html><head><title>Pardon Our Interruption...</title></head><body><h1>Checking your browser before you access eBay.</h1></body></html>'
+        row = parse_ebay_product(html, 'https://www.ebay.com/itm/100000000001')
+        self.assertEqual(row['title'], '')
+        self.assertIsNone(row['price'])
 
     def test_amazon_total_and_price_band(self):
         html = '<span>1-48 of over 50,000 results</span>'
@@ -370,6 +434,38 @@ class ParserTests(TestCase):
         self.assertEqual(rows[0]['rating'], 4.6)
         self.assertEqual(rows[0]['review_count'], 320)
         self.assertEqual(rows[0]['sold'], 18)
+
+    def test_ebay_search_s_card(self):
+        html = '''
+        <li class="s-card" data-listingid="2500219655424533">
+          <a class="s-card__link" href="https://ebay.com/itm/123456?itmmeta=x"></a>
+          <div class="s-card__title"><span>Shop on eBay</span></div>
+        </li>
+        <li class="s-card" data-listingid="116396798118">
+          <a class="s-card__link" href="https://www.ebay.com/itm/116396798118?_skw=airpods&amp;itmmeta=01"></a>
+          <img class="s-card__image" src="https://i.ebayimg.com/images/g/sSoAAeSw/s-l500.webp" />
+          <div class="s-card__title"><span>Apple AirPods Pro 2</span><span class="clipped">Opens in a new window or tab</span></div>
+          <div class="s-card__subtitle"><span>Pre-Owned</span></div>
+          <div class="s-card__attribute-row"><span class="s-card__price">$101.00</span></div>
+          <div class="s-card__attribute-row"><span>Located in United States</span></div>
+          <div class="s-card__attribute-row"><span>8,630 sold</span></div>
+          <div class="s-card__attribute-row"><span>vipoutlet 97.2% positive (1M)</span></div>
+          <div><span class="clipped">4.0 out of 5 stars.</span></div>
+          <span class="s-card__reviews-count"><span aria-hidden="false">5 product ratings</span></span>
+        </li>
+        '''
+        rows = parse_ebay_category(html, 'https://www.ebay.com/sch/i.html?_nkw=airpods')
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row['item_id'], '116396798118')
+        self.assertEqual(row['url'], 'https://www.ebay.com/itm/116396798118')
+        self.assertEqual(row['title'], 'Apple AirPods Pro 2')
+        self.assertEqual(row['price'], 101.0)
+        self.assertEqual(row['rating'], 4.0)
+        self.assertEqual(row['review_count'], 5)
+        self.assertEqual(row['sold'], 8630)
+        self.assertEqual(row['condition'], 'Pre-Owned')
+        self.assertEqual(row['image'], 'https://i.ebayimg.com/images/g/sSoAAeSw/s-l500.webp')
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(prefix='discovery-test-'))

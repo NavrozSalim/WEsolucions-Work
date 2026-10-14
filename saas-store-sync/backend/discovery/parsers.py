@@ -20,7 +20,10 @@ _PRICE_RE = re.compile(r'(?:US\s*)?(?:AU\s*)?\$?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2}
 _RATING_RE = re.compile(r'(\d(?:\.\d)?)\s*out of\s*5', re.I)
 _REVIEWS_RE = re.compile(r'([\d,]+)\s*(?:product\s+)?(?:ratings?|reviews?)', re.I)
 _SOLD_RE = re.compile(r'([\d,]+)\+?\s+sold\b', re.I)
-_SKIP_SPEC_CLASS = ('shipping', 'returns', 'quantity', 'payments', 'delivery', 'tax', 'postage')
+_SKIP_SPEC_CLASS = (
+    'shipping', 'returns', 'quantity', 'payments', 'delivery', 'deliverto', 'tax',
+    'postage', 'importcharges', 'gspmessage',
+)
 _SKIP_SPEC_LABELS = {
     'shipping',
     'delivery',
@@ -30,7 +33,16 @@ _SKIP_SPEC_LABELS = {
     'payment',
     'quantity',
     'postage',
+    'import charges',
 }
+_EBAY_ITEM_MARKERS = (
+    'h1.x-item-title__mainTitle',
+    '[data-testid="x-item-title"]',
+    '.x-price-primary',
+    '[data-testid="x-price-primary"]',
+    '[data-testid="x-about-this-item"]',
+    '.ux-image-carousel',
+)
 _INVENTORY_RE = re.compile(
     r'only\s+(\d+)\s+left in stock|(\d+)\s+left in stock|more than\s+(\d+)\s+available|(\d+)\s+available|last one',
     re.I,
@@ -849,39 +861,60 @@ def _jsonld_rating(item: dict) -> tuple[float | None, int | None]:
     return rating, reviews
 
 
+def _ebay_value_text(node) -> str:
+    """Visible text of an item-specifics value, without “Read more” and screen-reader copies."""
+    if node is None:
+        return ''
+    copy = BeautifulSoup(str(node), 'html.parser')
+    for junk in copy.select(
+        '[aria-hidden="true"], .clipped, button, '
+        '.ux-expandable-textual-display-block-inline__control, [data-testid="viewMore"]'
+    ):
+        junk.decompose()
+    return _text(copy)
+
+
+def _ebay_spec_pair(label: str, value: str, seen: set, pairs: list) -> None:
+    label = (label or '').rstrip(':').strip()
+    value = (value or '').strip()
+    if label:
+        value = re.sub(rf'^{re.escape(label)}\s*:\s*', '', value, flags=re.I)
+    key = label.lower()
+    if not label or not value or key in _SKIP_SPEC_LABELS or key in seen:
+        return
+    seen.add(key)
+    pairs.append((label, value))
+
+
 def _ebay_specifics(root) -> list[tuple[str, str]]:
-    """Item specifics only. Shipping, returns, and quantity rows are left out."""
-    pairs = []
-    seen = set()
-    for row in root.select('.ux-labels-values, [data-testid="ux-labels-values"]'):
-        classes = ' '.join(row.get('class') or [])
+    """The Item specifics table. Shipping, import, returns, and payment rows are left out."""
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    section = (
+        root.select_one('[data-testid="x-about-this-item"]')
+        or root.select_one('.x-about-this-item')
+        or root.select_one('#viTabs_0_is')
+    )
+    if section is not None:
+        for label_node in section.select('dt'):
+            value_node = label_node.find_next_sibling('dd')
+            _ebay_spec_pair(_ebay_value_text(label_node), _ebay_value_text(value_node), seen, pairs)
+        if pairs:
+            return pairs
+    scope = section or root
+    for row in scope.select('.ux-labels-values, [data-testid="ux-labels-values"]'):
+        classes = ' '.join(row.get('class') or []).lower()
         if any(flag in classes for flag in _SKIP_SPEC_CLASS):
             continue
         label_node = (
             row.select_one('.ux-labels-values__labels')
             or row.select_one('.ux-labels-values__labels-content')
-            or row.select_one('dt')
         )
         value_node = (
             row.select_one('.ux-labels-values__values')
             or row.select_one('.ux-labels-values__values-content')
-            or row.select_one('dd')
         )
-        label = _text(label_node).rstrip(':').strip()
-        value = _text(value_node)
-        if (not label or not value) and row.select('.ux-textspans'):
-            spans = [_text(span) for span in row.select('.ux-textspans') if _text(span)]
-            if not label and spans:
-                label = spans[0].rstrip(':').strip()
-            if not value and len(spans) > 1:
-                value = spans[1]
-        if value.lower().startswith(label.lower()) and label:
-            value = value[len(label):].lstrip(' :')
-        label_key = label.lower()
-        if not label or not value or label_key in _SKIP_SPEC_LABELS or label_key in seen:
-            continue
-        seen.add(label_key)
-        pairs.append((label, value))
+        _ebay_spec_pair(_ebay_value_text(label_node), _ebay_value_text(value_node), seen, pairs)
     return pairs
 
 
@@ -902,18 +935,26 @@ def _ebay_brand(pairs: list[tuple[str, str]], root) -> str:
 
 
 def _ebay_rating_and_reviews(root) -> tuple[float | None, int | None]:
+    """Product reviews only. Seller feedback stars (“Accurate description 4.9”) are not a product rating."""
     rating = None
     reviews = _review_count(
-        root.select_one('.x-review-ratings'),
-        root.select_one('.x-review-details'),
-        root.select_one('[data-testid="x-review-details"]'),
         root.select_one('.ux-summary__count'),
-        root.select_one('a[href*="#rwid"]'),
+        root.select_one('.x-review-ratings'),
         root.select_one('.s-item__reviews-count'),
+        root.select_one('a[href*="#rwid"]'),
     )
+    score = _text(
+        root.select_one('[data-testid="review--start--rating"]')
+        or root.select_one('.ux-summary__start--rating')
+    )
+    if re.fullmatch(r'\d(?:\.\d)?', score or ''):
+        rating = float(score)
     for node in root.select(
-        '.x-star-rating, [data-testid="x-star-rating"], [aria-label*="out of 5"], .s-item__reviews'
+        '[data-testid="ux-star-rating"] [aria-label], .ux-star-rating [aria-label], '
+        '.x-star-rating, [data-testid="x-star-rating"], .s-item__reviews [aria-label], .s-item__reviews'
     ):
+        if node.find_parent(class_=re.compile(r'fdbk|seller', re.I)):
+            continue
         blob = ' '.join(
             part for part in (
                 node.get('aria-label') or '',
@@ -945,9 +986,50 @@ def _ebay_next_price(card) -> float | None:
     return _price(_text(node))
 
 
+def _ebay_card_image(card) -> str:
+    for image in card.select('img.s-card__image, img'):
+        for attr in ('src', 'data-defer-load', 'data-src'):
+            value = image.get(attr) or ''
+            if 'ebayimg.com' in value:
+                return value
+    return ''
+
+
+def _parse_ebay_s_cards(soup, page_url: str) -> list[dict]:
+    """Search results drawn as ``li.s-card``."""
+    rows = []
+    for card in soup.select('li.s-card'):
+        link = card.select_one('a.s-card__link[href*="/itm/"]') or card.select_one('a[href*="/itm/"]')
+        href = _abs(page_url, link.get('href') if link else '')
+        item_id = extract_ebay_item_id(card.get('data-listingid') or '') or extract_ebay_item_id(href)
+        title = _ebay_value_text(card.select_one('.s-card__title'))
+        title = re.sub(r'[\s\-–]*Opens in a new window or tab\s*$', '', title, flags=re.I)
+        title = title.strip().rstrip('-–').strip()
+        if not item_id or not title or title.lower() == 'shop on ebay':
+            continue
+        reviews = _review_count(card.select_one('.s-card__reviews-count'))
+        rating_match = _RATING_RE.search(_text(card))
+        subtitles = [_text(node) for node in card.select('.s-card__subtitle') if _text(node)]
+        rows.append({
+            'item_id': item_id,
+            'url': f'{_abs(page_url, "/").rstrip("/")}/itm/{item_id}',
+            'title': title,
+            'price': _price(_text(card.select_one('.s-card__price'))),
+            'rating': float(rating_match.group(1)) if rating_match else None,
+            'review_count': reviews,
+            'sold': _sold_count(*card.select('.s-card__attribute-row')),
+            'image': _ebay_card_image(card),
+            'condition': subtitles[-1] if subtitles else '',
+            'category': '',
+        })
+    return rows
+
+
 def parse_ebay_category(html: str, page_url: str) -> list[dict]:
     soup = _soup(html)
-    rows = []
+    rows = _parse_ebay_s_cards(soup, page_url)
+    if rows:
+        return rows
     for card in soup.select('li.s-item, .s-item'):
         link = card.select_one('a.s-item__link') or card.select_one('a[href*="/itm/"]')
         href = _abs(page_url, link.get('href') if link else '')
@@ -975,10 +1057,24 @@ def parse_ebay_category(html: str, page_url: str) -> list[dict]:
     return rows
 
 
+def is_ebay_item_page(html: str) -> bool:
+    """An eBay listing page. A challenge or error page with a heading is not one."""
+    soup = _soup(html)
+    if any(soup.select_one(selector) is not None for selector in _EBAY_ITEM_MARKERS):
+        return True
+    return bool(_jsonld_products(soup))
+
+
 def parse_ebay_product(html: str, page_url: str) -> dict:
     soup = _soup(html)
     item_id = extract_ebay_item_id(page_url)
-    title = _text(soup.select_one('h1.x-item-title__mainTitle')) or _text(soup.select_one('h1'))
+    if not is_ebay_item_page(html):
+        return {'item_id': item_id, 'url': page_url, 'title': '', 'price': None}
+    title = (
+        _text(soup.select_one('h1.x-item-title__mainTitle'))
+        or _text(soup.select_one('[data-testid="x-item-title"] h1'))
+        or _text(soup.select_one('h1'))
+    )
     price = _price(_text(soup.select_one('.x-price-primary')))
     seller = _text(soup.select_one('.x-sellercard-atf__info__about-seller')) or _text(
         soup.select_one('span.ux-textspans--BOLD')

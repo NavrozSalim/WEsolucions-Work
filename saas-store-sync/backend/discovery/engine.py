@@ -162,7 +162,15 @@ def _ebay_session(marketplace: str):
 
 def _blocked(html: str) -> bool:
     sample = (html or '')[:8000].lower()
-    markers = ('captcha', 'robot check', 'enter the characters you see', 'sorry, we just need to make sure')
+    markers = (
+        'captcha',
+        'robot check',
+        'enter the characters you see',
+        'sorry, we just need to make sure',
+        'pardon our interruption',
+        'checking your browser',
+        'splashui/challenge',
+    )
     return any(marker in sample for marker in markers)
 
 
