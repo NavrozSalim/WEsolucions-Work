@@ -9,6 +9,23 @@ from django.test import SimpleTestCase
 from sync.tasks import run_store_failed_zero_inventory
 
 
+class ManualSyncIncludesFailedTests(SimpleTestCase):
+    def test_manual_sync_queryset_includes_failed_stock(self):
+        from catalog.marketplace_push import manual_sync_mappings
+
+        store = MagicMock()
+        filtered = MagicMock()
+        with patch('catalog.models.ProductMapping.objects') as objects:
+            objects.filter.return_value = filtered
+            manual_sync_mappings(store, vendor_id='vendor-1')
+        statuses = objects.filter.call_args[1]['sync_status__in']
+        self.assertIn('failed', statuses)
+        self.assertIn('needs_attention', statuses)
+        self.assertIn('scraped', statuses)
+        self.assertNotIn('pending', statuses)
+        filtered.filter.assert_called_once_with(product__vendor_id='vendor-1')
+
+
 class FailedZeroInventoryTests(SimpleTestCase):
     def test_failed_zero_only_pushes_failed_listings(self):
         adapter = MagicMock()

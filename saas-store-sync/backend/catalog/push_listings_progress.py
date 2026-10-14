@@ -48,18 +48,15 @@ def _infer_sync_step(message: str, metadata: dict) -> str:
 
 
 def build_push_listings_progress_payload(store) -> dict[str, Any]:
-    from catalog.models import CatalogActivityLog, ProductMapping
+    from catalog.models import CatalogActivityLog
     from sync.push_listings_lock import push_listings_lock_key
 
     store_id = str(store.id)
     lock_owner = cache.get(push_listings_lock_key(store_id))
 
-    eligible_total = ProductMapping.objects.filter(
-        store=store,
-        is_active=True,
-        sync_status__in=['synced', 'scraped'],
-        store_price__isnull=False,
-    ).count()
+    from catalog.marketplace_push import manual_sync_mappings
+
+    eligible_total = manual_sync_mappings(store).count()
 
     since = timezone.now() - timedelta(hours=6)
     logs = list(

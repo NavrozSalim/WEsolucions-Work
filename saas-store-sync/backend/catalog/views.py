@@ -1683,7 +1683,7 @@ class CatalogActivityLogListView(APIView):
 
 
 class CatalogPushListingsView(APIView):
-    """Push local price/stock to marketplace for scraped/synced products only (no vendor scrape)."""
+    """Push local price/stock, including failed rows whose stock is already 0."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, store_pk):
@@ -1722,14 +1722,9 @@ class CatalogPushListingsView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        listing_qs = ProductMapping.objects.filter(
-            store=store,
-            is_active=True,
-            sync_status__in=['synced', 'scraped'],
-            store_price__isnull=False,
-        )
-        if push_vendor_id:
-            listing_qs = listing_qs.filter(product__vendor_id=push_vendor_id)
+        from catalog.marketplace_push import manual_sync_mappings
+
+        listing_qs = manual_sync_mappings(store, push_vendor_id)
         total_listings = listing_qs.count()
 
         run_inline = request.data.get('run_inline') or request.query_params.get('inline') == '1'

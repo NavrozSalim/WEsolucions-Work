@@ -1661,8 +1661,10 @@ def _return_push_listings_cancelled(store, succeeded, failed, skipped, total_to_
 
 def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_id=None):
     """
-    Push local store_price / store_stock to the marketplace for listings that are
-    already scraped or synced — no vendor URL scrape (excludes pending / failed / needs_attention).
+    Push local store_price / store_stock to the marketplace.
+
+    Includes scraped, synced, and failed rows. A failed Costway SKU already has
+    stock 0 locally; Manual sync sends that 0. Pending rows are left out.
 
     disable_schedule: if True (manual sync from Catalog), turn off SyncSchedule.is_active for this store.
     """
@@ -1711,16 +1713,11 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
             action_type='schedule_paused',
         )
 
+    from catalog.marketplace_push import manual_sync_mappings
+
     adapter = get_adapter(store)
     price_by_vid, price_fb, _, _ = _build_store_vendor_pricing_inventory_caches(store)
-    qs = ProductMapping.objects.filter(
-        store=store,
-        is_active=True,
-        sync_status__in=['synced', 'scraped'],
-        store_price__isnull=False,
-    ).select_related('product', 'product__vendor')
-    if vendor_id:
-        qs = qs.filter(product__vendor_id=vendor_id)
+    qs = manual_sync_mappings(store, vendor_id).select_related('product', 'product__vendor')
     total_to_push = qs.count()
 
     succeeded, failed, skipped = 0, 0, 0

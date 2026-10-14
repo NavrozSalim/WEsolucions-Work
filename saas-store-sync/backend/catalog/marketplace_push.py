@@ -11,6 +11,25 @@ logger = logging.getLogger(__name__)
 
 _TWOPL = Decimal('0.01')
 
+# Pending rows have not been priced yet. Failed Costway rows already have stock 0
+# and must be included so Manual sync sends that 0 to the marketplace.
+MANUAL_SYNC_STATUSES = ('synced', 'scraped', 'failed', 'needs_attention')
+
+
+def manual_sync_mappings(store, vendor_id=None):
+    """Listings Manual sync should push, including failed rows whose stock is 0."""
+    from catalog.models import ProductMapping
+
+    qs = ProductMapping.objects.filter(
+        store=store,
+        is_active=True,
+        sync_status__in=list(MANUAL_SYNC_STATUSES),
+        store_price__isnull=False,
+    )
+    if vendor_id:
+        qs = qs.filter(product__vendor_id=vendor_id)
+    return qs
+
 
 def quantize_posted_price(price) -> Decimal | None:
     if price is None:
