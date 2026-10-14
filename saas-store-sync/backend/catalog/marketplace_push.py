@@ -14,6 +14,29 @@ _TWOPL = Decimal('0.01')
 # Pending rows have not been priced yet. Failed Costway rows already have stock 0
 # and must be included so Manual sync sends that 0 to the marketplace.
 MANUAL_SYNC_STATUSES = ('synced', 'scraped', 'failed', 'needs_attention')
+_KEEP_FAILED_STATUSES = frozenset({'failed', 'needs_attention'})
+
+
+def mark_mapping_pushed(pm, *, now=None, clear_error: bool = False, scrape_error: str | None = None) -> None:
+    """Record a successful stock push.
+
+    A failed or needs-attention row stays failed. The push only sent its current
+    stock. Scraped and synced rows become synced.
+    """
+    from django.utils import timezone
+
+    if now is None:
+        now = timezone.now()
+    previous = (getattr(pm, 'sync_status', None) or '')
+    pm.last_sync_time = now
+    fields = ['last_sync_time']
+    if previous not in _KEEP_FAILED_STATUSES:
+        pm.sync_status = 'synced'
+        fields.append('sync_status')
+        if clear_error:
+            pm.scrape_error = (scrape_error or '')[:500] or None
+            fields.append('scrape_error')
+    pm.save(update_fields=fields)
 
 
 def manual_sync_mappings(store, vendor_id=None):
@@ -194,11 +217,12 @@ def _apply_sears_bulk_push_results(
     for sku, pm in pm_by_sku.items():
         if sku in ok_set:
             push_ok += 1
-            pm.sync_status = 'synced'
-            pm.last_sync_time = now_ok
-            warn = warnings_by_sku.get(sku)
-            pm.scrape_error = (warn or '')[:500] if warn else None
-            pm.save(update_fields=['sync_status', 'last_sync_time', 'scrape_error'])
+            mark_mapping_pushed(
+                pm,
+                now=now_ok,
+                clear_error=True,
+                scrape_error=warnings_by_sku.get(sku),
+            )
         elif not any(f.get('sku') == sku for f in failed_list):
             continue
 

@@ -1327,9 +1327,9 @@ def run_store_update(self, store_id, source='beat'):
                     ),
                 )
                 push_ok += 1
-                pm.sync_status = 'synced'
-                pm.last_sync_time = timezone.now()
-                pm.save(update_fields=['sync_status', 'last_sync_time'])
+                from catalog.marketplace_push import mark_mapping_pushed
+
+                mark_mapping_pushed(pm)
         except Exception as push_err:
             logger.warning(
                 "Push failed for scraped listing %s: %s",
@@ -1384,9 +1384,9 @@ def run_store_update(self, store_id, source='beat'):
                 for pm, sku, _price, _stock in bulk_queue:
                     if str(sku) in ok_set:
                         push_ok += 1
-                        pm.sync_status = 'synced'
-                        pm.last_sync_time = now_ok
-                        pm.save(update_fields=['sync_status', 'last_sync_time'])
+                        from catalog.marketplace_push import mark_mapping_pushed
+
+                        mark_mapping_pushed(pm, now=now_ok)
                 for it in failed_list[:50]:
                     push_fail += 1
                     _record_push_error(it.get('sku') or '', Exception(it.get('error') or 'Bulk push failed'))
@@ -2006,9 +2006,9 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                 for pm, listing_id in queued_pairs:
                     if listing_id in ok_set:
                         succeeded += 1
-                        pm.sync_status = 'synced'
-                        pm.last_sync_time = now_ok
-                        pm.save(update_fields=['sync_status', 'last_sync_time'])
+                        from catalog.marketplace_push import mark_mapping_pushed
+
+                        mark_mapping_pushed(pm, now=now_ok)
                         ReverbUpdateLog.objects.create(
                             product_mapping=pm,
                             status=ReverbUpdateLog.Status.SUCCESS,
@@ -2065,10 +2065,9 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                         )
                         if not ok:
                             raise ValueError(err_or_warn or 'marketplace_push_failed')
-                        now_ok = timezone.now()
-                        pm.sync_status = 'synced'
-                        pm.last_sync_time = now_ok
-                        pm.save(update_fields=['sync_status', 'last_sync_time'])
+                        from catalog.marketplace_push import mark_mapping_pushed
+
+                        mark_mapping_pushed(pm)
                         ReverbUpdateLog.objects.create(
                             product_mapping=pm,
                             status=ReverbUpdateLog.Status.SUCCESS,

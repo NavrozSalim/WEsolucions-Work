@@ -10,6 +10,22 @@ from sync.tasks import run_store_failed_zero_inventory
 
 
 class ManualSyncIncludesFailedTests(SimpleTestCase):
+    def test_failed_mapping_stays_failed_after_a_zero_push(self):
+        from catalog.marketplace_push import mark_mapping_pushed
+
+        failed = MagicMock()
+        failed.sync_status = 'failed'
+        failed.scrape_error = 'costway_feed_sku_missing'
+        mark_mapping_pushed(failed, clear_error=True, scrape_error='warning')
+        self.assertEqual(failed.sync_status, 'failed')
+        self.assertEqual(failed.scrape_error, 'costway_feed_sku_missing')
+        self.assertNotIn('sync_status', failed.save.call_args[1]['update_fields'])
+
+        scraped = MagicMock()
+        scraped.sync_status = 'scraped'
+        mark_mapping_pushed(scraped)
+        self.assertEqual(scraped.sync_status, 'synced')
+
     def test_manual_sync_queryset_includes_failed_stock(self):
         from catalog.marketplace_push import manual_sync_mappings
 
