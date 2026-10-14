@@ -89,6 +89,17 @@ def _price(text: str):
         return None
 
 
+def _digits_int(text: str) -> int | None:
+    """A count such as 1,234. A comma with no digits is not a count."""
+    digits = re.sub(r'[^\d]', '', text or '')
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
 def _inventory_count(*parts) -> int | None:
     """Quantity left, when the page states it. “In stock” alone is not a count."""
     blob = ' '.join(part for part in parts if part)
@@ -219,13 +230,15 @@ def _review_count(*sources) -> int | None:
     for blob in blobs:
         match = _REVIEWS_RE.search(blob or '')
         if match:
-            return int(match.group(1).replace(',', ''))
+            count = _digits_int(match.group(1))
+            if count is not None:
+                return count
     for blob in blobs:
         match = re.fullmatch(r'([\d,]{1,12})', (blob or '').strip())
         if not match:
             continue
-        value = int(match.group(1).replace(',', ''))
-        if value > 0:
+        value = _digits_int(match.group(1))
+        if value:
             return value
     return None
 
@@ -701,10 +714,14 @@ def parse_amazon_category(html: str, page_url: str) -> list[dict]:
             rating = float(match.group(1)) if match else None
         reviews = None
         review_node = card.select_one('[aria-label*="rating"]') or card.select_one('.a-size-base.s-underline-text')
-        blob = _text(card)
-        review_match = _REVIEWS_RE.search(_text(review_node) if review_node else '') or _REVIEWS_RE.search(blob)
-        if review_match:
-            reviews = int(review_match.group(1).replace(',', ''))
+        card_text = _text(card)
+        for sample in (_text(review_node) if review_node else '', card_text):
+            review_match = _REVIEWS_RE.search(sample)
+            if not review_match:
+                continue
+            reviews = _digits_int(review_match.group(1))
+            if reviews is not None:
+                break
         image = card.select_one('img')
         rows.append({
             'asin': asin,
@@ -825,7 +842,9 @@ def _sold_count(*sources) -> int | None:
         for blob in blobs:
             match = _SOLD_RE.search(blob or '')
             if match:
-                return int(match.group(1).replace(',', ''))
+                count = _digits_int(match.group(1))
+                if count is not None:
+                    return count
     return None
 
 
@@ -1244,7 +1263,7 @@ def parse_ebay_product(html: str, page_url: str) -> dict:
             if rating is None:
                 rating = float(stated.group(1))
             if reviews is None:
-                reviews = int(stated.group(2).replace(',', ''))
+                reviews = _digits_int(stated.group(2))
     delivery = _ebay_delivery(soup)
     sold = _sold_count(
         soup.select_one('.x-quantity__availability'),

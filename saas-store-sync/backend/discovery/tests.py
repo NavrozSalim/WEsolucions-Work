@@ -82,6 +82,8 @@ class RuleAndDedupeTests(TestCase):
         self.assertEqual(columns[3:13], list(IMAGE_COLUMNS))
         self.assertEqual(columns[-1], 'brand')
         self.assertNotIn('images', columns)
+        category_columns = output_columns('amazon_us', ['title'], 'category')
+        self.assertEqual(category_columns[:3], ['asin', 'url', 'category_url'])
 
 
 class ParserTests(TestCase):
@@ -103,6 +105,22 @@ class ParserTests(TestCase):
         self.assertEqual(rows[0]['price'], 49.99)
         self.assertEqual(rows[0]['rating'], 4.6)
         self.assertEqual(rows[0]['review_count'], 320)
+
+    def test_amazon_category_card_with_an_empty_rating_label_is_kept(self):
+        html = '''
+        <div data-asin="B0SAMPLE02">
+          <h2><a href="/dp/B0SAMPLE02"><span>Selfie Stick</span></a></h2>
+          <span class="a-price"><span class="a-offscreen">$19.99</span></span>
+          <span class="a-icon-alt">4.3 out of 5 stars</span>
+          <span class="a-size-base s-underline-text">, ratings</span>
+        </div>
+        '''
+        rows = parse_amazon_category(html, 'https://www.amazon.com/s?k=selfie')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['asin'], 'B0SAMPLE02')
+        self.assertEqual(rows[0]['price'], 19.99)
+        self.assertEqual(rows[0]['rating'], 4.3)
+        self.assertIsNone(rows[0]['review_count'])
 
     def test_amazon_price_keeps_cents_and_drops_sponsored_links(self):
         html = '''
@@ -617,6 +635,30 @@ class ParserTests(TestCase):
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(prefix='discovery-test-'))
 class AmazonCategoryWalkTests(TestCase):
+    def test_category_rows_keep_the_uploaded_link(self):
+        html = (
+            '<div data-asin="B0SAMPLE01">'
+            '<h2><a href="/dp/B0SAMPLE01">Mixer</a></h2></div>'
+        )
+
+        def fake_fetch(url, session=None):
+            if 'page=2' in url or 'page%3D2' in url:
+                return '<html></html>'
+            return html
+
+        saved = []
+        with patch('discovery.engine._fetch', side_effect=fake_fetch):
+            rows = _live_category_rows(
+                'https://www.amazon.com/s?k=selfie+stick',
+                'amazon_us',
+                [],
+                on_batch=saved.append,
+            )
+        self.assertEqual(rows[0]['asin'], 'B0SAMPLE01')
+        self.assertEqual(rows[0]['category_url'], 'https://www.amazon.com/s?k=selfie+stick')
+        self.assertEqual(saved[0][0]['category_url'], 'https://www.amazon.com/s?k=selfie+stick')
+        self.assertNotEqual(rows[0]['url'], rows[0]['category_url'])
+
     def test_category_walks_past_300_products(self):
         def fake_fetch(url, session=None):
             query = __import__('urllib.parse', fromlist=['parse_qs']).parse_qs(

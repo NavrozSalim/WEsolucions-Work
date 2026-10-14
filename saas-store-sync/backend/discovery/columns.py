@@ -17,6 +17,7 @@ MODES = (
 AMAZON_CATEGORY = (
     'asin',
     'url',
+    'category_url',
     'title',
     'price',
     'rating',
@@ -49,6 +50,7 @@ AMAZON_PRODUCT = (
 EBAY_CATEGORY = (
     'item_id',
     'url',
+    'category_url',
     'title',
     'price',
     'rating',
@@ -91,11 +93,11 @@ COLUMNS = {
 }
 
 # Category output is meant to feed the product-details step.
-_AMAZON_CATEGORY_DEFAULT = ('asin', 'url', 'title', 'price', 'rating', 'review_count', 'category')
+_AMAZON_CATEGORY_DEFAULT = ('asin', 'url', 'category_url', 'title', 'price', 'rating', 'review_count', 'category')
 _AMAZON_PRODUCT_DEFAULT = (
     'asin', 'url', 'title', 'brand', 'price', 'rating', 'review_count', 'category', 'availability', 'inventory', 'delivery_date', 'free_delivery', 'ships_from', 'sold_by', 'description',
 )
-_EBAY_CATEGORY_DEFAULT = ('item_id', 'url', 'title', 'price', 'rating', 'review_count', 'sold', 'category')
+_EBAY_CATEGORY_DEFAULT = ('item_id', 'url', 'category_url', 'title', 'price', 'rating', 'review_count', 'sold', 'category')
 _EBAY_PRODUCT_DEFAULT = (
     'item_id', 'url', 'title', 'brand', 'price', 'rating', 'review_count', 'sold', 'item_specifications', 'category', 'availability', 'inventory', 'delivery_date',
 )
@@ -180,12 +182,16 @@ def fill_image_columns(row: dict) -> dict:
     return row
 
 
-def output_columns(marketplace: str, selected: list[str]) -> list[str]:
+def output_columns(marketplace: str, selected: list[str], mode: str | None = None) -> list[str]:
     """Always keep the product id and URL so the file can feed the next step.
 
     Selecting images writes image-01 through image-10 instead of one cell.
+    A category file also keeps the link from the upload, so a stopped job
+    still shows which category was last saved.
     """
     required = [ID_FIELD[marketplace], 'url']
+    if mode == 'category':
+        required.append('category_url')
     ordered = []
     for column in required + list(selected):
         if column == 'images':

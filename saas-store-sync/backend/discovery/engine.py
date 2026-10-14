@@ -368,11 +368,21 @@ def _load_inputs(job: DiscoveryJob) -> list[dict]:
     return read_spreadsheet(open_bytes(blob, job.original_filename))
 
 
+def _stamp_category_url(batch: list[dict], source: str) -> list[dict]:
+    """Remember the category link from the file on every product from that link."""
+    for row in batch:
+        row['category_url'] = source
+    return batch
+
+
 def _sample_category_rows(job: DiscoveryJob, urls: list[str]) -> list[dict]:
     catalog = sample_catalog(job.marketplace)
     rows = []
-    for _url in urls:
-        rows.extend(dict(item) for item in catalog)
+    for source in urls:
+        for item in catalog:
+            row = dict(item)
+            row['category_url'] = source
+            rows.append(row)
     return rows
 
 
@@ -601,9 +611,16 @@ def _live_category_rows(
     price bands.
     """
     rows = []
+    source = url
+
+    def emit(batch, source=source):
+        _stamp_category_url(batch, source)
+        if on_batch:
+            on_batch(batch)
+
     if is_amazon(marketplace):
         grid = amazon_results_url(url) or url
-        _collect_amazon(grid, None, None, 0, session, errors, set(), rows, on_batch, stop)
+        _collect_amazon(grid, None, None, 0, session, errors, set(), rows, emit, stop)
         return rows[:MAX_CATEGORY_PRODUCTS]
 
     pages = [ebay_results_url(_with_ebay_zip(url, zip_code))]
@@ -654,8 +671,7 @@ def _live_category_rows(
                 errors.append(f'{current}: no product cards found')
             continue
         rows.extend(fresh)
-        if on_batch:
-            on_batch(fresh)
+        emit(fresh)
         if not discovered_follows:
             discovered_follows = True
             for follow in listing_follow_urls(html, current):
@@ -840,6 +856,7 @@ def execute_job(job_id) -> None:
         columns = output_columns(
             job.marketplace,
             clean_columns(job.marketplace, job.mode, job.columns),
+            job.mode,
         )
         job.columns = columns
         job.save(update_fields=['columns'])
