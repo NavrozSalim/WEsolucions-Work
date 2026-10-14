@@ -21,6 +21,7 @@ from discovery.parsers import (
     listing_follow_urls,
     parse_amazon_category,
     parse_amazon_product,
+    ebay_results_url,
     parse_ebay_category,
     parse_ebay_product,
 )
@@ -440,6 +441,15 @@ class ParserTests(TestCase):
         extra = parse_amazon_category(embedded, 'https://www.amazon.com/b/?node=8882491011')
         self.assertEqual([row['asin'] for row in extra], ['B0SAMPLE08'])
         self.assertEqual(extra[0]['url'], 'https://www.amazon.com/dp/B0SAMPLE08')
+
+    def test_ebay_search_asks_for_240_listings_per_page(self):
+        widened = ebay_results_url('https://www.ebay.com/sch/i.html?_nkw=drill')
+        self.assertIn('_ipg=240', widened)
+        kept = ebay_results_url('https://www.ebay.com/sch/i.html?_nkw=drill&_ipg=60')
+        self.assertIn('_ipg=60', kept)
+        self.assertNotIn('_ipg=240', kept)
+        item = 'https://www.ebay.com/itm/100000000001'
+        self.assertEqual(ebay_results_url(item), item)
 
     def test_ebay_category_card(self):
         html = '''

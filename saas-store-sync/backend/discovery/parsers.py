@@ -621,6 +621,24 @@ def amazon_with_price(url: str, low_cents: int, high_cents: int) -> str:
     ))
 
 
+def ebay_results_url(url: str) -> str:
+    """Ask an eBay search for 240 listings per page. The default is about 60."""
+    parts = urlsplit(url or '')
+    if 'ebay.' not in (parts.netloc or '').lower() or '/itm/' in (parts.path or '').lower():
+        return url
+    query = parse_qs(parts.query, keep_blank_values=True)
+    if query.get('_ipg'):
+        return url
+    query['_ipg'] = ['240']
+    return urlunsplit((
+        parts.scheme,
+        parts.netloc,
+        parts.path or '/',
+        urlencode(query, doseq=True),
+        '',
+    ))
+
+
 def with_page(url: str, page: int) -> str:
     """Search result page N. Amazon uses ``page``, eBay uses ``_pgn``."""
     parts = urlsplit(url)

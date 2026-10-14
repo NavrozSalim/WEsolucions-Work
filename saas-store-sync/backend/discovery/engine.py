@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import requests
@@ -25,6 +27,7 @@ from .parsers import (
     amazon_results_url,
     amazon_with_price,
     listing_follow_urls,
+    ebay_results_url,
     next_page_url,
     parse_amazon_category,
     parse_amazon_product,
@@ -58,6 +61,8 @@ MAX_CATEGORY_PRODUCTS = 100_000
 _AMAZON_PRICE_CAP_CENTS = 2_000_000
 _AMAZON_MIN_BAND_CENTS = 100
 FETCH_TIMEOUT = 25
+# Product pages are fetched together. More than this gets eBay to refuse the server.
+EBAY_FETCH_WORKERS = 4
 
 _UA = (
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -142,6 +147,28 @@ def _amazon_session(marketplace: str, zip_code: str):
     except Exception:
         logger.warning('Could not set Amazon delivery zip %s', zip_code)
     return session
+
+
+_ebay_thread_sessions = threading.local()
+
+
+def _thread_ebay_session(parent):
+    """One browser session per fetch thread. The shared session is not safe to share."""
+    current = getattr(_ebay_thread_sessions, 'session', None)
+    if current is not None:
+        return current
+    current = _browser_session()
+    if parent is not None:
+        try:
+            current.headers.update(dict(parent.headers))
+        except Exception:
+            pass
+        try:
+            current.cookies.update(parent.cookies)
+        except Exception:
+            pass
+    _ebay_thread_sessions.session = current
+    return current
 
 
 def _ebay_session(marketplace: str):
@@ -424,7 +451,7 @@ def _live_category_rows(
         _collect_amazon(grid, None, None, 0, session, errors, set(), rows, on_batch, stop)
         return rows[:MAX_CATEGORY_PRODUCTS]
 
-    pages = [_with_ebay_zip(url, zip_code)]
+    pages = [ebay_results_url(_with_ebay_zip(url, zip_code))]
     seen_urls = set()
     seen_ids = set()
     discovered_follows = False
@@ -468,7 +495,7 @@ def _live_category_rows(
             discovered_follows = True
             for follow in listing_follow_urls(html, current):
                 _queue_page(pages, seen_urls, follow)
-        _queue_page(pages, seen_urls, next_page_url(html, current))
+        _queue_page(pages, seen_urls, ebay_results_url(next_page_url(html, current)))
     return rows[:MAX_CATEGORY_PRODUCTS]
 
 
@@ -508,6 +535,46 @@ def _category_urls(job: DiscoveryJob, inputs: list[dict]) -> list[str]:
     if not urls:
         raise DiscoveryError('Add at least one category URL.')
     return urls
+
+
+def _fetch_ebay_products(rows, marketplace, errors, session, table, stop) -> None:
+    """Open several eBay product pages at once. Writes stay on this thread."""
+
+    def one(row):
+        local_errors = []
+        parsed = _live_product_row(
+            row,
+            marketplace,
+            local_errors,
+            _thread_ebay_session(session),
+        )
+        if parsed:
+            fill_image_columns(parsed)
+        return parsed, local_errors
+
+    window = []
+
+    def flush() -> None:
+        if not window:
+            return
+        with ThreadPoolExecutor(max_workers=EBAY_FETCH_WORKERS) as pool:
+            results = list(pool.map(one, list(window)))
+        fresh = []
+        for parsed, local_errors in results:
+            errors.extend(local_errors)
+            if parsed:
+                fresh.append(parsed)
+        if fresh:
+            table.add(fresh)
+        window.clear()
+
+    for row in rows:
+        if stop():
+            raise DiscoveryCancelled()
+        window.append(row)
+        if len(window) >= EBAY_FETCH_WORKERS * 2:
+            flush()
+    flush()
 
 
 def execute_job(job_id) -> None:
@@ -586,6 +653,7 @@ def execute_job(job_id) -> None:
             unique_inputs, pre_dupes = dedupe_rows(job.marketplace, stamped)
             if not resume:
                 table.duplicates += pre_dupes
+            ebay_pending = []
             for row in unique_inputs:
                 _raise_if_stopped(job.id)
                 done_key = product_key(job.marketplace, row)
@@ -598,6 +666,9 @@ def execute_job(job_id) -> None:
                     table.removed_by_rules += 1
                     table.scraped += 1
                     continue
+                if not job.use_sample and is_ebay(job.marketplace):
+                    ebay_pending.append(row)
+                    continue
                 parsed = (
                     _sample_product_row(job, row)
                     if job.use_sample
@@ -606,6 +677,15 @@ def execute_job(job_id) -> None:
                 if parsed:
                     fill_image_columns(parsed)
                     table.add([parsed])
+            if ebay_pending:
+                _fetch_ebay_products(
+                    ebay_pending,
+                    job.marketplace,
+                    errors,
+                    session,
+                    table,
+                    stop,
+                )
 
         kept_rows = [
             item.data for item in job.products.order_by('created_at')
