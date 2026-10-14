@@ -250,6 +250,8 @@ def _ebay_session(marketplace: str):
 
 
 def _close_ebay_browser(session) -> None:
+    if session is None:
+        return
     root = getattr(session, '_parent_session', None) or session
     state = getattr(root, '_browser_state', None)
     if not state:
@@ -262,8 +264,18 @@ def _close_ebay_browser(session) -> None:
         pass
 
 
-def _ebay_browser_fallback(url: str, marketplace: str, session) -> dict | None:
-    """Warm eBay in headless Chrome when HTTP is challenged, and hand cookies to HTTP."""
+def _ebay_html_usable(html: str, url: str) -> bool:
+    """A real listing or search page. A challenge page is not one."""
+    if not html or _blocked(html):
+        return False
+    parsed = parse_ebay_product(html, url)
+    if parsed.get('title') or parsed.get('price') is not None:
+        return True
+    return bool(parse_ebay_category(html, url))
+
+
+def _ebay_browser_html(url: str, marketplace: str, session) -> str | None:
+    """Open the page in headless Chrome and keep the cookies for the next HTTP request."""
     if session is None:
         return None
     root = getattr(session, '_parent_session', None) or session
@@ -273,10 +285,8 @@ def _ebay_browser_fallback(url: str, marketplace: str, session) -> dict | None:
             _copy_session_cookies(root, session)
             try:
                 html = _fetch(url, session)
-                if not _blocked(html):
-                    parsed = parse_ebay_product(html, url)
-                    if parsed.get('title') or parsed.get('price') is not None:
-                        return parsed
+                if _ebay_html_usable(html, url):
+                    return html
             except Exception:
                 pass
         if getattr(root, '_browser_failures', 0) >= 2:
@@ -306,12 +316,10 @@ def _ebay_browser_fallback(url: str, marketplace: str, session) -> dict | None:
                 _copy_session_cookies(root, session)
         except Exception:
             pass
-        if html and not _blocked(html):
-            parsed = parse_ebay_product(html, url)
-            if parsed.get('title') or parsed.get('price') is not None:
-                root._browser_failures = 0
-                root._browser_warmed_http = True
-                return parsed
+        if _ebay_html_usable(html, url):
+            root._browser_failures = 0
+            root._browser_warmed_http = True
+            return html
         root._browser_failures = getattr(root, '_browser_failures', 0) + 1
         if root._browser_failures >= 2:
             try:
@@ -319,6 +327,17 @@ def _ebay_browser_fallback(url: str, marketplace: str, session) -> dict | None:
             except Exception:
                 pass
         return None
+
+
+def _ebay_browser_fallback(url: str, marketplace: str, session) -> dict | None:
+    """Warm eBay in headless Chrome when HTTP is challenged, and hand cookies to HTTP."""
+    html = _ebay_browser_html(url, marketplace, session)
+    if not html:
+        return None
+    parsed = parse_ebay_product(html, url)
+    if parsed.get('title') or parsed.get('price') is not None:
+        return parsed
+    return None
 
 
 def _blocked(html: str) -> bool:
@@ -598,16 +617,26 @@ def _live_category_rows(
         if not current or current in seen_urls:
             continue
         seen_urls.add(current)
+        html = ''
+        fetch_error = None
         try:
             html = _fetch(current, session)
         except requests.RequestException as exc:
-            if '403' in str(exc):
+            fetch_error = exc
+        if fetch_error is not None or _blocked(html):
+            recovered = _retry_ebay_html(current, marketplace, session)
+            if recovered:
+                html = recovered
+                fetch_error = None
+                logger.info('discovery ebay category recovered %s', current)
+        if fetch_error is not None:
+            if '403' in str(fetch_error):
                 errors.append(
                     f'{current}: eBay refused this server (HTTP 403). '
                     'The link is valid. eBay is blocking automated requests from this network.'
                 )
             else:
-                errors.append(f'{current}: {exc}')
+                errors.append(f'{current}: {fetch_error}')
             continue
         if _blocked(html):
             errors.append(f'{current}: the site blocked the request')
@@ -635,7 +664,8 @@ def _live_category_rows(
     return rows[:MAX_CATEGORY_PRODUCTS]
 
 
-def _retry_ebay_product(url: str, marketplace: str, session) -> dict | None:
+def _retry_ebay_html(url: str, marketplace: str, session) -> str | None:
+    """One more HTTP try on the warmed session, then headless Chrome."""
     if session is None:
         return None
     host = HOSTS.get(marketplace) or HOSTS['ebay_us']
@@ -649,15 +679,23 @@ def _retry_ebay_product(url: str, marketplace: str, session) -> dict | None:
         _copy_session_cookies(parent, session)
     try:
         html = _fetch(url, session)
-        if not _blocked(html):
-            parsed = parse_ebay_product(html, url)
-            if parsed.get('title') or parsed.get('price') is not None:
-                if parent is not None:
-                    _copy_session_cookies(session, parent)
-                return parsed
+        if _ebay_html_usable(html, url):
+            if parent is not None:
+                _copy_session_cookies(session, parent)
+            return html
     except Exception:
         pass
-    return _ebay_browser_fallback(url, marketplace, session)
+    return _ebay_browser_html(url, marketplace, session)
+
+
+def _retry_ebay_product(url: str, marketplace: str, session) -> dict | None:
+    html = _retry_ebay_html(url, marketplace, session)
+    if not html:
+        return None
+    parsed = parse_ebay_product(html, url)
+    if parsed.get('title') or parsed.get('price') is not None:
+        return parsed
+    return None
 
 
 def _live_product_row(row: dict, marketplace: str, errors: list[str], session: requests.Session | None = None) -> dict | None:
@@ -795,6 +833,7 @@ def execute_job(job_id) -> None:
 
     errors: list[str] = []
     columns = list(job.columns or [])
+    session = None
     try:
         inputs = _load_inputs(job)
         rules = normalize_rules(job.rules)
@@ -961,3 +1000,5 @@ def execute_job(job_id) -> None:
             'errors': errors[:20],
         }
         job.save(update_fields=['status', 'error_message', 'finished_at', 'stats'])
+    finally:
+        _close_ebay_browser(session)

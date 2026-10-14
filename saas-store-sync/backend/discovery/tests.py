@@ -513,6 +513,43 @@ class ParserTests(TestCase):
         self.assertEqual(parsed['title'], 'Bamboo Plant Stand')
         self.assertEqual(parsed['price'], 35.91)
 
+    def test_ebay_category_recovers_after_http_403(self):
+        import requests
+
+        calls = []
+
+        class DummySession:
+            def get(self, url, timeout=None):
+                return None
+
+        def fake_fetch(url, session=None):
+            calls.append(url)
+            if len(calls) == 1:
+                raise requests.HTTPError('403 Client Error')
+            return '''
+            <li class="s-card" data-listingid="116396798118">
+              <a class="s-card__link" href="https://www.ebay.com.au/itm/116396798118"></a>
+              <div class="s-card__title"><span>Plant Stand</span></div>
+              <span class="s-card__price">AU $35.91</span>
+            </li>
+            '''
+
+        errors = []
+        with patch('discovery.engine._fetch', side_effect=fake_fetch), patch(
+            'discovery.engine.time.sleep'
+        ):
+            rows = _live_category_rows(
+                'https://www.ebay.com.au/sch/i.html?_ssn=superhomeestore&store_cat=0',
+                'ebay_au',
+                errors,
+                session=DummySession(),
+            )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['item_id'], '116396798118')
+        self.assertEqual(rows[0]['title'], 'Plant Stand')
+        self.assertEqual(rows[0]['price'], 35.91)
+
     def test_ebay_search_asks_for_240_listings_per_page(self):
         widened = ebay_results_url('https://www.ebay.com/sch/i.html?_nkw=drill')
         self.assertIn('_ipg=240', widened)
