@@ -981,6 +981,59 @@ def _ebay_rating_and_reviews(root) -> tuple[float | None, int | None]:
     return rating, reviews
 
 
+_EBAY_RANGE_RE = re.compile(
+    r'([A-Za-z]{3,9},?\s+[A-Za-z]{3,9}\s+\d{1,2})\s+and\s+'
+    r'([A-Za-z]{3,9},?\s+[A-Za-z]{3,9}\s+\d{1,2})',
+    re.I,
+)
+
+
+def _ebay_condition(soup) -> str:
+    """The condition label only. The icon’s “More information” title is not part of it."""
+    root = soup.select_one('.x-item-condition-text') or soup.select_one('[data-testid="x-item-condition"]')
+    if root is None:
+        return ''
+    shown = root.select_one('[data-testid="ux-textual-display"] .ux-textspans')
+    if shown is not None and _text(shown):
+        return _text(shown)
+    copy = BeautifulSoup(str(root), 'html.parser')
+    for junk in copy.select('.clipped, button, svg, title'):
+        junk.decompose()
+    return _text(copy)
+
+
+def _ebay_delivery(soup) -> str:
+    """The estimated arrival, such as “Tue, Oct 27 – Mon, Nov 2”."""
+    node = (
+        soup.select_one('.ux-labels-values--deliverto .ux-labels-values__values')
+        or soup.select_one('.ux-labels-values--shipping .ux-labels-values__values')
+    )
+    if node is not None:
+        dates = [
+            _text(span)
+            for span in node.select('.ux-textspans--BOLD')
+            if re.search(r'\d', _text(span))
+        ]
+        if len(dates) >= 2:
+            return f'{dates[0]} – {dates[1]}'
+        if len(dates) == 1:
+            return dates[0]
+        match = _EBAY_RANGE_RE.search(_text(node))
+        if match:
+            return f'{match.group(1)} – {match.group(2)}'
+    return _delivery_date(
+        soup.select_one('.ux-labels-values--deliverto'),
+        soup.select_one('.ux-labels-values--shipping'),
+        soup.select_one('#vi-acc-del-range'),
+    )
+
+
+def _ebay_availability(text: str) -> str:
+    """Quantity left. The sold count has its own column."""
+    cleaned = _SOLD_RE.sub('', text or '')
+    return re.sub(r'\s+', ' ', cleaned).strip(' ·-')
+
+
 def _ebay_next_price(card) -> float | None:
     node = card.select_one('.s-item__price')
     return _price(_text(node))
@@ -1079,7 +1132,7 @@ def parse_ebay_product(html: str, page_url: str) -> dict:
     seller = _text(soup.select_one('.x-sellercard-atf__info__about-seller')) or _text(
         soup.select_one('span.ux-textspans--BOLD')
     )
-    condition = _text(soup.select_one('.x-item-condition-text'))
+    condition = _ebay_condition(soup)
     crumbs = [
         _text(node)
         for node in soup.select('nav.breadcrumbs a, .seo-breadcrumb-text')
@@ -1093,13 +1146,22 @@ def parse_ebay_product(html: str, page_url: str) -> dict:
     )
     description = _clean_prose(_text(soup.select_one('.d-item-description')))
     images = _ebay_product_images(soup)
-    availability = _text(soup.select_one('.x-quantity__availability'))
-    inventory = _inventory_count(availability)
+    availability_text = _text(soup.select_one('.x-quantity__availability'))
+    availability = _ebay_availability(availability_text)
+    inventory = _inventory_count(availability_text)
     rating, reviews = _ebay_rating_and_reviews(soup)
-    delivery = _delivery_date(
-        soup.select_one('.ux-labels-values--shipping'),
-        soup.select_one('#vi-acc-del-range'),
-    )
+    if rating is None or reviews is None:
+        stated = re.search(
+            r'(\d(?:\.\d)?)\s+out of 5 stars based on\s+([\d,]+)\s+product ratings?',
+            html or '',
+            re.I,
+        )
+        if stated:
+            if rating is None:
+                rating = float(stated.group(1))
+            if reviews is None:
+                reviews = int(stated.group(2).replace(',', ''))
+    delivery = _ebay_delivery(soup)
     sold = _sold_count(
         soup.select_one('.x-quantity__availability'),
         soup.select_one('.d-quantity__availability'),

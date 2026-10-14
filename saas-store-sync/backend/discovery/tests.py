@@ -350,6 +350,35 @@ class ParserTests(TestCase):
         self.assertNotIn('Import', row['item_specifications'])
         self.assertNotIn('Shipping', row['item_specifications'])
 
+    def test_ebay_condition_and_delivery_ignore_the_extra_copies(self):
+        html = '''
+        <h1 class="x-item-title__mainTitle"><span>Drill</span></h1>
+        <div class="x-item-condition-text">
+          <span aria-hidden="true" data-testid="ux-textual-display"><span class="ux-textspans">Brand New</span></span>
+          <span class="clipped">Brand New</span>
+          <button><svg><title>More information - About this item condition</title></svg></button>
+        </div>
+        <div class="x-quantity__availability">
+          <span class="ux-textspans">9 available</span>
+          <span class="ux-textspans">6 sold</span>
+        </div>
+        <div class="ux-labels-values ux-labels-values--deliverto">
+          <div class="ux-labels-values__values">
+            <span class="ux-textspans">Estimated between </span>
+            <span class="ux-textspans ux-textspans--BOLD">Tue, Oct 27</span>
+            <span class="ux-textspans"> and </span>
+            <span class="ux-textspans ux-textspans--BOLD">Mon, Nov 2</span>
+            <span class="ux-textspans"> to 74600</span>
+          </div>
+        </div>
+        '''
+        row = parse_ebay_product(html, 'https://www.ebay.com.au/itm/100000000001')
+        self.assertEqual(row['condition'], 'Brand New')
+        self.assertEqual(row['availability'], '9 available')
+        self.assertEqual(row['sold'], 6)
+        self.assertEqual(row['inventory'], 9)
+        self.assertEqual(row['delivery_date'], 'Tue, Oct 27 – Mon, Nov 2')
+
     def test_ebay_seller_feedback_stars_are_not_a_product_rating(self):
         html = '''
         <h1 class="x-item-title__mainTitle"><span>Drill</span></h1>
