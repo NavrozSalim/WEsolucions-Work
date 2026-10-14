@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import requests
@@ -538,7 +538,7 @@ def _category_urls(job: DiscoveryJob, inputs: list[dict]) -> list[str]:
 
 
 def _fetch_ebay_products(rows, marketplace, errors, session, table, stop) -> None:
-    """Open several eBay product pages at once. Writes stay on this thread."""
+    """Open several eBay product pages at once and save each one as it finishes."""
 
     def one(row):
         local_errors = []
@@ -550,31 +550,46 @@ def _fetch_ebay_products(rows, marketplace, errors, session, table, stop) -> Non
         )
         if parsed:
             fill_image_columns(parsed)
-        return parsed, local_errors
+        return row, parsed, local_errors
 
-    window = []
+    pending = iter(rows)
+    with ThreadPoolExecutor(max_workers=EBAY_FETCH_WORKERS) as pool:
+        inflight = set()
 
-    def flush() -> None:
-        if not window:
-            return
-        with ThreadPoolExecutor(max_workers=EBAY_FETCH_WORKERS) as pool:
-            results = list(pool.map(one, list(window)))
-        fresh = []
-        for parsed, local_errors in results:
-            errors.extend(local_errors)
-            if parsed:
-                fresh.append(parsed)
-        if fresh:
-            table.add(fresh)
-        window.clear()
+        def submit_one() -> bool:
+            try:
+                row = next(pending)
+            except StopIteration:
+                return False
+            inflight.add(pool.submit(one, row))
+            return True
 
-    for row in rows:
-        if stop():
-            raise DiscoveryCancelled()
-        window.append(row)
-        if len(window) >= EBAY_FETCH_WORKERS * 2:
-            flush()
-    flush()
+        for _ in range(EBAY_FETCH_WORKERS):
+            if not submit_one():
+                break
+        while inflight:
+            if stop():
+                for fut in inflight:
+                    fut.cancel()
+                raise DiscoveryCancelled()
+            done, inflight = wait(inflight, timeout=1, return_when=FIRST_COMPLETED)
+            for fut in done:
+                try:
+                    row, parsed, local_errors = fut.result()
+                except Exception as exc:
+                    row, parsed, local_errors = {}, None, [str(exc)]
+                url = str((row or {}).get('url') or '')
+                if local_errors:
+                    errors.extend(local_errors)
+                    table.warning = local_errors[-1]
+                    logger.info('discovery ebay miss %s', url)
+                if parsed:
+                    logger.info('discovery ebay kept %s', url)
+                    table.add([parsed])
+                elif local_errors:
+                    table.scraped += 1
+                    table.publish()
+                submit_one()
 
 
 def execute_job(job_id) -> None:

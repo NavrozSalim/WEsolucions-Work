@@ -1,6 +1,7 @@
 import io
 import os
 import tempfile
+import time
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -10,7 +11,7 @@ from openpyxl import load_workbook
 from rest_framework.test import APIClient
 
 from discovery.columns import ID_FIELD, IMAGE_COLUMNS, output_columns
-from discovery.engine import _live_category_rows, execute_job
+from discovery.engine import _fetch_ebay_products, _live_category_rows, execute_job
 from discovery.files import template_bytes, workbook_bytes
 from discovery.identity import dedupe_rows
 from discovery.models import DiscoveryJob, DiscoveryProduct
@@ -441,6 +442,39 @@ class ParserTests(TestCase):
         extra = parse_amazon_category(embedded, 'https://www.amazon.com/b/?node=8882491011')
         self.assertEqual([row['asin'] for row in extra], ['B0SAMPLE08'])
         self.assertEqual(extra[0]['url'], 'https://www.amazon.com/dp/B0SAMPLE08')
+
+    def test_ebay_product_is_saved_as_soon_as_its_page_returns(self):
+        saved = []
+
+        class Table:
+            warning = ''
+            scraped = 0
+
+            def add(self, batch):
+                saved.append((time.monotonic(), batch[0]['title']))
+
+            def publish(self):
+                return None
+
+        def fake_fetch(row, marketplace, errors, session):
+            if row['n']:
+                time.sleep(0.6)
+            return {
+                'title': f"p{row['n']}",
+                'price': 1,
+                'item_id': str(row['n']),
+                'url': row['url'],
+            }
+
+        rows = [{'url': f'https://www.ebay.com.au/itm/{i}', 'n': i} for i in range(4)]
+        started = time.monotonic()
+        with (
+            patch('discovery.engine._live_product_row', side_effect=fake_fetch),
+            patch('discovery.engine._thread_ebay_session', return_value=None),
+        ):
+            _fetch_ebay_products(rows, 'ebay_au', [], None, Table(), lambda: False)
+        self.assertEqual(len(saved), 4)
+        self.assertLess(saved[0][0] - started, 0.4)
 
     def test_ebay_search_asks_for_240_listings_per_page(self):
         widened = ebay_results_url('https://www.ebay.com/sch/i.html?_nkw=drill')
