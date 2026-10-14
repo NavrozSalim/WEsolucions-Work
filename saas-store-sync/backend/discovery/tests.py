@@ -476,6 +476,43 @@ class ParserTests(TestCase):
         self.assertEqual(len(saved), 4)
         self.assertLess(saved[0][0] - started, 0.4)
 
+    def test_ebay_product_recovers_when_the_first_page_is_challenged(self):
+        from discovery.engine import _live_product_row
+
+        calls = []
+
+        class DummySession:
+            headers = {}
+            cookies = {}
+
+            def get(self, url, timeout=None):
+                return None
+
+        def fake_fetch(url, session=None):
+            calls.append(url)
+            if len(calls) == 1:
+                return '<html><title>Pardon Our Interruption...</title></html>'
+            return (
+                '<h1 class="x-item-title__mainTitle"><span>Bamboo Plant Stand</span></h1>'
+                '<div data-testid="x-bin-price"><span>AU $35.91</span></div>'
+            )
+
+        errors = []
+        with patch('discovery.engine._fetch', side_effect=fake_fetch), patch(
+            'discovery.engine.time.sleep'
+        ):
+            parsed = _live_product_row(
+                {'url': 'https://www.ebay.com.au/itm/Bamboo-Stand/355669302802?itmmeta=01&hash=abc'},
+                'ebay_au',
+                errors,
+                DummySession(),
+            )
+        self.assertIsNotNone(parsed)
+        self.assertEqual(errors, [])
+        self.assertEqual(calls[0], 'https://www.ebay.com.au/itm/355669302802')
+        self.assertEqual(parsed['title'], 'Bamboo Plant Stand')
+        self.assertEqual(parsed['price'], 35.91)
+
     def test_ebay_search_asks_for_240_listings_per_page(self):
         widened = ebay_results_url('https://www.ebay.com/sch/i.html?_nkw=drill')
         self.assertIn('_ipg=240', widened)

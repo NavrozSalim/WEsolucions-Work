@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
@@ -150,41 +151,174 @@ def _amazon_session(marketplace: str, zip_code: str):
 
 
 _ebay_thread_sessions = threading.local()
+_ebay_browser_lock = threading.Lock()
+
+
+def _copy_session_cookies(source, target) -> None:
+    if source is None or target is None or source is target:
+        return
+    try:
+        jar = getattr(source.cookies, 'jar', None)
+        if jar is not None:
+            for cookie in list(jar):
+                name = getattr(cookie, 'name', None)
+                value = getattr(cookie, 'value', None)
+                if not name or value is None:
+                    continue
+                domain = getattr(cookie, 'domain', '') or ''
+                path = getattr(cookie, 'path', '/') or '/'
+                if domain:
+                    target.cookies.set(name, value, domain=domain, path=path)
+                else:
+                    target.cookies.set(name, value, path=path)
+            return
+    except Exception:
+        pass
+    try:
+        target.cookies.update(source.cookies)
+    except Exception:
+        pass
+
+
+def _apply_ebay_cookies(session, marketplace: str, parent=None) -> None:
+    host = HOSTS.get(marketplace) or HOSTS['ebay_us']
+    session.headers['User-Agent'] = _UA
+    session.headers['Accept-Language'] = (
+        'en-AU,en;q=0.9,en-US;q=0.8'
+        if marketplace == 'ebay_au'
+        else 'en-US,en;q=0.9'
+    )
+    session.headers['Referer'] = host + '/'
+    session.headers['Cache-Control'] = 'max-age=0'
+    session.headers['Pragma'] = 'no-cache'
+    session.headers['Upgrade-Insecure-Requests'] = '1'
+    if marketplace == 'ebay_au':
+        try:
+            from scrapers.ebay_au_fast import load_cookies_for_http
+
+            for cookie in load_cookies_for_http():
+                name = cookie.get('name')
+                value = cookie.get('value')
+                if not name or value is None:
+                    continue
+                domain = cookie.get('domain') or '.ebay.com.au'
+                path = cookie.get('path') or '/'
+                session.cookies.set(name, value, domain=domain, path=path)
+        except Exception:
+            pass
+    if parent is not None:
+        try:
+            session.headers.update(dict(parent.headers))
+        except Exception:
+            pass
+        _copy_session_cookies(parent, session)
 
 
 def _thread_ebay_session(parent):
-    """One browser session per fetch thread. The shared session is not safe to share."""
+    """One browser session per fetch thread, keeping the warmed eBay cookies."""
+    marketplace = getattr(parent, '_marketplace', 'ebay_au')
+    parent_id = id(parent) if parent is not None else None
     current = getattr(_ebay_thread_sessions, 'session', None)
-    if current is not None:
+    if current is not None and getattr(_ebay_thread_sessions, 'parent_id', None) == parent_id:
+        if parent is not None:
+            _copy_session_cookies(parent, current)
         return current
     current = _browser_session()
-    if parent is not None:
-        try:
-            current.headers.update(dict(parent.headers))
-        except Exception:
-            pass
-        try:
-            current.cookies.update(parent.cookies)
-        except Exception:
-            pass
+    current._parent_session = parent
+    current._marketplace = marketplace
+    _apply_ebay_cookies(current, marketplace, parent=parent)
     _ebay_thread_sessions.session = current
+    _ebay_thread_sessions.parent_id = parent_id
     return current
 
 
 def _ebay_session(marketplace: str):
     """Browser-style eBay session. A normal request is answered with 403."""
     session = _browser_session()
+    session._marketplace = marketplace
+    session._browser_state = {}
+    session._browser_failures = 0
+    session._browser_warmed_http = False
+    session._browser_lock = threading.Lock()
     host = HOSTS.get(marketplace) or HOSTS['ebay_us']
-    if marketplace == 'ebay_au':
-        session.headers['Accept-Language'] = 'en-AU,en;q=0.9,en-US;q=0.8'
-    else:
-        session.headers['Accept-Language'] = 'en-US,en;q=0.9'
-    session.headers['Referer'] = host + '/'
+    _apply_ebay_cookies(session, marketplace)
     try:
         session.get(host + '/', timeout=FETCH_TIMEOUT)
     except Exception:
         logger.warning('Could not open eBay before the scrape')
     return session
+
+
+def _close_ebay_browser(session) -> None:
+    root = getattr(session, '_parent_session', None) or session
+    state = getattr(root, '_browser_state', None)
+    if not state:
+        return
+    try:
+        from scrapers.ebay_common import close_ebay_session
+
+        close_ebay_session(state)
+    except Exception:
+        pass
+
+
+def _ebay_browser_fallback(url: str, marketplace: str, session) -> dict | None:
+    """Warm eBay in headless Chrome when HTTP is challenged, and hand cookies to HTTP."""
+    if session is None:
+        return None
+    root = getattr(session, '_parent_session', None) or session
+    lock = getattr(root, '_browser_lock', None) or _ebay_browser_lock
+    with lock:
+        if getattr(root, '_browser_warmed_http', False):
+            _copy_session_cookies(root, session)
+            try:
+                html = _fetch(url, session)
+                if not _blocked(html):
+                    parsed = parse_ebay_product(html, url)
+                    if parsed.get('title') or parsed.get('price') is not None:
+                        return parsed
+            except Exception:
+                pass
+        if getattr(root, '_browser_failures', 0) >= 2:
+            return None
+        try:
+            from scrapers.ebay_common import (
+                EBAY_MARKET_AU,
+                EBAY_MARKET_US,
+                EbayBrowserSession,
+                EbayHTTP,
+                close_ebay_market_session,
+            )
+        except Exception:
+            root._browser_failures = 2
+            return None
+        market = EBAY_MARKET_AU if marketplace == 'ebay_au' else EBAY_MARKET_US
+        region = 'AU' if marketplace == 'ebay_au' else 'US'
+        state = getattr(root, '_browser_state', None)
+        if state is None:
+            state = {}
+            root._browser_state = state
+        html, _err = EbayBrowserSession.warm_and_fetch(url, region, state, market)
+        try:
+            http_client = EbayHTTP._get_client(state, market)
+            if http_client is not None:
+                _copy_session_cookies(http_client, root)
+                _copy_session_cookies(root, session)
+        except Exception:
+            pass
+        if html and not _blocked(html):
+            parsed = parse_ebay_product(html, url)
+            if parsed.get('title') or parsed.get('price') is not None:
+                root._browser_failures = 0
+                root._browser_warmed_http = True
+                return parsed
+        root._browser_failures = getattr(root, '_browser_failures', 0) + 1
+        if root._browser_failures >= 2:
+            try:
+                close_ebay_market_session(state, market)
+            except Exception:
+                pass
+        return None
 
 
 def _blocked(html: str) -> bool:
@@ -274,6 +408,7 @@ class _LiveTable:
         self.duplicates = 0
         self.removed_by_rules = 0
         self.scraped = 0
+        self.kept = 0
         self.warning = ''
 
     def publish(self) -> None:
@@ -282,7 +417,7 @@ class _LiveTable:
             'scraped': self.scraped,
             'duplicates_removed': self.duplicates,
             'removed_by_rules': self.removed_by_rules,
-            'kept': self.job.products.count(),
+            'kept': self.kept,
             'errors': [],
             'warning': self.warning,
         }
@@ -313,6 +448,7 @@ class _LiveTable:
             ))
         if fresh:
             DiscoveryProduct.objects.bulk_create(fresh, ignore_conflicts=True)
+            self.kept += len(fresh)
         self.publish()
 
 
@@ -499,6 +635,31 @@ def _live_category_rows(
     return rows[:MAX_CATEGORY_PRODUCTS]
 
 
+def _retry_ebay_product(url: str, marketplace: str, session) -> dict | None:
+    if session is None:
+        return None
+    host = HOSTS.get(marketplace) or HOSTS['ebay_us']
+    parent = getattr(session, '_parent_session', None)
+    time.sleep(0.35)
+    try:
+        session.get(host + '/', timeout=FETCH_TIMEOUT)
+    except Exception:
+        pass
+    if parent is not None:
+        _copy_session_cookies(parent, session)
+    try:
+        html = _fetch(url, session)
+        if not _blocked(html):
+            parsed = parse_ebay_product(html, url)
+            if parsed.get('title') or parsed.get('price') is not None:
+                if parent is not None:
+                    _copy_session_cookies(session, parent)
+                return parsed
+    except Exception:
+        pass
+    return _ebay_browser_fallback(url, marketplace, session)
+
+
 def _live_product_row(row: dict, marketplace: str, errors: list[str], session: requests.Session | None = None) -> dict | None:
     stamped = stamp_identity(marketplace, row)
     url = stamped.get('url') or ''
@@ -508,19 +669,33 @@ def _live_product_row(row: dict, marketplace: str, errors: list[str], session: r
     try:
         html = _fetch(url, session)
     except requests.RequestException as exc:
-        if is_ebay(marketplace) and '403' in str(exc):
-            errors.append(
-                f'{url}: eBay refused this server (HTTP 403). '
-                'eBay is blocking automated requests from this network.'
-            )
+        if is_ebay(marketplace):
+            recovered = _retry_ebay_product(url, marketplace, session)
+            if recovered is not None:
+                return recovered
+            if '403' in str(exc):
+                errors.append(
+                    f'{url}: eBay refused this server (HTTP 403). '
+                    'eBay is blocking automated requests from this network.'
+                )
+            else:
+                errors.append(f'{url}: {exc}')
         else:
             errors.append(f'{url}: {exc}')
         return None
     if _blocked(html):
+        if is_ebay(marketplace):
+            recovered = _retry_ebay_product(url, marketplace, session)
+            if recovered is not None:
+                return recovered
         errors.append(f'{url}: the site blocked the request')
         return None
     parsed = parse_amazon_product(html, url) if is_amazon(marketplace) else parse_ebay_product(html, url)
     if not parsed.get('title') and parsed.get('price') is None:
+        if is_ebay(marketplace):
+            recovered = _retry_ebay_product(url, marketplace, session)
+            if recovered is not None:
+                return recovered
         errors.append(f'{url}: product details were not in the page')
         return None
     return parsed
@@ -553,43 +728,46 @@ def _fetch_ebay_products(rows, marketplace, errors, session, table, stop) -> Non
         return row, parsed, local_errors
 
     pending = iter(rows)
-    with ThreadPoolExecutor(max_workers=EBAY_FETCH_WORKERS) as pool:
-        inflight = set()
+    try:
+        with ThreadPoolExecutor(max_workers=EBAY_FETCH_WORKERS) as pool:
+            inflight = set()
 
-        def submit_one() -> bool:
-            try:
-                row = next(pending)
-            except StopIteration:
-                return False
-            inflight.add(pool.submit(one, row))
-            return True
-
-        for _ in range(EBAY_FETCH_WORKERS):
-            if not submit_one():
-                break
-        while inflight:
-            if stop():
-                for fut in inflight:
-                    fut.cancel()
-                raise DiscoveryCancelled()
-            done, inflight = wait(inflight, timeout=1, return_when=FIRST_COMPLETED)
-            for fut in done:
+            def submit_one() -> bool:
                 try:
-                    row, parsed, local_errors = fut.result()
-                except Exception as exc:
-                    row, parsed, local_errors = {}, None, [str(exc)]
-                url = str((row or {}).get('url') or '')
-                if local_errors:
-                    errors.extend(local_errors)
-                    table.warning = local_errors[-1]
-                    logger.info('discovery ebay miss %s', url)
-                if parsed:
-                    logger.info('discovery ebay kept %s', url)
-                    table.add([parsed])
-                elif local_errors:
-                    table.scraped += 1
-                    table.publish()
-                submit_one()
+                    row = next(pending)
+                except StopIteration:
+                    return False
+                inflight.add(pool.submit(one, row))
+                return True
+
+            for _ in range(EBAY_FETCH_WORKERS):
+                if not submit_one():
+                    break
+            while inflight:
+                if stop():
+                    for fut in inflight:
+                        fut.cancel()
+                    raise DiscoveryCancelled()
+                done, inflight = wait(inflight, timeout=1, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    try:
+                        row, parsed, local_errors = fut.result()
+                    except Exception as exc:
+                        row, parsed, local_errors = {}, None, [str(exc)]
+                    url = str((row or {}).get('url') or '')
+                    if local_errors:
+                        errors.extend(local_errors)
+                        table.warning = local_errors[-1]
+                        logger.info('discovery ebay miss %s (%s)', url, local_errors[-1])
+                    if parsed:
+                        logger.info('discovery ebay kept %s', url)
+                        table.add([parsed])
+                    elif local_errors:
+                        table.scraped += 1
+                        table.publish()
+                    submit_one()
+    finally:
+        _close_ebay_browser(session)
 
 
 def execute_job(job_id) -> None:
@@ -634,6 +812,7 @@ def execute_job(job_id) -> None:
             }
             table.seen.update(saved_keys)
             table.resumed.update(saved_keys)
+            table.kept = len(saved_keys)
             table.scraped = int(previous.get('scraped') or 0)
             table.duplicates = int(previous.get('duplicates_removed') or 0)
             table.removed_by_rules = int(previous.get('removed_by_rules') or 0)
@@ -669,8 +848,12 @@ def execute_job(job_id) -> None:
             if not resume:
                 table.duplicates += pre_dupes
             ebay_pending = []
-            for row in unique_inputs:
+            live_ebay = not job.use_sample and is_ebay(job.marketplace)
+            if live_ebay:
                 _raise_if_stopped(job.id)
+            for row in unique_inputs:
+                if not live_ebay:
+                    _raise_if_stopped(job.id)
                 done_key = product_key(job.marketplace, row)
                 if done_key and done_key in table.resumed:
                     continue
@@ -681,7 +864,7 @@ def execute_job(job_id) -> None:
                     table.removed_by_rules += 1
                     table.scraped += 1
                     continue
-                if not job.use_sample and is_ebay(job.marketplace):
+                if live_ebay:
                     ebay_pending.append(row)
                     continue
                 parsed = (

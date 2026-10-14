@@ -37,10 +37,18 @@ _SKIP_SPEC_LABELS = {
 }
 _EBAY_ITEM_MARKERS = (
     'h1.x-item-title__mainTitle',
+    '.x-item-title__mainTitle',
     '[data-testid="x-item-title"]',
+    'h1.x-item-title',
+    'h1#itemTitle',
     '.x-price-primary',
     '[data-testid="x-price-primary"]',
+    '[data-testid="x-bin-price"]',
+    '.x-bin-price',
+    'section.x-item-price',
     '[data-testid="x-about-this-item"]',
+    '.x-about-this-item',
+    '#viTabs_0_is',
     '.ux-image-carousel',
 )
 _INVENTORY_RE = re.compile(
@@ -1136,17 +1144,75 @@ def is_ebay_item_page(html: str) -> bool:
     return bool(_jsonld_products(soup))
 
 
+_EBAY_JSON_PRICE_RE = re.compile(
+    r'"(?:buyItNowPrice|binPrice|currentPrice|discountedPrice|salePrice)"\s*:\s*\{\s*"value"\s*:\s*"?([\d.]+)"?'
+)
+
+
+def _ebay_title(soup) -> str:
+    for selector in (
+        'h1.x-item-title__mainTitle',
+        '[data-testid="x-item-title"] h1',
+        '.x-item-title__mainTitle',
+        '[data-testid="x-item-title"]',
+        'h1.x-item-title',
+        'h1#itemTitle',
+    ):
+        found = _text(soup.select_one(selector))
+        if found:
+            return found
+    for item in _jsonld_products(soup):
+        name = str(item.get('name') or '').strip()
+        if name:
+            return name
+    meta = soup.select_one('meta[property="og:title"]')
+    if meta and meta.get('content'):
+        cleaned = re.sub(r'\s*\|\s*eBay.*$', '', meta['content'].strip(), flags=re.I).strip()
+        if cleaned:
+            return cleaned
+    return _text(soup.select_one('h1'))
+
+
+def _ebay_price(soup, html: str) -> float | None:
+    for selector in (
+        '.x-price-primary',
+        '[data-testid="x-price-primary"]',
+        '[data-testid="x-bin-price"]',
+        '.x-bin-price',
+        'section.x-item-price .ux-textspans--BOLD',
+        '[data-testid="x-item-price"] .ux-textspans--BOLD',
+    ):
+        found = _price(_text(soup.select_one(selector)))
+        if found is not None:
+            return found
+    itemprop = soup.select_one('[itemprop="price"]')
+    if itemprop is not None:
+        found = _price((itemprop.get('content') or '') or _text(itemprop))
+        if found is not None:
+            return found
+    for item in _jsonld_products(soup):
+        offers = item.get('offers')
+        offer_list = offers if isinstance(offers, list) else ([offers] if isinstance(offers, dict) else [])
+        for offer in offer_list:
+            if not isinstance(offer, dict):
+                continue
+            for key in ('price', 'lowPrice'):
+                found = _price(str(offer.get(key) or ''))
+                if found is not None:
+                    return found
+    match = _EBAY_JSON_PRICE_RE.search(html or '')
+    if match:
+        return _price(match.group(1))
+    return None
+
+
 def parse_ebay_product(html: str, page_url: str) -> dict:
     soup = _soup(html)
     item_id = extract_ebay_item_id(page_url)
     if not is_ebay_item_page(html):
         return {'item_id': item_id, 'url': page_url, 'title': '', 'price': None}
-    title = (
-        _text(soup.select_one('h1.x-item-title__mainTitle'))
-        or _text(soup.select_one('[data-testid="x-item-title"] h1'))
-        or _text(soup.select_one('h1'))
-    )
-    price = _price(_text(soup.select_one('.x-price-primary')))
+    title = _ebay_title(soup)
+    price = _ebay_price(soup, html)
     seller = _text(soup.select_one('.x-sellercard-atf__info__about-seller')) or _text(
         soup.select_one('span.ux-textspans--BOLD')
     )

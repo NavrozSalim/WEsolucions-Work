@@ -145,17 +145,17 @@ def read_spreadsheet(uploaded, marketplace: str | None = None, mode: str | None 
 
 def product_url(marketplace: str, row: dict) -> str:
     url = str(row.get('url') or '').strip()
+    host = HOSTS[marketplace]
+    if not is_amazon(marketplace):
+        item_id = extract_ebay_item_id(str(row.get('item_id') or '')) or extract_ebay_item_id(url)
+        if item_id:
+            return f'{host}/itm/{item_id}'
     if url.startswith('http://') or url.startswith('https://'):
         return url
-    host = HOSTS[marketplace]
     if is_amazon(marketplace):
         asin = extract_asin(str(row.get('asin') or '')) or extract_asin(url)
         if asin:
             return f'{host}/dp/{asin}'
-    else:
-        item_id = extract_ebay_item_id(str(row.get('item_id') or '')) or extract_ebay_item_id(url)
-        if item_id:
-            return f'{host}/itm/{item_id}'
     return url
 
 
