@@ -273,6 +273,36 @@ class ParserTests(TestCase):
         self.assertEqual(row['image-02'], 'https://i.ebayimg.com/images/g/def/s-l1600.jpg')
         self.assertEqual(row['image-03'], '')
 
+    def test_ebay_product_reads_brand_rating_reviews_specifics_and_sold(self):
+        html = '''
+        <div class="x-star-rating" aria-label="4.8 out of 5 stars"></div>
+        <a href="#rwid"><span class="ux-textspans">1,234 product ratings</span></a>
+        <div class="x-quantity__availability">
+          <span class="ux-textspans">8 available</span>
+          <span class="ux-textspans">142 sold</span>
+        </div>
+        <div class="ux-labels-values ux-labels-values--shipping">
+          <div class="ux-labels-values__labels"><span>Shipping</span></div>
+          <div class="ux-labels-values__values"><span>Free</span></div>
+        </div>
+        <div class="ux-labels-values">
+          <div class="ux-labels-values__labels-content"><span class="ux-textspans">Brand</span></div>
+          <div class="ux-labels-values__values-content"><span class="ux-textspans">DEWALT</span></div>
+        </div>
+        <div class="ux-labels-values">
+          <div class="ux-labels-values__labels"><span>Color</span></div>
+          <div class="ux-labels-values__values"><span>Yellow</span></div>
+        </div>
+        '''
+        row = parse_ebay_product(html, 'https://www.ebay.com/itm/100000000001')
+        self.assertEqual(row['brand'], 'DEWALT')
+        self.assertEqual(row['rating'], 4.8)
+        self.assertEqual(row['review_count'], 1234)
+        self.assertEqual(row['sold'], 142)
+        self.assertEqual(row['item_specifications'], 'Brand: DEWALT | Color: Yellow')
+        self.assertEqual(row['bullets'], row['item_specifications'])
+        self.assertNotIn('Shipping', row['item_specifications'])
+
     def test_amazon_total_and_price_band(self):
         html = '<span>1-48 of over 50,000 results</span>'
         self.assertEqual(amazon_reported_total(html), 50000)
@@ -324,6 +354,9 @@ class ParserTests(TestCase):
           <a class="s-item__link" href="https://www.ebay.com/itm/100000000001?hash=abc"></a>
           <div class="s-item__title"><span>Steel Cookware Set</span></div>
           <span class="s-item__price">$49.99</span>
+          <div class="x-star-rating" aria-label="4.6 out of 5 stars"></div>
+          <span class="s-item__reviews-count"><span>320 product ratings</span></span>
+          <span class="s-item__quantitySold"><span>18 sold</span></span>
         </li>
         <li class="s-item">
           <a class="s-item__link" href="https://www.ebay.com/itm/0"></a>
@@ -334,6 +367,9 @@ class ParserTests(TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['item_id'], '100000000001')
         self.assertEqual(rows[0]['price'], 49.99)
+        self.assertEqual(rows[0]['rating'], 4.6)
+        self.assertEqual(rows[0]['review_count'], 320)
+        self.assertEqual(rows[0]['sold'], 18)
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(prefix='discovery-test-'))

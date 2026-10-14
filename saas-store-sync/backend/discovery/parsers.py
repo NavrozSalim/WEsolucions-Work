@@ -18,7 +18,19 @@ from .identity import extract_asin, extract_ebay_item_id
 
 _PRICE_RE = re.compile(r'(?:US\s*)?(?:AU\s*)?\$?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)')
 _RATING_RE = re.compile(r'(\d(?:\.\d)?)\s*out of\s*5', re.I)
-_REVIEWS_RE = re.compile(r'([\d,]+)\s*(?:ratings?|reviews?|product ratings?)', re.I)
+_REVIEWS_RE = re.compile(r'([\d,]+)\s*(?:product\s+)?(?:ratings?|reviews?)', re.I)
+_SOLD_RE = re.compile(r'([\d,]+)\+?\s+sold\b', re.I)
+_SKIP_SPEC_CLASS = ('shipping', 'returns', 'quantity', 'payments', 'delivery', 'tax', 'postage')
+_SKIP_SPEC_LABELS = {
+    'shipping',
+    'delivery',
+    'returns',
+    'return policy',
+    'payments',
+    'payment',
+    'quantity',
+    'postage',
+}
 _INVENTORY_RE = re.compile(
     r'only\s+(\d+)\s+left in stock|(\d+)\s+left in stock|more than\s+(\d+)\s+available|(\d+)\s+available|last one',
     re.I,
@@ -763,6 +775,171 @@ def parse_amazon_product(html: str, page_url: str) -> dict:
     return _with_image_slots(row, images)
 
 
+def _sold_count(*sources) -> int | None:
+    """How many of this listing have sold. “Sold by” and “sold out” are not a count."""
+    for source in sources:
+        if source is None:
+            continue
+        if hasattr(source, 'get_text'):
+            blobs = [source.get('aria-label') or '', source.get('title') or '', _text(source)]
+        else:
+            blobs = [str(source)]
+        for blob in blobs:
+            match = _SOLD_RE.search(blob or '')
+            if match:
+                return int(match.group(1).replace(',', ''))
+    return None
+
+
+def _jsonld_products(soup) -> list[dict]:
+    found = []
+    for script in soup.select('script[type="application/ld+json"]'):
+        raw = script.string or script.get_text() or ''
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        stack = data if isinstance(data, list) else [data]
+        while stack:
+            item = stack.pop()
+            if not isinstance(item, dict):
+                continue
+            graph = item.get('@graph')
+            if isinstance(graph, list):
+                stack.extend(graph)
+            kind = item.get('@type')
+            kinds = kind if isinstance(kind, list) else [kind]
+            if any(str(part).lower() == 'product' for part in kinds if part):
+                found.append(item)
+    return found
+
+
+def _jsonld_brand(item: dict) -> str:
+    brand = item.get('brand')
+    if isinstance(brand, list):
+        brand = brand[0] if brand else ''
+    if isinstance(brand, str):
+        return brand.strip()
+    if isinstance(brand, dict):
+        return str(brand.get('name') or '').strip()
+    return ''
+
+
+def _jsonld_rating(item: dict) -> tuple[float | None, int | None]:
+    aggregate = item.get('aggregateRating') or {}
+    if not isinstance(aggregate, dict):
+        return None, None
+    rating = None
+    try:
+        rating = float(aggregate.get('ratingValue'))
+    except (TypeError, ValueError):
+        rating = None
+    if rating is not None and not 0 <= rating <= 5:
+        rating = None
+    reviews = None
+    raw_count = aggregate.get('reviewCount')
+    if raw_count in (None, ''):
+        raw_count = aggregate.get('ratingCount')
+    try:
+        reviews = int(str(raw_count).replace(',', ''))
+    except (TypeError, ValueError):
+        reviews = None
+    if reviews is not None and reviews < 0:
+        reviews = None
+    return rating, reviews
+
+
+def _ebay_specifics(root) -> list[tuple[str, str]]:
+    """Item specifics only. Shipping, returns, and quantity rows are left out."""
+    pairs = []
+    seen = set()
+    for row in root.select('.ux-labels-values, [data-testid="ux-labels-values"]'):
+        classes = ' '.join(row.get('class') or [])
+        if any(flag in classes for flag in _SKIP_SPEC_CLASS):
+            continue
+        label_node = (
+            row.select_one('.ux-labels-values__labels')
+            or row.select_one('.ux-labels-values__labels-content')
+            or row.select_one('dt')
+        )
+        value_node = (
+            row.select_one('.ux-labels-values__values')
+            or row.select_one('.ux-labels-values__values-content')
+            or row.select_one('dd')
+        )
+        label = _text(label_node).rstrip(':').strip()
+        value = _text(value_node)
+        if (not label or not value) and row.select('.ux-textspans'):
+            spans = [_text(span) for span in row.select('.ux-textspans') if _text(span)]
+            if not label and spans:
+                label = spans[0].rstrip(':').strip()
+            if not value and len(spans) > 1:
+                value = spans[1]
+        if value.lower().startswith(label.lower()) and label:
+            value = value[len(label):].lstrip(' :')
+        label_key = label.lower()
+        if not label or not value or label_key in _SKIP_SPEC_LABELS or label_key in seen:
+            continue
+        seen.add(label_key)
+        pairs.append((label, value))
+    return pairs
+
+
+def _ebay_brand(pairs: list[tuple[str, str]], root) -> str:
+    for label, value in pairs:
+        if label.lower() in ('brand', 'brand name', 'manufacturer'):
+            return value
+    node = root.select_one('[itemprop="brand"]')
+    if node is not None:
+        named = _text(node.select_one('[itemprop="name"]')) or _text(node)
+        if named:
+            return named
+    for item in _jsonld_products(root):
+        brand = _jsonld_brand(item)
+        if brand:
+            return brand
+    return ''
+
+
+def _ebay_rating_and_reviews(root) -> tuple[float | None, int | None]:
+    rating = None
+    reviews = _review_count(
+        root.select_one('.x-review-ratings'),
+        root.select_one('.x-review-details'),
+        root.select_one('[data-testid="x-review-details"]'),
+        root.select_one('.ux-summary__count'),
+        root.select_one('a[href*="#rwid"]'),
+        root.select_one('.s-item__reviews-count'),
+    )
+    for node in root.select(
+        '.x-star-rating, [data-testid="x-star-rating"], [aria-label*="out of 5"], .s-item__reviews'
+    ):
+        blob = ' '.join(
+            part for part in (
+                node.get('aria-label') or '',
+                node.get('title') or '',
+                _text(node),
+            ) if part
+        )
+        match = _RATING_RE.search(blob)
+        if match and rating is None:
+            rating = float(match.group(1))
+        if reviews is None:
+            reviews = _review_count(blob)
+        if rating is not None and reviews is not None:
+            break
+    if rating is None or reviews is None:
+        for item in _jsonld_products(root):
+            found_rating, found_reviews = _jsonld_rating(item)
+            if rating is None:
+                rating = found_rating
+            if reviews is None:
+                reviews = found_reviews
+            if rating is not None and reviews is not None:
+                break
+    return rating, reviews
+
+
 def _ebay_next_price(card) -> float | None:
     node = card.select_one('.s-item__price')
     return _price(_text(node))
@@ -779,13 +956,18 @@ def parse_ebay_category(html: str, page_url: str) -> list[dict]:
         if not item_id or not title or title.lower() == 'shop on ebay':
             continue
         image = card.select_one('img')
+        rating, reviews = _ebay_rating_and_reviews(card)
         rows.append({
             'item_id': item_id,
             'url': href,
             'title': title,
             'price': _ebay_next_price(card),
-            'rating': None,
-            'review_count': None,
+            'rating': rating,
+            'review_count': reviews,
+            'sold': _sold_count(
+                card.select_one('.s-item__quantitySold'),
+                card.select_one('.s-item__hotness'),
+            ),
             'image': (image.get('src') if image else '') or '',
             'condition': _text(card.select_one('.SECONDARY_INFO')),
             'category': '',
@@ -807,38 +989,43 @@ def parse_ebay_product(html: str, page_url: str) -> dict:
         for node in soup.select('nav.breadcrumbs a, .seo-breadcrumb-text')
         if _text(node)
     ]
-    specifics = []
-    for row in soup.select('.ux-labels-values'):
-        label = _text(row.select_one('.ux-labels-values__labels'))
-        value = _text(row.select_one('.ux-labels-values__values'))
-        if label and value:
-            specifics.append(f'{label}: {value}')
+    specifics = _ebay_specifics(soup)
+    specification_text = ' | '.join(
+        _clean_prose(f'{label}: {value}')
+        for label, value in specifics
+        if _clean_prose(f'{label}: {value}')
+    )
     description = _clean_prose(_text(soup.select_one('.d-item-description')))
     images = _ebay_product_images(soup)
     availability = _text(soup.select_one('.x-quantity__availability'))
     inventory = _inventory_count(availability)
-    reviews = _review_count(
-        soup.select_one('.x-review-ratings'),
-        soup.select_one('.ux-summary__count'),
-    )
+    rating, reviews = _ebay_rating_and_reviews(soup)
     delivery = _delivery_date(
         soup.select_one('.ux-labels-values--shipping'),
         soup.select_one('#vi-acc-del-range'),
+    )
+    sold = _sold_count(
+        soup.select_one('.x-quantity__availability'),
+        soup.select_one('.d-quantity__availability'),
+        soup.select_one('.x-quantity'),
+        soup.select_one('#qtyAvailability'),
     )
     row = {
         'item_id': item_id,
         'url': page_url,
         'title': title,
-        'brand': '',
+        'brand': _ebay_brand(specifics, soup),
         'price': price,
-        'rating': None,
+        'rating': rating,
         'review_count': reviews,
+        'sold': sold,
         'availability': availability,
         'inventory': inventory,
         'delivery_date': delivery,
         'condition': condition,
         'description': description,
-        'bullets': ' | '.join(_clean_prose(item) for item in specifics if _clean_prose(item)),
+        'item_specifications': specification_text,
+        'bullets': specification_text,
         'category': ' > '.join(crumbs),
         'seller': seller,
     }

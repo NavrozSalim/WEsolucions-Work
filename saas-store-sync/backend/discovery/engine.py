@@ -51,7 +51,6 @@ def _raise_if_stopped(job_id) -> None:
     if _should_stop(job_id):
         raise DiscoveryCancelled()
 
-MAX_CATEGORY_URLS = 50
 # Per search URL. Amazon repeats the same cards after a few hundred, so a
 # department-sized category is split by price instead of stopping there.
 MAX_CATEGORY_PAGES = 500
@@ -498,8 +497,6 @@ def _category_urls(job: DiscoveryJob, inputs: list[dict]) -> list[str]:
         url = str(row.get('url') or '').strip()
         if url:
             urls.append(url)
-    if len(urls) > MAX_CATEGORY_URLS:
-        raise DiscoveryError(f'Category files are limited to {MAX_CATEGORY_URLS} URLs.')
     if not urls:
         raise DiscoveryError('Add at least one category URL.')
     return urls

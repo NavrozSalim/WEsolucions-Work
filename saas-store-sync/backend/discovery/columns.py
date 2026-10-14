@@ -55,6 +55,7 @@ EBAY_CATEGORY = (
     'review_count',
     'image',
     'condition',
+    'sold',
     'category',
 )
 
@@ -66,11 +67,13 @@ EBAY_PRODUCT = (
     'price',
     'rating',
     'review_count',
+    'sold',
     'availability',
     'inventory',
     'delivery_date',
     'condition',
     'description',
+    'item_specifications',
     'bullets',
     'images',
     'category',
@@ -92,9 +95,9 @@ _AMAZON_CATEGORY_DEFAULT = ('asin', 'url', 'title', 'price', 'rating', 'review_c
 _AMAZON_PRODUCT_DEFAULT = (
     'asin', 'url', 'title', 'brand', 'price', 'rating', 'review_count', 'category', 'availability', 'inventory', 'delivery_date', 'free_delivery', 'ships_from', 'sold_by', 'description',
 )
-_EBAY_CATEGORY_DEFAULT = ('item_id', 'url', 'title', 'price', 'rating', 'review_count', 'category')
+_EBAY_CATEGORY_DEFAULT = ('item_id', 'url', 'title', 'price', 'rating', 'review_count', 'sold', 'category')
 _EBAY_PRODUCT_DEFAULT = (
-    'item_id', 'url', 'title', 'brand', 'price', 'rating', 'review_count', 'category', 'availability', 'inventory', 'delivery_date',
+    'item_id', 'url', 'title', 'brand', 'price', 'rating', 'review_count', 'sold', 'item_specifications', 'category', 'availability', 'inventory', 'delivery_date',
 )
 
 DEFAULTS = {

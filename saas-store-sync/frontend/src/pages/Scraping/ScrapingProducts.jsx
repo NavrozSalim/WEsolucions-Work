@@ -31,6 +31,7 @@ const NUMERIC_COLUMNS = new Set([
   'review_count',
   'reviews',
   'inventory',
+  'sold',
 ]);
 
 const ID_COLUMNS = new Set(['asin', 'item_id']);
