@@ -50,7 +50,7 @@ function rulesPayload(form) {
         }
         return { op: raw.op, value: raw.value === '' ? null : Number(raw.value) };
     };
-    const categories = form.excludeCategories
+    const categories = form.wantCategories
         .split(/[\n,;]+/)
         .map((part) => part.trim())
         .filter(Boolean);
@@ -58,7 +58,7 @@ function rulesPayload(form) {
         rating: clause(form.rating),
         reviews: clause(form.reviews),
         price: clause(form.price),
-        exclude_categories: categories,
+        include_categories: categories,
     };
 }
 
@@ -137,7 +137,7 @@ export default function Scraping() {
     const [rating, setRating] = useState({ ...EMPTY_CLAUSE });
     const [reviews, setReviews] = useState({ ...EMPTY_CLAUSE });
     const [price, setPrice] = useState({ ...EMPTY_CLAUSE });
-    const [excludeCategories, setExcludeCategories] = useState('');
+    const [wantCategories, setWantCategories] = useState('');
     const [deleteTarget, setDeleteTarget] = useState(null);
     const [deleting, setDeleting] = useState(false);
     const [stoppingId, setStoppingId] = useState('');
@@ -210,7 +210,7 @@ export default function Scraping() {
         ));
     };
 
-    const formRules = () => rulesPayload({ rating, reviews, price, excludeCategories });
+    const formRules = () => rulesPayload({ rating, reviews, price, wantCategories });
 
     const onSubmit = async (event) => {
         event.preventDefault();
@@ -423,12 +423,15 @@ export default function Scraping() {
                         <RuleRow label="Price" hint="Highest price is “over”" value={price} onChange={setPrice} />
                     </div>
                     <label className="block text-sm font-medium text-slate-800 dark:text-slate-100">
-                        Remove these categories
+                        Want This Category
+                        <span className="mt-0.5 block text-xs font-normal text-slate-500 dark:text-slate-400">
+                            Optional. Leave this empty to keep every category.
+                        </span>
                         <textarea
-                            value={excludeCategories}
-                            onChange={(e) => setExcludeCategories(e.target.value)}
+                            value={wantCategories}
+                            onChange={(e) => setWantCategories(e.target.value)}
                             rows={2}
-                            placeholder="Books, Grocery"
+                            placeholder="Kitchen, Home"
                             className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-normal text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
                         />
                     </label>

@@ -35,7 +35,7 @@ STRICT_RULES = {
     'rating': {'op': 'lt', 'value': 3.5},
     'reviews': {'op': 'lt', 'value': 10},
     'price': {'op': 'gt', 'value': 80},
-    'exclude_categories': ['Books'],
+    'include_categories': ['Kitchen'],
 }
 
 
@@ -51,6 +51,19 @@ class RuleAndDedupeTests(TestCase):
         kept, removed = apply_rules(rows, STRICT_RULES)
         self.assertEqual(removed, 4)
         self.assertEqual([row['asin'] for row in kept], ['B0SAMPLE01'])
+
+    def test_want_category_keeps_a_matching_name_and_a_blank_category(self):
+        rows = [
+            {'asin': 'K1', 'category': 'Home & Kitchen > Cookware'},
+            {'asin': 'B1', 'category': 'Books'},
+            {'asin': 'E1', 'category': ''},
+        ]
+        kept, removed = apply_rules(rows, {'include_categories': 'Kitchen, Home'})
+        self.assertEqual(removed, 1)
+        self.assertEqual([row['asin'] for row in kept], ['K1', 'E1'])
+        everything, dropped = apply_rules(rows, {'include_categories': ''})
+        self.assertEqual(dropped, 0)
+        self.assertEqual(len(everything), 3)
 
     def test_missing_rating_is_kept(self):
         kept, removed = apply_rules(

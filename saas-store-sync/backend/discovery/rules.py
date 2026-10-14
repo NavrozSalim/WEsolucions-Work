@@ -2,6 +2,8 @@
 
 A missing value does not fail a numeric rule. eBay category cards often have no
 star rating, and those rows stay until a later page actually has the number.
+Want This Category is optional. An empty list keeps every category. A row with
+no category name stays, because a search card often has none yet.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ def empty_rules() -> dict:
         'rating': {'op': '', 'value': None, 'min': None, 'max': None},
         'reviews': {'op': '', 'value': None, 'min': None, 'max': None},
         'price': {'op': '', 'value': None, 'min': None, 'max': None},
-        'exclude_categories': [],
+        'include_categories': [],
     }
 
 
@@ -65,24 +67,24 @@ def normalize_rules(raw) -> dict:
         return base
     for field in ('rating', 'reviews', 'price'):
         base[field] = _clause(raw.get(field))
-    excluded = raw.get('exclude_categories') or []
-    if isinstance(excluded, str):
-        excluded = re.split(r'[\n,;]+', excluded)
+    wanted = raw.get('include_categories') or []
+    if isinstance(wanted, str):
+        wanted = re.split(r'[\n,;]+', wanted)
     cleaned = []
     seen = set()
-    for item in excluded:
+    for item in wanted:
         text = str(item or '').strip()
         key = text.casefold()
         if text and key not in seen:
             seen.add(key)
             cleaned.append(text)
-    base['exclude_categories'] = cleaned
+    base['include_categories'] = cleaned
     return base
 
 
 def rules_active(rules: dict) -> bool:
     rules = normalize_rules(rules)
-    if rules['exclude_categories']:
+    if rules['include_categories']:
         return True
     return any(rules[field]['op'] for field in ('rating', 'reviews', 'price'))
 
@@ -112,14 +114,14 @@ def _fails_numeric(row: dict, field: str, clause: dict) -> bool:
     return False
 
 
-def _fails_category(row: dict, excluded: list[str]) -> bool:
-    if not excluded:
+def _outside_wanted_category(row: dict, wanted: list[str]) -> bool:
+    if not wanted:
         return False
     category = str(row.get('category') or '').strip()
     if not category:
         return False
     haystack = category.casefold()
-    return any(name.casefold() in haystack for name in excluded)
+    return not any(name.casefold() in haystack for name in wanted)
 
 
 def row_removed(row: dict, rules: dict) -> bool:
@@ -127,7 +129,7 @@ def row_removed(row: dict, rules: dict) -> bool:
     for field in ('rating', 'reviews', 'price'):
         if _fails_numeric(row, field, rules[field]):
             return True
-    return _fails_category(row, rules['exclude_categories'])
+    return _outside_wanted_category(row, rules['include_categories'])
 
 
 def apply_rules(rows: list[dict], rules: dict) -> tuple[list[dict], int]:
@@ -150,6 +152,6 @@ def row_has_rule_fields(row: dict, rules: dict) -> bool:
     for field, column in _NUMERIC_FIELDS.items():
         if rules[field]['op'] and _num(row.get(column)) is not None:
             return True
-    if rules['exclude_categories'] and str(row.get('category') or '').strip():
+    if rules['include_categories'] and str(row.get('category') or '').strip():
         return True
     return False
