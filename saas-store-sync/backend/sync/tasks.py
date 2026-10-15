@@ -1602,6 +1602,9 @@ def _resolve_listing_id_for_pm(adapter, pm, store):
         child = (pm.marketplace_child_sku or '').strip()
         if child:
             return child
+        marketplace_listing = (pm.marketplace_id or '').strip()
+        if marketplace_listing:
+            return marketplace_listing
     else:
         listing_id = pm.marketplace_id
         if listing_id:

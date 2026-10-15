@@ -417,7 +417,7 @@ class SearsCatalogRulesTests(SimpleTestCase):
         self.assertEqual(_resolve_listing_id_for_pm(adapter, pm, store), 'UTXY-123-New')
         adapter.lookup_listing_by_sku.assert_not_called()
 
-    def test_resolve_listing_id_sears_ignores_stale_marketplace_id_without_child(self):
+    def test_resolve_listing_id_sears_uses_marketplace_id_when_child_sku_is_blank(self):
         from sync.tasks import _resolve_listing_id_for_pm
 
         pm = MagicMock()
@@ -425,7 +425,7 @@ class SearsCatalogRulesTests(SimpleTestCase):
         pm.marketplace_child_sku = ''
         store = _store('sears')
         adapter = MagicMock()
-        self.assertIsNone(_resolve_listing_id_for_pm(adapter, pm, store))
+        self.assertEqual(_resolve_listing_id_for_pm(adapter, pm, store), 'B646498318')
         adapter.lookup_listing_by_sku.assert_not_called()
 
     def test_mydeal_kind_from_store_not_generic_other(self):

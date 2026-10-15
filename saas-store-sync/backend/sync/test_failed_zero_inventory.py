@@ -48,7 +48,7 @@ class ManualSyncIncludesFailedTests(SimpleTestCase):
         )
         listed.filter.assert_called_once_with(product__vendor_id='vendor-1')
 
-    def test_sears_manual_sync_counts_only_rows_with_a_child_sku(self):
+    def test_sears_manual_sync_counts_marketplace_id_without_a_child_sku(self):
         from django.db.models import Q
 
         from catalog.marketplace_push import manual_sync_mappings
@@ -57,9 +57,9 @@ class ManualSyncIncludesFailedTests(SimpleTestCase):
         store.marketplace.code = 'sears'
         with patch('catalog.models.ProductMapping.objects') as objects:
             manual_sync_mappings(store)
-        objects.filter.return_value.exclude.assert_called_once_with(
-            Q(marketplace_child_sku__isnull=True) | Q(marketplace_child_sku=''),
-        )
+        missing_child = Q(marketplace_child_sku__isnull=True) | Q(marketplace_child_sku='')
+        missing_id = Q(marketplace_id__isnull=True) | Q(marketplace_id='')
+        objects.filter.return_value.exclude.assert_called_once_with(missing_child & missing_id)
 
 
 class FailedZeroInventoryTests(SimpleTestCase):
