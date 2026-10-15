@@ -27,19 +27,39 @@ class ManualSyncIncludesFailedTests(SimpleTestCase):
         self.assertEqual(scraped.sync_status, 'synced')
 
     def test_manual_sync_queryset_includes_failed_stock(self):
+        from django.db.models import Q
+
         from catalog.marketplace_push import manual_sync_mappings
 
         store = MagicMock()
-        filtered = MagicMock()
+        store.marketplace = None
+        store.marketplace_id = None
+        listed = MagicMock()
         with patch('catalog.models.ProductMapping.objects') as objects:
-            objects.filter.return_value = filtered
+            objects.filter.return_value.exclude.return_value = listed
             manual_sync_mappings(store, vendor_id='vendor-1')
         statuses = objects.filter.call_args[1]['sync_status__in']
         self.assertIn('failed', statuses)
         self.assertIn('needs_attention', statuses)
         self.assertIn('scraped', statuses)
         self.assertNotIn('pending', statuses)
-        filtered.filter.assert_called_once_with(product__vendor_id='vendor-1')
+        objects.filter.return_value.exclude.assert_called_once_with(
+            Q(marketplace_id__isnull=True) | Q(marketplace_id=''),
+        )
+        listed.filter.assert_called_once_with(product__vendor_id='vendor-1')
+
+    def test_sears_manual_sync_counts_only_rows_with_a_child_sku(self):
+        from django.db.models import Q
+
+        from catalog.marketplace_push import manual_sync_mappings
+
+        store = MagicMock()
+        store.marketplace.code = 'sears'
+        with patch('catalog.models.ProductMapping.objects') as objects:
+            manual_sync_mappings(store)
+        objects.filter.return_value.exclude.assert_called_once_with(
+            Q(marketplace_child_sku__isnull=True) | Q(marketplace_child_sku=''),
+        )
 
 
 class FailedZeroInventoryTests(SimpleTestCase):

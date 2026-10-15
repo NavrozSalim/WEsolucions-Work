@@ -40,7 +40,14 @@ def mark_mapping_pushed(pm, *, now=None, clear_error: bool = False, scrape_error
 
 
 def manual_sync_mappings(store, vendor_id=None):
-    """Listings Manual sync should push, including failed rows whose stock is 0."""
+    """Rows Manual sync can update.
+
+    A product with no marketplace ID is skipped later, so it is not counted.
+    Sears and Walmart use the child SKU as that ID. Failed rows that do have an
+    ID stay in the sync so their stock 0 is sent.
+    """
+    from django.db.models import Q
+
     from catalog.models import ProductMapping
 
     qs = ProductMapping.objects.filter(
@@ -49,6 +56,14 @@ def manual_sync_mappings(store, vendor_id=None):
         sync_status__in=list(MANUAL_SYNC_STATUSES),
         store_price__isnull=False,
     )
+    if store_is_sears(store) or store_is_walmart(store):
+        qs = qs.exclude(
+            Q(marketplace_child_sku__isnull=True) | Q(marketplace_child_sku=''),
+        )
+    else:
+        qs = qs.exclude(
+            Q(marketplace_id__isnull=True) | Q(marketplace_id=''),
+        )
     if vendor_id:
         qs = qs.filter(product__vendor_id=vendor_id)
     return qs
