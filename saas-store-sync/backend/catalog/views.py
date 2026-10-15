@@ -1722,11 +1722,6 @@ class CatalogPushListingsView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        from catalog.marketplace_push import manual_sync_mappings
-
-        listing_qs = manual_sync_mappings(store, push_vendor_id)
-        total_listings = listing_qs.count()
-
         run_inline = request.data.get('run_inline') or request.query_params.get('inline') == '1'
         store_key = str(store.id)
 
@@ -1798,7 +1793,6 @@ class CatalogPushListingsView(APIView):
                 'job_id': async_result.id,
                 'status': 'queued',
                 'message': 'Manual listing push queued.',
-                'total_listings': total_listings,
             },
             status=status.HTTP_202_ACCEPTED,
         )

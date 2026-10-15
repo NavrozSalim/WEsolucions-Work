@@ -175,14 +175,21 @@ function formatCatalogError(err) {
     if (typeof Blob !== 'undefined' && d instanceof Blob) {
         return err.message || 'Download failed.';
     }
+    const looksLikeHtml = (value) => (
+        typeof value === 'string' && (value.includes('<html') || value.includes('<!doctype'))
+    );
     if (status === 429) {
-        if (typeof d === 'string' && d.trim()) return d;
-        if (typeof d?.detail === 'string' && d.detail.trim()) return d.detail;
+        if (typeof d === 'string' && d.trim() && !looksLikeHtml(d)) return d;
+        if (typeof d?.detail === 'string' && d.detail.trim() && !looksLikeHtml(d.detail)) return d.detail;
         return 'Too many requests — wait a minute, then refresh the page. Sync may still be running on the server.';
     }
-    if (typeof d === 'string' && d.trim()) return d;
+    if (typeof d === 'string' && d.trim() && !looksLikeHtml(d)) return d;
     if (d?.detail != null) {
-        if (typeof d.detail === 'string') return d.detail;
+        if (typeof d.detail === 'string') {
+            return looksLikeHtml(d.detail)
+                ? 'Something went wrong on our side. Please try again in a moment.'
+                : d.detail;
+        }
         if (Array.isArray(d.detail)) return d.detail.map((x) => x?.msg || x).filter(Boolean).join('; ') || 'Something went wrong. Please try again.';
         return String(d.detail);
     }

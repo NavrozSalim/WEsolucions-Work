@@ -100,7 +100,10 @@ def build_push_listings_progress_payload(store) -> dict[str, Any]:
     if latest_progress and (latest_progress.metadata or {}).get('total'):
         total = int(latest_progress.metadata.get('total') or 0)
     else:
-        total = manual_sync_mappings(store, vendor_id).count()
+        try:
+            total = manual_sync_mappings(store, vendor_id).count()
+        except Exception:
+            total = 0
 
     if latest_progress:
         md = latest_progress.metadata or {}

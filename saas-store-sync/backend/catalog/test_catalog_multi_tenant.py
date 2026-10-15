@@ -1069,7 +1069,7 @@ class CatalogPushListingsViewTests(TestCase):
         self.assertEqual(resp.status_code, 202)
         body = resp.json()
         self.assertEqual(body['job_id'], 'task-push-abc')
-        self.assertIn('total_listings', body)
+        self.assertEqual(body['status'], 'queued')
         delay_mock.assert_called_once()
 
     def test_push_listings_returns_409_when_lock_held(self):
