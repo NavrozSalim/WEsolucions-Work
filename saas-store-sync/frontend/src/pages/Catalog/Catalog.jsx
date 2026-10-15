@@ -947,7 +947,7 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId, onSt
                     ) : null}
                     {!isQueued && isQueueBuild && (
                         <p className="text-xs text-violet-700 dark:text-violet-300 mt-0.5">
-                            Preparing listings for marketplace push — counts update as each batch completes. Use Stop Syncing to cancel.
+                            Preparing listings — the bar moves as each listing is counted. Use Stop Syncing to cancel.
                         </p>
                     )}
                     {!isQueued && !isWaitingSears && !isQueueBuild && (
@@ -1601,7 +1601,10 @@ export default function Catalog() {
         };
 
         poll();
-        const intervalId = setInterval(poll, 15000);
+        const intervalId = setInterval(
+            poll,
+            (trackingManualPush || manualPushActive) ? 3000 : 15000,
+        );
         if (!activeFlow && !trackingScrape && !trackingServerScrape && !trackingManualPush && inGraceWindow) {
             graceTimeoutId = setTimeout(() => {
                 cancelled = true;

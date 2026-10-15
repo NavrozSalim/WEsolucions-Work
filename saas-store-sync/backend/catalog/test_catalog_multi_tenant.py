@@ -1176,3 +1176,36 @@ class CatalogPushListingsProgressViewTests(TestCase):
         self.assertEqual(body['processed'], 0)
         self.assertEqual(body['pct'], 0)
         self.assertEqual(body['sync_step'], 'queue_build')
+
+    def test_progress_keeps_moving_after_many_updates(self):
+        from catalog.activity_log import append_catalog_log
+        from sync.push_listings_lock import try_acquire_push_listings_lock
+
+        try_acquire_push_listings_lock(str(self.store.id), 'task-progress-many')
+        append_catalog_log(
+            self.store.id,
+            'Marketplace sync started.',
+            action_type='sync_start',
+        )
+        for index in range(120):
+            append_catalog_log(
+                self.store.id,
+                f'preparing listings — {index + 1} of 500',
+                action_type='sync_progress',
+                metadata={
+                    'processed': index + 1,
+                    'total': 500,
+                    'pushed': 0,
+                    'failed': 0,
+                    'skipped_no_listing': 0,
+                    'sync_step': 'queue_build',
+                },
+            )
+
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body['processed'], 120)
+        self.assertEqual(body['total'], 500)
+        self.assertEqual(body['pct'], 24)
+        self.assertEqual(body['sync_step'], 'queue_build')

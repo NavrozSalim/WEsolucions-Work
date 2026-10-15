@@ -1727,9 +1727,10 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
     try:
         _raise_if_push_aborted(store_id)
 
+        scope_note = f' for {vendor_label}' if vendor_label else ' for all vendors'
         append_catalog_log(
             store.id,
-            f'Marketplace sync in progress: preparing bulk push — 0 of {total_to_push:,} queued.',
+            f'Marketplace sync in progress: preparing listings{scope_note} — 0 of {total_to_push:,}.',
             action_type='sync_progress',
             metadata={
                 'processed': 0,
@@ -1741,12 +1742,42 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
             },
         )
 
+        visited = 0
+
+        def _note_prepare(force=False):
+            nonlocal last_progress_log_at
+            now_mono = time.monotonic()
+            if (
+                not force
+                and visited % 100 != 0
+                and now_mono - last_progress_log_at < 5
+            ):
+                return
+            last_progress_log_at = now_mono
+            append_catalog_log(
+                store.id,
+                f'Marketplace sync in progress: preparing listings{scope_note} — '
+                f'{visited:,} of {total_to_push:,} '
+                f'({skipped:,} skipped, no listing ID).',
+                action_type='sync_progress',
+                metadata={
+                    'processed': visited,
+                    'total': total_to_push,
+                    'pushed': 0,
+                    'failed': 0,
+                    'skipped_no_listing': skipped,
+                    'sync_step': 'queue_build',
+                },
+            )
+
         if store_is_sears(store):
             bulk_queue = []
             queued_pairs = []
             queued_count = 0
-            for pm in qs.iterator(chunk_size=100):
+            for pm in qs.iterator(chunk_size=200):
                 _raise_if_push_aborted(store_id)
+                visited += 1
+                _note_prepare(force=(visited == 1))
                 listing_id = _resolve_listing_id_for_pm(adapter, pm, store)
                 if not listing_id:
                     skipped += 1
@@ -1759,28 +1790,6 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                 bulk_queue.append((pm, listing_id, pm.store_price, int(pm.store_stock or 0)))
                 queued_pairs.append((pm, str(listing_id)))
                 queued_count += 1
-                now_mono = time.monotonic()
-                if (
-                    queued_count == 1
-                    or queued_count % PUSH_LISTINGS_PROGRESS_EVERY == 0
-                    or now_mono - last_progress_log_at >= PUSH_LISTINGS_PROGRESS_LOG_SEC
-                ):
-                    last_progress_log_at = now_mono
-                    append_catalog_log(
-                        store.id,
-                        f'Marketplace sync in progress: preparing bulk push — '
-                        f'{skipped + queued_count:,} of {total_to_push:,} queued '
-                        f'({skipped:,} skipped, no listing ID).',
-                        action_type='sync_progress',
-                        metadata={
-                            'processed': skipped + queued_count,
-                            'total': total_to_push,
-                            'pushed': 0,
-                            'failed': 0,
-                            'skipped_no_listing': skipped,
-                            'sync_step': 'queue_build',
-                        },
-                    )
 
             from catalog.marketplace_push import flush_sears_bulk_marketplace_push
             from django.conf import settings as django_settings
@@ -1912,8 +1921,10 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
             bulk_queue = []
             queued_pairs = []
             queued_count = 0
-            for pm in qs.iterator(chunk_size=100):
+            for pm in qs.iterator(chunk_size=200):
                 _raise_if_push_aborted(store_id)
+                visited += 1
+                _note_prepare(force=(visited == 1))
                 listing_id = _resolve_listing_id_for_pm(adapter, pm, store)
                 if not listing_id:
                     skipped += 1
@@ -1926,28 +1937,6 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                 bulk_queue.append((pm, listing_id, pm.store_price, int(pm.store_stock or 0)))
                 queued_pairs.append((pm, str(listing_id)))
                 queued_count += 1
-                now_mono = time.monotonic()
-                if (
-                    queued_count == 1
-                    or queued_count % PUSH_LISTINGS_PROGRESS_EVERY == 0
-                    or now_mono - last_progress_log_at >= PUSH_LISTINGS_PROGRESS_LOG_SEC
-                ):
-                    last_progress_log_at = now_mono
-                    append_catalog_log(
-                        store.id,
-                        f'Marketplace sync in progress: preparing bulk push — '
-                        f'{skipped + queued_count:,} of {total_to_push:,} queued '
-                        f'({skipped:,} skipped, no listing ID).',
-                        action_type='sync_progress',
-                        metadata={
-                            'processed': skipped + queued_count,
-                            'total': total_to_push,
-                            'pushed': 0,
-                            'failed': 0,
-                            'skipped_no_listing': skipped,
-                            'sync_step': 'queue_build',
-                        },
-                    )
 
             _raise_if_push_aborted(store_id)
 
