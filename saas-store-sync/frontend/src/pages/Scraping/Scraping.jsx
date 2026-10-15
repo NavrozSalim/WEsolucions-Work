@@ -521,6 +521,7 @@ export default function Scraping() {
                                             {stats.duplicates_removed != null && ` · ${stats.duplicates_removed} duplicates removed`}
                                             {stats.removed_by_rules != null && ` · ${stats.removed_by_rules} removed by rules`}
                                             {stats.kept != null && ` · ${stats.kept} in the file`}
+                                            {Number(stats.missed) > 0 && ` · ${stats.missed} not returned`}
                                         </p>
                                         {job.error_message && (
                                             <p className="mt-1 text-xs text-rose-600 dark:text-rose-400">{job.error_message}</p>

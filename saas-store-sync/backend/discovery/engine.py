@@ -341,7 +341,8 @@ def _ebay_browser_fallback(url: str, marketplace: str, session) -> dict | None:
 
 
 def _blocked(html: str) -> bool:
-    sample = (html or '')[:8000].lower()
+    text = html or ''
+    sample = text[:8000].lower()
     markers = (
         'captcha',
         'robot check',
@@ -350,8 +351,14 @@ def _blocked(html: str) -> bool:
         'pardon our interruption',
         'checking your browser',
         'splashui/challenge',
+        'to discuss automated access to amazon data',
+        'validatecaptcha',
+        'api-services-support@amazon.com',
     )
-    return any(marker in sample for marker in markers)
+    if any(marker in sample for marker in markers):
+        return True
+    # Amazon's refusal page is short. A real product page is much larger.
+    return len(text) < 20000 and 'continue shopping' in sample
 
 
 def _project(row: dict, columns: list[str]) -> dict:
@@ -704,6 +711,31 @@ def _retry_ebay_html(url: str, marketplace: str, session) -> str | None:
     return _ebay_browser_html(url, marketplace, session)
 
 
+def _retry_amazon_product(url: str, marketplace: str, session) -> dict | None:
+    """Open the product once more after Amazon sends a refusal or an empty page."""
+    if session is None:
+        return None
+    streak = getattr(session, '_amazon_blocks', 0) + 1
+    session._amazon_blocks = streak
+    time.sleep(2.5 if streak >= 3 else 0.6)
+    host = HOSTS.get(marketplace) or HOSTS['amazon_us']
+    try:
+        session.get(host + '/', timeout=FETCH_TIMEOUT)
+    except Exception:
+        pass
+    try:
+        html = _fetch(url, session)
+    except requests.RequestException:
+        return None
+    if _blocked(html):
+        return None
+    parsed = parse_amazon_product(html, url)
+    if parsed.get('title') or parsed.get('price') is not None:
+        session._amazon_blocks = 0
+        return parsed
+    return None
+
+
 def _retry_ebay_product(url: str, marketplace: str, session) -> dict | None:
     html = _retry_ebay_html(url, marketplace, session)
     if not html:
@@ -735,11 +767,18 @@ def _live_product_row(row: dict, marketplace: str, errors: list[str], session: r
             else:
                 errors.append(f'{url}: {exc}')
         else:
+            recovered = _retry_amazon_product(url, marketplace, session)
+            if recovered is not None:
+                return recovered
             errors.append(f'{url}: {exc}')
         return None
     if _blocked(html):
         if is_ebay(marketplace):
             recovered = _retry_ebay_product(url, marketplace, session)
+            if recovered is not None:
+                return recovered
+        if is_amazon(marketplace):
+            recovered = _retry_amazon_product(url, marketplace, session)
             if recovered is not None:
                 return recovered
         errors.append(f'{url}: the site blocked the request')
@@ -748,6 +787,10 @@ def _live_product_row(row: dict, marketplace: str, errors: list[str], session: r
     if not parsed.get('title') and parsed.get('price') is None:
         if is_ebay(marketplace):
             recovered = _retry_ebay_product(url, marketplace, session)
+            if recovered is not None:
+                return recovered
+        if is_amazon(marketplace):
+            recovered = _retry_amazon_product(url, marketplace, session)
             if recovered is not None:
                 return recovered
         errors.append(f'{url}: product details were not in the page')
@@ -958,7 +1001,23 @@ def execute_job(job_id) -> None:
         job.columns = columns
         job.rules = rules
         warning = table.warning
+        missed = 0
+        if job.mode != DiscoveryJob.Mode.CATEGORY:
+            missed = max(
+                0,
+                input_count - table.duplicates - table.removed_by_rules - len(kept_rows),
+            )
         if (
+            not job.use_sample
+            and job.mode != DiscoveryJob.Mode.CATEGORY
+            and is_amazon(job.marketplace)
+            and missed
+        ):
+            warning = (
+                f'Amazon did not return {missed} of {input_count} products. '
+                'Those pages were refused or had no title and price, so they were not saved.'
+            )
+        elif (
             not job.use_sample
             and job.mode == DiscoveryJob.Mode.CATEGORY
             and is_amazon(job.marketplace)
@@ -974,6 +1033,7 @@ def execute_job(job_id) -> None:
             'duplicates_removed': table.duplicates,
             'removed_by_rules': table.removed_by_rules,
             'kept': len(kept_rows),
+            'missed': missed,
             'errors': errors[:20],
             'warning': warning,
         }

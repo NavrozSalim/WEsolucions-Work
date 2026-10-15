@@ -581,6 +581,43 @@ class ParserTests(TestCase):
         self.assertEqual(rows[0]['title'], 'Plant Stand')
         self.assertEqual(rows[0]['price'], 35.91)
 
+    def test_amazon_product_retries_after_a_refusal_page(self):
+        from discovery.engine import _blocked, _live_product_row
+
+        refusal = '<html><title>Amazon.com</title><a>Continue shopping</a></html>'
+        self.assertTrue(_blocked(refusal))
+        self.assertFalse(_blocked('Continue shopping ' + ('x' * 25000)))
+
+        calls = []
+
+        class DummySession:
+            def get(self, url, timeout=None):
+                return None
+
+        def fake_fetch(url, session=None):
+            calls.append(url)
+            if len(calls) == 1:
+                return refusal
+            return '''
+            <span id="productTitle">Steel Cookware Set</span>
+            <span class="a-price"><span class="a-offscreen">$49.99</span></span>
+            '''
+
+        errors = []
+        with patch('discovery.engine._fetch', side_effect=fake_fetch), patch(
+            'discovery.engine.time.sleep'
+        ):
+            parsed = _live_product_row(
+                {'url': 'https://www.amazon.com/dp/B0SAMPLE01'},
+                'amazon_us',
+                errors,
+                DummySession(),
+            )
+        self.assertEqual(errors, [])
+        self.assertEqual(parsed['title'], 'Steel Cookware Set')
+        self.assertEqual(parsed['price'], 49.99)
+        self.assertEqual(len(calls), 2)
+
     def test_ebay_search_asks_for_240_listings_per_page(self):
         widened = ebay_results_url('https://www.ebay.com/sch/i.html?_nkw=drill')
         self.assertIn('_ipg=240', widened)
