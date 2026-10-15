@@ -3307,9 +3307,22 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     result = {"price": price, "inventory": stock}
                 elif url:
                     _flush_writes()
+                    fetch_url = url
+                    if "costco." in url_l:
+                        try:
+                            from catalog.vendor_url_resolve import canonicalize_costco_pdp_url
+                            fetch_url = canonicalize_costco_pdp_url(
+                                url,
+                                nora_key,
+                                listing.sku or "",
+                                listing.external_variant_key or "",
+                                listing.external_product_key or "",
+                            ) or url
+                        except Exception:
+                            fetch_url = url
                     try:
                         result = get_price_and_stock(
-                            url, region, session, vendor_code=src_code or None,
+                            fetch_url, region, session, vendor_code=src_code or None,
                         ) or {}
                     except Exception as exc:  # noqa: BLE001
                         if not uses_nora:

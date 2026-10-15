@@ -46,7 +46,11 @@ from .core import ScrapeResult
 from .costco_au_proxies import (
     CostcoAuProxyPool,
     ProxyAssignment,
+    claim_shared_proxy,
     get_pool,
+    note_shared_block,
+    release_shared_claim,
+    shared_proxy_wait,
 )
 
 logger = logging.getLogger("scrapers.costco_au")
@@ -96,6 +100,16 @@ HTTP_TIMEOUT_SEC = _env_int("COSTCO_AU_HTTP_TIMEOUT_SEC", 25)
 HTTP_RETRIES = _env_int("COSTCO_AU_HTTP_RETRIES", 2)
 SELENIUM_FALLBACK = _env_bool("COSTCO_AU_SELENIUM_FALLBACK", False)
 BLOCK_COOLDOWN_SEC = _env_float("COSTCO_AU_BLOCK_COOLDOWN_SEC", 600.0)
+
+
+def _lock_wait_sec() -> float:
+    """How long to wait for another worker to finish a request on this proxy.
+
+    Read on each call so a worker picks up ``COSTCO_AU_LOCK_WAIT_SEC`` without
+    a code change. A full Cloudflare cooldown is waited separately, once per
+    product, and is capped by ``COSTCO_AU_BLOCK_COOLDOWN_SEC``.
+    """
+    return max(0.0, _env_float("COSTCO_AU_LOCK_WAIT_SEC", 120.0))
 
 
 # ---------------------------------------------------------------------------
@@ -504,9 +518,11 @@ def html_is_challenge(html: str) -> tuple[bool, str]:
     return False, ""
 
 
+# Product pages are titled "Name | Costco Australia". Matching that phrase
+# marked every unrendered PDP shell as the homepage. These phrases are the
+# real warehouse home title only.
 _HOMEPAGE_TITLE_PATTERNS = (
     "member warehouse for bulk buys",
-    "costco australia",
     "| costco aus",
 )
 
@@ -539,6 +555,13 @@ def is_homepage_redirect(url: str, final_url: str, soup: BeautifulSoup) -> bool:
     title_el = soup.select_one("title")
     title = (title_el.get_text(strip=True).lower() if title_el else "")
     for pat in _HOMEPAGE_TITLE_PATTERNS:
+        # "| costco aus" is the home title. It must not match "| costco australia"
+        # on a product page.
+        if pat == "| costco aus":
+            if title.endswith("| costco aus"):
+                title_is_homepage = True
+                break
+            continue
         if pat in title:
             title_is_homepage = True
             break
@@ -601,7 +624,8 @@ def parse_costco_pdp(url: str, html: str, final_url: str = "") -> ScrapeResult:
         ``ScrapeResult.ok(price, stock, title)`` on success.
         ``ScrapeResult.fail(...)`` with one of:
             * ``blocked_<reason>`` — challenge / WAF page
-            * ``product_not_found`` — homepage redirect for /p/<id>
+            * ``product_not_found`` — confirmed homepage redirect for /p/<id>
+            * ``page_shell``       — response was not a rendered product page
             * ``no_price``         — page loaded but no price selector matched
     """
     if not html:
@@ -622,8 +646,10 @@ def parse_costco_pdp(url: str, html: str, final_url: str = "") -> ScrapeResult:
         )
 
     if not _looks_like_pdp(soup, url):
+        # An unrendered shell is not proof the item is gone. The caller retries
+        # another proxy. A confirmed homepage redirect stays ``product_not_found``.
         return ScrapeResult.fail(
-            "product_not_found", "Not a Costco AU product page", "",
+            "page_shell", "Costco AU product page did not render", "",
             VENDOR_TAG, url,
         )
 
@@ -846,6 +872,51 @@ def _selenium_fetch(url: str, session: dict, assignment: ProxyAssignment) -> tup
 # Public API
 # ---------------------------------------------------------------------------
 
+def _park_proxy(pool: CostcoAuProxyPool, assignment: ProxyAssignment, cooldown_sec: float) -> None:
+    """Ban ``assignment`` locally and on the shared clock, without extending a live ban."""
+    pool.mark_blocked(assignment, cooldown_sec=cooldown_sec)
+    note_shared_block(assignment.label, cooldown_sec, gap_sec=pool._min_gap_sec)
+
+
+def _acquire_costco_proxy(
+    pool: CostcoAuProxyPool,
+    *,
+    force_rotate: bool,
+    wait_for_cooldown: bool,
+) -> Optional[ProxyAssignment]:
+    """Take a proxy that is not cooling.
+
+    When the whole pool is banned, wait out that ban once (the first attempt
+    of a product) so the rest of the catalog can continue. Later attempts in
+    the same product rotate immediately and leave the deadline alone.
+    """
+    assignment = pool.acquire(force_rotate=force_rotate, allow_cooling=False)
+    if assignment is not None or not wait_for_cooldown:
+        return assignment
+    wait = pool.seconds_until_ready()
+    cap = max(_lock_wait_sec(), float(BLOCK_COOLDOWN_SEC))
+    if wait <= 0 or wait > cap:
+        return None
+    logger.info("Costco AU pool cooling; waiting %.0fs for a proxy", wait)
+    time.sleep(wait)
+    return pool.acquire(force_rotate=False, allow_cooling=False)
+
+
+def _reserve_proxy(pool: CostcoAuProxyPool, assignment: ProxyAssignment) -> bool:
+    """Wait for this proxy's shared gap. False means try a different proxy."""
+    status = claim_shared_proxy(assignment.label, pool._min_gap_sec, _lock_wait_sec())
+    if status == "ok":
+        pool.note_request_started(assignment)
+        return True
+    if status == "skip":
+        pool.wait_for_gap(assignment)
+        return True
+    remain = shared_proxy_wait(assignment.label)
+    if remain > 0:
+        pool.mark_blocked(assignment, cooldown_sec=remain)
+    return False
+
+
 def scrape_costco_au(
     vendor_url: str,
     region: str,
@@ -890,22 +961,34 @@ def scrape_costco_au(
     last_html_saved = False
 
     for attempt in range(attempts):
-        assignment = active_pool.acquire(force_rotate=attempt > 0)
+        assignment = _acquire_costco_proxy(
+            active_pool,
+            force_rotate=attempt > 0,
+            wait_for_cooldown=attempt == 0,
+        )
         if assignment is None:
-            last_error = "no_proxy_available"
+            # Keep the last fetch error. "no_proxy_available" only when this
+            # product never got a response because the whole pool was banned.
+            last_error = last_error or "no_proxy_available"
             break
 
-        active_pool.wait_for_gap(assignment)
+        if not _reserve_proxy(active_pool, assignment):
+            last_error = last_error or "proxy_busy"
+            continue
+
         logger.info(
             "Costco AU GET %s (proxy=%s attempt=%d/%d)",
             vendor_url[:120], assignment.label, attempt + 1, attempts,
         )
-        html, final_url, http_err = _http_fetch(vendor_url, session, assignment)
+        try:
+            html, final_url, http_err = _http_fetch(vendor_url, session, assignment)
+        finally:
+            release_shared_claim(assignment.label)
 
         if http_err:
             last_error = http_err
             # 4xx/5xx — try next proxy; transient request error — try next proxy too.
-            active_pool.mark_blocked(assignment, cooldown_sec=BLOCK_COOLDOWN_SEC / 6)
+            _park_proxy(active_pool, assignment, BLOCK_COOLDOWN_SEC / 6)
             continue
 
         result = parse_costco_pdp(vendor_url, html, final_url)
@@ -923,6 +1006,12 @@ def scrape_costco_au(
         if result.error_code == "product_not_found":
             return result.to_legacy()
 
+        # Unrendered shell: the proxy did reach Costco, so don't park it.
+        # Another IP may get the rendered PDP. A dead id fails after retries
+        # without taking the pool offline.
+        if result.error_code == "page_shell":
+            continue
+
         # ``no_price`` — the proxy fetched the PDP just fine, the parser simply
         # couldn't find a price (out of stock w/o price, discontinued listing,
         # category landing page, etc.). Retrying with another proxy returns the
@@ -932,21 +1021,25 @@ def scrape_costco_au(
             return result.to_legacy()
 
         if result.error_code.startswith("blocked_"):
-            active_pool.mark_blocked(assignment, cooldown_sec=BLOCK_COOLDOWN_SEC)
+            _park_proxy(active_pool, assignment, BLOCK_COOLDOWN_SEC)
         else:
             # ``empty_response`` and other rare parse errors — short cooldown
             # so we rotate to a fresh proxy on the next attempt.
-            active_pool.mark_blocked(assignment, cooldown_sec=BLOCK_COOLDOWN_SEC / 6)
+            _park_proxy(active_pool, assignment, BLOCK_COOLDOWN_SEC / 6)
 
     if SELENIUM_FALLBACK:
-        assignment = active_pool.acquire(force_rotate=True)
-        if assignment is not None:
-            active_pool.wait_for_gap(assignment)
+        assignment = _acquire_costco_proxy(
+            active_pool, force_rotate=True, wait_for_cooldown=False,
+        )
+        if assignment is not None and _reserve_proxy(active_pool, assignment):
             logger.info(
                 "Costco AU Selenium fallback url=%s proxy=%s",
                 vendor_url[:120], assignment.label,
             )
-            html, final_url, sel_err = _selenium_fetch(vendor_url, session, assignment)
+            try:
+                html, final_url, sel_err = _selenium_fetch(vendor_url, session, assignment)
+            finally:
+                release_shared_claim(assignment.label)
             if not sel_err:
                 result = parse_costco_pdp(vendor_url, html, final_url)
                 if result.success:

@@ -148,6 +148,20 @@ class CostcoAuProxyPoolTests(SimpleTestCase):
         a = self.pool.acquire(force_rotate=True)
         self.assertIsNotNone(a)
 
+    def test_allow_cooling_false_returns_none_when_pool_is_banned(self):
+        for _ in range(len(self.urls)):
+            a = self.pool.acquire(force_rotate=True)
+            self.pool.mark_blocked(a, cooldown_sec=600.0)
+        self.assertIsNone(self.pool.acquire(force_rotate=True, allow_cooling=False))
+        self.assertGreater(self.pool.seconds_until_ready(), 500)
+
+    def test_second_block_does_not_extend_cooldown(self):
+        assignment = self.pool.acquire()
+        self.pool.mark_blocked(assignment, cooldown_sec=600.0)
+        deadline = self.pool._cooldown_until[assignment.index]
+        self.pool.mark_blocked(assignment, cooldown_sec=600.0)
+        self.assertEqual(self.pool._cooldown_until[assignment.index], deadline)
+
     def test_threads_get_independent_assignments(self):
         results: dict[int, str] = {}
 
@@ -161,6 +175,41 @@ class CostcoAuProxyPoolTests(SimpleTestCase):
         # proxy (cursor-based round robin), but the per-thread sticky dict has
         # two entries.
         self.assertEqual(len(results), 2)
+
+
+class SharedProxyGateTests(SimpleTestCase):
+    """The cache clock stops two Celery children from sharing one banned IP."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        self.cache = cache
+        self.label = "costco-test-gate:55991"
+        self.cache.delete(f"costco-au:proxy:next:{self.label}")
+        self.cache.delete(f"costco-au:proxy:claim:{self.label}")
+
+    def tearDown(self):
+        self.cache.delete(f"costco-au:proxy:next:{self.label}")
+        self.cache.delete(f"costco-au:proxy:claim:{self.label}")
+
+    def test_second_worker_does_not_take_a_held_proxy(self):
+        self.assertEqual(
+            costco_au_proxies.claim_shared_proxy(self.label, 20, 120),
+            "ok",
+        )
+        self.assertEqual(
+            costco_au_proxies.claim_shared_proxy(self.label, 20, 0),
+            "busy",
+        )
+
+    def test_block_replaces_the_gap_and_a_second_block_does_not_reset_it(self):
+        costco_au_proxies.claim_shared_proxy(self.label, 20, 120)
+        costco_au_proxies.note_shared_block(self.label, 600, gap_sec=20)
+        first = costco_au_proxies.shared_proxy_wait(self.label)
+        self.assertGreater(first, 500)
+        costco_au_proxies.note_shared_block(self.label, 600, gap_sec=20)
+        second = costco_au_proxies.shared_proxy_wait(self.label)
+        self.assertGreater(second, 500)
+        self.assertLessEqual(second, first)
 
 
 class GetPoolTests(SimpleTestCase):
@@ -680,8 +729,17 @@ class ParseCostcoPdpTests(SimpleTestCase):
         url = "https://www.costco.com.au/p/TFS-CO-138511-New"
         result = costco_au_scraper.parse_costco_pdp(url, _BARREN_SHELL_HTML)
         self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "product_not_found")
+        self.assertEqual(result.error_code, "page_shell")
         self.assertIsNone(result.price)
+
+    def test_product_title_shell_is_not_a_homepage_redirect(self):
+        html = (
+            "<html><head><title>Premium Wireless Vacuum | Costco Australia</title></head>"
+            "<body></body></html>"
+        )
+        result = costco_au_scraper.parse_costco_pdp(self.URL, html)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "page_shell")
 
 
 # ============================================================================
@@ -784,6 +842,46 @@ class ScrapeCostcoAuOrchestrationTests(SimpleTestCase):
         self.assertIsNone(result["price"])
         self.assertEqual(result["error_code"], "product_not_found")
         self.assertEqual(len(calls), 1, "product_not_found is terminal — must not rotate")
+
+    def test_page_shell_retries_another_proxy(self):
+        calls = []
+
+        def fake_fetch(url, session, assignment):
+            calls.append(assignment.index)
+            if len(calls) == 1:
+                return _BARREN_SHELL_HTML, url, ""
+            return _PDP_HTML_NORMAL, url, ""
+
+        with patch.object(costco_au_scraper, "_http_fetch", side_effect=fake_fetch):
+            result = costco_au_scraper.scrape_costco_au(
+                self.url, "AU", session={}, pool=self.pool,
+            )
+
+        self.assertEqual(result["price"], 1299.99)
+        self.assertEqual(calls, [0, 1])
+
+    def test_first_attempt_waits_for_cooldown_without_extending_it(self):
+        pool = costco_au_proxies.CostcoAuProxyPool(["http://u:p@only:9"], min_gap_sec=0.0)
+        pool._cursor = 0
+        banned = pool.acquire()
+        pool.mark_blocked(banned, cooldown_sec=30.0)
+        deadline = pool._cooldown_until[banned.index]
+        slept = []
+
+        def fake_sleep(seconds):
+            slept.append(seconds)
+            pool._cooldown_until.clear()
+
+        with patch.object(costco_au_scraper.time, "sleep", side_effect=fake_sleep):
+            got = costco_au_scraper._acquire_costco_proxy(
+                pool, force_rotate=False, wait_for_cooldown=True,
+            )
+
+        self.assertEqual(len(slept), 1)
+        self.assertGreater(slept[0], 20)
+        self.assertLess(slept[0], 40)
+        self.assertIsNotNone(got)
+        self.assertGreater(deadline, 0)
 
     def test_no_price_does_not_rotate_or_cooldown(self):
         """``no_price`` is a parse miss, not a proxy fault — fail terminally."""

@@ -226,7 +226,13 @@ class CostcoAuProxyPool:
         except Exception:
             return "unknown"
 
-    def _next_free_index(self, now: float, *, exclude: Optional[int] = None) -> Optional[int]:
+    def _next_free_index(
+        self,
+        now: float,
+        *,
+        exclude: Optional[int] = None,
+        allow_cooling: bool = True,
+    ) -> Optional[int]:
         n = len(self._urls)
         if n == 0:
             return None
@@ -238,18 +244,33 @@ class CostcoAuProxyPool:
             cd = self._cooldown_until.get(idx, 0.0)
             if cd <= now:
                 return idx
-        # All proxies in cooldown — return the one whose cooldown ends first.
+        if not allow_cooling:
+            # A cooling proxy must not be handed out. Reusing it and then
+            # calling mark_blocked() again restarts the ban, so the pool
+            # never recovers for the rest of the job.
+            return None
+        # Callers that still tolerate a cooling proxy (eBay AU) get the one
+        # whose cooldown ends first.
         candidates = [(idx, self._cooldown_until.get(idx, 0.0)) for idx in range(n)
                       if exclude is None or idx != exclude]
         if not candidates:
             return None
         return min(candidates, key=lambda kv: kv[1])[0]
 
-    def acquire(self, *, force_rotate: bool = False) -> Optional[ProxyAssignment]:
+    def acquire(
+        self,
+        *,
+        force_rotate: bool = False,
+        allow_cooling: bool = True,
+    ) -> Optional[ProxyAssignment]:
         """Return a :class:`ProxyAssignment` for the current thread.
 
         ``force_rotate=True`` releases any sticky proxy held by this thread
         and picks the next one — used after the active proxy gets blocked.
+
+        ``allow_cooling=False`` returns ``None`` when every proxy is still
+        banned. Costco AU uses that so a blocked IP is left alone until its
+        cooldown ends. eBay AU keeps the default and may reuse a cooling proxy.
         """
         if not self._urls:
             return None
@@ -265,7 +286,11 @@ class CostcoAuProxyPool:
                     url = self._urls[current]
                     return ProxyAssignment(index=current, url=url, label=self._label(url))
                 # In cooldown — fall through to picking next.
-            idx = self._next_free_index(now, exclude=current if force_rotate else None)
+            idx = self._next_free_index(
+                now,
+                exclude=current if force_rotate else None,
+                allow_cooling=allow_cooling,
+            )
             if idx is None:
                 return None
             self._sticky[tid] = idx
@@ -273,8 +298,30 @@ class CostcoAuProxyPool:
             url = self._urls[idx]
             return ProxyAssignment(index=idx, url=url, label=self._label(url))
 
+    def seconds_until_ready(self) -> float:
+        """Seconds until some proxy is usable. ``0`` when one is already free."""
+        now = time.monotonic()
+        soonest: Optional[float] = None
+        with self._lock:
+            if not self._urls:
+                return 0.0
+            for idx in range(len(self._urls)):
+                remain = self._cooldown_until.get(idx, 0.0) - now
+                if remain <= 0:
+                    return 0.0
+                if soonest is None or remain < soonest:
+                    soonest = remain
+        return soonest or 0.0
+
+    def note_request_started(self, assignment: Optional[ProxyAssignment]) -> None:
+        """Record that a request is starting, for the per-proxy gap."""
+        self._record_request(assignment)
+
     def mark_blocked(self, assignment: ProxyAssignment, cooldown_sec: float = 300.0) -> None:
         """Mark ``assignment`` as banned for ``cooldown_sec`` seconds.
+
+        A proxy that is already cooling keeps its original deadline. Extending
+        it on every failed retry pushed the ban out for the whole catalog run.
 
         Logs at ``warning`` only for long cooldowns (real Cloudflare-style bans).
         Short cooldowns (used for transient HTTP / parse errors) log at ``debug``
@@ -283,8 +330,12 @@ class CostcoAuProxyPool:
         if assignment is None:
             return
         now = time.monotonic()
+        cooldown_sec = max(0.0, float(cooldown_sec))
         with self._lock:
-            self._cooldown_until[assignment.index] = now + max(0.0, float(cooldown_sec))
+            existing = self._cooldown_until.get(assignment.index, 0.0)
+            if existing > now:
+                return
+            self._cooldown_until[assignment.index] = now + cooldown_sec
         log_fn = logger.warning if cooldown_sec >= 300.0 else logger.debug
         log_fn(
             "Costco AU proxy %d (%s) cooled down for %.0fs after block",
@@ -370,6 +421,122 @@ def reset_pool_for_tests() -> None:
         _POOL = None
 
 
+# ---------------------------------------------------------------------------
+# Cross-process gate (Redis/Django cache)
+# ---------------------------------------------------------------------------
+# Prefork Celery children each own an in-process pool, so cooldowns and the
+# 20s gap are not visible to the other child. Both then hit the same
+# residential IP. The cache keys below are the shared clock. They are skipped
+# when the gap is 0 (tests) or Django cache is unavailable.
+
+_SHARED_PREFIX = "costco-au:proxy:"
+
+
+def _django_cache():
+    try:
+        from django.conf import settings
+        if not settings.configured:
+            return None
+        from django.core.cache import cache
+        return cache
+    except Exception:
+        return None
+
+
+def shared_proxy_wait(label: str) -> float:
+    """Seconds until ``label`` may be used on the shared clock. ``0`` if free."""
+    cache = _django_cache()
+    if cache is None or not label:
+        return 0.0
+    try:
+        raw = cache.get(f"{_SHARED_PREFIX}next:{label}")
+    except Exception:
+        return 0.0
+    if raw is None:
+        return 0.0
+    try:
+        until = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, until - time.time())
+
+
+def claim_shared_proxy(label: str, min_gap_sec: float, max_wait_sec: float) -> str:
+    """Reserve ``label`` for one request across processes.
+
+    Returns ``"skip"`` when the shared gate is not in use, ``"ok"`` when this
+    process may fetch now, or ``"busy"`` when another worker holds the proxy
+    or its cooldown is longer than ``max_wait_sec``.
+    """
+    if not label or min_gap_sec <= 0:
+        return "skip"
+    cache = _django_cache()
+    if cache is None:
+        return "skip"
+    wait = shared_proxy_wait(label)
+    if wait > max_wait_sec:
+        return "busy"
+    if wait > 0:
+        time.sleep(wait)
+    hold = max(1, int(min_gap_sec + 0.999))
+    try:
+        claimed = cache.add(f"{_SHARED_PREFIX}claim:{label}", "1", hold)
+    except Exception:
+        return "skip"
+    if not claimed:
+        return "busy"
+    try:
+        cache.set(
+            f"{_SHARED_PREFIX}next:{label}",
+            time.time() + float(min_gap_sec),
+            timeout=hold + 30,
+        )
+    except Exception:
+        pass
+    return "ok"
+
+
+def release_shared_claim(label: str) -> None:
+    """Drop the in-request claim. The next-allowed time still enforces the gap."""
+    if not label:
+        return
+    cache = _django_cache()
+    if cache is None:
+        return
+    try:
+        cache.delete(f"{_SHARED_PREFIX}claim:{label}")
+    except Exception:
+        return
+
+
+def note_shared_block(label: str, cooldown_sec: float, *, gap_sec: float = 0.0) -> None:
+    """Park ``label`` on the shared clock.
+
+    A proxy already inside a real cooldown keeps that deadline. The short
+    inter-request gap (about ``gap_sec``) is replaced by the ban.
+    """
+    if not label or cooldown_sec <= 0:
+        return
+    cache = _django_cache()
+    if cache is None:
+        return
+    key = f"{_SHARED_PREFIX}next:{label}"
+    now = time.time()
+    try:
+        raw = cache.get(key)
+        current = float(raw) if raw is not None else 0.0
+    except Exception:
+        return
+    remain = current - now
+    if remain > max(0.0, float(gap_sec)) + 5.0:
+        return
+    timeout = max(1, int(cooldown_sec) + 30)
+    try:
+        cache.set(key, now + float(cooldown_sec), timeout=timeout)
+    except Exception:
+        return
+
+
 __all__ = [
     "ProxyAssignment",
     "ProxyBlockedError",
@@ -377,4 +544,8 @@ __all__ = [
     "load_proxy_urls",
     "get_pool",
     "reset_pool_for_tests",
+    "shared_proxy_wait",
+    "claim_shared_proxy",
+    "release_shared_claim",
+    "note_shared_block",
 ]
