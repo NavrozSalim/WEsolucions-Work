@@ -897,6 +897,37 @@ class BunningsListingServiceTests(TestCase):
         self.assertNotIn("state", attrs)
         self.assertNotIn("product-id-type", attrs)
 
+    def test_xlsx_select_all_skips_per_category_attribute_calls(self):
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
+        from listings.bunnings.template_xlsx import build_template_xlsx
+
+        hierarchies = [f"CAT-{i}" for i in range(12)]
+        logistics = BunningsResult(
+            ok=True,
+            data={"logistic_classes": [{"code": "free-shipping", "label": "Free Shipping"}]},
+        )
+        with patch(
+            "listings.bunnings.products.load_category_attributes",
+        ) as load_attrs, patch("listings.bunnings.template_xlsx.BunningsClient") as client_cls:
+            client_cls.return_value.list_logistic_classes.return_value = logistics
+            content = build_template_xlsx("create", store=self.store, hierarchies=hierarchies)
+
+        load_attrs.assert_not_called()
+        wb = load_workbook(BytesIO(content))
+        codes = [cell.value for cell in wb["Data"][2]]
+        self.assertIn("VARIANT_GROUP_CODE", codes)
+        self.assertIn("CATEGORY", codes)
+        ref_values = {
+            cell
+            for row in wb["ReferenceData"].iter_rows(values_only=True)
+            for cell in row
+        }
+        self.assertIn("CAT-0", ref_values)
+        self.assertIn("CAT-11", ref_values)
+
     def test_xlsx_parse_prefers_code_row_over_labels(self):
         from io import BytesIO
 

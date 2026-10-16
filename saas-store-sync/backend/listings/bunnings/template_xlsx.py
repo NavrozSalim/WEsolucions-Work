@@ -22,6 +22,8 @@ COLOR_OFFER = "1563A3"
 FONT_WHITE = Font(bold=True, color="FFFFFF", name="Calibri", size=10)
 ALIGN = Alignment(wrap_text=True, vertical="center", horizontal="center")
 DATA_ROWS_END = 10000
+# Above this, skip a live attribute call per category. Select all is 1,000+ leaves.
+LIVE_ATTRIBUTE_CATEGORY_LIMIT = 8
 YES_NO = ["Yes", "No"]
 PRODUCT_ID_TYPES = ["SHOP_SKU", "GTIN", "SKU"]
 ORIGIN_DEFAULTS = ["Australia", "New Zealand"]
@@ -167,9 +169,13 @@ def _dropdown_defaults(code: str, values: list[str]) -> list[str]:
 
 
 def build_template_columns(store, hierarchy_codes) -> list[TemplateColumn]:
-    bunnings_products.prefetch_category_attributes(store, hierarchy_codes)
-    pm11 = _pm11_lookup(store, hierarchy_codes)
     categories = [str(c).strip() for c in (hierarchy_codes or []) if str(c or "").strip()]
+    # One Mirakl attribute call per category. A full tree cannot wait on that.
+    if len(categories) <= LIVE_ATTRIBUTE_CATEGORY_LIMIT:
+        bunnings_products.prefetch_category_attributes(store, categories)
+        pm11 = _pm11_lookup(store, categories)
+    else:
+        pm11 = {}
     logistics = _logistic_codes(store)
     columns: list[TemplateColumn] = []
 

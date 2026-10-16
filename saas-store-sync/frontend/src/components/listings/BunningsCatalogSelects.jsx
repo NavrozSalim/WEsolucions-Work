@@ -264,7 +264,7 @@ export function BunningsCategoryMultiSelect({ storeId, values = [], onChange, re
                 </div>
             </div>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Select every leaf you need, or use Select all. Parent categories are not included.
+                Select every leaf you need, or use Select all. A large selection downloads straight away with the shared columns and every category in the CATEGORY list. Pick 8 or fewer when you also need that category’s extra fields.
             </p>
         </div>
     );
