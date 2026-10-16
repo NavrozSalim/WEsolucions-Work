@@ -1508,7 +1508,9 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
         user_cancelled = False
         fatal_parts: list[str] = []
 
-        if not isinstance(results, list):
+        if isinstance(results, dict):
+            results = [results]
+        elif not isinstance(results, list):
             results = []
 
         for r in results:
@@ -1965,6 +1967,53 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
     }
 
 
+def _schedule_store_scrape_lanes(store_id: str, chunks: list, vendor_id: str) -> None:
+    """Start two lanes. Each lane sends its own next batch when the current one finishes.
+
+    A group of every batch was left unfinished: the two running batches completed
+    and the batches waiting in the queue were never started. The next batch is
+    now sent by the worker that just finished, so the Pending list is walked
+    through to the end.
+    """
+    from django.core.cache import cache
+
+    lanes: list[list] = [[], []]
+    for index, chunk in enumerate(chunks):
+        lanes[index % 2].append([str(x) for x in chunk])
+    lanes = [lane for lane in lanes if lane]
+    cache.set(f'catalog:scrape_lanes:{store_id}', 0, timeout=6 * 3600)
+    for lane in lanes:
+        first, *rest = lane
+        catalog_scrape_store_chunk_task.apply_async(
+            args=[str(store_id), first, rest, len(lanes), vendor_id or ''],
+        )
+
+
+def _advance_store_scrape_lane(store_id, rest, lane_count, vendor_id, stats) -> None:
+    """Send this lane's next batch, or finish the scrape when every lane is done."""
+    from django.core.cache import cache
+
+    rest = list(rest or [])
+    if rest and not (stats or {}).get('user_cancelled'):
+        nxt, *more = rest
+        catalog_scrape_store_chunk_task.apply_async(
+            args=[str(store_id), nxt, more, int(lane_count or 1), vendor_id or ''],
+        )
+        return
+    key = f'catalog:scrape_lanes:{store_id}'
+    try:
+        done = cache.incr(key)
+    except ValueError:
+        cache.set(key, 1, timeout=6 * 3600)
+        done = 1
+    if done < max(1, int(lane_count or 1)):
+        return
+    cache.delete(key)
+    catalog_scrape_store_finalize.apply_async(
+        args=[[stats or {}], str(store_id), vendor_id or ''],
+    )
+
+
 def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False, vendor_id: str | None = None) -> dict:
     """
     Scrape vendor URLs for active listings whose ``sync_status`` is ``pending`` only.
@@ -2052,11 +2101,7 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False, vend
 
     if use_parallel:
         chunks = [mapping_ids[i : i + chunk_sz] for i in range(0, len(mapping_ids), chunk_sz)]
-        sigs = [
-            catalog_scrape_store_chunk_task.si(str(store_id), [str(x) for x in ch])
-            for ch in chunks
-        ]
-        chord(group(sigs))(catalog_scrape_store_finalize.s(str(store_id), vendor_id or ''))
+        _schedule_store_scrape_lanes(str(store_id), chunks, vendor_id or '')
         return {
             'store_id': str(store_id),
             'scope': 'store',
@@ -2145,30 +2190,42 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False, vend
 
 
 @shared_task(bind=True, max_retries=3)
-def catalog_scrape_store_chunk_task(self, store_id: str, mapping_ids: list):
+def catalog_scrape_store_chunk_task(
+    self,
+    store_id: str,
+    mapping_ids: list,
+    rest=None,
+    lane_count=1,
+    vendor_id: str = '',
+):
     from scrapers import close_amazon_session
     from stores.models import Store
 
-    try:
-        store = Store.objects.select_related('marketplace').get(id=store_id)
-    except Store.DoesNotExist:
-        return {
-            'error': 'store_not_found',
-            'rows_processed': 0,
-            'rows_succeeded': 0,
-            'failed': 0,
-            'error_summary': None,
-            'stalled': False,
-            'user_cancelled': False,
-        }
-
-    if should_abort_celery_scrape(str(store.id)):
-        return _cancelled_store_chunk_result()
-
+    rest = list(rest or [])
+    lane_count = max(1, int(lane_count or 1))
+    vendor_id = vendor_id or ''
+    stats = {
+        'error': 'store_not_found',
+        'rows_processed': 0,
+        'rows_succeeded': 0,
+        'failed': 0,
+        'error_summary': None,
+        'stalled': False,
+        'user_cancelled': False,
+    }
     session: dict = {}
-    if store.user_id:
-        session['aliexpress_user_id'] = str(store.user_id)
     try:
+        try:
+            store = Store.objects.select_related('marketplace').get(id=store_id)
+        except Store.DoesNotExist:
+            return stats
+
+        if should_abort_celery_scrape(str(store.id)):
+            stats = _cancelled_store_chunk_result()
+            return stats
+
+        if store.user_id:
+            session['aliexpress_user_id'] = str(store.user_id)
         mappings = (
             ProductMapping.objects.filter(id__in=mapping_ids, store=store)
             .select_related('product', 'product__vendor')
@@ -2181,9 +2238,22 @@ def catalog_scrape_store_chunk_task(self, store_id: str, mapping_ids: list):
             session=session,
             emit_stall_log=False,
         )
+        return stats
+    except Exception as exc:
+        logger.exception('Store scrape chunk failed for store %s: %s', store_id, exc)
+        stats = {
+            'fatal_error': str(exc),
+            'rows_processed': 0,
+            'rows_succeeded': 0,
+            'failed': 0,
+            'error_summary': str(exc),
+            'stalled': False,
+            'user_cancelled': False,
+        }
+        return stats
     finally:
         close_amazon_session(session)
-    return stats
+        _advance_store_scrape_lane(store_id, rest, lane_count, vendor_id, stats)
 
 
 @shared_task
@@ -2211,7 +2281,9 @@ def catalog_scrape_store_finalize(results, store_id: str, vendor_id: str | None 
         error_summary = None
         fatal_parts: list[str] = []
 
-        if not isinstance(results, list):
+        if isinstance(results, dict):
+            results = [results]
+        elif not isinstance(results, list):
             results = []
 
         for r in results:
