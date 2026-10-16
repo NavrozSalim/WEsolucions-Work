@@ -37,6 +37,11 @@ BUNNINGS_PRODUCT_REQUIRED = [
     ("PRODUCT_DESCRIPTION", "Product Description", "Maximum 30 characters. No special characters."),
     ("PRIMARY_UOM", "Primary unit of measure", "Primary unit of measure."),
     ("PRIMARY_IMAGE", "Image", "Primary image, product only, white background."),
+    ("image-2", "Image 2", "Optional extra product image URL."),
+    ("image-3", "Image 3", "Optional extra product image URL."),
+    ("image-4", "Image 4", "Optional extra product image URL."),
+    ("image-5", "Image 5", "Optional extra product image URL."),
+    ("image-6", "Image 6", "Optional extra product image URL."),
     ("VARIANT_GROUP_CODE", "Variant group code", "Same code on every size/colour variant."),
     ("DEFAULT_VARIANT", "Default Variant", "Yes on one row per variant group, No on the others."),
     ("KEY_SELLING_POINT_1", "Key Selling Point 1", "Short sentence, different from the product overview."),
@@ -123,10 +128,12 @@ def _pm11_lookup(store, hierarchy_codes) -> dict[str, dict]:
             prev = by_code.get(code.lower())
             values = _unique_values((prev or {}).get("values"), item.get("values"))
             required = bool(item.get("required")) or bool((prev or {}).get("required"))
+            variant = bool(item.get("variant")) or bool((prev or {}).get("variant"))
             by_code[code.lower()] = {
                 "code": code,
                 "label": str(item.get("label") or (prev or {}).get("label") or code),
                 "required": required,
+                "variant": variant,
                 "values": values,
             }
     return by_code
@@ -181,7 +188,7 @@ def build_template_columns(store, hierarchy_codes) -> list[TemplateColumn]:
     seen = {col.code.lower() for col in columns}
     for item in pm11.values():
         code = item["code"]
-        if not item.get("required"):
+        if not item.get("required") and not item.get("variant"):
             continue
         if code.lower() in seen or code.lower() in ALWAYS_PRODUCT_CODES or code.lower() in ALWAYS_OFFER_CODES:
             continue
@@ -208,10 +215,10 @@ def build_template_columns(store, hierarchy_codes) -> list[TemplateColumn]:
     return columns
 
 
-def _sample_row(columns: list[TemplateColumn], *, category: str, index: int, store_name: str, marketplace_name: str, action: str) -> dict:
-    suffix = "" if index == 1 else f"-{index}"
-    sku = f"BN-EXAMPLE-001{suffix}-M"
-    parent = f"BN-EXAMPLE-001{suffix}"
+def _sample_row(columns: list[TemplateColumn], *, category: str, index: int, store_name: str, marketplace_name: str, action: str, variant_index: int = 1) -> dict:
+    parent = f"BN-EXAMPLE-{index:03d}"
+    size = "M" if variant_index == 1 else "L"
+    sku = f"{parent}-{size}"
     title = "Example Power Drill"
     overview = "Example product overview for Bunnings Marketplace. Keep key selling points separate."
     image = "https://example.com/photo1.jpg"
@@ -229,10 +236,10 @@ def _sample_row(columns: list[TemplateColumn], *, category: str, index: int, sto
         "Store Name (Optional)": store_name,
         "Action": "Mapped" if action == "mapped" else "Create",
         "Option 1 Name (Optional)": "Size",
-        "Option 1 Value (Optional)": "M",
+        "Option 1 Value (Optional)": size,
         "Option 2 Name (Optional)": "Colour",
-        "Option 2 Value (Optional)": "Red",
-        "Variation Img URL (Optional)": "https://example.com/photo-red-m.jpg",
+        "Option 2 Value (Optional)": "Red" if variant_index == 1 else "Blue",
+        "Variation Img URL (Optional)": f"https://example.com/photo-{size.lower()}.jpg",
         "CATEGORY": category,
         "SUPPLIER_ITEM_NUMBER": sku,
         "DISPLAY_NAME": title,
@@ -243,8 +250,9 @@ def _sample_row(columns: list[TemplateColumn], *, category: str, index: int, sto
         "PRODUCT_DESCRIPTION": "Example product text",
         "PRIMARY_UOM": uom,
         "PRIMARY_IMAGE": image,
+        "image-2": "https://example.com/photo2.jpg" if variant_index == 1 else "",
         "VARIANT_GROUP_CODE": parent,
-        "DEFAULT_VARIANT": "Yes" if index == 1 else "No",
+        "DEFAULT_VARIANT": "Yes" if variant_index == 1 else "No",
         "KEY_SELLING_POINT_1": "Example selling point 1",
         "KEY_SELLING_POINT_2": "Example selling point 2",
         "KEY_SELLING_POINT_3": "Example selling point 3",
@@ -295,17 +303,21 @@ def build_template_xlsx(action: str = "create", store=None, hierarchies=None) ->
     ws.auto_filter.ref = f"A2:{last_col}2"
 
     samples = hierarchy_codes or [""]
+    excel_row = 3
     for i, code in enumerate(samples, start=1):
-        values = _sample_row(
-            columns,
-            category=code or "HIERARCHY_CODE",
-            index=i,
-            store_name=store_name,
-            marketplace_name=marketplace_name,
-            action=action,
-        )
-        for idx, col in enumerate(columns, start=1):
-            ws.cell(2 + i, idx, values.get(col.code, ""))
+        for variant_index in (1, 2):
+            values = _sample_row(
+                columns,
+                category=code or "HIERARCHY_CODE",
+                index=i,
+                variant_index=variant_index,
+                store_name=store_name,
+                marketplace_name=marketplace_name,
+                action=action,
+            )
+            for idx, col in enumerate(columns, start=1):
+                ws.cell(excel_row, idx, values.get(col.code, ""))
+            excel_row += 1
 
     ref_col = 1
     for col_idx, col in enumerate(columns, start=1):

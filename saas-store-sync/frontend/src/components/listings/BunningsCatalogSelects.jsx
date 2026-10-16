@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, Loader2, Search } from 'lucide-react';
 import { getBunningsAttributes, getBunningsCategories, getBunningsLogistics } from '../../services/listingService';
 
@@ -134,201 +133,138 @@ export function BunningsCategorySelect({ storeId, value, onChange, required = fa
     );
 }
 
-const MAX_BULK_CATEGORIES = 12;
-
-function placeCategoryMenu(trigger) {
-    if (!trigger) return { top: 0, left: 0, width: 320, maxHeight: 240 };
-    const r = trigger.getBoundingClientRect();
-    const gap = 4;
-    const preferred = 260;
-    const spaceBelow = window.innerHeight - r.bottom - 8;
-    const spaceAbove = r.top - 8;
-    const openUp = spaceBelow < 180 && spaceAbove > spaceBelow;
-    const maxHeight = Math.max(140, Math.min(preferred, openUp ? spaceAbove : spaceBelow));
-    return {
-        left: r.left,
-        width: Math.max(r.width, 280),
-        maxHeight,
-        top: openUp ? undefined : r.bottom + gap,
-        bottom: openUp ? window.innerHeight - r.top + gap : undefined,
-    };
-}
-
-/** Pick one or more leaf categories for a category-specific bulk Excel template. */
+/** Pick leaf categories for a category-specific bulk Excel template. */
 export function BunningsCategoryMultiSelect({ storeId, values = [], onChange, required = false }) {
-    const [open, setOpen] = useState(false);
     const [query, setQuery] = useState('');
     const [options, setOptions] = useState([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
-    const [menuPos, setMenuPos] = useState({ top: 0, left: 0, width: 320, maxHeight: 240 });
-    const triggerRef = useRef(null);
-    const menuRef = useRef(null);
-    const debounceRef = useRef(null);
     const selected = Array.isArray(values) ? values : [];
-    const selectedCodes = new Set(selected.map((c) => c.code));
-
-    const updatePosition = useCallback(() => {
-        setMenuPos(placeCategoryMenu(triggerRef.current));
-    }, []);
-
-    useLayoutEffect(() => {
-        if (!open) return;
-        updatePosition();
-        const id = requestAnimationFrame(updatePosition);
-        const onMove = () => updatePosition();
-        window.addEventListener('resize', onMove);
-        window.addEventListener('scroll', onMove, true);
-        return () => {
-            cancelAnimationFrame(id);
-            window.removeEventListener('resize', onMove);
-            window.removeEventListener('scroll', onMove, true);
-        };
-    }, [open, updatePosition, selected.length]);
+    const selectedCodes = useMemo(() => new Set(selected.map((c) => c.code)), [selected]);
+    const leaves = useMemo(
+        () => options.filter((opt) => opt?.code && opt.leaf !== false),
+        [options],
+    );
+    const needle = query.trim().toLowerCase();
+    const shown = useMemo(() => {
+        if (!needle) return leaves;
+        return leaves.filter((opt) => {
+            const name = String(opt.name || '').toLowerCase();
+            const code = String(opt.code || '').toLowerCase();
+            return name.includes(needle) || code.includes(needle);
+        });
+    }, [leaves, needle]);
 
     useEffect(() => {
-        if (!open) return;
-        const handler = (e) => {
-            if (triggerRef.current?.contains(e.target) || menuRef.current?.contains(e.target)) return;
-            setOpen(false);
-        };
-        document.addEventListener('mousedown', handler);
-        return () => document.removeEventListener('mousedown', handler);
-    }, [open]);
-
-    useEffect(() => {
-        if (!storeId || !open) return;
-        clearTimeout(debounceRef.current);
-        debounceRef.current = setTimeout(() => {
-            setLoading(true);
-            setError('');
-            getBunningsCategories(storeId, query)
-                .then((res) => {
-                    const list = Array.isArray(res.data?.categories) ? res.data.categories : [];
-                    setOptions(list);
-                })
-                .catch((err) => {
+        if (!storeId) return undefined;
+        let cancelled = false;
+        setLoading(true);
+        setError('');
+        getBunningsCategories(storeId)
+            .then((res) => {
+                const list = Array.isArray(res.data?.categories) ? res.data.categories : [];
+                if (!cancelled) setOptions(list);
+            })
+            .catch((err) => {
+                if (!cancelled) {
                     setError(err.response?.data?.detail || 'Could not load Bunnings categories.');
                     setOptions([]);
-                })
-                .finally(() => setLoading(false));
-        }, query ? 250 : 0);
-        return () => clearTimeout(debounceRef.current);
-    }, [storeId, open, query]);
+                }
+            })
+            .finally(() => {
+                if (!cancelled) setLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [storeId]);
 
-    const addCategory = (opt) => {
-        if (!opt?.code || opt.leaf === false || selectedCodes.has(opt.code)) return;
-        if (selected.length >= MAX_BULK_CATEGORIES) return;
+    const toggleCategory = (opt) => {
+        if (!opt?.code || opt.leaf === false) return;
+        if (selectedCodes.has(opt.code)) {
+            onChange?.(selected.filter((c) => c.code !== opt.code));
+            return;
+        }
         onChange?.([...selected, { code: opt.code, name: opt.name || opt.code }]);
-        setQuery('');
     };
 
-    const removeCategory = (code) => {
-        onChange?.(selected.filter((c) => c.code !== code));
+    const selectAll = () => {
+        const byCode = new Map(selected.map((cat) => [cat.code, cat]));
+        leaves.forEach((opt) => {
+            byCode.set(opt.code, { code: opt.code, name: opt.name || opt.code });
+        });
+        onChange?.([...byCode.values()]);
     };
 
-    const menu = open && typeof document !== 'undefined' && createPortal(
-        <div
-            ref={menuRef}
-            role="listbox"
-            style={{
-                position: 'fixed',
-                top: menuPos.top,
-                bottom: menuPos.bottom,
-                left: menuPos.left,
-                width: menuPos.width,
-                zIndex: 99999,
-            }}
-            className="overflow-hidden rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 shadow-xl"
-        >
-            <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-700 px-3 py-2">
-                <Search className="h-4 w-4 shrink-0 text-slate-400" />
-                <input
-                    autoFocus
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder="Search categories…"
-                    className="w-full bg-transparent text-sm outline-hidden text-slate-900 dark:text-slate-100"
-                />
-                {loading && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" />}
-            </div>
-            <div className="overflow-y-auto" style={{ maxHeight: Math.max(96, (menuPos.maxHeight || 240) - 44) }}>
-                {error && (
-                    <p className="px-3 py-2 text-xs text-rose-600 dark:text-rose-400">{error}</p>
-                )}
-                {!error && !loading && options.length === 0 && (
-                    <p className="px-3 py-2 text-xs text-slate-500">No categories match.</p>
-                )}
-                {options.map((opt) => (
-                    <button
-                        key={opt.code}
-                        type="button"
-                        role="option"
-                        aria-selected={selectedCodes.has(opt.code)}
-                        disabled={opt.leaf === false || selectedCodes.has(opt.code)}
-                        className={`block w-full px-3 py-2 text-left text-sm ${
-                            opt.leaf === false || selectedCodes.has(opt.code)
-                                ? 'cursor-not-allowed text-slate-400'
-                                : 'text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
-                        }`}
-                        onClick={() => addCategory(opt)}
-                    >
-                        {opt.name}
-                        {opt.leaf === false ? (
-                            <span className="ml-1 text-xs text-slate-400">(parent — pick a leaf)</span>
-                        ) : selectedCodes.has(opt.code) ? (
-                            <span className="ml-1 text-xs text-slate-400">(added)</span>
-                        ) : null}
-                    </button>
-                ))}
-            </div>
-        </div>,
-        document.body,
-    );
+    const clearAll = () => onChange?.([]);
 
     return (
         <div>
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
-                Categories for this file {required ? <span className="text-rose-500">*</span> : null}
-            </label>
-            {selected.length > 0 && (
-                <div className="mb-2 flex flex-wrap gap-1.5">
-                    {selected.map((cat) => (
-                        <span
-                            key={cat.code}
-                            className="inline-flex max-w-full items-center gap-1 rounded-full bg-accent-50 dark:bg-accent-900/30 px-2 py-1 text-xs text-accent-800 dark:text-accent-200"
-                        >
-                            <span className="truncate">{cat.name || cat.code}</span>
-                            <button
-                                type="button"
-                                className="shrink-0 text-accent-600 hover:text-rose-600"
-                                onClick={() => removeCategory(cat.code)}
-                                aria-label={`Remove ${cat.name || cat.code}`}
-                            >
-                                ×
-                            </button>
-                        </span>
-                    ))}
-                </div>
-            )}
-            <button
-                ref={triggerRef}
-                type="button"
-                aria-haspopup="listbox"
-                aria-expanded={open}
-                onClick={() => setOpen((o) => !o)}
-                className="flex w-full items-center justify-between rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-left text-sm text-slate-900 dark:text-slate-100"
-            >
-                <span className="text-slate-400">
-                    {selected.length
-                        ? 'Add another leaf category…'
-                        : 'Select leaf categories…'}
+            <div className="mb-1 flex items-center justify-between gap-2">
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
+                    Categories for this file {required ? <span className="text-rose-500">*</span> : null}
+                </label>
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                    {selected.length} selected
                 </span>
-                <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
-            </button>
-            {menu}
+            </div>
+            <div className="overflow-hidden rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900">
+                <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-700 px-3 py-2">
+                    <Search className="h-4 w-4 shrink-0 text-slate-400" />
+                    <input
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        placeholder="Search categories…"
+                        className="w-full bg-transparent text-sm outline-hidden text-slate-900 dark:text-slate-100"
+                    />
+                    {loading && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" />}
+                </div>
+                <div className="flex items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-700 px-3 py-1.5">
+                    <button
+                        type="button"
+                        className="text-xs font-medium text-accent-700 hover:underline disabled:text-slate-400 dark:text-accent-300"
+                        onClick={selectAll}
+                        disabled={loading || leaves.length === 0}
+                    >
+                        Select all
+                    </button>
+                    <button
+                        type="button"
+                        className="text-xs font-medium text-slate-600 hover:underline disabled:text-slate-400 dark:text-slate-300"
+                        onClick={clearAll}
+                        disabled={selected.length === 0}
+                    >
+                        Clear
+                    </button>
+                </div>
+                <div className="max-h-64 overflow-y-auto">
+                    {error && (
+                        <p className="px-3 py-2 text-xs text-rose-600 dark:text-rose-400">{error}</p>
+                    )}
+                    {!error && !loading && shown.length === 0 && (
+                        <p className="px-3 py-2 text-xs text-slate-500">No leaf categories match.</p>
+                    )}
+                    {shown.map((opt) => {
+                        const checked = selectedCodes.has(opt.code);
+                        return (
+                            <label
+                                key={opt.code}
+                                className="flex cursor-pointer items-start gap-2 px-3 py-2 text-sm text-slate-800 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800"
+                            >
+                                <input
+                                    type="checkbox"
+                                    className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300"
+                                    checked={checked}
+                                    onChange={() => toggleCategory(opt)}
+                                />
+                                <span className="min-w-0 break-words">{opt.name || opt.code}</span>
+                            </label>
+                        );
+                    })}
+                </div>
+            </div>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Open the list, search, and pick leaf categories. Up to {MAX_BULK_CATEGORIES} per file.
+                Select every leaf you need, or use Select all. Parent categories are not included.
             </p>
         </div>
     );

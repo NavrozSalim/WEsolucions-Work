@@ -100,9 +100,12 @@ export async function wrapDownloadError(err, fallback = 'Download failed.') {
  * GET a file, save it, and turn JSON-as-blob errors into a normal Error.message.
  * Pass the shared axios `api` client so this util does not import services.
  */
-export async function apiDownload(client, path, { params, fallbackFilename, mimeType } = {}) {
+export async function apiDownload(client, path, { params, data, method = 'get', fallbackFilename, mimeType } = {}) {
     try {
-        const res = await client.get(path, { params, responseType: 'blob' });
+        const verb = String(method || 'get').toLowerCase() === 'post' ? 'post' : 'get';
+        const res = verb === 'post'
+            ? await client.post(path, data || {}, { params, responseType: 'blob' })
+            : await client.get(path, { params, responseType: 'blob' });
         const ct = String(res.headers?.['content-type'] || '');
         if (ct.includes('application/json')) {
             throw await wrapDownloadError({ response: { data: res.data, status: res.status } }, 'Download failed.');

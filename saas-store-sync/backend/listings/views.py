@@ -323,7 +323,7 @@ class StoreBunningsCategoriesView(APIView):
                 {'detail': result.message or 'Could not load Bunnings categories.'},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
-        categories = bunnings_products.flatten_hierarchies(result.data, q=q, limit=2000)
+        categories = bunnings_products.flatten_hierarchies(result.data, q=q, limit=0)
         return Response({'categories': categories})
 
 
@@ -482,6 +482,35 @@ class StoreListingDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def _template_hierarchies(raw) -> list[str]:
+    if isinstance(raw, (list, tuple)):
+        parts = raw
+    else:
+        parts = str(raw or '').replace(';', ',').split(',')
+    return [str(part).strip() for part in parts if str(part).strip()]
+
+
+def _template_response(store, action: str, hierarchies: list[str]):
+    action = (action or 'create').strip().lower()
+    if marketplace_kind(store.marketplace) == 'bunnings' and action in ('create', 'mapped'):
+        from listings.bunnings.template_xlsx import build_template_xlsx
+
+        content = build_template_xlsx(action, store=store, hierarchies=hierarchies or None)
+        resp = HttpResponse(
+            content,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        name = f'listing_template_{action}.xlsx'
+    else:
+        resp = HttpResponse(
+            csv_import.build_template_csv(action, store=store, hierarchies=hierarchies or None),
+            content_type='text/csv',
+        )
+        name = f'listing_template_{action}.csv'
+    resp['Content-Disposition'] = f'attachment; filename="{name}"'
+    return resp
+
+
 class StoreListingTemplateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -493,28 +522,16 @@ class StoreListingTemplateView(APIView):
             or request.query_params.get('hierarchy')
             or ''
         )
-        hierarchies = [
-            part.strip()
-            for part in str(raw_hierarchies).replace(';', ',').split(',')
-            if part.strip()
-        ]
-        if marketplace_kind(store.marketplace) == 'bunnings' and action in ('create', 'mapped'):
-            from listings.bunnings.template_xlsx import build_template_xlsx
+        return _template_response(store, action, _template_hierarchies(raw_hierarchies))
 
-            content = build_template_xlsx(action, store=store, hierarchies=hierarchies or None)
-            resp = HttpResponse(
-                content,
-                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            )
-            name = f'listing_template_{action}.xlsx'
-        else:
-            resp = HttpResponse(
-                csv_import.build_template_csv(action, store=store, hierarchies=hierarchies or None),
-                content_type='text/csv',
-            )
-            name = f'listing_template_{action}.csv'
-        resp['Content-Disposition'] = f'attachment; filename="{name}"'
-        return resp
+    def post(self, request, store_pk):
+        """Same file as GET, with the category list in the body so Select all is not URL-limited."""
+        store = _get_store(request, store_pk)
+        action = (request.data.get('action') or 'create').strip().lower()
+        raw_hierarchies = request.data.get('hierarchies')
+        if raw_hierarchies in (None, ''):
+            raw_hierarchies = request.data.get('hierarchy') or ''
+        return _template_response(store, action, _template_hierarchies(raw_hierarchies))
 
 
 class StoreListingBulkUploadView(APIView):

@@ -423,7 +423,8 @@ def flatten_product_attributes(payload) -> list[dict]:
         level = str(raw.get("requirement_level") or raw.get("requirementLevel") or "").strip().upper()
         required = bool(raw.get("required")) or level in ("REQUIRED", "MANDATORY")
         recommended = level in ("RECOMMENDED",)
-        if not required and not recommended:
+        variant = bool(raw.get("variant"))
+        if not required and not recommended and not variant:
             continue
         values = []
         raw_values = raw.get("values") or []
@@ -444,7 +445,7 @@ def flatten_product_attributes(payload) -> list[dict]:
             "type": str(raw.get("type") or "TEXT").strip(),
             "values": values,
             "values_list": _values_list_code(raw),
-            "variant": bool(raw.get("variant")),
+            "variant": variant,
         })
     out.sort(key=lambda r: (not r["required"], r["label"].lower()))
     return out

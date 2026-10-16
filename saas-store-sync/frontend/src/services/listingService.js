@@ -116,12 +116,23 @@ export const bulkUploadListings = (storeId, file, action = 'create') => {
 export const downloadListingTemplate = (storeId, action = 'create', extraParams = {}, filename) => {
     const fallbackFilename = filename || `listing_template_${action}.csv`;
     const xlsx = String(fallbackFilename).toLowerCase().endsWith('.xlsx');
+    const mimeType = xlsx
+        ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        : 'text/csv';
+    const hierarchies = extraParams.hierarchies;
+    if (hierarchies) {
+        const codes = String(hierarchies).split(',').map((code) => code.trim()).filter(Boolean);
+        return apiDownload(api, `/stores/${storeId}/listings/template/`, {
+            method: 'post',
+            data: { action, hierarchies: codes },
+            fallbackFilename,
+            mimeType,
+        });
+    }
     return apiDownload(api, `/stores/${storeId}/listings/template/`, {
         params: { action, ...extraParams },
         fallbackFilename,
-        mimeType: xlsx
-            ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            : 'text/csv',
+        mimeType,
     });
 };
 

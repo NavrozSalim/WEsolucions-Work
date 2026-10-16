@@ -667,9 +667,11 @@ class BunningsListingServiceTests(TestCase):
         self.assertIn("Option 1 Name (Optional)", csv_text)
         self.assertIn("Variation Img URL (Optional)", csv_text)
         rows = csv_import.parse_upload("bunnings.csv", csv_text.encode())
-        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["sku"], "BN-EXAMPLE-001-M")
+        self.assertEqual(rows[1]["sku"], "BN-EXAMPLE-001-L")
         self.assertEqual(rows[0]["product_key"], "BN-EXAMPLE-001")
+        self.assertEqual(rows[1]["product_key"], "BN-EXAMPLE-001")
         self.assertEqual(rows[0]["title"], "Example Power Drill")
         self.assertEqual(rows[0]["brand"], "ExampleBrand")
         self.assertEqual(rows[0]["gtin"], "9300000000001")
@@ -766,9 +768,12 @@ class BunningsListingServiceTests(TestCase):
         self.assertIn("BEDSIDE", csv_text)
         self.assertIn("DRILLS", csv_text)
         rows = csv_import.parse_upload("bunnings.csv", csv_text.encode())
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 4)
         self.assertEqual(rows[0]["category"], "BEDSIDE")
-        self.assertEqual(rows[1]["category"], "DRILLS")
+        self.assertEqual(rows[1]["category"], "BEDSIDE")
+        self.assertEqual(rows[0]["product_key"], rows[1]["product_key"])
+        self.assertNotEqual(rows[0]["sku"], rows[1]["sku"])
+        self.assertEqual(rows[2]["category"], "DRILLS")
 
     def test_xlsx_template_colors_dropdowns_and_parse(self):
         from io import BytesIO
@@ -798,6 +803,13 @@ class BunningsListingServiceTests(TestCase):
                 "required": False,
                 "values": [{"code": "White", "label": "White"}],
             },
+            {
+                "code": "size",
+                "label": "Size",
+                "required": False,
+                "variant": True,
+                "values": [{"code": "M", "label": "M"}, {"code": "L", "label": "L"}],
+            },
         ]
         logistics = BunningsResult(
             ok=True,
@@ -824,6 +836,8 @@ class BunningsListingServiceTests(TestCase):
         self.assertIn("DISPLAY_NAME", codes)
         self.assertIn("attribute_pdb_assembly", codes)
         self.assertIn("sku", codes)
+        self.assertIn("image-2", codes)
+        self.assertIn("size", codes)
         self.assertNotIn("colour", codes)
         self.assertEqual(codes.count("DISPLAY_NAME"), 1)
         self.assertEqual(codes.count("KEY_SELLING_POINT_1"), 1)
@@ -850,17 +864,20 @@ class BunningsListingServiceTests(TestCase):
         self.assertTrue(any("ReferenceData!" in formula for formula in formulas))
 
         rows = csv_import.parse_upload("bunnings.xlsx", content)
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 4)
         self.assertEqual(rows[0]["row_number"], 3)
         self.assertEqual(rows[0]["sku"], "BN-EXAMPLE-001-M")
+        self.assertEqual(rows[1]["sku"], "BN-EXAMPLE-001-L")
         self.assertEqual(rows[0]["product_key"], "BN-EXAMPLE-001")
+        self.assertEqual(rows[1]["product_key"], "BN-EXAMPLE-001")
         self.assertEqual(rows[0]["title"], "Example Power Drill")
         self.assertEqual(rows[0]["description"], "Example product text")
         self.assertEqual(rows[0]["brand"], "ExampleBrand")
         self.assertEqual(rows[0]["gtin"], "9300000000001")
         self.assertEqual(rows[0]["image_urls"], "https://example.com/photo1.jpg")
         self.assertEqual(rows[0]["category"], "BEDSIDE")
-        self.assertEqual(rows[1]["category"], "DRILLS")
+        self.assertEqual(rows[1]["category"], "BEDSIDE")
+        self.assertEqual(rows[2]["category"], "DRILLS")
         self.assertEqual(rows[0]["sale_price"], "79.99")
         self.assertEqual(rows[0]["inventory"], "5")
         self.assertEqual(rows[0]["logistic_class"], "SMALL")

@@ -1176,10 +1176,10 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
         ]
         headers = list(BUNNINGS_PREFIX_HEADERS) + list(BUNNINGS_OPERATOR_HEADERS) + extra_attr_headers + list(BUNNINGS_OFFER_HEADERS)
 
-        def _bunnings_sample(category_code: str, index: int = 1) -> dict:
-            sku_suffix = "" if index == 1 else f"-{index}"
-            sku = f"BN-EXAMPLE-001{sku_suffix}-M"
-            parent = f"BN-EXAMPLE-001{sku_suffix}"
+        def _bunnings_sample(category_code: str, index: int = 1, variant_index: int = 1) -> dict:
+            parent = f"BN-EXAMPLE-{index:03d}"
+            size = "M" if variant_index == 1 else "L"
+            sku = f"{parent}-{size}"
             title = "Example Power Drill"
             description = "Example product description for Bunnings Marketplace."
             brand = "ExampleBrand"
@@ -1197,9 +1197,9 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
                 "product-id-type": "SHOP_SKU",
                 "variant-group-code": parent,
                 "Option 1 Name (Optional)": "Size",
-                "Option 1 Value (Optional)": "M",
+                "Option 1 Value (Optional)": size,
                 "Option 2 Name (Optional)": "Colour",
-                "Option 2 Value (Optional)": "Red",
+                "Option 2 Value (Optional)": "Red" if variant_index == 1 else "Blue",
                 "Option 3 Name (Optional)": "",
                 "Option 3 Value (Optional)": "",
                 "Option 4 Name (Optional)": "",
@@ -1214,7 +1214,7 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
                 "SUPPLIER_ITEM_NUMBER": sku,
                 "SECTION_DESCRIPTION": description[:30],
                 "PRIMARY_UOM": "Each",
-                "DEFAULT_VARIANT": "Yes" if index == 1 else "No",
+                "DEFAULT_VARIANT": "Yes" if variant_index == 1 else "No",
                 "KEY_SELLING_POINT_1": "Example selling point 1",
                 "KEY_SELLING_POINT_2": "Example selling point 2",
                 "KEY_SELLING_POINT_3": "Example selling point 3",
@@ -1253,9 +1253,11 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
         writer.writeheader()
         if hierarchy_codes:
             for i, code in enumerate(hierarchy_codes, start=1):
-                writer.writerow(_bunnings_sample(code, i))
+                writer.writerow(_bunnings_sample(code, i, 1))
+                writer.writerow(_bunnings_sample(code, i, 2))
         else:
-            writer.writerow(_bunnings_sample(""))
+            writer.writerow(_bunnings_sample("", 1, 1))
+            writer.writerow(_bunnings_sample("", 1, 2))
         return out.getvalue()
 
     sample_black = {

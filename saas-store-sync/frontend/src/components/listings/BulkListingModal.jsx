@@ -127,7 +127,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                     </button>
                 </div>
 
-                <div className={isBunnings ? 'px-6 py-4' : 'min-h-0 flex-1 overflow-y-auto px-6 py-4'}>
+                <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
                     {isBunnings ? (
                         <p className="text-sm text-slate-600 dark:text-slate-400">
                             Pick leaf categories, download the Excel template, fill rows, then upload.
