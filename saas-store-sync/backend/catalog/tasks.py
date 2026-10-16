@@ -1968,7 +1968,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
 
 
 def _schedule_store_scrape_lanes(store_id: str, chunks: list, vendor_id: str) -> None:
-    """Start two lanes. Each lane sends its own next batch when the current one finishes.
+    """Start ``CATALOG_SCRAPE_LANES`` lanes. Each lane sends its own next batch when the current one finishes.
 
     A group of every batch was left unfinished: the two running batches completed
     and the batches waiting in the queue were never started. The next batch is
@@ -1977,9 +1977,10 @@ def _schedule_store_scrape_lanes(store_id: str, chunks: list, vendor_id: str) ->
     """
     from django.core.cache import cache
 
-    lanes: list[list] = [[], []]
+    lane_total = max(1, int(getattr(settings, 'CATALOG_SCRAPE_LANES', 2) or 2))
+    lanes: list[list] = [[] for _ in range(lane_total)]
     for index, chunk in enumerate(chunks):
-        lanes[index % 2].append([str(x) for x in chunk])
+        lanes[index % lane_total].append([str(x) for x in chunk])
     lanes = [lane for lane in lanes if lane]
     cache.set(f'catalog:scrape_lanes:{store_id}', 0, timeout=6 * 3600)
     for lane in lanes:

@@ -1,6 +1,6 @@
 """Amazon AU OOS error-selector stock rules."""
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase
 from bs4 import BeautifulSoup
@@ -134,6 +134,60 @@ class AmazonAUPostcodeTests(SimpleTestCase):
     def test_invalid_falls_back(self):
         with patch.dict(os.environ, {"AMAZON_AU_POSTCODE": "abc"}):
             self.assertEqual(amazon_au_postcode(), "2762")
+
+
+class AmazonAUProxyUrlTests(SimpleTestCase):
+    def test_amazon_list_wins_over_shared(self):
+        from scrapers.amazon_au_proxies import load_amazon_au_proxy_urls
+
+        urls = load_amazon_au_proxy_urls(env={
+            "AMAZON_AU_PROXY_URLS": "http://u:p@amz:1",
+            "COSTCO_AU_PROXY_URLS": "http://u:p@costco:2",
+        })
+        self.assertEqual(urls, ["http://u:p@amz:1"])
+
+    def test_falls_back_to_costco_list(self):
+        from scrapers.amazon_au_proxies import load_amazon_au_proxy_urls
+
+        urls = load_amazon_au_proxy_urls(env={"COSTCO_AU_PROXY_URLS": "http://u:p@costco:2"})
+        self.assertEqual(urls, ["http://u:p@costco:2"])
+
+
+class AmazonAUHttpRetryTests(SimpleTestCase):
+    def setUp(self):
+        from scrapers import amazon_au_proxies
+        amazon_au_proxies.reset_pool_for_tests()
+        self.addCleanup(amazon_au_proxies.reset_pool_for_tests)
+
+    def test_failed_postcode_is_not_retried_for_every_product(self):
+        from scrapers.amazon_au_scraper import AmazonAUHTTP
+
+        session = {}
+        s = MagicMock()
+        s.post.side_effect = Exception("boom")
+        AmazonAUHTTP._ensure_zip(s, "https://www.amazon.com.au/dp/B000000001", session, True)
+        AmazonAUHTTP._ensure_zip(s, "https://www.amazon.com.au/dp/B000000002", session, True)
+        self.assertEqual(s.post.call_count, 1)
+
+    def test_block_rotates_proxy_without_backoff(self):
+        from scrapers import amazon_au_scraper
+        from scrapers.core import ScrapeResult
+
+        env = {"AMAZON_AU_PROXY_URLS": "http://u:p@a:1,http://u:p@b:2"}
+        results = [
+            ScrapeResult.fail("blocked_captcha", "x", "", "amazon_au", "u"),
+            ScrapeResult.ok(price=10.0, stock=2, title="t"),
+        ]
+        with patch.dict(os.environ, env), \
+                patch.object(amazon_au_scraper.AmazonAUHTTP, "fetch", side_effect=results), \
+                patch.object(amazon_au_scraper.AmazonAUHTTP, "_get_session") as get_session, \
+                patch.object(amazon_au_scraper, "backoff_delay") as backoff:
+            out = amazon_au_scraper.AmazonAUHTTP.scrape_with_retry(
+                "https://www.amazon.com.au/dp/B000000001", {}, True,
+            )
+        self.assertTrue(out.success)
+        backoff.assert_not_called()
+        get_session.assert_called_once_with({}, True, rotate=True)
 
 
 class AmazonAUAsinMismatchTests(SimpleTestCase):

@@ -58,6 +58,13 @@ try:
 except ValueError:
     CATALOG_SCRAPE_CHUNK_SIZE = 80
 
+# Store-wide scrape chunks run in this many lanes at once. Match the scraper worker's
+# --concurrency; extra lanes just wait in the queue.
+try:
+    CATALOG_SCRAPE_LANES = max(1, min(16, int(os.getenv('CATALOG_SCRAPE_LANES', '2'))))
+except ValueError:
+    CATALOG_SCRAPE_LANES = 2
+
 # After user clicks Stop on a server-side catalog scrape, re-queue the same scrape after
 # this many seconds if listings are still Pending (0 = disabled). Default off so Stop stays stopped.
 try:

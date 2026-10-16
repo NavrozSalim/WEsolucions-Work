@@ -36,8 +36,10 @@ services:
     command: >-
       celery -A core worker -l info
       -Q heavy-au
-      --concurrency=${CELERY_AU_SCRAPER_CONCURRENCY:-2}
-      --prefetch-multiplier=1 -O fair
+      --concurrency=${CELERY_AU_SCRAPER_CONCURRENCY:-4}
+      --prefetch-multiplier=1
+      --max-tasks-per-child=${CELERY_AU_MAX_TASKS_PER_CHILD:-40}
+      -O fair
     init: true
     environment: &au-worker-env
       - DATABASE_URL=${DATABASE_URL}
@@ -63,7 +65,10 @@ services:
       - EBAY_AU_PAGE_LOAD_TIMEOUT_SEC=${EBAY_AU_PAGE_LOAD_TIMEOUT_SEC:-12}
       - EBAY_AU_PAGE_WAIT_TIMEOUT_SEC=${EBAY_AU_PAGE_WAIT_TIMEOUT_SEC:-10}
       - EBAY_BIN_HYDRATE_MAX_SEC=${EBAY_BIN_HYDRATE_MAX_SEC:-2}
-      - CATALOG_SCRAPE_CHUNK_SIZE=${CATALOG_SCRAPE_CHUNK_SIZE:-}
+      # Smaller chunks so a mid-size catalog still splits across every lane.
+      # Keep CATALOG_SCRAPE_LANES equal to CELERY_AU_SCRAPER_CONCURRENCY.
+      - CATALOG_SCRAPE_CHUNK_SIZE=${CATALOG_SCRAPE_CHUNK_SIZE:-40}
+      - CATALOG_SCRAPE_LANES=${CATALOG_SCRAPE_LANES:-4}
       - VEVOR_AU_FEED_URL=${VEVOR_AU_FEED_URL:-https://ads-feed.s3.us-west-2.amazonaws.com/ads/business/563/vevor-563.xlsx}
       - COSTWAY_AU_FEED_URL=${COSTWAY_AU_FEED_URL:-https://au.costway.com/media/feed/Dropship-AU.csv}
       - PROXY_URL=${PROXY_URL:-}
@@ -71,6 +76,16 @@ services:
       - COSTCO_AU_PROXY_URL=${COSTCO_AU_PROXY_URL:-}
       - COSTCO_AU_PROXY_URLS=${COSTCO_AU_PROXY_URLS:-}
       - AMAZON_AU_POSTCODE=${AMAZON_AU_POSTCODE:-2762}
+      # Amazon AU HTTP goes through AMAZON_AU_PROXY_URLS, else the Costco/shared list.
+      # Datacenter IPs get blocked and fall back to Chrome, which is the slow path.
+      - AMAZON_AU_PROXY_URLS=${AMAZON_AU_PROXY_URLS:-}
+      - AMAZON_AU_DISABLE_PROXIES=${AMAZON_AU_DISABLE_PROXIES:-}
+      - AMAZON_AU_MIN_REQUEST_GAP_SEC=${AMAZON_AU_MIN_REQUEST_GAP_SEC:-2}
+      - AMAZON_AU_PROXY_BLOCK_COOLDOWN_SEC=${AMAZON_AU_PROXY_BLOCK_COOLDOWN_SEC:-300}
+      - AMAZON_AU_HTTP_TIMEOUT_SEC=${AMAZON_AU_HTTP_TIMEOUT_SEC:-15}
+      - AMAZON_AU_HTTP_RETRIES=${AMAZON_AU_HTTP_RETRIES:-2}
+      - AMAZON_AU_SELENIUM_FALLBACK=${AMAZON_AU_SELENIUM_FALLBACK:-1}
+      - AMAZON_AU_SELENIUM_ATTEMPTS=${AMAZON_AU_SELENIUM_ATTEMPTS:-1}
       - EBAY_AU_PROXY_URLS=${EBAY_AU_PROXY_URLS:-}
       # Safer eBay defaults (production logs showed eBay 403-cascading every IP):
       #   gap 5s lets a 5-proxy pool sustain ~1 request/sec/proxy without burning IPs
@@ -101,7 +116,7 @@ services:
       - COSTCO_AU_MIN_REQUEST_GAP_SEC=${COSTCO_AU_MIN_REQUEST_GAP_SEC:-20}
       - COSTCO_AU_LOCK_WAIT_SEC=${COSTCO_AU_LOCK_WAIT_SEC:-120}
       - COSTCO_AU_HTTP_RETRIES=${COSTCO_AU_HTTP_RETRIES:-2}
-      - COSTCO_AU_HTTP_TIMEOUT_SEC=${COSTCO_AU_HTTP_TIMEOUT_SEC:-25}
+      - COSTCO_AU_HTTP_TIMEOUT_SEC=${COSTCO_AU_HTTP_TIMEOUT_SEC:-20}
       - COSTCO_AU_BLOCK_COOLDOWN_SEC=${COSTCO_AU_BLOCK_COOLDOWN_SEC:-600}
       - COSTCO_AU_SELENIUM_FALLBACK=${COSTCO_AU_SELENIUM_FALLBACK:-0}
     volumes:

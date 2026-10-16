@@ -24,8 +24,18 @@ from .amazon_us_scraper import AmazonDriver, AmazonParser, AmazonScraper
 
 logger = logging.getLogger("scrapers.amazon_au")
 
-RETRY_LIMIT = 3
-FETCH_TIMEOUT = 30
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
+RETRY_LIMIT = max(1, _env_int("AMAZON_AU_HTTP_RETRIES", 2) + 1)
+FETCH_TIMEOUT = max(5, _env_int("AMAZON_AU_HTTP_TIMEOUT_SEC", 15))
+SELENIUM_ATTEMPTS = max(1, _env_int("AMAZON_AU_SELENIUM_ATTEMPTS", 1))
+_SESSION_PROXY_KEY = "amazon_au_http_proxy"
 
 # Default to Tallawong NSW so shipping-coverage errors match typical AU customer locations.
 # Override with AMAZON_AU_POSTCODE in the AU worker .env.prod.
@@ -193,23 +203,47 @@ class AmazonAUHTTP:
     }
 
     @staticmethod
-    def _get_session(session_dict: dict, is_au: bool) -> requests.Session:
+    def _get_session(session_dict: dict, is_au: bool, rotate: bool = False) -> requests.Session:
+        """HTTP session bound to one proxy. ``rotate`` moves it to the next proxy.
+
+        Cookies (including the delivery postcode) belong to one IP, so a new
+        proxy gets a fresh session and the postcode is set again.
+        """
         key = "amazon_au_http_session"
-        if session_dict is not None and key in session_dict:
-            return session_dict[key]
+        existing = session_dict.get(key) if session_dict is not None else None
+        if existing is not None and not rotate:
+            return existing
+
+        from .amazon_au_proxies import acquire_proxy
+
+        assignment = acquire_proxy(force_rotate=rotate) if is_au else None
+        if existing is not None:
+            try:
+                existing.close()
+            except Exception:
+                pass
         s = requests.Session()
         domain = "amazon.com.au" if is_au else "amazon.com"
         s.headers.update(get_random_headers(f"https://www.{domain}/"))
         s.cookies.update(_AU_COOKIES if is_au else _USD_COOKIES)
+        if assignment is not None:
+            s.proxies = assignment.as_requests_proxy()
+            logger.info("Amazon AU HTTP session via proxy %s", assignment.label)
         if session_dict is not None:
             session_dict[key] = s
+            session_dict[_SESSION_PROXY_KEY] = assignment
+            session_dict.pop("amazon_au_http_zip_set", None)
         return s
 
     @classmethod
     def _ensure_zip(cls, s: requests.Session, seed_url: str, session_dict: dict, is_au: bool):
-        """Set delivery location for accurate pricing."""
+        """Set delivery location for accurate pricing.
+
+        Tried once per HTTP session. A failed attempt is not repeated for every
+        product: that added two extra requests to each scrape.
+        """
         zip_key = "amazon_au_http_zip_set"
-        if session_dict is not None and session_dict.get(zip_key):
+        if session_dict is not None and zip_key in session_dict:
             return
         zip_code = amazon_au_postcode() if is_au else "10001"
         endpoint = cls._ZIP_CHANGE_URLS.get(is_au, cls._ZIP_CHANGE_URLS[False])
@@ -290,16 +324,30 @@ class AmazonAUHTTP:
 
     @classmethod
     def scrape_with_retry(cls, url: str, session_dict: dict = None, is_au: bool = False) -> ScrapeResult:
+        from .amazon_au_proxies import mark_blocked, mark_success, proxies_configured
+
+        use_proxies = is_au and proxies_configured()
         last_result = None
         for attempt in range(RETRY_LIMIT):
-            if attempt > 0:
-                backoff_delay(attempt, base=2.0, jitter=1.5)
             result = cls.fetch(url, session_dict, is_au)
+            assignment = (session_dict or {}).get(_SESSION_PROXY_KEY)
             if result.success:
+                mark_success(assignment)
                 return result
             last_result = result
-            if result.error_code in ("http_404", "asin_mismatch"):
+            if result.error_code in ("http_404", "asin_mismatch", "no_price"):
                 break
+            if attempt + 1 >= RETRY_LIMIT:
+                break
+            ip_problem = (
+                result.error_code.startswith(("blocked", "http_5", "http_403", "http_429"))
+                or result.error_code in ("timeout", "connection_error", "request_error")
+            )
+            if use_proxies and ip_problem:
+                mark_blocked(assignment)
+                cls._get_session(session_dict, is_au, rotate=True)
+                continue
+            backoff_delay(attempt + 1, base=2.0, jitter=1.5)
             if result.error_code.startswith("blocked"):
                 s = cls._get_session(session_dict, is_au)
                 domain = "amazon.com.au" if is_au else "amazon.com"
@@ -388,22 +436,18 @@ def _selenium_scrape_page(url: str, driver) -> ScrapeResult:
 
     try:
         driver.get(url)
-        random_delay(3, 5)
+        random_delay(1, 2)
         AmazonScraper.solve_captcha(driver)
 
-        for sel in [
-            "span.a-price",
-            ".apex-pricetopay-value",
-            "#corePrice_feature_div",
-            ".apexPriceToPay",
-            "#availability",
-        ]:
-            try:
-                WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
-                break
-            except Exception:
-                continue
-        time.sleep(1.5)
+        try:
+            WebDriverWait(driver, 8).until(EC.presence_of_element_located((
+                By.CSS_SELECTOR,
+                "span.a-price, .apex-pricetopay-value, #corePrice_feature_div, "
+                ".apexPriceToPay, #availability",
+            )))
+        except Exception:
+            pass
+        time.sleep(0.5)
 
         html = driver.page_source
 
@@ -489,6 +533,9 @@ def scrape_amazon_au(vendor_url: str, region: str, session: dict = None) -> dict
         http_result.error_code, vendor_url[:60],
     )
 
+    if os.environ.get("AMAZON_AU_SELENIUM_FALLBACK", "1").strip().lower() in ("0", "false", "no", "off"):
+        return http_result.to_legacy()
+
     # --- Fallback: Selenium ---
     try:
         from selenium import webdriver  # noqa: F401
@@ -515,7 +562,7 @@ def scrape_amazon_au(vendor_url: str, region: str, session: dict = None) -> dict
                 session["amazon_us_location_set"] = True
 
         last_result = None
-        for attempt in range(RETRY_LIMIT):
+        for attempt in range(SELENIUM_ATTEMPTS):
             if attempt > 0:
                 backoff_delay(attempt, base=2.5, jitter=2.0)
             result = _selenium_scrape_page(vendor_url, driver)
@@ -556,3 +603,4 @@ def close_amazon_au_session(session):
         except Exception:
             pass
     session.pop("amazon_au_http_zip_set", None)
+    session.pop(_SESSION_PROXY_KEY, None)
