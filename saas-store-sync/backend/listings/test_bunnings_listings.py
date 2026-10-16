@@ -863,8 +863,16 @@ class BunningsListingServiceTests(TestCase):
         formulas = [str(dv.formula1) for dv in ws.data_validations.dataValidation]
         self.assertTrue(any("ReferenceData!" in formula for formula in formulas))
 
+        ref_values = [
+            cell
+            for row in wb["ReferenceData"].iter_rows(values_only=True)
+            for cell in row
+        ]
+        self.assertIn("BEDSIDE", ref_values)
+        self.assertIn("DRILLS", ref_values)
+
         rows = csv_import.parse_upload("bunnings.xlsx", content)
-        self.assertEqual(len(rows), 4)
+        self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["row_number"], 3)
         self.assertEqual(rows[0]["sku"], "BN-EXAMPLE-001-M")
         self.assertEqual(rows[1]["sku"], "BN-EXAMPLE-001-L")
@@ -877,7 +885,6 @@ class BunningsListingServiceTests(TestCase):
         self.assertEqual(rows[0]["image_urls"], "https://example.com/photo1.jpg")
         self.assertEqual(rows[0]["category"], "BEDSIDE")
         self.assertEqual(rows[1]["category"], "BEDSIDE")
-        self.assertEqual(rows[2]["category"], "DRILLS")
         self.assertEqual(rows[0]["sale_price"], "79.99")
         self.assertEqual(rows[0]["inventory"], "5")
         self.assertEqual(rows[0]["logistic_class"], "SMALL")

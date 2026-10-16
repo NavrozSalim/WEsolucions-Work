@@ -35,6 +35,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
     const [file, setFile] = useState(null);
     const [action, setAction] = useState('create');
     const [uploading, setUploading] = useState(false);
+    const [downloading, setDownloading] = useState(false);
     const [error, setError] = useState('');
     const [result, setResult] = useState(null);
     const [bunningsCategories, setBunningsCategories] = useState([]);
@@ -65,12 +66,14 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
             extra.hierarchies = bunningsCategories.map((c) => c.code).join(',');
         }
         setError('');
+        setDownloading(true);
         const suffix = extra.hierarchies
-            ? `_${bunningsCategories.map((c) => c.code).slice(0, 3).join('_')}`
+            ? `_${bunningsCategories.length}`
             : '';
         const ext = isBunnings && (action === 'create' || action === 'mapped') ? 'xlsx' : 'csv';
         downloadListingTemplate(storeId, action, extra, `listing_template_${action}${suffix}.${ext}`)
-            .catch((err) => setError(err.message || 'Could not download the template.'));
+            .catch((err) => setError(err.message || 'Could not download the template.'))
+            .finally(() => setDownloading(false));
     };
 
     const handleUpload = () => {
@@ -240,10 +243,10 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                             variant="secondary"
                             size="sm"
                             onClick={handleTemplate}
-                            disabled={isBunnings && (action === 'create' || action === 'mapped') && bunningsCategories.length === 0}
+                            disabled={downloading || (isBunnings && (action === 'create' || action === 'mapped') && bunningsCategories.length === 0)}
                         >
                             <Download className="mr-1.5 h-4 w-4" />
-                            Download template
+                            {downloading ? 'Preparing template…' : 'Download template'}
                         </Button>
                         <input
                             ref={fileRef}

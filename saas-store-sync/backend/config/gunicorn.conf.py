@@ -11,8 +11,8 @@ worker_class = "sync"
 worker_connections = 1000
 max_requests = 1000
 max_requests_jitter = 50
-# Default 120s: short enough to recover stuck workers; long-running work must use Celery (e.g. catalog scrape).
-timeout = int(os.environ.get("GUNICORN_TIMEOUT", "120"))
+# 300s matches nginx proxy_read_timeout so a full Bunnings category template can finish.
+timeout = int(os.environ.get("GUNICORN_TIMEOUT", "300"))
 keepalive = 2
 accesslog = "-"
 errorlog = "-"

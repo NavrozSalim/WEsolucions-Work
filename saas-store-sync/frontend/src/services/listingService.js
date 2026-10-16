@@ -127,6 +127,7 @@ export const downloadListingTemplate = (storeId, action = 'create', extraParams 
             data: { action, hierarchies: codes },
             fallbackFilename,
             mimeType,
+            timeout: 300_000,
         });
     }
     return apiDownload(api, `/stores/${storeId}/listings/template/`, {

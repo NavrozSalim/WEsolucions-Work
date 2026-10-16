@@ -167,6 +167,7 @@ def _dropdown_defaults(code: str, values: list[str]) -> list[str]:
 
 
 def build_template_columns(store, hierarchy_codes) -> list[TemplateColumn]:
+    bunnings_products.prefetch_category_attributes(store, hierarchy_codes)
     pm11 = _pm11_lookup(store, hierarchy_codes)
     categories = [str(c).strip() for c in (hierarchy_codes or []) if str(c or "").strip()]
     logistics = _logistic_codes(store)
@@ -302,7 +303,9 @@ def build_template_xlsx(action: str = "create", store=None, hierarchies=None) ->
     last_col = get_column_letter(len(columns))
     ws.auto_filter.ref = f"A2:{last_col}2"
 
-    samples = hierarchy_codes or [""]
+    # Two example rows show a variation pair. Every selected category stays in the
+    # CATEGORY dropdown; writing a pair per category makes Select all time out.
+    samples = hierarchy_codes[:1] or [""]
     excel_row = 3
     for i, code in enumerate(samples, start=1):
         for variant_index in (1, 2):

@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import logging
+import threading
 import time
 from decimal import Decimal, InvalidOperation
 
@@ -139,6 +140,7 @@ CORE_PRODUCT_CODES = frozenset({
     "image-6",
 })
 _ATTR_CACHE: dict[tuple, list] = {}
+_ATTR_LOCK = threading.Lock()
 _VALUE_LIST_CACHE: dict[str, dict[str, list[dict]]] = {}
 # Mirakl LIST attributes must be sent as value-list codes, not labels.
 DEFAULT_ATTR_VALUE_LISTS = {
@@ -478,8 +480,10 @@ def load_category_attributes(store, hierarchy_code: str) -> list[dict]:
     if not code or store is None:
         return []
     cache_key = (str(getattr(store, "id", "")), code)
-    if cache_key in _ATTR_CACHE:
-        return _ATTR_CACHE[cache_key]
+    with _ATTR_LOCK:
+        cached = _ATTR_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     try:
         client = BunningsClient(store)
         result = client.list_product_attributes(code)
@@ -491,8 +495,32 @@ def load_category_attributes(store, hierarchy_code: str) -> list[dict]:
         return []
     rows = flatten_product_attributes(result.data)
     attach_list_values(store, rows)
-    _ATTR_CACHE[cache_key] = rows
+    with _ATTR_LOCK:
+        _ATTR_CACHE[cache_key] = rows
     return rows
+
+
+def prefetch_category_attributes(store, hierarchy_codes, *, workers: int = 8) -> None:
+    """Load PM11 for many hierarchies at once so a full-tree template can finish."""
+    codes: list[str] = []
+    seen: set[str] = set()
+    for raw in hierarchy_codes or []:
+        code = str(raw or "").strip()
+        if code and code not in seen:
+            seen.add(code)
+            codes.append(code)
+    if not codes or store is None:
+        return
+    load_value_lists(store)
+    pool = max(1, min(int(workers or 1), len(codes), 8))
+    if pool == 1:
+        for code in codes:
+            load_category_attributes(store, code)
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=pool) as executor:
+        list(executor.map(lambda code: load_category_attributes(store, code), codes))
 
 
 def _values_list_code(raw: dict) -> str:
