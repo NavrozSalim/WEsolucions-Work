@@ -171,3 +171,24 @@ class AmazonAUAsinMismatchTests(SimpleTestCase):
             "https://www.amazon.com.au/dp/B08QF7YH9G",
             soup,
         ))
+
+    def test_redirected_url_fails_when_the_page_has_no_asin_row(self):
+        soup = BeautifulSoup(
+            "<span class='a-price'><span class='a-offscreen'>$4.70</span></span>",
+            "html.parser",
+        )
+        result = au_asin_mismatch_result(
+            "https://www.amazon.com.au/dp/B0C9ZQC2FT",
+            soup,
+            "https://www.amazon.com.au/dp/B0C9ZTJTMQ",
+        )
+        self.assertEqual(result.error_code, "asin_mismatch")
+        self.assertIsNone(result.price)
+
+    def test_same_landed_url_without_an_asin_row_is_not_a_failure(self):
+        soup = BeautifulSoup("<span>In stock</span>", "html.parser")
+        self.assertIsNone(au_asin_mismatch_result(
+            "https://www.amazon.com.au/dp/B0C9ZQC2FT",
+            soup,
+            "https://www.amazon.com.au/dp/B0C9ZQC2FT",
+        ))

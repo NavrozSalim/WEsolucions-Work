@@ -143,20 +143,30 @@ def asin_from_amazon_page(soup: BeautifulSoup) -> str:
     return ""
 
 
-def au_asin_mismatch_result(requested_url: str, soup: BeautifulSoup):
+def au_asin_mismatch_result(
+    requested_url: str,
+    soup: BeautifulSoup,
+    landed_url: str = "",
+):
     """Fail the row when Amazon opened a different product than the listing ASIN.
 
-    The redirected page's price and stock are not returned, so the catalog
-    marks the listing Failed instead of saving the other product.
+    A mismatch is taken from the printed Item details ASIN or from the URL
+    Amazon actually opened. Either one is enough, so a redirect still fails
+    when the details table is missing. The other product's price is not returned.
     """
     expected = asin_from_amazon_url(requested_url)
     if not expected:
         return None
-    found = asin_from_amazon_page(soup)
-    if not found or found == expected:
+    observed = []
+    for candidate in (asin_from_amazon_page(soup), asin_from_amazon_url(landed_url)):
+        if candidate and candidate not in observed:
+            observed.append(candidate)
+    foreign = [asin for asin in observed if asin != expected]
+    if not foreign:
         return None
+    found = foreign[0]
     logger.info(
-        "Amazon AU ASIN mismatch url=%s expected=%s page=%s",
+        "Amazon AU ASIN mismatch url=%s expected=%s opened=%s",
         (requested_url or "")[:120],
         expected,
         found,
@@ -257,7 +267,7 @@ class AmazonAUHTTP:
         except Exception:
             soup = BeautifulSoup(html, "html.parser")
 
-        mismatch = au_asin_mismatch_result(url, soup)
+        mismatch = au_asin_mismatch_result(url, soup, getattr(resp, "url", "") or "")
         if mismatch is not None:
             return mismatch
 
@@ -288,7 +298,7 @@ class AmazonAUHTTP:
             if result.success:
                 return result
             last_result = result
-            if result.error_code in ("http_404",):
+            if result.error_code in ("http_404", "asin_mismatch"):
                 break
             if result.error_code.startswith("blocked"):
                 s = cls._get_session(session_dict, is_au)
@@ -411,8 +421,12 @@ def _selenium_scrape_page(url: str, driver) -> ScrapeResult:
             return ScrapeResult.fail(f"blocked_{reason}", f"Blocked: {reason}", html, "amazon_au", url)
 
         soup = BeautifulSoup(html, "html.parser")
+        try:
+            landed_url = driver.current_url or ""
+        except Exception:
+            landed_url = ""
 
-        mismatch = au_asin_mismatch_result(url, soup)
+        mismatch = au_asin_mismatch_result(url, soup, landed_url)
         if mismatch is not None:
             return mismatch
 
@@ -463,6 +477,12 @@ def scrape_amazon_au(vendor_url: str, region: str, session: dict = None) -> dict
     if http_result.success:
         logger.info("HTTP scrape OK for %s (price=%s)", vendor_url[:60], http_result.price)
         return http_result.to_legacy()
+    if http_result.error_code == "asin_mismatch":
+        logger.info(
+            "Amazon AU ASIN mismatch is final for %s; not trying the browser",
+            vendor_url[:80],
+        )
+        return http_result.to_legacy()
 
     logger.info(
         "HTTP scrape failed [%s], trying Selenium fallback for %s",
@@ -502,7 +522,7 @@ def scrape_amazon_au(vendor_url: str, region: str, session: dict = None) -> dict
             if result.success:
                 return result.to_legacy()
             last_result = result
-            if result.error_code in ("captcha", "dog_page"):
+            if result.error_code in ("captcha", "dog_page", "asin_mismatch"):
                 break
 
         logger.warning(
