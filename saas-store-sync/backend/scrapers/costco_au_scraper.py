@@ -39,6 +39,7 @@ import os
 import re
 import time
 from typing import Optional
+from urllib.parse import quote
 
 from bs4 import BeautifulSoup
 
@@ -748,6 +749,131 @@ def _http_fetch(url: str, session: dict, assignment: ProxyAssignment) -> tuple[s
 
 
 # ---------------------------------------------------------------------------
+# Product API
+# ---------------------------------------------------------------------------
+# Some live PDPs return a shell with no Add to cart block. The same proxy
+# still gets a price from the commerce product API, for the same item code.
+# Carousel prices on a 404 page are not used — only this code-scoped payload.
+
+_OCC_PRODUCT_URL = (
+    "https://www.costco.com.au/rest/v2/australia/products/{code}"
+    "?fields=code,name,price(FULL),stock(FULL),purchasable"
+)
+
+
+def occ_product_url(code: str) -> str:
+    return _OCC_PRODUCT_URL.format(code=quote(code, safe=""))
+
+
+def _stock_from_occ(payload: dict) -> int:
+    """3 = in stock, 0 = out of stock. Never the raw warehouse quantity."""
+    status = str((payload.get("stock") or {}).get("stockLevelStatus") or "").lower()
+    if "outofstock" in status or "soldout" in status:
+        return 0
+    if status in ("instock", "lowstock"):
+        return 3
+    return 3 if payload.get("purchasable") else 0
+
+
+def parse_occ_product(url: str, status: int, body: str) -> Optional[ScrapeResult]:
+    """Turn one product-API response into a scrape result.
+
+    ``None`` means the response was unusable (transport or unexpected body),
+    so the caller may try another proxy. A found price and a confirmed miss
+    are final.
+    """
+    text = (body or "").strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    errors = payload.get("errors")
+    if status == 404 or (isinstance(errors, list) and errors):
+        message = "Product not found"
+        if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+            message = str(errors[0].get("message") or message)
+        return ScrapeResult.fail(
+            "product_not_found", message[:240], "", VENDOR_TAG, url,
+        )
+    if status != 200:
+        return None
+
+    price_node = payload.get("price")
+    raw_price = ""
+    if isinstance(price_node, dict):
+        raw_price = price_node.get("value", "")
+    price = _parse_price_text(str(raw_price))
+    title = str(payload.get("name") or "").strip()[:500] or None
+    if price is None:
+        return ScrapeResult.fail(
+            "no_price", "Price not found on product API", "", VENDOR_TAG, url,
+        )
+    return ScrapeResult.ok(price=price, stock=_stock_from_occ(payload), title=title)
+
+
+def _occ_codes(url: str) -> list[str]:
+    pid = product_id_from_url(url)
+    if not pid:
+        return []
+    codes = [pid]
+    if "-" in pid:
+        base = pid.split("-", 1)[0]
+        if base and base not in codes:
+            codes.append(base)
+    return codes
+
+
+def _fetch_occ_body(code: str, session: dict, assignment: ProxyAssignment) -> tuple[int, str, str]:
+    """GET one product-API document through ``assignment``. Returns status, body, error."""
+    client = _get_http_client(session, assignment)
+    kwargs = {
+        "timeout": HTTP_TIMEOUT_SEC,
+        "allow_redirects": True,
+        "headers": {"Accept": "application/json"},
+    }
+    if getattr(client, "_costco_au_use_impersonate", False):
+        kwargs["impersonate"] = "chrome131"
+    try:
+        resp = client.get(occ_product_url(code), **kwargs)
+    except Exception as exc:
+        return 0, "", f"request_error: {type(exc).__name__}: {str(exc)[:200]}"
+    status = int(getattr(resp, "status_code", 0) or 0)
+    body = getattr(resp, "text", "") or ""
+    return status, body, ""
+
+
+def _lookup_occ_product(
+    url: str,
+    session: dict,
+    assignment: ProxyAssignment,
+) -> Optional[ScrapeResult]:
+    """Ask the product API for ``url``'s item code. ``None`` if the call failed."""
+    last: Optional[ScrapeResult] = None
+    for code in _occ_codes(url):
+        status, body, err = _fetch_occ_body(code, session, assignment)
+        if err or not body:
+            return None
+        parsed = parse_occ_product(url, status, body)
+        if parsed is None:
+            return None
+        if parsed.success:
+            logger.info(
+                "Costco AU API OK url=%s code=%s price=%s stock=%s",
+                url[:80], code, parsed.price, parsed.stock,
+            )
+            return parsed
+        last = parsed
+        if parsed.error_code != "product_not_found":
+            return parsed
+    return last
+
+
+# ---------------------------------------------------------------------------
 # Selenium fallback (opt-in)
 # ---------------------------------------------------------------------------
 
@@ -1006,10 +1132,18 @@ def scrape_costco_au(
         if result.error_code == "product_not_found":
             return result.to_legacy()
 
-        # Unrendered shell: the proxy did reach Costco, so don't park it.
-        # Another IP may get the rendered PDP. A dead id fails after retries
-        # without taking the pool offline.
+        # The HTML had no product price. The commerce API usually still has
+        # this item. One answer there is final — every proxy gets the same shell.
         if result.error_code == "page_shell":
+            occ = _lookup_occ_product(vendor_url, session, assignment)
+            if occ is not None and occ.success:
+                active_pool.mark_success(assignment)
+                return occ.to_legacy()
+            if occ is not None and occ.error_code == "product_not_found":
+                return occ.to_legacy()
+            if occ is not None and occ.error_code == "no_price":
+                active_pool.mark_success(assignment)
+                return occ.to_legacy()
             continue
 
         # ``no_price`` — the proxy fetched the PDP just fine, the parser simply

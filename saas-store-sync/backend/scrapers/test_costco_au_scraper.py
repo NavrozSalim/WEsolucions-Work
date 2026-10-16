@@ -732,6 +732,45 @@ class ParseCostcoPdpTests(SimpleTestCase):
         self.assertEqual(result.error_code, "page_shell")
         self.assertIsNone(result.price)
 
+    def test_product_api_in_stock_and_out_of_stock(self):
+        url = "https://www.costco.com.au/p/163910"
+        instock = json.dumps({
+            "code": "163910",
+            "name": "Pantene Pro-V",
+            "price": {"value": 21.99, "currencyIso": "AUD"},
+            "purchasable": True,
+            "stock": {"stockLevel": 50, "stockLevelStatus": "inStock"},
+        })
+        result = costco_au_scraper.parse_occ_product(url, 200, instock)
+        self.assertTrue(result.success)
+        self.assertEqual(result.price, 21.99)
+        self.assertEqual(result.stock, 3)
+        self.assertEqual(result.title, "Pantene Pro-V")
+
+        oos = json.dumps({
+            "code": "195870",
+            "name": "Ausab Australian Abalone",
+            "price": {"value": 64.99},
+            "purchasable": True,
+            "stock": {"stockLevelStatus": "outOfStock"},
+        })
+        result = costco_au_scraper.parse_occ_product(url, 200, oos)
+        self.assertEqual(result.price, 64.99)
+        self.assertEqual(result.stock, 0)
+
+    def test_product_api_unknown_code_is_not_found(self):
+        body = json.dumps({
+            "errors": [{
+                "message": "Product with code 000000 not found!",
+                "type": "UnknownIdentifierError",
+            }],
+        })
+        result = costco_au_scraper.parse_occ_product(
+            "https://www.costco.com.au/p/000000", 404, body,
+        )
+        self.assertEqual(result.error_code, "product_not_found")
+        self.assertIsNone(result.price)
+
     def test_product_title_shell_is_not_a_homepage_redirect(self):
         html = (
             "<html><head><title>Premium Wireless Vacuum | Costco Australia</title></head>"
@@ -852,13 +891,58 @@ class ScrapeCostcoAuOrchestrationTests(SimpleTestCase):
                 return _BARREN_SHELL_HTML, url, ""
             return _PDP_HTML_NORMAL, url, ""
 
-        with patch.object(costco_au_scraper, "_http_fetch", side_effect=fake_fetch):
+        with patch.object(costco_au_scraper, "_http_fetch", side_effect=fake_fetch), \
+                patch.object(costco_au_scraper, "_lookup_occ_product", return_value=None):
             result = costco_au_scraper.scrape_costco_au(
                 self.url, "AU", session={}, pool=self.pool,
             )
 
         self.assertEqual(result["price"], 1299.99)
         self.assertEqual(calls, [0, 1])
+
+    def test_page_shell_uses_product_api_without_another_proxy(self):
+        calls = []
+
+        def fake_fetch(url, session, assignment):
+            calls.append(url)
+            return _BARREN_SHELL_HTML, url, ""
+
+        api_result = costco_au_scraper.ScrapeResult.ok(
+            price=21.99, stock=3, title="Pantene Pro-V",
+        )
+        with patch.object(costco_au_scraper, "_http_fetch", side_effect=fake_fetch), \
+                patch.object(
+                    costco_au_scraper, "_lookup_occ_product", return_value=api_result,
+                ) as mock_api:
+            result = costco_au_scraper.scrape_costco_au(
+                "https://www.costco.com.au/p/163910", "AU", session={}, pool=self.pool,
+            )
+
+        self.assertEqual(result["price"], 21.99)
+        self.assertEqual(result["stock"], 3)
+        self.assertEqual(result["title"], "Pantene Pro-V")
+        self.assertEqual(len(calls), 1)
+        mock_api.assert_called_once()
+
+    def test_page_shell_api_miss_does_not_rotate(self):
+        calls = []
+
+        def fake_fetch(url, session, assignment):
+            calls.append(assignment.index)
+            return _BARREN_SHELL_HTML, url, ""
+
+        missing = costco_au_scraper.ScrapeResult.fail(
+            "product_not_found", "Product with code 000000 not found!", "",
+            "costco_au", self.url,
+        )
+        with patch.object(costco_au_scraper, "_http_fetch", side_effect=fake_fetch), \
+                patch.object(costco_au_scraper, "_lookup_occ_product", return_value=missing):
+            result = costco_au_scraper.scrape_costco_au(
+                self.url, "AU", session={}, pool=self.pool,
+            )
+
+        self.assertEqual(result["error_code"], "product_not_found")
+        self.assertEqual(len(calls), 1)
 
     def test_first_attempt_waits_for_cooldown_without_extending_it(self):
         pool = costco_au_proxies.CostcoAuProxyPool(["http://u:p@only:9"], min_gap_sec=0.0)
