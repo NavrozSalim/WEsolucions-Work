@@ -664,6 +664,9 @@ function vendorIngestIsRunning(vendor) {
  * Pick the vendor that should drive the Scrape button label and tracking
  * state when a store has products from multiple desktop-runner vendors.
  * Prefer one that still has pending work; otherwise fall back to the first.
+ *
+ * ``runner: 'live'`` vendors (e.g. Costco AU with proxies) are scraped on the
+ * server and are tracked by ``server_celery_scrape``, not by desktop polling.
  */
 /** Feed/desktop progress keys used by the scrape progress payload. */
 function progressVendorKey(code) {
@@ -675,9 +678,14 @@ function progressVendorKey(code) {
     return '';
 }
 
+function isNonLiveVendor(vendor) {
+    return Boolean(vendor && vendor.runner !== 'live');
+}
+
 function getActiveVendor(vendors) {
-    if (!Array.isArray(vendors) || vendors.length === 0) return null;
-    return vendors.find((v) => vendorSyncPending(v) > 0 || vendorIngestIsRunning(v)) || vendors[0];
+    const nonLive = Array.isArray(vendors) ? vendors.filter(isNonLiveVendor) : [];
+    if (nonLive.length === 0) return null;
+    return nonLive.find((v) => vendorSyncPending(v) > 0 || vendorIngestIsRunning(v)) || nonLive[0];
 }
 
 /** HebScrapeJob desktop queue — not used for ``runner: live`` (Amazon/eBay server scrapes). */
@@ -1671,15 +1679,19 @@ export default function Catalog() {
     // Works uniformly for HEB, Costco, and any future ingest-only vendor.
     useEffect(() => {
         if (!trackingScrape || !scrapeProgress) return;
-        const vendors = getVendorSummaries(scrapeProgress);
+        const vendors = getVendorSummaries(scrapeProgress).filter(isNonLiveVendor);
         const rawVendors = scrapeProgress?.vendors || {};
         const hasActiveDesktopJob = Object.values(rawVendors).some((v) => {
+            if (v?.runner === 'live') return false;
             const st = v?.job?.status;
             return st === 'pending' || st === 'claimed';
         }) || ['pending', 'claimed'].includes(scrapeProgress?.heb_job?.status);
 
         if (vendors.length === 0 && !hasActiveDesktopJob) {
             setTrackingScrape(false);
+            if (!scrapeProgress?.server_celery_scrape?.active) {
+                setFlowStatus('');
+            }
             return;
         }
         if (vendors.length === 0) {
@@ -2031,7 +2043,7 @@ export default function Catalog() {
                     trackingServerScrapeRef.current = false;
                     setTrackingServerScrape(false);
                 }
-                let vendors = getVendorSummaries(progress);
+                let vendors = getVendorSummaries(progress).filter(isNonLiveVendor);
                 if (progressKey) {
                     vendors = vendors.filter((v) => v.code === progressKey);
                 } else if (scopedVendor) {
@@ -2217,10 +2229,19 @@ export default function Catalog() {
             return;
         }
         const active = Boolean(scrapeProgress.server_celery_scrape?.active);
+        const wasActive = trackingServerScrapeRef.current;
         setTrackingServerScrape(active);
         trackingServerScrapeRef.current = active;
         if (active && viewMode === 'products' && flowStatus !== 'syncing') {
             setFlowStatus((prev) => (prev === 'scraping' ? prev : 'scraping'));
+        }
+        if (wasActive && !active && !trackingScrapeRef.current) {
+            setFlowStatus((prev) => (prev === 'scraping' ? 'success' : prev));
+            setLiveRefreshUntil(Date.now() + 120000);
+            if (viewMode === 'products') {
+                refreshProducts();
+            }
+            refreshActivityLogs().catch(() => {});
         }
     }, [scrapeProgress, selectedStore, viewMode, flowStatus]);
 

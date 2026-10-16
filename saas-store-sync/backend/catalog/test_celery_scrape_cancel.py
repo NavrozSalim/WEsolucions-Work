@@ -19,6 +19,7 @@ from catalog.scrape_progress import build_scrape_progress_payload
 from catalog.tasks import (
     _pending_left_scrape_note,
     _process_store_wide_scrape_mappings,
+    catalog_scrape_store_finalize,
     resume_catalog_scrape_after_stop,
 )
 from marketplace.models import Marketplace
@@ -229,4 +230,46 @@ class CeleryScrapeCancelTests(TestCase):
         res = self.client.post(f'/api/v1/stores/{self.store.id}/catalog/scrape/')
         self.assertNotEqual(res.status_code, 409)
         self.assertIn(res.status_code, (200, 202))
+
+    @patch('catalog.tasks.catalog_scrape_store_task.apply_async')
+    def test_store_finalize_continues_when_pending_rows_remain(self, mock_apply):
+        self._state(cancel=False)
+        self._mapping('B0LEFT')
+        out = catalog_scrape_store_finalize(
+            [{
+                'rows_processed': 60,
+                'rows_succeeded': 57,
+                'failed': 3,
+                'stalled': False,
+                'user_cancelled': False,
+            }],
+            str(self.store.id),
+            '',
+        )
+        self.assertTrue(out['continued'])
+        mock_apply.assert_called_once()
+        self.assertTrue(
+            StoreCatalogCeleryScrapeState.objects.filter(store=self.store).exists(),
+        )
+
+    @patch('catalog.tasks.catalog_scrape_store_task.apply_async')
+    def test_store_finalize_does_not_continue_when_cancelled(self, mock_apply):
+        self._state(cancel=True)
+        self._mapping('B0LEFT')
+        out = catalog_scrape_store_finalize(
+            [{
+                'rows_processed': 10,
+                'rows_succeeded': 10,
+                'failed': 0,
+                'stalled': False,
+                'user_cancelled': True,
+            }],
+            str(self.store.id),
+            '',
+        )
+        self.assertFalse(out['continued'])
+        mock_apply.assert_not_called()
+        self.assertFalse(
+            StoreCatalogCeleryScrapeState.objects.filter(store=self.store).exists(),
+        )
 

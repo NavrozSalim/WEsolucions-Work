@@ -1484,7 +1484,11 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
     from sync.models import ScrapeRun
 
     from catalog.activity_log import append_catalog_log
-    from catalog.celery_scrape_state import clear_celery_scrape_state
+    from catalog.celery_scrape_state import (
+        clear_celery_scrape_state,
+        mark_celery_scrape_worker_started,
+        set_celery_scrape_state,
+    )
 
     try:
         upload = CatalogUpload.objects.select_related('store', 'store__marketplace').get(id=upload_id)
@@ -1594,6 +1598,35 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
                 action_type='marketplace_push',
                 metadata=sears_push,
             )
+        continued = False
+        if (
+            left_n > 0
+            and not user_cancelled
+            and not stalled_out
+            and not fatal_parts
+            and (succeeded > 0 or failed > 0)
+        ):
+            next_tid = str(uuid.uuid4())
+            with transaction.atomic():
+                set_celery_scrape_state(
+                    store,
+                    task_id=next_tid,
+                    scope=StoreCatalogCeleryScrapeState.Scope.UPLOAD,
+                    upload=upload,
+                )
+                mark_celery_scrape_worker_started(str(store.id))
+            try:
+                catalog_scrape_task.apply_async(args=[str(upload_id)], task_id=next_tid)
+                continued = True
+                append_catalog_log(
+                    store.id,
+                    f'Continuing vendor scrape for {left_n} remaining Pending listing(s).',
+                    action_type='scrape_auto_resume',
+                    metadata={'scope': 'upload', 'upload_id': str(upload_id), 'pending_left': left_n},
+                )
+            except Exception:
+                logger.exception('Could not queue follow-up upload scrape for upload %s', upload_id)
+                clear_celery_scrape_state(str(store.id))
         return {
             'upload_id': str(upload_id),
             'run_id': str(run.id),
@@ -1602,9 +1635,11 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
             'rows_succeeded': succeeded,
             'failed': failed,
             'stalled': stalled_out,
+            'continued': continued,
         }
     finally:
-        clear_celery_scrape_state(str(store.id))
+        if not locals().get('continued'):
+            clear_celery_scrape_state(str(store.id))
 
 
 def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, emit_stall_log: bool):
@@ -2156,7 +2191,11 @@ def catalog_scrape_store_finalize(results, store_id: str, vendor_id: str | None 
     from stores.models import Store
 
     from catalog.activity_log import append_catalog_log
-    from catalog.celery_scrape_state import clear_celery_scrape_state
+    from catalog.celery_scrape_state import (
+        clear_celery_scrape_state,
+        mark_celery_scrape_worker_started,
+        set_celery_scrape_state,
+    )
 
     try:
         store = Store.objects.select_related('marketplace').get(id=store_id)
@@ -2242,6 +2281,38 @@ def catalog_scrape_store_finalize(results, store_id: str, vendor_id: str | None 
                 action_type='marketplace_push',
                 metadata=sears_push,
             )
+        continued = False
+        if (
+            left_n > 0
+            and not user_cancelled
+            and not stalled_out
+            and not fatal_parts
+            and (succeeded > 0 or failed > 0)
+        ):
+            next_tid = str(uuid.uuid4())
+            with transaction.atomic():
+                set_celery_scrape_state(
+                    store,
+                    task_id=next_tid,
+                    scope=StoreCatalogCeleryScrapeState.Scope.STORE,
+                    upload=None,
+                )
+                mark_celery_scrape_worker_started(str(store.id))
+            try:
+                task_args = [str(store.id)]
+                if vendor_id:
+                    task_args.append(vendor_id)
+                catalog_scrape_store_task.apply_async(args=task_args, task_id=next_tid)
+                continued = True
+                append_catalog_log(
+                    store.id,
+                    f'Continuing vendor scrape for {left_n} remaining Pending listing(s).',
+                    action_type='scrape_auto_resume',
+                    metadata={'scope': 'store', 'pending_left': left_n},
+                )
+            except Exception:
+                logger.exception('Could not queue follow-up store scrape for store %s', store.id)
+                clear_celery_scrape_state(str(store_id))
         return {
             'store_id': str(store_id),
             'scope': 'store',
@@ -2250,9 +2321,11 @@ def catalog_scrape_store_finalize(results, store_id: str, vendor_id: str | None 
             'failed': failed,
             'error_summary': error_summary or ('; '.join(fatal_parts) if fatal_parts else None),
             'stalled': stalled_out,
+            'continued': continued,
         }
     finally:
-        clear_celery_scrape_state(str(store_id))
+        if not locals().get('continued'):
+            clear_celery_scrape_state(str(store_id))
 
 
 @shared_task(bind=True, max_retries=3)
