@@ -110,6 +110,66 @@ def apply_au_error_stock(soup: BeautifulSoup, stock):
     return stock
 
 
+_ASIN_TOKEN_RE = re.compile(r"\b(B[A-Z0-9]{9})\b", re.IGNORECASE)
+_ASIN_URL_RE = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})", re.IGNORECASE)
+
+
+def asin_from_amazon_url(url: str) -> str:
+    """ASIN in the vendor link that was opened, before any redirect."""
+    match = _ASIN_URL_RE.search(url or "")
+    return match.group(1).upper() if match else ""
+
+
+def asin_from_amazon_page(soup: BeautifulSoup) -> str:
+    """ASIN printed on the product page (Item details / Additional Information)."""
+    if soup is None:
+        return ""
+    for node in soup.select("th, span.a-text-bold, td.a-span3, span.a-color-secondary"):
+        label = node.get_text(" ", strip=True).rstrip(":").strip().upper()
+        if label != "ASIN":
+            continue
+        sibling = node.find_next_sibling()
+        blob = sibling.get_text(" ", strip=True) if sibling else ""
+        if not blob and node.parent is not None:
+            blob = node.parent.get_text(" ", strip=True)
+        match = _ASIN_TOKEN_RE.search(blob)
+        if match:
+            return match.group(1).upper()
+    for sel in ("input#ASIN", "input[name='ASIN']"):
+        el = soup.select_one(sel)
+        value = (el.get("value") if el else "") or ""
+        if _ASIN_TOKEN_RE.fullmatch(value.strip()):
+            return value.strip().upper()
+    return ""
+
+
+def au_asin_mismatch_result(requested_url: str, soup: BeautifulSoup):
+    """Fail the row when Amazon opened a different product than the listing ASIN.
+
+    The redirected page's price and stock are not returned, so the catalog
+    marks the listing Failed instead of saving the other product.
+    """
+    expected = asin_from_amazon_url(requested_url)
+    if not expected:
+        return None
+    found = asin_from_amazon_page(soup)
+    if not found or found == expected:
+        return None
+    logger.info(
+        "Amazon AU ASIN mismatch url=%s expected=%s page=%s",
+        (requested_url or "")[:120],
+        expected,
+        found,
+    )
+    return ScrapeResult.fail(
+        "asin_mismatch",
+        f"Amazon opened ASIN {found}; this listing is {expected}.",
+        "",
+        "amazon_au",
+        requested_url,
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # HTTP-based scraper (primary)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -196,6 +256,10 @@ class AmazonAUHTTP:
             soup = BeautifulSoup(html, "lxml")
         except Exception:
             soup = BeautifulSoup(html, "html.parser")
+
+        mismatch = au_asin_mismatch_result(url, soup)
+        if mismatch is not None:
+            return mismatch
 
         oos = AmazonParser.oos_without_offer_result(soup)
         if oos is not None:
@@ -347,6 +411,10 @@ def _selenium_scrape_page(url: str, driver) -> ScrapeResult:
             return ScrapeResult.fail(f"blocked_{reason}", f"Blocked: {reason}", html, "amazon_au", url)
 
         soup = BeautifulSoup(html, "html.parser")
+
+        mismatch = au_asin_mismatch_result(url, soup)
+        if mismatch is not None:
+            return mismatch
 
         oos = AmazonParser.oos_without_offer_result(soup)
         if oos is not None:

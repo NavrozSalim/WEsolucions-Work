@@ -9,6 +9,8 @@ from scrapers.amazon_au_scraper import (
     AU_OOS_ERROR_SELECTOR,
     amazon_au_postcode,
     apply_au_error_stock,
+    asin_from_amazon_page,
+    au_asin_mismatch_result,
 )
 from scrapers.amazon_us_scraper import AmazonParser
 
@@ -132,3 +134,40 @@ class AmazonAUPostcodeTests(SimpleTestCase):
     def test_invalid_falls_back(self):
         with patch.dict(os.environ, {"AMAZON_AU_POSTCODE": "abc"}):
             self.assertEqual(amazon_au_postcode(), "2762")
+
+
+class AmazonAUAsinMismatchTests(SimpleTestCase):
+    def test_page_asin_is_read_from_item_details(self):
+        html = """
+        <table>
+          <tr><th>ASIN</th><td>B0C9ZTJTMQ</td></tr>
+        </table>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        self.assertEqual(asin_from_amazon_page(soup), "B0C9ZTJTMQ")
+
+    def test_different_page_asin_fails_without_a_price(self):
+        html = """
+        <span class="a-price"><span class="a-offscreen">$49.99</span></span>
+        <tr><th class="a-color-secondary">ASIN</th><td>B0C9ZTJTMQ</td></tr>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        result = au_asin_mismatch_result(
+            "https://www.amazon.com.au/dp/B08QF7YH9G",
+            soup,
+        )
+        self.assertIsNotNone(result)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "asin_mismatch")
+        self.assertIsNone(result.price)
+        self.assertIsNone(result.stock)
+        self.assertIn("B0C9ZTJTMQ", result.error_message)
+        self.assertIn("B08QF7YH9G", result.error_message)
+
+    def test_matching_asin_is_not_a_failure(self):
+        html = "<tr><th>ASIN</th><td>B08QF7YH9G</td></tr>"
+        soup = BeautifulSoup(html, "html.parser")
+        self.assertIsNone(au_asin_mismatch_result(
+            "https://www.amazon.com.au/dp/B08QF7YH9G",
+            soup,
+        ))
