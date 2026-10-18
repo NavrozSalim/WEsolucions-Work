@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
+from django.db import OperationalError
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -28,6 +29,17 @@ from stores.models import Store
 from vendor.models import Vendor
 
 User = get_user_model()
+
+
+def _timeout_monotonic():
+    """First read is the wait start; later reads are far past the timeout."""
+    _timeout_monotonic.n += 1
+    if _timeout_monotonic.n == 1:
+        return 0.0
+    return _timeout_monotonic.n * 100000.0
+
+
+_timeout_monotonic.n = 0
 
 
 @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
@@ -84,6 +96,14 @@ class CeleryScrapeCancelTests(TestCase):
 
     def test_should_abort_when_state_missing(self):
         self.assertTrue(should_abort_celery_scrape(str(self.store.id)))
+
+    @patch(
+        'catalog.models.StoreCatalogCeleryScrapeState.objects.get',
+        side_effect=OperationalError('server closed the connection'),
+    )
+    def test_db_blip_does_not_abort_running_scrape(self, _get):
+        self.assertFalse(should_abort_celery_scrape(str(self.store.id)))
+        self.assertGreaterEqual(_get.call_count, 2)
 
     def test_should_abort_only_after_cancel_flag(self):
         self._state()
@@ -272,4 +292,54 @@ class CeleryScrapeCancelTests(TestCase):
         self.assertFalse(
             StoreCatalogCeleryScrapeState.objects.filter(store=self.store).exists(),
         )
+
+    @patch('catalog.tasks.catalog_scrape_store_task.apply_async')
+    def test_store_finalize_continues_after_stall_when_pending_remain(self, mock_apply):
+        self._state(cancel=False)
+        self._mapping('B0STALL')
+        out = catalog_scrape_store_finalize(
+            [{
+                'rows_processed': 5,
+                'rows_succeeded': 4,
+                'failed': 1,
+                'stalled': True,
+                'user_cancelled': False,
+            }],
+            str(self.store.id),
+            '',
+        )
+        self.assertTrue(out['continued'])
+        mock_apply.assert_called_once()
+
+    @patch('catalog.tasks.catalog_scrape_store_task.apply_async')
+    def test_store_finalize_does_not_continue_stall_with_no_progress(self, mock_apply):
+        self._state(cancel=False)
+        self._mapping('B0STALL0')
+        out = catalog_scrape_store_finalize(
+            [{
+                'rows_processed': 0,
+                'rows_succeeded': 0,
+                'failed': 0,
+                'stalled': True,
+                'user_cancelled': False,
+            }],
+            str(self.store.id),
+            '',
+        )
+        self.assertFalse(out['continued'])
+        mock_apply.assert_not_called()
+
+    @patch('time.monotonic', side_effect=lambda: _timeout_monotonic())
+    @patch('catalog.tasks.catalog_scrape_store_task.apply_async')
+    def test_update_wait_timeout_leaves_scrape_running(self, mock_apply, _monotonic):
+        from sync.tasks import _run_browser_scrape_for_scheduled_update
+
+        _timeout_monotonic.n = 0
+        self._mapping('B0WAIT')
+        out = _run_browser_scrape_for_scheduled_update(self.store, 'manual')
+        self.assertTrue(out.get('still_running'))
+        self.assertEqual(out.get('error'), 'browser_scrape_timeout')
+        st = StoreCatalogCeleryScrapeState.objects.get(store=self.store)
+        self.assertFalse(st.cancel_requested)
+        mock_apply.assert_called_once()
 

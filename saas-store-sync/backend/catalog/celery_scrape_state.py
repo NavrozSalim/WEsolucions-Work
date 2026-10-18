@@ -7,8 +7,11 @@ single-task scrape is still running so ``/scrape/progress/`` can show
 """
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from catalog.models import CatalogUpload
@@ -102,16 +105,35 @@ def should_abort_celery_scrape(store_id: str | None) -> bool:
     ``phase=stopping`` until chunks drain. A missing row still means abort
     (job finished, crashed, or an older Stop path that deleted state) so a
     leftover worker does not keep going after finalize.
+
+    A dropped database connection is not a cancel. Costco requests sit idle
+    on the DB for minutes; treating that blip as Stop left the rest of the
+    Pending list behind.
     """
     if not store_id:
         return False
+    from django.db import InterfaceError, OperationalError, close_old_connections
+
     from catalog.models import StoreCatalogCeleryScrapeState
 
-    try:
-        st = StoreCatalogCeleryScrapeState.objects.get(store_id=store_id)
-    except StoreCatalogCeleryScrapeState.DoesNotExist:
-        return True
-    return bool(st.cancel_requested)
+    close_old_connections()
+    for attempt in (1, 2):
+        try:
+            st = StoreCatalogCeleryScrapeState.objects.get(store_id=store_id)
+        except StoreCatalogCeleryScrapeState.DoesNotExist:
+            return True
+        except (OperationalError, InterfaceError):
+            close_old_connections()
+            if attempt == 1:
+                continue
+            logger.exception(
+                'Scrape cancel check failed for store %s; continuing so a dropped '
+                'database connection does not abandon Pending listings.',
+                store_id,
+            )
+            return False
+        return bool(st.cancel_requested)
+    return False
 
 
 def request_celery_scrape_cancel(store_id: str | None) -> bool:

@@ -861,6 +861,11 @@ def _run_browser_scrape_for_scheduled_update(store, source: str) -> dict:
 
     ``run_store_update`` waits until the scrape finishes or the user clicks Stop
     (``should_abort_celery_scrape`` / cancel API).
+
+    If the wait exceeds ``SCHEDULED_UPDATE_BROWSER_SCRAPE_MAX_WAIT_SEC`` the
+    update stops waiting, but the scrape is left running. Clearing scrape
+    state here used to look like Stop to the chunk workers, so the rest of a
+    slow Costco catalog stayed Pending.
     """
     import time
     import uuid
@@ -928,19 +933,34 @@ def _run_browser_scrape_for_scheduled_update(store, source: str) -> dict:
         time.sleep(poll_interval)
 
     logger.warning(
-        'Timed out waiting for browser scrape on store %s after %ss',
+        'Timed out waiting for browser scrape on store %s after %ss; '
+        'leaving the scrape running so remaining Pending listings are finished.',
         store.name,
         max_wait,
     )
     try:
-        from core.celery import app
+        from catalog.activity_log import append_catalog_log
 
-        app.control.revoke(task_id, terminate=False)
+        append_catalog_log(
+            store.id,
+            'Store update stopped waiting, but the vendor scrape is still running. '
+            'Pending listings were not cancelled.',
+            action_type='scrape_still_running',
+            metadata={
+                'scope': 'store',
+                'scheduled_update': True,
+                'source': source,
+                'waited_sec': max_wait,
+                'task_id': task_id,
+            },
+        )
     except Exception:
-        pass
-    clear_celery_scrape_state(str(store.id))
-    invalidate_scrape_progress_cache(str(store.id))
-    return {'error': 'browser_scrape_timeout', 'task_id': task_id}
+        logger.exception('append_catalog_log failed for scrape_still_running')
+    return {
+        'error': 'browser_scrape_timeout',
+        'still_running': True,
+        'task_id': task_id,
+    }
 
 
 def _wait_managed_listing_scrape(store) -> dict:
@@ -1244,6 +1264,7 @@ def run_store_update(self, store_id, source='beat'):
 
     error_summary = None
     browser_scrape = {}
+    scrape_still_running = False
 
     def _record_push_error(sku_hint: str, err: Exception):
         if len(push_errors) >= 20:
@@ -1256,8 +1277,17 @@ def run_store_update(self, store_id, source='beat'):
 
     if source in ('beat', 'manual'):
         browser_scrape = _run_browser_scrape_for_scheduled_update(store, source)
+        scrape_still_running = bool(browser_scrape.get('still_running'))
         if browser_scrape.get('user_cancelled'):
             error_summary = 'user_cancelled'
+        elif scrape_still_running:
+            # The scrape is still walking Pending rows. Pushing now would publish
+            # a partial catalog and the timeout must not be stored as a failure.
+            error_summary = None
+            hint = (
+                'Vendor scrape is still running. Pending listings were not cancelled. '
+                'Marketplace push waits until that scrape finishes.'
+            )
         elif browser_scrape.get('error'):
             error_summary = browser_scrape.get('error')
 
@@ -1279,12 +1309,16 @@ def run_store_update(self, store_id, source='beat'):
     bulk_queue = []  # list of (pm, sku, price, stock)
     price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
 
-    # Push ingest-fed and browser-scraped rows (same pass as before)
-    push_mappings = ProductMapping.objects.filter(
-        store=store,
-        is_active=True,
-        sync_status='scraped',
-    ).select_related('product', 'product__vendor')
+    # Push ingest-fed and browser-scraped rows (same pass as before).
+    # Skip while a browser scrape is still in flight — those rows are still changing.
+    if scrape_still_running:
+        push_mappings = ProductMapping.objects.none()
+    else:
+        push_mappings = ProductMapping.objects.filter(
+            store=store,
+            is_active=True,
+            sync_status='scraped',
+        ).select_related('product', 'product__vendor')
     for pm in push_mappings.iterator(chunk_size=300):
         if pm.store_price is None or not pm.product:
             continue
