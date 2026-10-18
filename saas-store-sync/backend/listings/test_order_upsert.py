@@ -1,4 +1,7 @@
 """Tests for order persist rules: processed status/data must not reset on fetch."""
+from datetime import datetime, timedelta
+from unittest.mock import MagicMock, patch
+
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
 
@@ -6,6 +9,7 @@ from marketplace.models import Marketplace
 from stores.models import Store
 
 from listings import order_service
+from listings.lasoo.client import LasooResult
 from listings.models import MarketplaceOrder, OrderStatus
 from listings.order_upsert import merge_order_defaults, persist_marketplace_order, resolve_shipping_status, resolve_status
 from listings.mydeal import orders as mydeal_orders
@@ -275,3 +279,204 @@ class PersistOrderTests(TestCase):
         self.assertIsNone(reverb_orders.map_reverb_status(""))
         self.assertIsNone(reverb_orders.map_reverb_status("weird_status"))
         self.assertEqual(reverb_orders.map_reverb_status("paid"), OrderStatus.PAID)
+
+
+def _invoice(number: int) -> dict:
+    created = (datetime(2024, 1, 1) + timedelta(hours=number)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        "id": number,
+        "invoiceNumber": str(number),
+        "status": "PAID",
+        "createdAt": created,
+        "totalCents": 1000,
+    }
+
+
+def _page_ids(page: int, take: int, total: int, *, descending: bool) -> list[int]:
+    ordered = list(range(total, 0, -1)) if descending else list(range(1, total + 1))
+    start = (page - 1) * take
+    return ordered[start:start + take]
+
+
+def _envelope(ids: list[int], *, total: int | None, page: int, take: int) -> dict:
+    invoices = {
+        "nodes": [_invoice(i) for i in ids],
+    }
+    if total is not None:
+        invoices["totalCount"] = total
+        invoices["pageInfo"] = {"hasNextPage": page * take < total}
+    return {"results": {"data": {"invoices": invoices}}}
+
+
+class LasooOrderExtractTests(SimpleTestCase):
+    def test_reads_marketplacer_nodes(self):
+        rows, meta = order_service._extract_order_page(_envelope([9, 8], total=3, page=1, take=2))
+        self.assertEqual([row["id"] for row in rows], [9, 8])
+        self.assertEqual(meta["total"], 3)
+        self.assertTrue(meta["has_next"])
+
+    def test_unwraps_edges(self):
+        body = {
+            "results": {
+                "invoices": {
+                    "edges": [{
+                        "cursor": "abc",
+                        "node": _invoice(5),
+                    }],
+                    "totalCount": 1,
+                }
+            }
+        }
+        rows, meta = order_service._extract_order_page(body)
+        self.assertEqual(rows[0]["id"], 5)
+        self.assertEqual(meta["total"], 1)
+
+    def test_reads_plain_lasoo_list(self):
+        rows = order_service._extract_orders({
+            "results": {"data": [_invoice(42)]},
+        })
+        self.assertEqual(rows[0]["invoiceNumber"], "42")
+
+    def test_does_not_treat_line_items_as_orders(self):
+        rows = order_service._extract_orders({
+            "id": 10,
+            "status": "PAID",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "lineItems": [{"id": 1, "totalCents": 100, "title": "Hat"}],
+        })
+        self.assertEqual(rows, [])
+
+
+class LasooOrderFetchTests(TestCase):
+    def _store(self):
+        User = get_user_model()
+        user = User.objects.create_user(username="lasoofetch", email="lasoofetch@example.com", password="pw")
+        lasoo, _ = Marketplace.objects.get_or_create(code="lasoo", defaults={"name": "Lasoo"})
+        store = Store.objects.create(
+            user=user, name="Lasoo fetch", region="AU", api_token="", marketplace=lasoo,
+            management_mode="full_store", lasoo_environment="staging",
+        )
+        return user, store
+
+    def _client(self, send):
+        client = MagicMock()
+        client.auth_key = "test-key"
+        client.send.side_effect = send
+        return client
+
+    def _saved_ids(self, store):
+        return set(
+            MarketplaceOrder.objects.filter(store=store).values_list("external_order_key", flat=True)
+        )
+
+    @patch("listings.order_service.LASOO_NEWEST_PAGES", 2)
+    @patch("listings.order_service.LasooClient")
+    def test_oldest_first_pages_saves_the_newest_invoices(self, mock_client_cls):
+        """Page 1 is the oldest invoices. The newest ones live on the last page."""
+        user, store = self._store()
+        take = 2
+        total = 10
+
+        def send(_endpoint, payload):
+            page = payload["data"]["page"]
+            ids = _page_ids(page, take, total, descending=False)
+            return LasooResult(ok=True, data=_envelope(ids, total=total, page=page, take=take))
+
+        mock_client_cls.return_value = self._client(send)
+        result = order_service.fetch(user, store, take=take)
+        saved = self._saved_ids(store)
+        pages = [call.args[1]["data"]["page"] for call in mock_client_cls.return_value.send.call_args_list]
+
+        self.assertTrue(result["ok"])
+        self.assertIn("10", saved)
+        self.assertIn("9", saved)
+        self.assertNotIn("1", saved)
+        self.assertIn(5, pages)
+        self.assertNotIn(2, pages)
+
+    @patch("listings.order_service.LASOO_NEWEST_PAGES", 2)
+    @patch("listings.order_service.LasooClient")
+    def test_newest_first_does_not_walk_to_the_oldest_page(self, mock_client_cls):
+        user, store = self._store()
+        take = 2
+        total = 10
+
+        def send(_endpoint, payload):
+            page = payload["data"]["page"]
+            ids = _page_ids(page, take, total, descending=True)
+            return LasooResult(ok=True, data=_envelope(ids, total=total, page=page, take=take))
+
+        mock_client_cls.return_value = self._client(send)
+        result = order_service.fetch(user, store, take=take)
+        saved = self._saved_ids(store)
+        pages = [call.args[1]["data"]["page"] for call in mock_client_cls.return_value.send.call_args_list]
+
+        self.assertTrue(result["ok"])
+        self.assertIn("10", saved)
+        self.assertIn("8", saved)
+        self.assertNotIn("1", saved)
+        self.assertEqual(pages, [1, 2])
+        self.assertIn("sort", mock_client_cls.return_value.send.call_args_list[0].args[1]["data"])
+
+    @patch("listings.order_service.LasooClient")
+    def test_single_page_stops(self, mock_client_cls):
+        user, store = self._store()
+
+        def send(_endpoint, payload):
+            self.assertEqual(payload["data"]["page"], 1)
+            return LasooResult(ok=True, data=_envelope([3, 4], total=2, page=1, take=50))
+
+        mock_client_cls.return_value = self._client(send)
+        result = order_service.fetch(user, store)
+        self.assertEqual(result["fetched"], 2)
+        self.assertEqual(mock_client_cls.return_value.send.call_count, 1)
+
+    @patch("listings.order_service.LASOO_NEWEST_PAGES", 2)
+    @patch("listings.order_service.LasooClient")
+    def test_without_total_still_reaches_the_last_short_page(self, mock_client_cls):
+        user, store = self._store()
+        take = 2
+        total = 5
+
+        def send(_endpoint, payload):
+            page = payload["data"]["page"]
+            ids = _page_ids(page, take, total, descending=False)
+            return LasooResult(ok=True, data=_envelope(ids, total=None, page=page, take=take))
+
+        mock_client_cls.return_value = self._client(send)
+        result = order_service.fetch(user, store, take=take)
+        saved = self._saved_ids(store)
+
+        self.assertTrue(result["ok"])
+        self.assertIn("5", saved)
+        self.assertNotIn("1", saved)
+        self.assertLess(mock_client_cls.return_value.send.call_count, 8)
+
+    @patch("listings.order_service.LasooClient")
+    def test_repeated_page_does_not_scan_forever(self, mock_client_cls):
+        user, store = self._store()
+
+        def send(_endpoint, payload):
+            return LasooResult(ok=True, data=_envelope([1, 2], total=None, page=1, take=2))
+
+        mock_client_cls.return_value = self._client(send)
+        result = order_service.fetch(user, store, take=2)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self._saved_ids(store), {"1", "2"})
+        self.assertLessEqual(mock_client_cls.return_value.send.call_count, 3)
+
+    @patch("listings.order_service.LasooClient")
+    def test_rejected_sort_falls_back_to_unsorted_search(self, mock_client_cls):
+        user, store = self._store()
+
+        def send(_endpoint, payload):
+            if "sort" in payload["data"]:
+                return LasooResult(ok=False, message="Unknown sort", data={})
+            return LasooResult(ok=True, data=_envelope([8], total=1, page=1, take=50))
+
+        mock_client_cls.return_value = self._client(send)
+        result = order_service.fetch(user, store)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self._saved_ids(store), {"8"})
+        self.assertEqual(mock_client_cls.return_value.send.call_count, 2)
+        self.assertNotIn("sort", mock_client_cls.return_value.send.call_args_list[1].args[1]["data"])

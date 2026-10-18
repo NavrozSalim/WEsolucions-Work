@@ -1,5 +1,8 @@
 """Retrieve and persist orders/invoices from the store's marketplace (Lasoo / Reverb)."""
 import logging
+from datetime import datetime
+
+from django.utils import timezone
 
 from stores.credentials import marketplace_kind
 
@@ -10,6 +13,20 @@ from .models import MarketplaceOrder, OrderStatus
 from .order_upsert import persist_marketplace_order
 
 logger = logging.getLogger("listings")
+
+# Invoices_Search defaults to oldest-first (Marketplacer invoices with no sort).
+# One page of 50 therefore never includes invoices past that first page.
+LASOO_ORDER_TAKE = 50
+LASOO_NEWEST_PAGES = 8
+LASOO_PAGE_PROBE_CAP = 200
+
+_ORDER_CONNECTION_KEYS = ("invoices", "orders")
+_ORDER_LIST_KEYS = ("results", "body", "data", "records", "items", "nodes", "edges")
+_TOTAL_KEYS = ("totalCount", "total", "totalRecords", "recordCount")
+_SKIP_LIST_KEYS = {
+    "lineItems", "line_items", "shipment", "shipments", "refunds",
+    "messages", "notes",
+}
 
 
 def _require_lasoo(store):
@@ -49,30 +66,45 @@ def fetch(user, store, page: int = 1, take: int = 50) -> dict:
 
 
 def _fetch_lasoo(user, store, page: int = 1, take: int = 50) -> dict:
-    """Pull invoices from Lasoo (Invoices_Search) and upsert them locally."""
+    """Pull the newest Lasoo invoices (Invoices_Search) and upsert them locally.
+
+    ``page`` is accepted for callers that still pass it. The search is not limited
+    to that single page: unsorted Invoices_Search returns the oldest invoices first,
+    so a one-page fetch never sees invoices created after the first page fills up.
+    """
+    del page  # newest-window scan, not a single page index
     environment = store.lasoo_environment or 'staging'
     client = LasooClient(store, environment)
+    page_size = max(1, min(int(take or LASOO_ORDER_TAKE), 100))
 
-    payload = build_payload(
-        "orders",
-        data=_orders_search_data(page=page, take=take),
-        auth=client.auth_key,
-    )
-    result = client.send("orders", payload)
+    result, raw_orders = _collect_lasoo_orders(client, page_size)
     if not result.ok:
         return {"ok": False, "message": result.message, "fetched": 0}
 
-    raw_orders = _extract_orders(result.data)
     saved = 0
+    seen: set[str] = set()
     for raw in raw_orders:
-        if isinstance(raw, dict):
-            _upsert_order(user, store, environment, raw)
-            saved += 1
+        if not isinstance(raw, dict):
+            continue
+        key = str(_first(
+            raw.get("legacyId"), raw.get("id"), raw.get("invoiceId"),
+            raw.get("invoiceNumber"), raw.get("externalOrderKey"),
+        ) or "")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        _upsert_order(user, store, environment, raw)
+        saved += 1
 
+    logger.info(
+        "Lasoo order sync store=%s env=%s fetched=%s",
+        getattr(store, "id", None), environment, saved,
+    )
     return {"ok": True, "message": f"Retrieved {saved} order(s) from {environment}.", "fetched": saved}
 
 
-def _orders_search_data(*, page: int = 1, take: int = 50, **extra) -> dict:
+def _orders_search_data(*, page: int = 1, take: int = 50, newest_first: bool = False, **extra) -> dict:
     """Flags for Invoices_Search so customer + shipping address come back with line items."""
     data = {
         "page": page,
@@ -86,8 +118,272 @@ def _orders_search_data(*, page: int = 1, take: int = 50, **extra) -> dict:
         "includeInvoice": True,
         "includeShipments": True,
     }
+    if newest_first:
+        # Marketplacer invoice sort. If Connect rejects it, the caller retries without it
+        # and still reads the last pages, which are the newest when the default order is ascending.
+        data["sort"] = {"fields": ["CREATED_AT"], "ordering": "DESCENDING"}
     data.update(extra)
     return data
+
+
+def _collect_lasoo_orders(client, take: int):
+    """Return ``(result, rows)`` covering the newest invoices, not only page 1."""
+    cache: dict = {}
+    result, rows, meta = _load_lasoo_order_page(client, 1, take, newest_first=True, cache=cache)
+    newest_first = True
+    if not result.ok or not rows:
+        plain, plain_rows, plain_meta = _load_lasoo_order_page(
+            client, 1, take, newest_first=False, cache=cache,
+        )
+        if plain.ok and (plain_rows or not result.ok):
+            result, rows, meta = plain, plain_rows, plain_meta
+            newest_first = False
+        elif not result.ok:
+            return result, []
+    if not rows or _lasoo_page_is_complete(rows, take, meta):
+        return result, rows
+
+    if _page_is_descending(rows) is True:
+        return result, _walk_lasoo_forward(
+            client, rows, take, newest_first=newest_first, cache=cache,
+        )
+
+    # Sort was ignored or rejected by the payload above. Later pages must use the
+    # same unsorted query, which is oldest-first, so the last page holds the newest invoices.
+    if newest_first:
+        plain, plain_rows, plain_meta = _load_lasoo_order_page(
+            client, 1, take, newest_first=False, cache=cache,
+        )
+        if plain.ok and plain_rows:
+            result, rows, meta = plain, plain_rows, plain_meta
+            newest_first = False
+            if _lasoo_page_is_complete(rows, take, meta):
+                return result, rows
+
+    last_page, last_rows, last_result = _find_lasoo_last_page(
+        client, take, newest_first=newest_first, cache=cache,
+        first_rows=rows, meta=meta,
+    )
+    if last_page <= 1 or not last_rows or _pages_identical(rows, last_rows):
+        return result, rows
+    if _page_is_newer(rows, last_rows):
+        return result, _walk_lasoo_forward(
+            client, rows, take, newest_first=newest_first, cache=cache,
+        )
+    return last_result or result, _walk_lasoo_backward(
+        client, last_page, last_rows, take, newest_first=newest_first, cache=cache,
+    )
+
+
+def _load_lasoo_order_page(client, page: int, take: int, *, newest_first: bool, cache: dict):
+    key = (page, newest_first)
+    if key in cache:
+        return cache[key]
+    payload = build_payload(
+        "orders",
+        data=_orders_search_data(page=page, take=take, newest_first=newest_first),
+        auth=client.auth_key,
+    )
+    result = client.send("orders", payload)
+    rows, meta = ([], {})
+    if result.ok:
+        rows, meta = _extract_order_page(result.data)
+    loaded = (result, rows, meta)
+    cache[key] = loaded
+    return loaded
+
+
+def _lasoo_page_is_complete(rows: list, take: int, meta: dict) -> bool:
+    total = meta.get("total")
+    has_next = meta.get("has_next")
+    if isinstance(total, int) and total > len(rows):
+        return False
+    if has_next is False:
+        return True
+    if isinstance(total, int) and total <= len(rows):
+        return True
+    return len(rows) < take and has_next is not True
+
+
+def _walk_lasoo_forward(client, first_rows, take, *, newest_first: bool, cache: dict) -> list:
+    collected = list(first_rows)
+    prev_sig = _page_signature(first_rows)
+    for page in range(2, LASOO_NEWEST_PAGES + 1):
+        result, rows, meta = _load_lasoo_order_page(
+            client, page, take, newest_first=newest_first, cache=cache,
+        )
+        if not result.ok or not rows or _page_signature(rows) == prev_sig:
+            break
+        collected.extend(rows)
+        prev_sig = _page_signature(rows)
+        if len(rows) < take or meta.get("has_next") is False:
+            break
+        if isinstance(meta.get("total"), int) and meta["total"] <= take * page:
+            break
+    return collected
+
+
+def _walk_lasoo_backward(client, last_page, last_rows, take, *, newest_first: bool, cache: dict) -> list:
+    collected = list(last_rows)
+    prev_sig = _page_signature(last_rows)
+    pages_left = LASOO_NEWEST_PAGES - 1
+    page = last_page - 1
+    while page >= 1 and pages_left > 0:
+        result, rows, _meta = _load_lasoo_order_page(
+            client, page, take, newest_first=newest_first, cache=cache,
+        )
+        if not result.ok or not rows or _page_signature(rows) == prev_sig:
+            break
+        collected.extend(rows)
+        prev_sig = _page_signature(rows)
+        pages_left -= 1
+        page -= 1
+    return collected
+
+
+def _find_lasoo_last_page(client, take, *, newest_first: bool, cache: dict, first_rows, meta):
+    total = meta.get("total")
+    if isinstance(total, int) and total > take:
+        last_page = min(LASOO_PAGE_PROBE_CAP, max(2, (total + take - 1) // take))
+        result, rows, _meta = _load_lasoo_order_page(
+            client, last_page, take, newest_first=newest_first, cache=cache,
+        )
+        if result.ok and rows and not _pages_identical(first_rows, rows):
+            return last_page, rows, result
+        if result.ok and not rows:
+            return _binary_last_page(
+                client, take, newest_first=newest_first, cache=cache,
+                first_rows=first_rows, lo=1, hi=last_page, last_rows=first_rows,
+            )
+    return _probe_lasoo_last_page(
+        client, take, newest_first=newest_first, cache=cache, first_rows=first_rows,
+    )
+
+
+def _probe_lasoo_last_page(client, take, *, newest_first: bool, cache: dict, first_rows):
+    last_page = 1
+    last_rows = first_rows
+    last_result = None
+    page = 2
+    empty_at = None
+    while page <= LASOO_PAGE_PROBE_CAP:
+        result, rows, _meta = _load_lasoo_order_page(
+            client, page, take, newest_first=newest_first, cache=cache,
+        )
+        if not result.ok:
+            break
+        if not rows or _pages_identical(first_rows, rows) or _pages_identical(last_rows, rows):
+            if rows and _pages_identical(first_rows, rows):
+                return 1, first_rows, None
+            empty_at = page
+            break
+        last_page = page
+        last_rows = rows
+        last_result = result
+        if len(rows) < take:
+            return last_page, last_rows, last_result
+        page *= 2
+    if empty_at is None:
+        return last_page, last_rows, last_result
+    return _binary_last_page(
+        client, take, newest_first=newest_first, cache=cache,
+        first_rows=first_rows, lo=last_page, hi=empty_at,
+        last_rows=last_rows, last_result=last_result,
+    )
+
+
+def _binary_last_page(client, take, *, newest_first, cache, first_rows, lo, hi, last_rows, last_result=None):
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        result, rows, _meta = _load_lasoo_order_page(
+            client, mid, take, newest_first=newest_first, cache=cache,
+        )
+        if result.ok and rows and not _pages_identical(first_rows, rows):
+            lo = mid
+            last_rows = rows
+            last_result = result
+        else:
+            hi = mid
+    return lo, last_rows, last_result
+
+
+def _pages_identical(a, b) -> bool:
+    return bool(a) and _page_signature(a) == _page_signature(b)
+
+
+def _page_signature(rows) -> tuple:
+    picked = list(rows[:2])
+    if len(rows) > 2:
+        picked.append(rows[-1])
+    ids = []
+    for raw in picked:
+        if not isinstance(raw, dict):
+            ids.append("")
+            continue
+        ids.append(str(_first(
+            raw.get("legacyId"), raw.get("id"), raw.get("invoiceId"), raw.get("invoiceNumber"),
+        ) or ""))
+    return tuple(ids)
+
+
+def _page_is_descending(rows) -> bool | None:
+    if len(rows) < 2:
+        return None
+    first = _row_rank(rows[0])
+    last = _row_rank(rows[-1])
+    if first > last:
+        return True
+    if first < last:
+        return False
+    return None
+
+
+def _page_is_newer(a, b) -> bool:
+    if not a or not b:
+        return False
+    return max(_row_rank(row) for row in a) > max(_row_rank(row) for row in b)
+
+
+def _row_rank(raw: dict) -> tuple:
+    if not isinstance(raw, dict):
+        return (datetime.min.replace(tzinfo=timezone.utc), 0)
+    number = None
+    for candidate in (
+        raw.get("legacyId"), raw.get("legacy_id"),
+        raw.get("id"), raw.get("invoiceId"), raw.get("invoiceNumber"),
+        _dig(raw, "invoice.id"),
+    ):
+        number = _coerce_int(candidate)
+        if number is not None:
+            break
+    stamp = _order_dates(raw).get("orderedAt") or raw.get("updatedAt")
+    return (_parse_stamp(stamp), number or 0)
+
+
+def _coerce_int(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _parse_stamp(value):
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        text = value.strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return datetime.min.replace(tzinfo=timezone.utc)
+    else:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if timezone.is_naive(parsed):
+        return timezone.make_aware(parsed, timezone.utc)
+    return parsed
 
 
 def create_test_order(user, store) -> dict:
@@ -145,18 +441,121 @@ def create_test_order(user, store) -> dict:
 
 def _extract_orders(data) -> list:
     """Dig through Lasoo's response envelope to find the list of invoices."""
+    rows, _meta = _extract_order_page(data)
+    return rows
+
+
+def _extract_order_page(data) -> tuple[list, dict]:
+    """Return ``(invoice rows, paging meta)`` from a Lasoo or Marketplacer envelope.
+
+    Marketplacer puts invoices on ``invoices.nodes`` (or ``edges[].node``). A bare
+    list under ``results.data`` is the Lasoo Connect shape.
+    """
+    found = _search_invoice_list(data)
+    if not found:
+        return [], {}
+    rows, container = found
+    return _unwrap_order_rows(rows), _page_meta(container, data if isinstance(data, dict) else None)
+
+
+def _search_invoice_list(data):
+    """Return ``(rows, container)`` for the first invoice list, or None."""
     if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        for key in ("invoices", "orders", "items", "records", "results", "body", "data"):
-            value = data.get(key)
-            if isinstance(value, list):
-                return value
-            if isinstance(value, dict):
-                nested = _extract_orders(value)
-                if nested:
-                    return nested
-    return []
+        if data and any(_looks_like_invoice(row) for row in data[:5] if isinstance(row, dict)):
+            return data, {}
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    for key in _ORDER_CONNECTION_KEYS:
+        found = _list_under(data, key)
+        if found:
+            return found
+
+    for key in _ORDER_LIST_KEYS:
+        found = _list_under(data, key)
+        if found:
+            return found
+    return None
+
+
+def _list_under(data: dict, key: str):
+    if key in _SKIP_LIST_KEYS:
+        return None
+    value = data.get(key)
+    if isinstance(value, list):
+        if value and any(_looks_like_invoice(row) for row in value[:5] if isinstance(row, dict)):
+            return value, data
+        return None
+    if isinstance(value, dict):
+        for inner in ("nodes", "edges", "items", "records", "data", "invoices", "orders"):
+            rows = value.get(inner)
+            if isinstance(rows, list) and rows and any(
+                _looks_like_invoice(row) for row in rows[:5] if isinstance(row, dict)
+            ):
+                return rows, value
+        return _search_invoice_list(value)
+    return None
+
+
+def _looks_like_invoice(row) -> bool:
+    if not isinstance(row, dict):
+        return False
+    node = row.get("node")
+    if isinstance(node, dict) and set(row.keys()) <= {"node", "cursor"}:
+        return _looks_like_invoice(node)
+    if any(key in row for key in (
+        "invoiceNumber", "invoiceId", "legacyId", "buyerEmailAddress",
+        "externalOrderKey", "statusFlags", "invoiceStatus",
+    )):
+        return True
+    if "lineItems" in row or "line_items" in row:
+        return True
+    return "id" in row and any(key in row for key in ("status", "createdAt", "created_at", "order"))
+
+
+def _unwrap_order_rows(rows: list) -> list:
+    unwrapped = []
+    for row in rows:
+        if (
+            isinstance(row, dict)
+            and isinstance(row.get("node"), dict)
+            and set(row.keys()) <= {"node", "cursor"}
+        ):
+            unwrapped.append(row["node"])
+        else:
+            unwrapped.append(row)
+    return unwrapped
+
+
+def _page_meta(*sources) -> dict:
+    total = None
+    has_next = None
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        candidates = [src]
+        info = src.get("pageInfo")
+        if isinstance(info, dict):
+            candidates.append(info)
+        for candidate in candidates:
+            if total is None:
+                total = _int_field(candidate, _TOTAL_KEYS)
+            if has_next is None and "hasNextPage" in candidate:
+                has_next = bool(candidate.get("hasNextPage"))
+            elif has_next is None and "has_next" in candidate:
+                has_next = bool(candidate.get("has_next"))
+    return {"total": total, "has_next": has_next}
+
+
+def _int_field(src: dict, keys) -> int | None:
+    for key in keys:
+        if key not in src:
+            continue
+        number = _coerce_int(src.get(key))
+        if number is not None:
+            return number
+    return None
 
 
 def _first(*values):
