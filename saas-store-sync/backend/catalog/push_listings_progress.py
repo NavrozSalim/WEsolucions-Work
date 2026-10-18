@@ -55,7 +55,10 @@ def build_push_listings_progress_payload(store) -> dict[str, Any]:
     store_id = str(store.id)
     lock_owner = cache.get(push_listings_lock_key(store_id))
 
-    since = timezone.now() - timedelta(hours=6)
+    # Same window as the push lock and activity-log retention. A 6-hour window
+    # dropped sync_start overnight, so the bar reset to Preparing / 0 while
+    # Sears batches were still running.
+    since = timezone.now() - timedelta(hours=24)
     run_logs = CatalogActivityLog.objects.filter(store=store, created_at__gte=since)
     latest_start = (
         run_logs.filter(action_type='sync_start').order_by('-created_at').first()
@@ -96,6 +99,15 @@ def build_push_listings_progress_payload(store) -> dict[str, Any]:
             .order_by('-created_at')
             .first()
         )
+    elif lock_owner:
+        # The start row was pruned after 24h, but the lock means this run is
+        # still going. Keep showing the newest progress row from this run.
+        progress_qs = run_logs.filter(action_type='sync_progress')
+        if latest_end is not None:
+            progress_qs = progress_qs.filter(created_at__gt=latest_end.created_at)
+        latest_progress = progress_qs.order_by('-created_at').first()
+        if latest_progress is not None:
+            started_at = latest_progress.created_at.isoformat()
 
     if latest_progress and (latest_progress.metadata or {}).get('total'):
         total = int(latest_progress.metadata.get('total') or 0)

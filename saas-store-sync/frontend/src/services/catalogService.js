@@ -289,8 +289,8 @@ export const exportCatalogProducts = (storeId, { syncStatus } = {}) =>
         mimeType: 'text/csv',
     });
 
-/** Manual sync for large catalogs can run for hours — keep polling until Celery finishes. */
-const PUSH_LISTINGS_MAX_WAIT_MS = 6 * 60 * 60 * 1000;
+/** Sears manual sync of a large catalog can run overnight — keep polling until Celery finishes. */
+const PUSH_LISTINGS_MAX_WAIT_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Poll Celery job status until ready.

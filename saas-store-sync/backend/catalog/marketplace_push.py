@@ -260,6 +260,27 @@ def _apply_sears_bulk_push_results(
     }
 
 
+def _empty_sears_push_stats() -> dict:
+    return {
+        'push_ok': 0,
+        'push_fail': 0,
+        'errors': [],
+        'warnings': {},
+        'ok_skus': set(),
+        'skipped': False,
+    }
+
+
+def _merge_sears_push_stats(total: dict, part: dict) -> None:
+    total['push_ok'] += int(part.get('push_ok') or 0)
+    total['push_fail'] += int(part.get('push_fail') or 0)
+    total['errors'].extend(part.get('errors') or [])
+    total['ok_skus'] = set(total.get('ok_skus') or []) | set(part.get('ok_skus') or [])
+    warnings = dict(total.get('warnings') or {})
+    warnings.update(part.get('warnings') or {})
+    total['warnings'] = warnings
+
+
 def flush_sears_bulk_marketplace_push(
     store,
     bulk_queue: list[tuple],
@@ -275,6 +296,9 @@ def flush_sears_bulk_marketplace_push(
     Push many Sears listings in batched multi-item XML feeds.
 
     ``bulk_queue`` entries are ``(pm, listing_id, price, stock)``.
+
+    Each finished batch is saved immediately. A worker restart no longer throws
+    away the batches Sears already accepted.
     """
     from store_adapters import get_adapter
     from sync.sears_seller_lock import (
@@ -331,10 +355,101 @@ def flush_sears_bulk_marketplace_push(
         stats = {'push_ok': 0, 'push_fail': len(bulk_queue), 'errors': [], 'skipped': True}
         return stats
 
+    persisted_skus: set[str] = set()
+    accumulated = _empty_sears_push_stats()
+
+    def _persist_sku_result(ok_skus, failed, warnings) -> None:
+        ok_set = {str(sku) for sku in (ok_skus or set())}
+        failed_rows = list(failed or [])
+        warning_map = warnings or {}
+        touched = set(ok_set) | {str(row.get('sku') or '') for row in failed_rows}
+        touched.discard('')
+        pending = {
+            sku: pm_by_sku[sku]
+            for sku in touched
+            if sku in pm_by_sku and sku not in persisted_skus
+        }
+        if not pending:
+            return
+        part = _apply_sears_bulk_push_results(
+            pending,
+            {
+                'ok': ok_set & set(pending),
+                'failed': [
+                    row for row in failed_rows
+                    if str(row.get('sku') or '') in pending
+                ],
+                'warnings': {
+                    sku: msg for sku, msg in warning_map.items() if sku in pending
+                },
+            },
+        )
+        persisted_skus.update(pending.keys())
+        _merge_sears_push_stats(accumulated, part)
+
+    def _on_batch(batch_num, total_batches, batch_ok, batch_failed, batch_size, **kwargs):
+        if 'ok_skus' in kwargs or 'failed' in kwargs:
+            _persist_sku_result(
+                kwargs.get('ok_skus'),
+                kwargs.get('failed'),
+                kwargs.get('warnings'),
+            )
+        if callable(on_batch_progress):
+            on_batch_progress(batch_num, total_batches, batch_ok, batch_failed, batch_size)
+
+    def _result_for(skus, result) -> dict:
+        sku_set = set(skus)
+        source = result or {}
+        return {
+            'ok': {str(sku) for sku in (source.get('ok') or set())} & sku_set,
+            'failed': [
+                row for row in (source.get('failed') or [])
+                if str(row.get('sku') or '') in sku_set
+            ],
+            'warnings': {
+                sku: msg
+                for sku, msg in (source.get('warnings') or {}).items()
+                if sku in sku_set
+            },
+        }
+
+    def _finish(result, *, fail_remaining_with: str | None = None, cancelled: bool = False) -> dict:
+        if pre_failed:
+            _merge_sears_push_stats(
+                accumulated,
+                _apply_sears_bulk_push_results(
+                    {},
+                    {'ok': set(), 'failed': []},
+                    pre_failed=pre_failed,
+                ),
+            )
+        remaining = {
+            sku: pm for sku, pm in pm_by_sku.items() if sku not in persisted_skus
+        }
+        if remaining:
+            if fail_remaining_with is not None:
+                leftover_result = {
+                    'ok': set(),
+                    'failed': [
+                        {'sku': sku, 'error': fail_remaining_with}
+                        for sku in remaining
+                    ],
+                    'warnings': {},
+                }
+            else:
+                leftover_result = _result_for(remaining, result)
+            leftover = _apply_sears_bulk_push_results(remaining, leftover_result)
+            persisted_skus.update(remaining.keys())
+            _merge_sears_push_stats(accumulated, leftover)
+        accumulated['skipped'] = False
+        if cancelled or (result or {}).get('cancelled'):
+            accumulated['cancelled'] = True
+        return accumulated
+
     try:
         result = bulk_fn(
             items,
-            on_batch_complete=on_batch_progress,
+            on_batch_complete=_on_batch,
             on_report_wait=on_report_wait,
             should_abort=should_abort,
         ) or {}
@@ -342,32 +457,14 @@ def flush_sears_bulk_marketplace_push(
         from sync.push_listings_cancel import PushListingsCancelled
 
         if isinstance(exc, PushListingsCancelled):
-            stats = _apply_sears_bulk_push_results(
-                pm_by_sku,
-                {'ok': set(), 'failed': [], 'warnings': {}},
-                pre_failed=pre_failed,
-            )
-            stats['skipped'] = False
-            stats['cancelled'] = True
-            return stats
+            return _finish(None, cancelled=True)
         logger.warning('Sears bulk marketplace push failed: %s', exc)
-        failed = [{'sku': it['sku'], 'error': str(exc)[:500]} for it in items]
-        stats = _apply_sears_bulk_push_results(
-            pm_by_sku,
-            {'ok': set(), 'failed': failed, 'warnings': {}},
-            pre_failed=pre_failed,
-        )
-        stats['skipped'] = False
-        return stats
+        return _finish(None, fail_remaining_with=str(exc)[:500])
     finally:
         if seller_locked:
             release_sears_seller_lock(seller_id, owner)
 
-    stats = _apply_sears_bulk_push_results(pm_by_sku, result, pre_failed=pre_failed)
-    stats['skipped'] = False
-    if result.get('cancelled'):
-        stats['cancelled'] = True
-    return stats
+    return _finish(result, cancelled=bool(result.get('cancelled')))
 
 
 def bulk_push_sears_scraped_listings(

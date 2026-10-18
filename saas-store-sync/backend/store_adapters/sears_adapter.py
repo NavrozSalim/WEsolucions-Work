@@ -1017,6 +1017,9 @@ class SearsAdapter(BaseStoreAdapter):
                         len(chunk_ok),
                         len(chunk_failed),
                         len(chunk),
+                        ok_skus=set(chunk_ok),
+                        failed=list(chunk_failed),
+                        warnings=dict(chunk_warnings),
                     )
                 if feed_delay > 0 and batch_num < total_batches:
                     _sleep_with_abort(feed_delay, should_abort)

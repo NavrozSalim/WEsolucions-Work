@@ -520,6 +520,88 @@ class SearsAdapterPushTests(SimpleTestCase):
         self.assertTrue(store_is_sears(_store('sears')))
 
 
+class SearsBulkBatchPersistTests(SimpleTestCase):
+    def _pm(self, status='synced'):
+        pm = MagicMock()
+        pm.sync_status = status
+        pm.scrape_error = None
+        return pm
+
+    def _flush(self, bulk_side_effect, pms):
+        store = _store('sears')
+        store.id = 'store-1'
+        adapter = MagicMock()
+        adapter._seller_id = 'seller-1'
+        adapter.update_products_bulk.side_effect = bulk_side_effect
+
+        queue = [
+            (pms['A'], 'A', Decimal('10.00'), 1),
+            (pms['B'], 'B', Decimal('11.00'), 2),
+        ]
+        with patch('catalog.marketplace_push.store_is_sears', return_value=True), \
+                patch('store_adapters.get_adapter', return_value=adapter), \
+                patch('sync.sears_seller_lock.try_acquire_sears_seller_lock', return_value=True), \
+                patch('sync.sears_seller_lock.release_sears_seller_lock'), \
+                patch('sync.tasks._adapter_push_kwargs', return_value={'price': Decimal('10.00'), 'rrp': Decimal('12.00'), 'stock': 1}):
+            from catalog.marketplace_push import flush_sears_bulk_marketplace_push
+
+            return flush_sears_bulk_marketplace_push(store, queue)
+
+    def test_each_batch_is_saved_before_the_next_batch(self):
+        pms = {'A': self._pm(), 'B': self._pm('scraped')}
+        saved_during_first = {}
+
+        def bulk(items, on_batch_complete=None, **kwargs):
+            on_batch_complete(
+                1, 2, 1, 0, 1,
+                ok_skus={'A'}, failed=[], warnings={},
+            )
+            saved_during_first['A'] = pms['A'].save.called
+            saved_during_first['B'] = pms['B'].save.called
+            on_batch_complete(
+                2, 2, 1, 0, 1,
+                ok_skus={'B'}, failed=[], warnings={},
+            )
+            return {'ok': {'A', 'B'}, 'failed': [], 'warnings': {}}
+
+        stats = self._flush(bulk, pms)
+        self.assertTrue(saved_during_first['A'])
+        self.assertFalse(saved_during_first['B'])
+        self.assertEqual(stats['push_ok'], 2)
+        self.assertEqual(stats['push_fail'], 0)
+        self.assertEqual(pms['A'].save.call_count, 1)
+        self.assertEqual(pms['B'].save.call_count, 1)
+
+    def test_finished_batch_is_kept_when_a_later_batch_crashes(self):
+        pms = {'A': self._pm(), 'B': self._pm()}
+
+        def bulk(items, on_batch_complete=None, **kwargs):
+            on_batch_complete(
+                1, 2, 1, 0, 1,
+                ok_skus={'A'}, failed=[], warnings={},
+            )
+            raise RuntimeError('worker stopped')
+
+        stats = self._flush(bulk, pms)
+        self.assertEqual(stats['push_ok'], 1)
+        self.assertEqual(stats['push_fail'], 1)
+        self.assertEqual(pms['B'].scrape_error, 'worker stopped')
+        self.assertNotEqual(pms['A'].scrape_error, 'worker stopped')
+        self.assertIn('A', stats['ok_skus'])
+
+    def test_result_without_batch_callback_is_saved_once(self):
+        pms = {'A': self._pm(), 'B': self._pm()}
+
+        def bulk(items, on_batch_complete=None, **kwargs):
+            return {'ok': {'A', 'B'}, 'failed': [], 'warnings': {}}
+
+        stats = self._flush(bulk, pms)
+        self.assertEqual(stats['push_ok'], 2)
+        self.assertEqual(stats['push_fail'], 0)
+        self.assertEqual(pms['A'].save.call_count, 1)
+        self.assertEqual(pms['B'].save.call_count, 1)
+
+
 class SearsMarketplacePushDeferTests(SimpleTestCase):
     def test_apply_post_scrape_skips_sears(self):
         from catalog.marketplace_push import apply_post_scrape_marketplace_push

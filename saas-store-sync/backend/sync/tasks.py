@@ -1630,6 +1630,26 @@ PUSH_LISTINGS_PROGRESS_EVERY = 10
 PUSH_LISTINGS_PROGRESS_LOG_SEC = 20
 
 
+def _iter_mappings_by_pk(qs, page_size=200):
+    """Yield rows in short queries so progress writes commit immediately.
+
+    ``QuerySet.iterator()`` on PostgreSQL holds a server-side cursor transaction
+    until the scan finishes. Catalog progress logs written inside that scan are
+    invisible to the Catalog page.
+    """
+    last_pk = None
+    ordered = qs.order_by('pk')
+    while True:
+        page = ordered
+        if last_pk is not None:
+            page = page.filter(pk__gt=last_pk)
+        rows = list(page[:page_size])
+        if not rows:
+            return
+        yield from rows
+        last_pk = rows[-1].pk
+
+
 def _raise_if_push_aborted(store_id) -> None:
     from sync.push_listings_cancel import PushListingsCancelled, should_abort_push_listings
 
@@ -1777,7 +1797,7 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
             bulk_queue = []
             queued_pairs = []
             queued_count = 0
-            for pm in qs.iterator(chunk_size=200):
+            for pm in _iter_mappings_by_pk(qs, page_size=200):
                 _raise_if_push_aborted(store_id)
                 visited += 1
                 _note_prepare(force=(visited == 1))
@@ -1808,7 +1828,7 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                 if bulk_queue else 0
             )
 
-            def _sears_bulk_batch_progress(batch_num, total_batches, batch_ok, batch_failed, _batch_size):
+            def _sears_bulk_batch_progress(batch_num, total_batches, batch_ok, batch_failed, _batch_size, **_kwargs):
                 nonlocal bulk_succeeded, bulk_failed, last_progress_log_at
                 bulk_succeeded += batch_ok
                 bulk_failed += batch_failed

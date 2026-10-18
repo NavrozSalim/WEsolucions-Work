@@ -1209,3 +1209,89 @@ class CatalogPushListingsProgressViewTests(TestCase):
         self.assertEqual(body['total'], 500)
         self.assertEqual(body['pct'], 24)
         self.assertEqual(body['sync_step'], 'queue_build')
+
+    def test_progress_still_counts_when_sync_started_overnight(self):
+        """A Sears run started 8 hours ago must not reset to Preparing / 0."""
+        from datetime import timedelta
+
+        from django.core.cache import cache
+        from django.utils import timezone
+
+        from catalog.activity_log import append_catalog_log
+        from catalog.models import CatalogActivityLog
+        from sync.push_listings_lock import push_listings_lock_key
+
+        CatalogActivityLog.objects.filter(store=self.store).delete()
+        cache.set(push_listings_lock_key(str(self.store.id)), 'task-overnight', 300)
+        start = append_catalog_log(
+            self.store.id,
+            'Marketplace sync started.',
+            action_type='sync_start',
+        )
+        CatalogActivityLog.objects.filter(pk=start.pk).update(
+            created_at=timezone.now() - timedelta(hours=8),
+        )
+        append_catalog_log(
+            self.store.id,
+            'Marketplace sync in progress: batch 18 of 503.',
+            action_type='sync_progress',
+            metadata={
+                'processed': 1800,
+                'total': 50214,
+                'pushed': 1700,
+                'failed': 10,
+                'skipped_no_listing': 90,
+                'sync_step': 'bulk_push',
+                'batch_num': 18,
+                'total_batches': 503,
+            },
+        )
+
+        body = self.client.get(self.url).json()
+        self.assertTrue(body['active'])
+        self.assertEqual(body['processed'], 1800)
+        self.assertEqual(body['pushed'], 1700)
+        self.assertEqual(body['failed'], 10)
+        self.assertEqual(body['total'], 50214)
+        self.assertEqual(body['sync_step'], 'bulk_push')
+
+    def test_progress_uses_latest_row_after_start_log_is_pruned(self):
+        from datetime import timedelta
+
+        from django.core.cache import cache
+        from django.utils import timezone
+
+        from catalog.activity_log import append_catalog_log
+        from catalog.models import CatalogActivityLog
+        from sync.push_listings_lock import push_listings_lock_key
+
+        CatalogActivityLog.objects.filter(store=self.store).delete()
+        cache.set(push_listings_lock_key(str(self.store.id)), 'task-pruned-start', 300)
+        start = append_catalog_log(
+            self.store.id,
+            'Marketplace sync started.',
+            action_type='sync_start',
+        )
+        CatalogActivityLog.objects.filter(pk=start.pk).update(
+            created_at=timezone.now() - timedelta(hours=30),
+        )
+        append_catalog_log(
+            self.store.id,
+            'Marketplace sync in progress: batch 40 of 503.',
+            action_type='sync_progress',
+            metadata={
+                'processed': 4000,
+                'total': 50214,
+                'pushed': 3900,
+                'failed': 20,
+                'skipped_no_listing': 80,
+                'sync_step': 'bulk_push',
+            },
+        )
+        self.assertFalse(CatalogActivityLog.objects.filter(pk=start.pk).exists())
+
+        body = self.client.get(self.url).json()
+        self.assertTrue(body['active'])
+        self.assertEqual(body['processed'], 4000)
+        self.assertEqual(body['pushed'], 3900)
+        self.assertEqual(body['sync_step'], 'bulk_push')
