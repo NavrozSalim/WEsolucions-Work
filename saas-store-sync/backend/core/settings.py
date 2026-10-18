@@ -385,17 +385,20 @@ else:
 
 CELERY_BROKER_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
-# Redis redelivers unacked tasks after this many seconds (default 3600). Catalog scrape
-# chunks can run longer than an hour; premature redelivery duplicates work and leaves
-# leftover Pending rows when the original worker finishes and the chord callback clears state.
+# Redis puts an unacked task back on the queue after this many seconds.
+# Discovery scrapes ack only when the whole file finishes (task_acks_late).
+# A 13k Amazon product run takes longer than 6 hours; a shorter timeout
+# redelivers that job and used to wipe the rows already saved.
+# Every Celery worker on this Redis must use the same value and be restarted
+# together. Catalog chunks are shorter than this and stay safe.
 try:
     CELERY_BROKER_TRANSPORT_OPTIONS = {
         'visibility_timeout': max(
-            3600, int(os.getenv('CELERY_VISIBILITY_TIMEOUT', str(6 * 3600))),
+            3600, int(os.getenv('CELERY_VISIBILITY_TIMEOUT', str(48 * 3600))),
         ),
     }
 except ValueError:
-    CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': 6 * 3600}
+    CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': 48 * 3600}
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 # So AsyncResult leaves PENDING while the task runs; frontend job poll can detect a live worker.

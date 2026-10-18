@@ -36,6 +36,7 @@ from .parsers import (
     parse_ebay_product,
     with_page,
 )
+from .locks import lock_owner_var, refresh_discovery_lock
 from .rules import normalize_rules, row_has_rule_fields, row_removed
 from .sample_data import sample_by_key, sample_catalog
 
@@ -47,6 +48,7 @@ class DiscoveryCancelled(Exception):
 
 
 def _should_stop(job_id) -> bool:
+    refresh_discovery_lock(job_id, lock_owner_var.get())
     row = DiscoveryJob.objects.filter(pk=job_id).values_list('cancel_requested', flat=True).first()
     return row is None or bool(row)
 
@@ -435,10 +437,11 @@ def _json_row(row: dict) -> dict:
 class _LiveTable:
     """Persist kept products while the scrape is still running."""
 
-    def __init__(self, job: DiscoveryJob, rules: dict, input_count: int):
+    def __init__(self, job: DiscoveryJob, rules: dict, input_count: int, lock_owner: str | None = None):
         self.job = job
         self.rules = rules
         self.input_count = input_count
+        self.lock_owner = lock_owner
         self.seen = set()
         self.resumed = set()
         self.duplicates = 0
@@ -448,6 +451,7 @@ class _LiveTable:
         self.warning = ''
 
     def publish(self) -> None:
+        refresh_discovery_lock(self.job.id, self.lock_owner)
         self.job.stats = {
             'input_rows': self.input_count,
             'scraped': self.scraped,
@@ -867,10 +871,25 @@ def _fetch_ebay_products(rows, marketplace, errors, session, table, stop) -> Non
         _close_ebay_browser(session)
 
 
-def execute_job(job_id) -> None:
+def execute_job(job_id, lock_owner=None) -> None:
+    """Run one discovery job.
+
+    A broker redelivery passes the same job id. Saved products stay, and the
+    scrape continues from the first id that is not saved yet.
+    """
+    token = lock_owner_var.set(lock_owner)
+    try:
+        _execute_job(job_id, lock_owner)
+    finally:
+        lock_owner_var.reset(token)
+
+
+def _execute_job(job_id, lock_owner=None) -> None:
     try:
         job = DiscoveryJob.objects.get(id=job_id)
     except DiscoveryJob.DoesNotExist:
+        return
+    if job.status == DiscoveryJob.Status.SUCCEEDED:
         return
     if job.cancel_requested:
         job.status = DiscoveryJob.Status.CANCELLED
@@ -879,15 +898,20 @@ def execute_job(job_id) -> None:
         job.save(update_fields=['status', 'error_message', 'finished_at'])
         return
     previous = dict(job.stats or {})
-    resume = bool(previous.pop('resume', False))
+    explicit_resume = bool(previous.pop('resume', False))
+    # Products are written as each page is accepted. A redelivery must keep
+    # them. Deleting here is what sent a long Amazon run back to zero.
+    resume = explicit_resume or job.products.exists()
     job.status = DiscoveryJob.Status.RUNNING
-    job.started_at = timezone.now()
     job.error_message = ''
     job.finished_at = None
     if resume:
         job.stats = previous
+        if job.started_at is None:
+            job.started_at = timezone.now()
     else:
         job.products.all().delete()
+        job.started_at = timezone.now()
     job.save(update_fields=['status', 'started_at', 'error_message', 'finished_at', 'stats'])
 
     errors: list[str] = []
@@ -904,7 +928,7 @@ def execute_job(job_id) -> None:
         job.columns = columns
         job.save(update_fields=['columns'])
         input_count = len(inputs)
-        table = _LiveTable(job, rules, input_count)
+        table = _LiveTable(job, rules, input_count, lock_owner=lock_owner)
         if resume:
             saved_keys = {
                 key for key in job.products.values_list('product_key', flat=True) if key
@@ -912,9 +936,10 @@ def execute_job(job_id) -> None:
             table.seen.update(saved_keys)
             table.resumed.update(saved_keys)
             table.kept = len(saved_keys)
-            table.scraped = int(previous.get('scraped') or 0)
+            table.scraped = max(int(previous.get('scraped') or 0), len(saved_keys))
             table.duplicates = int(previous.get('duplicates_removed') or 0)
             table.removed_by_rules = int(previous.get('removed_by_rules') or 0)
+        refresh_discovery_lock(job.id, lock_owner, force=True)
         stop = lambda: _should_stop(job.id)
         session = None
         if not job.use_sample and is_amazon(job.marketplace):

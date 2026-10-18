@@ -1139,3 +1139,112 @@ class DiscoveryJobTests(TestCase):
         self.assertTrue(job.products.filter(product_key=first_key).exists())
         self.assertNotIn(first_key, fetched)
         self.assertEqual(len(fetched), 2)
+
+    def _product_job(self, count=3):
+        rows = [
+            {'url': f'https://www.amazon.com/dp/B{index:09d}'}
+            for index in range(1, count + 1)
+        ]
+        payload = workbook_bytes(['url'], rows)
+        job = DiscoveryJob(
+            owner=self.user,
+            marketplace='amazon_us',
+            mode=DiscoveryJob.Mode.PRODUCT,
+            original_filename='amazon_us-product-template.xlsx',
+            use_sample=True,
+            zip_code='10001',
+            source_bytes=payload,
+        )
+        job.source_file.save('products.xlsx', ContentFile(payload), save=False)
+        job.save()
+        return job
+
+    def test_redelivery_continues_from_saved_products(self):
+        job = self._product_job()
+        state = {'checks': 0}
+
+        def stop_after_first(_job_id):
+            state['checks'] += 1
+            return state['checks'] >= 2
+
+        with patch('discovery.engine._should_stop', side_effect=stop_after_first):
+            execute_job(job.id)
+        job.refresh_from_db()
+        self.assertEqual(job.products.count(), 1)
+        first_key = job.products.get().product_key
+        started = job.started_at
+        stats = dict(job.stats or {})
+        stats.pop('resume', None)
+        job.status = DiscoveryJob.Status.RUNNING
+        job.cancel_requested = False
+        job.stats = stats
+        job.save(update_fields=['status', 'cancel_requested', 'stats'])
+
+        from discovery.engine import _sample_product_row as original_sample
+        from discovery.identity import product_key
+
+        fetched = []
+
+        def spy(job_obj, row):
+            fetched.append(product_key('amazon_us', row))
+            return original_sample(job_obj, row)
+
+        with patch('discovery.engine._should_stop', return_value=False), patch(
+            'discovery.engine._sample_product_row',
+            side_effect=spy,
+        ):
+            execute_job(job.id)
+        job.refresh_from_db()
+        self.assertEqual(job.status, DiscoveryJob.Status.SUCCEEDED, job.error_message)
+        self.assertEqual(job.products.count(), 3)
+        self.assertTrue(job.products.filter(product_key=first_key).exists())
+        self.assertNotIn(first_key, fetched)
+        self.assertEqual(len(fetched), 2)
+        self.assertEqual(job.started_at, started)
+
+    def test_finished_job_is_not_started_again(self):
+        job = self._product_job()
+        execute_job(job.id)
+        job.refresh_from_db()
+        self.assertEqual(job.status, DiscoveryJob.Status.SUCCEEDED, job.error_message)
+        self.assertEqual(job.products.count(), 3)
+        started = job.started_at
+        with patch('discovery.engine._sample_product_row') as sample:
+            execute_job(job.id)
+        sample.assert_not_called()
+        job.refresh_from_db()
+        self.assertEqual(job.status, DiscoveryJob.Status.SUCCEEDED)
+        self.assertEqual(job.products.count(), 3)
+        self.assertEqual(job.started_at, started)
+
+    def test_a_second_worker_waits_instead_of_restarting(self):
+        from celery.exceptions import Retry
+
+        from discovery.tasks import run_discovery_job
+
+        with patch('discovery.tasks.acquire_discovery_lock', return_value=False), patch(
+            'discovery.tasks.execute_job',
+        ) as execute:
+            with self.assertRaises(Retry):
+                run_discovery_job.apply(args=['job-1'], throw=True)
+        execute.assert_not_called()
+
+    def test_discovery_lock_allows_one_owner(self):
+        from django.core.cache import cache
+
+        from discovery.locks import (
+            acquire_discovery_lock,
+            refresh_discovery_lock,
+            release_discovery_lock,
+        )
+
+        job_id = 'lock-job'
+        cache.delete(f'discovery-job-lock:{job_id}')
+        self.assertTrue(acquire_discovery_lock(job_id, 'worker-a'))
+        self.assertFalse(acquire_discovery_lock(job_id, 'worker-b'))
+        refresh_discovery_lock(job_id, 'worker-a', force=True)
+        release_discovery_lock(job_id, 'worker-b')
+        self.assertFalse(acquire_discovery_lock(job_id, 'worker-b'))
+        release_discovery_lock(job_id, 'worker-a')
+        self.assertTrue(acquire_discovery_lock(job_id, 'worker-b'))
+        release_discovery_lock(job_id, 'worker-b')
