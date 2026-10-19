@@ -871,6 +871,16 @@ def _fetch_ebay_products(rows, marketplace, errors, session, table, stop) -> Non
         _close_ebay_browser(session)
 
 
+def _promote_discovery(job: DiscoveryJob) -> None:
+    """Start the next queued file for this account and region."""
+    try:
+        from discovery.queue import promote_after_job
+
+        promote_after_job(job.id, job.owner_id, job.marketplace)
+    except Exception:
+        logger.exception('discovery queue did not advance after %s', getattr(job, 'id', None))
+
+
 def execute_job(job_id, lock_owner=None) -> None:
     """Run one discovery job.
 
@@ -890,12 +900,14 @@ def _execute_job(job_id, lock_owner=None) -> None:
     except DiscoveryJob.DoesNotExist:
         return
     if job.status == DiscoveryJob.Status.SUCCEEDED:
+        _promote_discovery(job)
         return
     if job.cancel_requested:
         job.status = DiscoveryJob.Status.CANCELLED
         job.error_message = 'Stopped.'
         job.finished_at = timezone.now()
         job.save(update_fields=['status', 'error_message', 'finished_at'])
+        _promote_discovery(job)
         return
     previous = dict(job.stats or {})
     explicit_resume = bool(previous.pop('resume', False))
@@ -1104,3 +1116,4 @@ def _execute_job(job_id, lock_owner=None) -> None:
         job.save(update_fields=['status', 'error_message', 'finished_at', 'stats'])
     finally:
         _close_ebay_browser(session)
+        _promote_discovery(job)

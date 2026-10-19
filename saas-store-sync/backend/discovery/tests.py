@@ -819,8 +819,9 @@ class DiscoveryJobTests(TestCase):
         )
         self.client = APIClient()
         self.client.force_authenticate(self.user)
-        self.async_patch = patch('discovery.views.run_discovery_job.apply_async')
-        self.async_patch.start()
+        self.async_patch = patch('discovery.queue.run_discovery_job.apply_async')
+        self.apply_async = self.async_patch.start()
+        self.apply_async.return_value.id = 'task-1'
 
     def tearDown(self):
         self.async_patch.stop()
@@ -1248,3 +1249,169 @@ class DiscoveryJobTests(TestCase):
         release_discovery_lock(job_id, 'worker-a')
         self.assertTrue(acquire_discovery_lock(job_id, 'worker-b'))
         release_discovery_lock(job_id, 'worker-b')
+
+    def _post_file(self, marketplace, mode, rows, filename):
+        if mode == 'category':
+            columns = ['url']
+        elif marketplace.startswith('amazon'):
+            columns = ['asin', 'url']
+        else:
+            columns = ['item_id', 'url']
+        payload = workbook_bytes(columns, rows)
+        return self.client.post(
+            '/api/v1/discovery/jobs/',
+            {
+                'marketplace': marketplace,
+                'mode': mode,
+                'use_sample': 'true',
+                'rules': '{}',
+                'columns': '[]',
+                'file': ContentFile(payload, name=filename),
+            },
+            format='multipart',
+        )
+
+    def _post_template(self, marketplace, mode, filename=None):
+        name, payload = template_bytes(marketplace, mode)
+        response = self.client.post(
+            '/api/v1/discovery/jobs/',
+            {
+                'marketplace': marketplace,
+                'mode': mode,
+                'use_sample': 'true',
+                'rules': '{}',
+                'columns': '[]',
+                'file': ContentFile(payload, name=filename or name),
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        return DiscoveryJob.objects.get(id=response.data['id'])
+
+    def test_category_file_rejects_more_than_200_links(self):
+        rows = [{'url': f'https://www.amazon.com/s?k=item{index}'} for index in range(201)]
+        response = self._post_file('amazon_us', 'category', rows, 'too-many.xlsx')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('200', response.data['detail'])
+        self.assertIn('201', response.data['detail'])
+        self.assertEqual(DiscoveryJob.objects.count(), 0)
+        self.apply_async.assert_not_called()
+
+    def test_category_file_accepts_200_links(self):
+        rows = [{'url': f'https://www.amazon.com/s?k=item{index}'} for index in range(200)]
+        response = self._post_file('amazon_us', 'category', rows, 'full.xlsx')
+        self.assertEqual(response.status_code, 201, response.content)
+
+    def test_product_file_rejects_more_than_100000_rows(self):
+        rows = [
+            {'asin': f'B{index:09d}', 'url': f'https://www.amazon.com/dp/B{index:09d}'}
+            for index in range(3)
+        ]
+        with patch('discovery.limits.MAX_PRODUCT_ROWS', 2):
+            response = self._post_file('amazon_us', 'product', rows, 'too-many.xlsx')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('2', response.data['detail'])
+        self.assertEqual(DiscoveryJob.objects.count(), 0)
+
+    def test_second_file_waits_and_starts_when_the_first_finishes(self):
+        first = self._post_template('amazon_us', 'category', 'first.xlsx')
+        second = self._post_template('amazon_us', 'category', 'second.xlsx')
+        self.assertEqual(self.apply_async.call_count, 1)
+        self.assertEqual(first.celery_task_id, 'task-1')
+        second.refresh_from_db()
+        self.assertEqual(second.status, DiscoveryJob.Status.QUEUED)
+        self.assertEqual(second.celery_task_id, '')
+        listed = self.client.get('/api/v1/discovery/jobs/')
+        by_id = {item['id']: item for item in listed.data}
+        self.assertEqual(by_id[str(first.id)]['queue_position'], 0)
+        self.assertEqual(by_id[str(second.id)]['queue_position'], 1)
+
+        execute_job(first.id)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.status, DiscoveryJob.Status.SUCCEEDED)
+        self.assertEqual(self.apply_async.call_count, 2)
+        self.assertEqual(second.celery_task_id, 'task-1')
+
+    def test_us_and_au_files_both_start(self):
+        self._post_template('amazon_us', 'category', 'us.xlsx')
+        self._post_template('amazon_au', 'category', 'au.xlsx')
+        self.assertEqual(self.apply_async.call_count, 2)
+
+    def test_another_account_does_not_wait_behind_this_one(self):
+        self._post_template('amazon_us', 'category', 'ours.xlsx')
+        other = User.objects.create_user(
+            username='other-discoverer',
+            email='other-discoverer@example.com',
+            password='pass12345',
+        )
+        self.client.force_authenticate(other)
+        self._post_template('amazon_us', 'category', 'theirs.xlsx')
+        self.assertEqual(self.apply_async.call_count, 2)
+
+    def test_stopping_a_queued_file_starts_the_next_one(self):
+        first = self._post_template('amazon_us', 'category', 'first.xlsx')
+        second = self._post_template('amazon_us', 'category', 'second.xlsx')
+        response = self.client.post(f'/api/v1/discovery/jobs/{first.id}/cancel/')
+        self.assertEqual(response.status_code, 200, response.content)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.status, DiscoveryJob.Status.CANCELLED)
+        self.assertEqual(second.celery_task_id, 'task-1')
+        self.assertEqual(self.apply_async.call_count, 2)
+
+    def test_resume_waits_while_another_file_is_running(self):
+        running = self._post_template('amazon_us', 'category', 'running.xlsx')
+        running.status = DiscoveryJob.Status.RUNNING
+        running.save(update_fields=['status'])
+        paused = self._product_job()
+        paused.status = DiscoveryJob.Status.CANCELLED
+        paused.save(update_fields=['status'])
+        response = self.client.post(f'/api/v1/discovery/jobs/{paused.id}/resume/')
+        self.assertEqual(response.status_code, 200, response.content)
+        paused.refresh_from_db()
+        self.assertEqual(paused.status, DiscoveryJob.Status.QUEUED)
+        self.assertEqual(paused.celery_task_id, '')
+        self.assertEqual(self.apply_async.call_count, 1)
+        self.assertEqual(response.data['queue_position'], 1)
+
+    def test_continue_splits_product_details_past_100000(self):
+        rows = [
+            {'url': f'https://www.amazon.com/dp/B{index:09d}', 'asin': f'B{index:09d}', 'title': 'Item'}
+            for index in range(5)
+        ]
+        payload = workbook_bytes(['url', 'asin', 'title'], rows)
+        parent = DiscoveryJob.objects.create(
+            owner=self.user,
+            marketplace='amazon_us',
+            mode=DiscoveryJob.Mode.CATEGORY,
+            status=DiscoveryJob.Status.SUCCEEDED,
+            original_filename='results.xlsx',
+            use_sample=True,
+            zip_code='10001',
+            result_bytes=payload,
+            columns=['url', 'asin', 'title'],
+        )
+        with patch('discovery.limits.MAX_PRODUCT_ROWS', 2):
+            response = self.client.post(
+                f'/api/v1/discovery/jobs/{parent.id}/continue/',
+                {'use_sample': True, 'columns': ['title']},
+                format='json',
+            )
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(response.data['parts'], 3)
+        children = list(DiscoveryJob.objects.filter(parent=parent).order_by('created_at', 'id'))
+        self.assertEqual(len(children), 3)
+        self.assertEqual(children[0].celery_task_id, 'task-1')
+        self.assertEqual(children[1].celery_task_id, '')
+        self.assertEqual(children[2].celery_task_id, '')
+        self.assertEqual(self.apply_async.call_count, 1)
+        from discovery.files import open_bytes, read_spreadsheet
+        self.assertEqual(len(read_spreadsheet(open_bytes(bytes(children[0].source_bytes), 'a.xlsx'))), 2)
+        self.assertEqual(len(read_spreadsheet(open_bytes(bytes(children[1].source_bytes), 'b.xlsx'))), 2)
+        self.assertEqual(len(read_spreadsheet(open_bytes(bytes(children[2].source_bytes), 'c.xlsx'))), 1)
+
+        execute_job(children[0].id)
+        children[1].refresh_from_db()
+        self.assertEqual(children[1].celery_task_id, 'task-1')
+        self.assertEqual(children[2].celery_task_id, '')

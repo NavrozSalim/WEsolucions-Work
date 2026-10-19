@@ -1,8 +1,10 @@
 import io
 import json
 import re
+from datetime import timedelta
 
 from django.core.files.base import ContentFile
+from django.utils import timezone
 from django.http import FileResponse
 from rest_framework import status
 from rest_framework.negotiation import DefaultContentNegotiation
@@ -21,10 +23,10 @@ from .files import (
     template_bytes,
     workbook_bytes,
 )
+from . import limits
 from .models import DiscoveryJob
-from .routing import queue_for_marketplace
+from .queue import PENDING_TASK_ID, dispatch_next, positions_for
 from .rules import normalize_rules
-from .tasks import run_discovery_job
 
 
 class CanUseDiscovery(BasePermission):
@@ -46,7 +48,7 @@ def _jobs_for(user):
     return DiscoveryJob.objects.filter(owner=user)
 
 
-def _job_payload(job: DiscoveryJob) -> dict:
+def _job_payload(job: DiscoveryJob, queue_position: int = 0) -> dict:
     return {
         'id': str(job.id),
         'marketplace': job.marketplace,
@@ -58,6 +60,7 @@ def _job_payload(job: DiscoveryJob) -> dict:
         'use_sample': job.use_sample,
         'zip_code': job.zip_code,
         'queue_name': job.queue_name,
+        'queue_position': queue_position,
         'rules': job.rules or {},
         'columns': job.columns or [],
         'stats': job.stats or {},
@@ -85,19 +88,13 @@ def _parse_json(value, fallback):
         return fallback
 
 
-def _enqueue(job: DiscoveryJob) -> None:
-    queue = queue_for_marketplace(job.marketplace)
-    job.queue_name = queue
-    job.save(update_fields=['queue_name'])
-    result = run_discovery_job.apply_async(args=[str(job.id)], queue=queue)
-    task_id = getattr(result, 'id', '') or ''
-    if isinstance(task_id, str) and task_id:
-        job.celery_task_id = task_id[:255]
-        job.save(update_fields=['celery_task_id'])
+def _payloads(user, jobs) -> list[dict]:
+    positions = positions_for(user)
+    return [_job_payload(job, positions.get(job.id, 0)) for job in jobs]
 
 
 def _revoke_task(task_id: str) -> None:
-    if not task_id:
+    if not task_id or task_id == PENDING_TASK_ID:
         return
     try:
         from core.celery import app as celery_app
@@ -156,8 +153,8 @@ class DiscoveryJobListCreateView(APIView):
     permission_classes = [IsAuthenticated, CanUseDiscovery]
 
     def get(self, request):
-        jobs = _jobs_for(request.user)[:50]
-        return Response([_job_payload(job) for job in jobs])
+        jobs = list(_jobs_for(request.user).select_related('owner')[:50])
+        return Response(_payloads(request.user, jobs))
 
     def post(self, request):
         marketplace = request.data.get('marketplace') or ''
@@ -173,9 +170,12 @@ class DiscoveryJobListCreateView(APIView):
         if not name.endswith(('.csv', '.xlsx', '.xls')):
             return Response({'detail': 'Upload a CSV or XLSX file.'}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            read_spreadsheet(upload, marketplace=marketplace, mode=mode)
+            rows = read_spreadsheet(upload, marketplace=marketplace, mode=mode)
         except SpreadsheetError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        too_many = limits.limit_detail(mode, len(rows))
+        if too_many:
+            return Response({'detail': too_many}, status=status.HTTP_400_BAD_REQUEST)
         upload.seek(0)
         source_bytes = upload.read()
         upload.seek(0)
@@ -199,9 +199,12 @@ class DiscoveryJobListCreateView(APIView):
             use_sample=use_sample,
             zip_code=zip_code,
         )
-        _enqueue(job)
+        dispatch_next(request.user, marketplace)
         job.refresh_from_db()
-        return Response(_job_payload(job), status=status.HTTP_201_CREATED)
+        return Response(
+            _job_payload(job, positions_for(request.user).get(job.id, 0)),
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class DiscoveryJobDetailView(APIView):
@@ -211,13 +214,20 @@ class DiscoveryJobDetailView(APIView):
         job = _jobs_for(request.user).filter(id=job_id).first()
         if job is None:
             return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
-        return Response(_job_payload(job))
+        return Response(_job_payload(job, positions_for(request.user).get(job.id, 0)))
 
     def delete(self, request, job_id):
         job = _jobs_for(request.user).filter(id=job_id).first()
         if job is None:
             return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
+        owner = job.owner
+        marketplace = job.marketplace
+        advance = job.status in (DiscoveryJob.Status.QUEUED, DiscoveryJob.Status.RUNNING)
+        if advance:
+            _revoke_task(job.celery_task_id)
         _delete_job(job)
+        if advance:
+            dispatch_next(owner, marketplace)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -317,11 +327,21 @@ class DiscoveryJobCancelView(APIView):
             return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
         if job.status not in (DiscoveryJob.Status.QUEUED, DiscoveryJob.Status.RUNNING):
             return Response({'detail': 'This scrape is not running.'}, status=status.HTTP_400_BAD_REQUEST)
+        task_id = job.celery_task_id
         job.cancel_requested = True
-        job.save(update_fields=['cancel_requested'])
-        _revoke_task(job.celery_task_id)
+        if job.status == DiscoveryJob.Status.QUEUED:
+            # Not on the worker yet. Close it here so the next file can start.
+            job.status = DiscoveryJob.Status.CANCELLED
+            job.error_message = 'Stopped.'
+            job.finished_at = timezone.now()
+            job.save(update_fields=['cancel_requested', 'status', 'error_message', 'finished_at'])
+            _revoke_task(task_id)
+            dispatch_next(request.user, job.marketplace)
+        else:
+            job.save(update_fields=['cancel_requested'])
+            _revoke_task(task_id)
         job.refresh_from_db()
-        return Response(_job_payload(job))
+        return Response(_job_payload(job, positions_for(request.user).get(job.id, 0)))
 
 
 class DiscoveryJobResumeView(APIView):
@@ -343,12 +363,15 @@ class DiscoveryJobResumeView(APIView):
         job.stats = stats
         job.cancel_requested = False
         job.status = DiscoveryJob.Status.QUEUED
+        job.celery_task_id = ''
         job.error_message = ''
         job.finished_at = None
-        job.save(update_fields=['stats', 'cancel_requested', 'status', 'error_message', 'finished_at'])
-        _enqueue(job)
+        job.save(update_fields=[
+            'stats', 'cancel_requested', 'status', 'celery_task_id', 'error_message', 'finished_at',
+        ])
+        dispatch_next(request.user, job.marketplace)
         job.refresh_from_db()
-        return Response(_job_payload(job))
+        return Response(_job_payload(job, positions_for(request.user).get(job.id, 0)))
 
 
 class DiscoveryJobClearView(APIView):
@@ -448,31 +471,46 @@ class DiscoveryJobContinueView(APIView):
             use_sample = use_sample.lower() in ('1', 'true', 'yes', 'on')
         rules = _parse_json(request.data.get('rules'), None)
         columns = _parse_json(request.data.get('columns'), None)
-        payload = workbook_bytes(
-            ['url', 'asin', 'item_id', 'title', 'price', 'rating', 'review_count', 'category'],
-            product_rows,
-        )
-        child = DiscoveryJob(
-            owner=request.user,
-            parent=parent,
-            marketplace=parent.marketplace,
-            mode=DiscoveryJob.Mode.PRODUCT,
-            original_filename=f'{parent.marketplace}-from-category.xlsx',
-            rules=normalize_rules(rules if isinstance(rules, dict) else parent.rules),
-            columns=columns if isinstance(columns, list) else [],
-            use_sample=bool(use_sample),
-            zip_code=parent.zip_code,
-            source_bytes=payload,
-        )
-        try:
-            child.source_file.save(
-                f'{parent.id}-products.xlsx',
-                ContentFile(payload),
-                save=False,
+        sheet_columns = ['url', 'asin', 'item_id', 'title', 'price', 'rating', 'review_count', 'category']
+        chunks = [
+            product_rows[index:index + limits.MAX_PRODUCT_ROWS]
+            for index in range(0, len(product_rows), limits.MAX_PRODUCT_ROWS)
+        ]
+        stamp = timezone.now()
+        normalized_rules = normalize_rules(rules if isinstance(rules, dict) else parent.rules)
+        chosen_columns = columns if isinstance(columns, list) else []
+        children = []
+        for index, chunk in enumerate(chunks):
+            payload = workbook_bytes(sheet_columns, chunk)
+            suffix = '' if len(chunks) == 1 else f'-{index + 1}'
+            child = DiscoveryJob(
+                owner=request.user,
+                parent=parent,
+                marketplace=parent.marketplace,
+                mode=DiscoveryJob.Mode.PRODUCT,
+                original_filename=f'{parent.marketplace}-from-category{suffix}.xlsx',
+                rules=normalized_rules,
+                columns=chosen_columns,
+                use_sample=bool(use_sample),
+                zip_code=parent.zip_code,
+                source_bytes=payload,
             )
-        except OSError:
-            pass
-        child.save()
-        _enqueue(child)
+            try:
+                child.source_file.save(
+                    f'{parent.id}-products{suffix}.xlsx',
+                    ContentFile(payload),
+                    save=False,
+                )
+            except OSError:
+                pass
+            child.save()
+            DiscoveryJob.objects.filter(pk=child.pk).update(
+                created_at=stamp + timedelta(microseconds=index),
+            )
+            children.append(child)
+        dispatch_next(request.user, parent.marketplace)
+        child = children[0]
         child.refresh_from_db()
-        return Response(_job_payload(child), status=status.HTTP_201_CREATED)
+        body = _job_payload(child, positions_for(request.user).get(child.id, 0))
+        body['parts'] = len(children)
+        return Response(body, status=status.HTTP_201_CREATED)

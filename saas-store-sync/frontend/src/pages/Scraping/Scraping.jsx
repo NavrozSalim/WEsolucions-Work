@@ -127,7 +127,7 @@ export default function Scraping() {
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState('');
     const [notice, setNotice] = useState('');
-    const [file, setFile] = useState(null);
+    const [files, setFiles] = useState([]);
     const [fileKey, setFileKey] = useState(0);
     const [marketplace, setMarketplace] = useState('amazon_us');
     const [mode, setMode] = useState('category');
@@ -216,7 +216,7 @@ export default function Scraping() {
         event.preventDefault();
         setError('');
         setNotice('');
-        if (!file) {
+        if (files.length === 0) {
             setError('Choose a CSV or XLSX file.');
             return;
         }
@@ -225,22 +225,41 @@ export default function Scraping() {
             return;
         }
         setSubmitting(true);
+        const queued = [];
         try {
-            await createDiscoveryJob({
-                file,
-                marketplace,
-                mode,
-                rules: formRules(),
-                columns,
-                useSample,
-                zipCode: zipCode.trim(),
-            });
-            setFile(null);
-            setFileKey((value) => value + 1);
-            setNotice('Scrape queued. It runs on the US or AU worker, not on the main app worker.');
+            for (const item of files) {
+                try {
+                    await createDiscoveryJob({
+                        file: item,
+                        marketplace,
+                        mode,
+                        rules: formRules(),
+                        columns,
+                        useSample,
+                        zipCode: zipCode.trim(),
+                    });
+                    queued.push(item.name);
+                } catch (err) {
+                    const detail = err.response?.data?.detail || 'Could not queue this file.';
+                    const earlier = queued.length
+                        ? ` ${queued.length} ${queued.length === 1 ? 'file was' : 'files were'} already queued.`
+                        : '';
+                    setError(`${item.name}: ${detail}${earlier}`);
+                    break;
+                }
+            }
+            if (queued.length === files.length) {
+                setFiles([]);
+                setFileKey((value) => value + 1);
+            }
+            if (queued.length > 0) {
+                setNotice(
+                    queued.length > 1
+                        ? `${queued.length} files queued. They run one at a time, in the order you selected.`
+                        : 'File queued. It runs when no other file from this account is already running on that server.',
+                );
+            }
             await refreshJobs();
-        } catch (err) {
-            setError(err.response?.data?.detail || 'Could not start the scrape.');
         } finally {
             setSubmitting(false);
         }
@@ -281,7 +300,7 @@ export default function Scraping() {
         try {
             await clearDiscoveryJobs();
             setClearOpen(false);
-            setFile(null);
+            setFiles([]);
             setFileKey((value) => value + 1);
             setNotice('Previous scrapes were cleared.');
             await refreshJobs();
@@ -312,12 +331,17 @@ export default function Scraping() {
         setNotice('');
         setSubmitting(true);
         try {
-            await continueDiscoveryJob(job.id, {
+            const created = await continueDiscoveryJob(job.id, {
                 rules: formRules(),
                 columns: options?.defaults?.[job.marketplace]?.product || [],
                 useSample,
             });
-            setNotice('Product details queued from the category results. Duplicates are removed again.');
+            const cap = options?.limits?.product || 100000;
+            setNotice(
+                created.parts > 1
+                    ? `Product details split into ${created.parts} jobs of ${cap.toLocaleString()}. They run one at a time.`
+                    : 'Product details queued from the category results. Duplicates are removed again.',
+            );
             await refreshJobs();
         } catch (err) {
             setError(err.response?.data?.detail || 'Could not start product details.');
@@ -376,7 +400,8 @@ export default function Scraping() {
                             key={fileKey}
                             type="file"
                             accept=".csv,.xlsx,.xls"
-                            onChange={(e) => setFile(e.target.files?.[0] || null)}
+                            multiple
+                            onChange={(e) => setFiles(Array.from(e.target.files || []))}
                             className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-2 file:text-sm file:font-medium file:text-slate-800 dark:text-slate-300 dark:file:bg-slate-800 dark:file:text-slate-100"
                         />
                     </label>
@@ -393,9 +418,10 @@ export default function Scraping() {
                 </div>
                 <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
                     {mode === 'category'
-                        ? 'Category file: one url column of search or category pages.'
-                        : 'Product file: a url column, or asin / item_id. The same id is scraped once.'}
-                    {file ? ` Selected ${file.name}.` : ''}
+                        ? `Category file: one url column, up to ${(options?.limits?.category || 200).toLocaleString()} links.`
+                        : `Product file: a url column, or asin / item_id, up to ${(options?.limits?.product || 100000).toLocaleString()} rows. The same id is scraped once.`}
+                    {' '}You can choose more than one file. They run one at a time, in the order you selected.
+                    {files.length > 0 ? ` Selected ${files.map((item) => item.name).join(', ')}.` : ''}
                 </p>
 
                 <label className="mt-4 flex items-start gap-2 text-sm text-slate-700 dark:text-slate-300">
@@ -511,6 +537,13 @@ export default function Scraping() {
                                                 {job.marketplace_label} · {job.mode_label}
                                             </p>
                                             <Badge variant={STATUS_VARIANT[job.status] || 'default'}>{job.status}</Badge>
+                                            {job.status === 'queued' && job.queue_position > 0 && (
+                                                <Badge>
+                                                    {job.queue_position === 1
+                                                        ? 'Waiting · next'
+                                                        : `Waiting · ${job.queue_position - 1} ahead`}
+                                                </Badge>
+                                            )}
                                             {job.use_sample && <Badge>Sample pages</Badge>}
                                             {job.queue_name && <Badge>{job.queue_name}</Badge>}
                                         </div>

@@ -205,6 +205,8 @@ def output_columns(marketplace: str, selected: list[str], mode: str | None = Non
 
 
 def options_payload() -> dict:
+    from .limits import MAX_CATEGORY_LINKS, MAX_PRODUCT_ROWS
+
     columns = {}
     defaults = {}
     for code, _label, _region in MARKETPLACES:
@@ -224,4 +226,8 @@ def options_payload() -> dict:
         'modes': [{'value': code, 'label': label} for code, label in MODES],
         'columns': columns,
         'defaults': defaults,
+        'limits': {
+            'category': MAX_CATEGORY_LINKS,
+            'product': MAX_PRODUCT_ROWS,
+        },
     }

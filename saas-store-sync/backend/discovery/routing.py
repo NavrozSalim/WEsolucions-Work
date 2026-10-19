@@ -25,6 +25,14 @@ def queue_for_marketplace(marketplace: str) -> str:
     return QUEUE_DISCOVER_US
 
 
+def marketplaces_for_queue(queue_name: str) -> list[str]:
+    """Marketplaces that share one discovery worker."""
+    from .columns import MARKETPLACES
+
+    region = 'AU' if queue_name == QUEUE_DISCOVER_AU else 'US'
+    return [code for code, _label, item_region in MARKETPLACES if item_region == region]
+
+
 class DiscoveryTaskRouter:
     """Send ``run_discovery_job`` to discover-us or discover-au from the job row."""
 
