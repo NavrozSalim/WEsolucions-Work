@@ -878,7 +878,7 @@ function ServerCeleryScrapeStrip({ state, progressStoreId, selectedStoreId }) {
                     </h3>
                     <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
                         {isStopping
-                            ? 'The page currently being fetched may finish. Remaining listings stay Pending. This will not restart on its own.'
+                            ? 'The page currently being fetched may finish. Remaining listings stay Pending. Start Scraping comes back once this goes quiet.'
                             : 'You can leave this page; product rows update as each item finishes. Use “Stop Scraping” to cancel.'}
                     </p>
                 </div>
@@ -3237,6 +3237,9 @@ export default function Catalog() {
                                 const serverStopping = scrapeProgress?.server_celery_scrape?.phase === 'stopping'
                                     || Boolean(scrapeProgress?.server_celery_scrape?.cancel_requested);
                                 const isActive = desktopRunnerBusy || trackingServerScrape;
+                                // Stop was already sent. Hide it so the page can return to
+                                // Start Scraping once the workers go quiet.
+                                const stopAlreadySent = serverStopping && !desktopRunnerBusy;
                                 const aheadCount = vendorIngestQueue(activeVendor)?.ahead_count || 0;
                                 const etaLabel = formatEtaShort(vendorIngestQueue(activeVendor)?.eta_seconds);
 
@@ -3299,7 +3302,7 @@ export default function Catalog() {
                                                 {label}
                                             </Button>
                                         )}
-                                        {isActive && (
+                                        {isActive && !stopAlreadySent && (
                                             <Button
                                                 variant="secondary"
                                                 size="sm"

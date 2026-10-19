@@ -229,6 +229,61 @@ class CeleryScrapeCancelTests(TestCase):
             StoreCatalogCeleryScrapeState.objects.filter(store=self.store).exists(),
         )
 
+    def test_repeat_stop_does_not_reset_cancel_clock(self):
+        self._state(cancel=True)
+        earlier = timezone.now() - timedelta(minutes=10)
+        StoreCatalogCeleryScrapeState.objects.filter(store=self.store).update(
+            cancel_requested_at=earlier,
+        )
+        self.assertTrue(request_celery_scrape_cancel(str(self.store.id)))
+        st = StoreCatalogCeleryScrapeState.objects.get(store=self.store)
+        self.assertLess(st.cancel_requested_at, timezone.now() - timedelta(minutes=5))
+
+    @override_settings(CATALOG_SCRAPE_STOP_IDLE_SECONDS=120)
+    def test_heal_clears_quiet_stop_before_stale_window(self):
+        self._state(cancel=True)
+        StoreCatalogCeleryScrapeState.objects.filter(store=self.store).update(
+            cancel_requested_at=timezone.now() - timedelta(minutes=3),
+        )
+        self._mapping('B0QUIET')
+        self.assertTrue(heal_stale_celery_scrape_state(str(self.store.id)))
+        self.assertFalse(
+            StoreCatalogCeleryScrapeState.objects.filter(store=self.store).exists(),
+        )
+
+    @override_settings(CATALOG_SCRAPE_STOP_IDLE_SECONDS=120)
+    def test_heal_keeps_stop_while_listings_are_still_updating(self):
+        self._state(cancel=True)
+        StoreCatalogCeleryScrapeState.objects.filter(store=self.store).update(
+            cancel_requested_at=timezone.now() - timedelta(minutes=3),
+        )
+        row = self._mapping('B0LIVE')
+        row.last_scrape_time = timezone.now()
+        row.save(update_fields=['last_scrape_time'])
+        self.assertFalse(heal_stale_celery_scrape_state(str(self.store.id)))
+        self.assertTrue(
+            StoreCatalogCeleryScrapeState.objects.filter(store=self.store).exists(),
+        )
+
+    @override_settings(CATALOG_SCRAPE_STOP_IDLE_SECONDS=120)
+    def test_progress_hides_quiet_stop(self):
+        self._state(cancel=True)
+        StoreCatalogCeleryScrapeState.objects.filter(store=self.store).update(
+            cancel_requested_at=timezone.now() - timedelta(minutes=3),
+        )
+        payload = build_scrape_progress_payload(self.store)
+        self.assertFalse(payload['server_celery_scrape']['active'])
+        self.assertFalse(payload['server_celery_scrape']['cancel_requested'])
+
+    def test_replaced_root_task_aborts_old_loop(self):
+        self._state()
+        self.assertFalse(
+            should_abort_celery_scrape(str(self.store.id), root_task_id='root-task-1'),
+        )
+        self.assertTrue(
+            should_abort_celery_scrape(str(self.store.id), root_task_id='old-task'),
+        )
+
     def test_progress_hides_legacy_stuck_stop(self):
         self._state(cancel=True)
         StoreCatalogCeleryScrapeState.objects.filter(store=self.store).update(

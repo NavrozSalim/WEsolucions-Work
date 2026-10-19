@@ -27,7 +27,11 @@ def _stall_no_pending_timedelta() -> timedelta:
     m = max(5, min(120, m))
     return timedelta(minutes=m)
 
-from .celery_scrape_state import mark_celery_scrape_worker_started, should_abort_celery_scrape
+from .celery_scrape_state import (
+    current_celery_scrape_root_task_id,
+    mark_celery_scrape_worker_started,
+    should_abort_celery_scrape,
+)
 from .models import (
     CatalogUpload,
     CatalogUploadRow,
@@ -1010,6 +1014,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
     row_counter = 0
 
     mark_celery_scrape_worker_started(str(store.id))
+    scrape_root_id = current_celery_scrape_root_task_id(str(store.id))
 
     try:
         price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
@@ -1028,7 +1033,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
 
         for row in rows:
             _refresh_db_connection()
-            if should_abort_celery_scrape(str(store.id)):
+            if should_abort_celery_scrape(str(store.id), root_task_id=scrape_root_id):
                 user_cancelled = True
                 break
             pm = row.product_mapping
@@ -1759,6 +1764,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
     fatal_error = None
 
     mark_celery_scrape_worker_started(str(store.id))
+    scrape_root_id = current_celery_scrape_root_task_id(str(store.id))
 
     try:
         price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
@@ -1777,7 +1783,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
 
         for pm in mappings:
             _refresh_db_connection()
-            if should_abort_celery_scrape(str(store.id)):
+            if should_abort_celery_scrape(str(store.id), root_task_id=scrape_root_id):
                 user_cancelled = True
                 break
             product = pm.product

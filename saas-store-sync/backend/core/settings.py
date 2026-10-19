@@ -91,6 +91,15 @@ try:
 except ValueError:
     CATALOG_SCRAPE_STOP_STALE_MINUTES = 20
 
+# After Stop, if no listing is scraped for this many seconds, the workers have
+# gone quiet. Drop the stopping banner so Start Scraping comes back.
+try:
+    CATALOG_SCRAPE_STOP_IDLE_SECONDS = max(
+        30, min(600, int(os.getenv('CATALOG_SCRAPE_STOP_IDLE_SECONDS', '120'))),
+    )
+except ValueError:
+    CATALOG_SCRAPE_STOP_IDLE_SECONDS = 120
+
 if DEBUG:
     ALLOWED_HOSTS = _env_list('ALLOWED_HOSTS', 'localhost,127.0.0.1,backend')
 else:
