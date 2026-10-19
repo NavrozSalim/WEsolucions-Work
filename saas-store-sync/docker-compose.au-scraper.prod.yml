@@ -36,7 +36,7 @@ services:
     command: >-
       celery -A core worker -l info
       -Q heavy-au
-      --concurrency=${CELERY_AU_SCRAPER_CONCURRENCY:-4}
+      --concurrency=${CELERY_AU_SCRAPER_CONCURRENCY:-10}
       --prefetch-multiplier=1
       --max-tasks-per-child=${CELERY_AU_MAX_TASKS_PER_CHILD:-40}
       -O fair
@@ -65,10 +65,10 @@ services:
       - EBAY_AU_PAGE_LOAD_TIMEOUT_SEC=${EBAY_AU_PAGE_LOAD_TIMEOUT_SEC:-12}
       - EBAY_AU_PAGE_WAIT_TIMEOUT_SEC=${EBAY_AU_PAGE_WAIT_TIMEOUT_SEC:-10}
       - EBAY_BIN_HYDRATE_MAX_SEC=${EBAY_BIN_HYDRATE_MAX_SEC:-2}
-      # Smaller chunks so a mid-size catalog still splits across every lane.
-      # Keep CATALOG_SCRAPE_LANES equal to CELERY_AU_SCRAPER_CONCURRENCY.
+      # One lane per Costco proxy. Keep this equal to CELERY_AU_SCRAPER_CONCURRENCY
+      # and do not exceed the number of COSTCO_AU_PROXY_URLS.
       - CATALOG_SCRAPE_CHUNK_SIZE=${CATALOG_SCRAPE_CHUNK_SIZE:-40}
-      - CATALOG_SCRAPE_LANES=${CATALOG_SCRAPE_LANES:-4}
+      - CATALOG_SCRAPE_LANES=${CATALOG_SCRAPE_LANES:-10}
       - VEVOR_AU_FEED_URL=${VEVOR_AU_FEED_URL:-https://ads-feed.s3.us-west-2.amazonaws.com/ads/business/563/vevor-563.xlsx}
       - COSTWAY_AU_FEED_URL=${COSTWAY_AU_FEED_URL:-https://au.costway.com/media/feed/Dropship-AU.csv}
       - PROXY_URL=${PROXY_URL:-}
