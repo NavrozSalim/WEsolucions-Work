@@ -404,6 +404,7 @@ class MarketplaceOrderSerializer(serializers.ModelSerializer):
             'id', 'store', 'external_order_key', 'invoice_number',
             'customer_info_json', 'line_items_json',
             'status', 'shipping_status', 'total_amount_cents',
+            'refunded_amount_cents', 'partial_refunds_json',
             'environment', 'shipments', 'raw_response_json',
             'details', 'related_tickets', 'created_at', 'updated_at',
             'shopify_order_id', 'shopify_order_name', 'shopify_synced_at',

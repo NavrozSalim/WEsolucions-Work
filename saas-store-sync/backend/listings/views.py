@@ -1386,6 +1386,31 @@ class StoreOrderCancelView(APIView):
         return Response(result, status=code)
 
 
+class StoreOrderPartialRefundView(APIView):
+    """Refund a percent of the order total on Lasoo, Reverb, or MyDeal.
+
+    The order stays open. Etsy, Bunnings, and Temu have no refund route.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk, pk):
+        store = _get_store(request, store_pk)
+        order = get_object_or_404(MarketplaceOrder, pk=pk, store=store)
+        reason = (request.data.get('reason') or '').strip()
+        note = (request.data.get('note') or '').strip()
+        try:
+            result = order_service.partial_refund(
+                order,
+                percent=request.data.get('percent'),
+                reason=reason,
+                note=note,
+            )
+        except MarketplaceError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        code = status.HTTP_200_OK if result.get('ok') else status.HTTP_502_BAD_GATEWAY
+        return Response(result, status=code)
+
+
 class StoreOrderCancelReasonsView(APIView):
     """Marketplace-provided cancel/refund reason options for the Orders UI."""
     permission_classes = [IsAuthenticated]

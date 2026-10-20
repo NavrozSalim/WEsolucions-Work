@@ -413,6 +413,125 @@ def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
     }
 
 
+def _mydeal_shipped(order: MarketplaceOrder) -> bool:
+    if order.status in (OrderStatus.SENT, OrderStatus.SHIPPING_SUBMITTED, OrderStatus.SHIPPING_COMPLETE):
+        return True
+    return (order.shipping_status or "") in ("submitted", "shipped", "complete")
+
+
+def _dollars(cents: int) -> float:
+    return float((Decimal(int(cents)) / Decimal(100)).quantize(Decimal("0.01")))
+
+
+def _refund_line_rows(order: MarketplaceOrder) -> list[dict]:
+    rows = []
+    for li in order.line_items_json if isinstance(order.line_items_json, list) else []:
+        if not isinstance(li, dict):
+            continue
+        lid = li.get("lineItemId") or (li.get("_raw") or {}).get("OrderItemId")
+        if lid is None or lid == "":
+            continue
+        try:
+            item_id = int(lid)
+        except (TypeError, ValueError):
+            item_id = lid
+        try:
+            total = int(li.get("totalCents") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        rows.append({"id": item_id, "total": max(0, total)})
+    return rows
+
+
+def partial_refund(
+    order: MarketplaceOrder,
+    *,
+    refund_cents: int,
+    reason: str,
+    note: str,
+    percent,
+) -> dict:
+    """POST /orders/{id}/refund for a portion of a shipped MyDeal order.
+
+    MyDeal refunds a dispatched order by amount. Unshipped orders use cancel.
+    """
+    del note, percent
+    if not _mydeal_shipped(order):
+        return {
+            "ok": False,
+            "marketplace_ok": False,
+            "message": (
+                "MyDeal only accepts a partial refund after the order is shipped. "
+                "Cancel an unshipped order instead."
+            ),
+        }
+
+    reason_code = normalize_cancel_reason(reason)
+    rows = _refund_line_rows(order)
+    if not rows:
+        return {
+            "ok": False,
+            "marketplace_ok": False,
+            "message": "No line items available to refund on MyDeal.",
+        }
+
+    from ..order_service import allocate_cents
+
+    order_total = int(order.total_amount_cents or 0)
+    product_base = sum(row["total"] for row in rows)
+    if order_total <= 0:
+        order_total = product_base or int(refund_cents)
+    shipping_base = max(0, order_total - product_base)
+    if product_base <= 0:
+        product_refund = 0
+        shipping_refund = int(refund_cents)
+        product_shares = [0] * len(rows)
+    else:
+        product_pool = min(product_base, order_total)
+        product_refund = (int(refund_cents) * product_pool) // order_total
+        shipping_refund = int(refund_cents) - product_refund
+        if shipping_base <= 0:
+            product_refund = int(refund_cents)
+            shipping_refund = 0
+        product_shares = allocate_cents([row["total"] for row in rows], product_refund)
+
+    items = []
+    for index, row in enumerate(rows):
+        share = product_shares[index]
+        ship = shipping_refund if index == 0 else 0
+        if share <= 0 and ship <= 0:
+            continue
+        item = {"Id": row["id"], "Reason": reason_code, "RefundAmount": _dollars(share)}
+        if ship > 0:
+            item["RefundShippingAmount"] = _dollars(ship)
+        items.append(item)
+    if not items:
+        return {
+            "ok": False,
+            "marketplace_ok": False,
+            "message": "Could not split the refund across MyDeal line items.",
+        }
+
+    try:
+        order_id = int(order.external_order_key)
+    except (TypeError, ValueError):
+        order_id = order.external_order_key
+
+    try:
+        client = MyDealClient(order.store)
+    except MarketplaceError as exc:
+        return {"ok": False, "marketplace_ok": False, "message": str(exc)}
+
+    result = client.refund_order(order_id, {"OrderId": order_id, "Items": items})
+    if result.ok:
+        return {"ok": True, "marketplace_ok": True}
+    return {
+        "ok": False,
+        "marketplace_ok": False,
+        "message": result.message or "MyDeal refund failed.",
+    }
+
+
 def build_fulfillment_payload(
     order: MarketplaceOrder,
     *,

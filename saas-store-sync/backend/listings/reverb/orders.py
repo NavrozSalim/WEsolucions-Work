@@ -456,6 +456,10 @@ def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
 
     reason_code = normalize_cancel_reason(reason)
     amount, currency = _refund_money(order)
+    already = int(order.refunded_amount_cents or 0)
+    if already > 0 and order.total_amount_cents is not None:
+        remaining = max(0, int(order.total_amount_cents) - already)
+        amount = f"{remaining / 100:.2f}"
     adapter = get_adapter(store)
     marketplace_ok = False
     marketplace_message = None
@@ -512,3 +516,45 @@ def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
             "If the order is unpaid, cancel it in the Reverb seller portal."
         ),
     }
+
+
+def partial_refund(
+    order: MarketplaceOrder,
+    *,
+    refund_cents: int,
+    reason: str,
+    note: str,
+    percent,
+) -> dict:
+    """Seller refund for part of the order total. Does not cancel the order."""
+    store = order.store
+    if not (getattr(store, "api_token", None) or "").strip():
+        raise MarketplaceError(
+            "No Reverb API token configured for this store. Add it in store settings."
+        )
+
+    reason_code = normalize_cancel_reason(reason)
+    _amount, currency = _refund_money(order)
+    amount = f"{int(refund_cents) / 100:.2f}"
+    note_to_buyer = note or f"Partial refund {format(percent, 'f')}%: {reason}"
+    adapter = get_adapter(store)
+    try:
+        adapter.create_seller_refund_request(
+            order.external_order_key or order.invoice_number,
+            reason=reason_code,
+            amount=amount,
+            currency=currency,
+            state="approved",
+            note_to_buyer=note_to_buyer[:500],
+        )
+    except ReverbAPIError as exc:
+        logger.warning(
+            "Reverb partial refund failed order=%s: %s",
+            order.external_order_key,
+            exc,
+        )
+        return {"ok": False, "marketplace_ok": False, "message": str(exc)[:400]}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Reverb partial refund unexpected error order=%s", order.external_order_key)
+        return {"ok": False, "marketplace_ok": False, "message": str(exc)[:400]}
+    return {"ok": True, "marketplace_ok": True, "currency": currency}

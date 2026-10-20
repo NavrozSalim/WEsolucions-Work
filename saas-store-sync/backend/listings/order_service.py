@@ -1,6 +1,7 @@
 """Retrieve and persist orders/invoices from the store's marketplace (Lasoo / Reverb)."""
 import logging
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from django.utils import timezone
 
@@ -1575,6 +1576,13 @@ def _cancel_lasoo(order: MarketplaceOrder, *, reason: str = "") -> dict:
     amount = order.total_amount_cents
     if amount is None:
         amount = sum(int(i.get("totalCents") or 0) for i in line_items)
+    amount = int(amount or 0)
+    already = int(order.refunded_amount_cents or 0)
+    # A later cancel refunds only what is still unpaid back, so a prior
+    # partial refund is not sent to Lasoo a second time.
+    if already > 0:
+        amount = max(0, amount - already)
+        line_items = _scale_refund_lines(line_items, amount) if amount else []
 
     data = {
         "invoiceId": _invoice_id_for_api(order),
@@ -1582,11 +1590,11 @@ def _cancel_lasoo(order: MarketplaceOrder, *, reason: str = "") -> dict:
         "items": line_items,
         "lineItemIds": [i["lineItemId"] for i in line_items],
         "itemsToBeReturned": False,
-        "partialRefund": False,
-        "refundAmountCents": int(amount or 0),
+        "partialRefund": already > 0,
+        "refundAmountCents": amount,
         "refundPostage": False,
         "returnAddress": "",
-        "partialRefundNote": "",
+        "partialRefundNote": "Remainder after a partial refund." if already > 0 else "",
         "notes": reason_text,
     }
     payload = build_payload("refunds_create", data=data, auth=client.auth_key)
@@ -1619,4 +1627,255 @@ def _cancel_lasoo(order: MarketplaceOrder, *, reason: str = "") -> dict:
             "Order marked cancelled here. "
             f"{_lasoo_error_message(result)}"
         ),
+    }
+
+
+# Marketplaces whose clients already expose a refund call. Etsy, Bunnings, and
+# Temu only cancel, so a percent of the total cannot be sent there.
+PARTIAL_REFUND_MARKETPLACES = ("lasoo", "reverb", "mydeal")
+
+
+def _parse_refund_percent(value) -> Decimal:
+    text = str(value if value is not None else "").strip()
+    if not text:
+        raise MarketplaceError("Enter the percent of the order to refund.")
+    try:
+        percent = Decimal(text)
+    except InvalidOperation as exc:
+        raise MarketplaceError("Percent must be a number.") from exc
+    # JSON numbers can carry binary noise (15.11 -> 15.10999...). Snap to cents of a percent.
+    percent = percent.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if percent <= 0 or percent >= 100:
+        raise MarketplaceError("A partial refund must be more than 0% and less than 100% of the order.")
+    return percent
+
+
+def _refund_cents_for_percent(total_cents: int, percent: Decimal) -> int:
+    amount = (Decimal(int(total_cents)) * percent / Decimal(100)).quantize(
+        Decimal("1"),
+        rounding=ROUND_HALF_UP,
+    )
+    return int(amount)
+
+
+def allocate_cents(weights: list[int], amount: int) -> list[int]:
+    """Split ``amount`` across ``weights`` so the shares sum to ``amount``."""
+    if not weights:
+        return []
+    total_weight = sum(max(0, int(w)) for w in weights)
+    if amount <= 0 or total_weight <= 0:
+        return [0] * len(weights)
+    shares = [(int(amount) * max(0, int(w))) // total_weight for w in weights]
+    leftover = int(amount) - sum(shares)
+    order = sorted(
+        range(len(weights)),
+        key=lambda i: (int(amount) * max(0, int(weights[i]))) % total_weight,
+        reverse=True,
+    )
+    for index in order:
+        if leftover <= 0:
+            break
+        shares[index] += 1
+        leftover -= 1
+    return shares
+
+
+def _order_currency(order: MarketplaceOrder, kind: str) -> str:
+    raw = order.raw_response_json if isinstance(order.raw_response_json, dict) else {}
+    currency = str(raw.get("currency") or "").strip().upper()
+    if not currency:
+        reverb = raw.get("_reverb") if isinstance(raw.get("_reverb"), dict) else {}
+        total = reverb.get("total") if isinstance(reverb.get("total"), dict) else {}
+        currency = str(total.get("currency") or "").strip().upper()
+    if currency:
+        return currency
+    return "USD" if kind == "reverb" else "AUD"
+
+
+def _money_label(cents: int, currency: str) -> str:
+    return f"{currency} {int(cents) / 100:.2f}".strip()
+
+
+def _record_partial_refund(
+    order: MarketplaceOrder,
+    *,
+    percent: Decimal,
+    refund_cents: int,
+    reason: str,
+    note: str,
+    marketplace: str,
+) -> None:
+    history = order.partial_refunds_json if isinstance(order.partial_refunds_json, list) else []
+    history = list(history)
+    history.append(
+        {
+            "percent": format(percent, "f"),
+            "refund_amount_cents": int(refund_cents),
+            "reason": reason,
+            "note": note,
+            "marketplace": marketplace,
+            "at": timezone.now().isoformat(),
+        }
+    )
+    order.refunded_amount_cents = int(order.refunded_amount_cents or 0) + int(refund_cents)
+    order.partial_refunds_json = history
+    order.save(update_fields=["refunded_amount_cents", "partial_refunds_json", "updated_at"])
+
+
+def partial_refund(order: MarketplaceOrder, *, percent, reason: str = "", note: str = "") -> dict:
+    """Refund a portion of the order total and leave the order open.
+
+    Lasoo uses Refunds_Create with partialRefund. Reverb posts a smaller
+    refund_amount. MyDeal posts /orders/{id}/refund for a shipped order.
+    The local refund total is stored only after the marketplace accepts.
+    """
+    kind = marketplace_kind(order.store.marketplace)
+    if kind not in PARTIAL_REFUND_MARKETPLACES:
+        raise MarketplaceError(
+            "Partial refund is available for Lasoo, Reverb, and MyDeal. "
+            "This marketplace has no refund route."
+        )
+    if order.status in (OrderStatus.CANCELLED, OrderStatus.REFUNDED):
+        raise MarketplaceError(f"Order is already {order.status.replace('_', ' ')}.")
+
+    parsed = _parse_refund_percent(percent)
+    if order.total_amount_cents is None or int(order.total_amount_cents) <= 0:
+        raise MarketplaceError("Order total is missing. Fetch orders again and retry.")
+    total = int(order.total_amount_cents)
+    refund_cents = _refund_cents_for_percent(total, parsed)
+    already = int(order.refunded_amount_cents or 0)
+    remaining = total - already
+    if refund_cents <= 0:
+        raise MarketplaceError("That percent rounds to 0.00. Choose a larger percent.")
+    if refund_cents > remaining:
+        raise MarketplaceError(
+            f"Only {_money_label(max(remaining, 0), _order_currency(order, kind))} "
+            "is still refundable on this order."
+        )
+    if refund_cents == remaining and already + refund_cents >= total:
+        raise MarketplaceError(
+            "That percent would refund the rest of the order. Use Cancel for a full refund."
+        )
+
+    reason_text = (reason or "").strip() or "Partial refund"
+    note_text = (note or "").strip()
+    if kind == "reverb":
+        from .reverb import orders as reverb_orders
+        result = reverb_orders.partial_refund(
+            order,
+            refund_cents=refund_cents,
+            reason=reason_text,
+            note=note_text,
+            percent=parsed,
+        )
+    elif kind == "mydeal":
+        from .mydeal import orders as mydeal_orders
+        result = mydeal_orders.partial_refund(
+            order,
+            refund_cents=refund_cents,
+            reason=reason_text,
+            note=note_text,
+            percent=parsed,
+        )
+    else:
+        result = _partial_refund_lasoo(
+            order,
+            refund_cents=refund_cents,
+            reason=reason_text,
+            note=note_text,
+            percent=parsed,
+        )
+
+    if not result.get("marketplace_ok"):
+        return result
+
+    _record_partial_refund(
+        order,
+        percent=parsed,
+        refund_cents=refund_cents,
+        reason=reason_text,
+        note=note_text,
+        marketplace=kind,
+    )
+    currency = _order_currency(order, kind)
+    result.update(
+        {
+            "ok": True,
+            "marketplace_ok": True,
+            "percent": format(parsed, "f"),
+            "refund_amount_cents": refund_cents,
+            "refunded_amount_cents": order.refunded_amount_cents,
+            "message": (
+                f"Refunded {format(parsed, 'f')}% ({_money_label(refund_cents, currency)}) "
+                f"on {kind.title()}. The order stays open."
+            ),
+        }
+    )
+    return result
+
+
+def _scale_refund_lines(lines: list[dict], refund_cents: int) -> list[dict]:
+    if not lines:
+        return []
+    weights = [max(0, int(line.get("totalCents") or 0)) for line in lines]
+    if sum(weights) <= 0:
+        weights = [1] * len(lines)
+    shares = allocate_cents(weights, refund_cents)
+    scaled = []
+    for line, share in zip(lines, shares):
+        if share <= 0:
+            continue
+        qty = line.get("quantity") or 1
+        try:
+            qty = int(qty)
+        except (TypeError, ValueError):
+            qty = 1
+        if qty < 1 or (share // qty) * qty != share:
+            qty = 1
+        per = share // qty
+        scaled.append(
+            {
+                **line,
+                "quantity": qty,
+                "salePriceCents": per,
+                "totalCents": share,
+                "amountPerItemCents": per,
+            }
+        )
+    return scaled
+
+
+def _partial_refund_lasoo(
+    order: MarketplaceOrder,
+    *,
+    refund_cents: int,
+    reason: str,
+    note: str,
+    percent: Decimal,
+) -> dict:
+    _require_lasoo(order.store)
+    client = LasooClient(order.store, order.environment)
+    lines = _scale_refund_lines(_refund_line_items(order, reason), refund_cents)
+    note_text = note or f"{format(percent, 'f')}% of the order total"
+    data = {
+        "invoiceId": _invoice_id_for_api(order),
+        "refundReason": reason,
+        "items": lines,
+        "lineItemIds": [i["lineItemId"] for i in lines],
+        "itemsToBeReturned": False,
+        "partialRefund": True,
+        "refundAmountCents": int(refund_cents),
+        "refundPostage": False,
+        "returnAddress": "",
+        "partialRefundNote": note_text,
+        "notes": note_text,
+    }
+    payload = build_payload("refunds_create", data=data, auth=client.auth_key)
+    result = client.send("refunds_create", payload)
+    if _lasoo_results_ok(result):
+        return {"ok": True, "marketplace_ok": True}
+    return {
+        "ok": False,
+        "marketplace_ok": False,
+        "message": _lasoo_error_message(result),
     }

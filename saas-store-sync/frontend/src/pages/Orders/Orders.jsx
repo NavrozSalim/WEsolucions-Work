@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
+    BadgePercent,
     Ban,
     CheckCircle2,
     ChevronDown,
@@ -26,6 +27,7 @@ import { getCatalogStores } from '../../services/catalogService';
 import {
     cancelOrder,
     completeOrderShipping,
+    partialRefundOrder,
     createTestOrder,
     exportOrdersExcel,
     getBunningsCarriers,
@@ -53,6 +55,19 @@ const STATUS_LABELS = {
     shipping_submitted: 'Shipping submitted',
     shipping_complete: 'Shipping complete',
 };
+
+const PARTIAL_REFUND_MARKETPLACES = new Set(['lasoo', 'reverb', 'mydeal']);
+
+function supportsPartialRefund(marketplaceCode) {
+    return PARTIAL_REFUND_MARKETPLACES.has(String(marketplaceCode || '').toLowerCase());
+}
+
+function refundPreviewCents(totalCents, percent) {
+    const total = Number(totalCents);
+    const pct = Number(percent);
+    if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(pct) || pct <= 0 || pct >= 100) return null;
+    return Math.round((total * pct) / 100);
+}
 
 function money(cents, currency = 'AUD') {
     if (cents == null || Number.isNaN(Number(cents))) return '—';
@@ -580,6 +595,156 @@ function CancelOrderModal({ open, onClose, onSubmit, order, loading, storeId }) 
     );
 }
 
+function PartialRefundModal({ open, order, storeId, marketplaceCode, onClose, onSubmit, loading }) {
+    const [percent, setPercent] = useState('15');
+    const [reason, setReason] = useState('');
+    const [otherReason, setOtherReason] = useState('');
+    const [note, setNote] = useState('');
+    const [reasons, setReasons] = useState([]);
+    const [reasonsLoading, setReasonsLoading] = useState(false);
+    const [error, setError] = useState('');
+
+    useEffect(() => {
+        if (!open || !storeId) return;
+        setError('');
+        setOtherReason('');
+        setNote('');
+        setPercent('15');
+        setReasonsLoading(true);
+        getOrderCancelReasons(storeId)
+            .then((res) => {
+                const list = Array.isArray(res.data?.reasons) ? res.data.reasons : [];
+                setReasons(list);
+                setReason(list[0]?.value || '');
+            })
+            .catch(() => {
+                setReasons([{ value: 'Other', label: 'Other' }]);
+                setReason('Other');
+                setError('Could not load marketplace reasons; using defaults.');
+            })
+            .finally(() => setReasonsLoading(false));
+    }, [open, storeId]);
+
+    if (!open) return null;
+
+    const currency = order?.details?.totals?.currency || 'AUD';
+    const totalCents = order?.details?.totals?.totalCents ?? order?.total_amount_cents;
+    const already = Number(order?.refunded_amount_cents) || 0;
+    const preview = refundPreviewCents(totalCents, percent);
+    const remaining = Number(totalCents) - already;
+    const isMydeal = String(marketplaceCode || '').toLowerCase() === 'mydeal';
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        const selected = reason.trim();
+        if (!selected) {
+            setError('Please select a reason.');
+            return;
+        }
+        const text = selected === 'Other' ? otherReason.trim() : selected;
+        if (!text) {
+            setError(selected === 'Other' ? 'Please enter a reason.' : 'Please select a reason.');
+            return;
+        }
+        const pct = Number(percent);
+        if (!Number.isFinite(pct) || pct <= 0 || pct >= 100) {
+            setError('Enter a percent greater than 0 and less than 100.');
+            return;
+        }
+        if (preview == null || preview <= 0) {
+            setError('That percent rounds to 0.00. Choose a larger percent.');
+            return;
+        }
+        if (preview >= remaining) {
+            setError('That percent would refund the rest of the order. Use Cancel for a full refund.');
+            return;
+        }
+        onSubmit({ percent: percent.trim(), reason: text, note: note.trim() });
+    };
+
+    const reasonOptions = [
+        { value: '', label: reasonsLoading ? 'Loading reasons…' : 'Select a reason' },
+        ...reasons.map((r) => ({ value: r.value, label: r.label || r.value })),
+    ];
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-xs" onClick={onClose} aria-hidden="true" />
+            <div
+                className="relative w-full max-w-md overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-700 px-6 py-4">
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                        Partial refund — {order?.invoice_number || order?.external_order_key}
+                    </h2>
+                    <button type="button" className="rounded-md p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={onClose}>
+                        <X className="h-5 w-5" />
+                    </button>
+                </div>
+                <form onSubmit={handleSubmit} className="space-y-4 px-6 py-4">
+                    {error && (
+                        <div className="rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-900/20 px-4 py-3 text-sm text-rose-700 dark:text-rose-300">
+                            {error}
+                        </div>
+                    )}
+                    <p className="text-sm text-slate-600 dark:text-slate-400">
+                        Refunds a portion of the order total ({money(totalCents, currency)}). The order stays open.
+                        {isMydeal ? ' MyDeal accepts this after the order is shipped.' : ''}
+                    </p>
+                    <Input
+                        label="Percent of order"
+                        type="number"
+                        min="0.01"
+                        max="99.99"
+                        step="0.01"
+                        value={percent}
+                        onChange={(e) => setPercent(e.target.value)}
+                        required
+                        disabled={loading}
+                    />
+                    <p className="text-sm text-slate-700 dark:text-slate-300">
+                        Refund amount: {preview == null ? '—' : money(preview, currency)}
+                        {already > 0 ? ` · already refunded ${money(already, currency)}` : ''}
+                    </p>
+                    <Select
+                        label="Reason"
+                        value={reason}
+                        onChange={(e) => setReason(e.target.value)}
+                        options={reasonOptions}
+                        disabled={reasonsLoading || loading}
+                        required
+                    />
+                    {reason === 'Other' && (
+                        <Input
+                            label="Other reason"
+                            value={otherReason}
+                            onChange={(e) => setOtherReason(e.target.value)}
+                            placeholder="Describe the reason"
+                            required
+                        />
+                    )}
+                    <Input
+                        label="Note"
+                        value={note}
+                        onChange={(e) => setNote(e.target.value)}
+                        placeholder="Optional note for the marketplace"
+                        disabled={loading}
+                    />
+                    <div className="flex justify-end gap-2 pt-2">
+                        <Button variant="secondary" type="button" onClick={onClose} disabled={loading}>
+                            Keep order
+                        </Button>
+                        <Button type="submit" disabled={loading || reasonsLoading || !reason || preview == null}>
+                            {loading ? 'Refunding…' : 'Refund portion'}
+                        </Button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    );
+}
+
 function DetailSection({ title, children, className = '', align = 'left' }) {
     return (
         <div className={`${className} ${align === 'right' ? 'text-right' : ''}`}>
@@ -883,7 +1048,23 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateT
                             <dt>Total</dt>
                             <dd className="tabular-nums">{money(totals.totalCents ?? order.total_amount_cents, currency)}</dd>
                         </div>
+                        {Number(order.refunded_amount_cents) > 0 && (
+                            <div className="flex justify-between gap-6 text-amber-700 dark:text-amber-300">
+                                <dt>Refunded</dt>
+                                <dd className="tabular-nums">{money(order.refunded_amount_cents, currency)}</dd>
+                            </div>
+                        )}
                     </dl>
+                    {Array.isArray(order.partial_refunds_json) && order.partial_refunds_json.length > 0 && (
+                        <ul className="mt-3 space-y-1 text-xs text-slate-500 dark:text-slate-400">
+                            {order.partial_refunds_json.map((entry, index) => (
+                                <li key={`${entry.at || index}`}>
+                                    {entry.percent}% · {money(entry.refund_amount_cents, currency)}
+                                    {entry.reason ? ` · ${entry.reason}` : ''}
+                                </li>
+                            ))}
+                        </ul>
+                    )}
                 </div>
             </div>
         </div>
@@ -911,6 +1092,8 @@ export default function Orders() {
     const [completingId, setCompletingId] = useState(null);
     const [cancelOrderRow, setCancelOrderRow] = useState(null);
     const [cancelLoading, setCancelLoading] = useState(false);
+    const [refundOrderRow, setRefundOrderRow] = useState(null);
+    const [refundLoading, setRefundLoading] = useState(false);
     const [exporting, setExporting] = useState(false);
     const [statusFilter, setStatusFilter] = useState(() => {
         if (initialStatus === 'open' || initialStatus === 'all') return initialStatus === 'open' ? 'open' : 'all';
@@ -1046,6 +1229,27 @@ export default function Orders() {
             .finally(() => setCancelLoading(false));
     };
 
+    const handlePartialRefund = ({ percent, reason, note }) => {
+        if (!refundOrderRow) return;
+        setRefundLoading(true);
+        partialRefundOrder(selectedStore, refundOrderRow.id, { percent, reason, note })
+            .then((res) => {
+                setMessage({
+                    text: res.data?.message || 'Partial refund sent.',
+                    variant: 'success',
+                });
+                setRefundOrderRow(null);
+                loadOrders(false);
+            })
+            .catch((err) => {
+                setMessage({
+                    text: err.response?.data?.detail || err.response?.data?.message || 'Partial refund failed.',
+                    variant: 'error',
+                });
+            })
+            .finally(() => setRefundLoading(false));
+    };
+
     const handleComplete = (order) => {
         setCompletingId(order.id);
         completeOrderShipping(selectedStore, order.id)
@@ -1067,9 +1271,11 @@ export default function Orders() {
         [stores, selectedStore]
     );
 
-    const isReverb = (selectedStoreData?.marketplace_code || '').toLowerCase() === 'reverb';
-    const isMydeal = (selectedStoreData?.marketplace_code || '').toLowerCase() === 'mydeal';
-    const isBunnings = (selectedStoreData?.marketplace_code || '').toLowerCase() === 'bunnings';
+    const marketplaceCode = (selectedStoreData?.marketplace_code || '').toLowerCase();
+    const isReverb = marketplaceCode === 'reverb';
+    const isMydeal = marketplaceCode === 'mydeal';
+    const isBunnings = marketplaceCode === 'bunnings';
+    const canPartialRefund = supportsPartialRefund(marketplaceCode);
     const orderIdLabel = isReverb || isBunnings ? 'Order ID' : 'Invoice';
     const orderDateTz = isMydeal ? MYDEAL_TZ : undefined;
 
@@ -1291,6 +1497,11 @@ export default function Orders() {
                                                     <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[o.status] || STATUS_STYLES.new}`}>
                                                         {STATUS_LABELS[o.status] || o.status}
                                                     </span>
+                                                    {Number(o.refunded_amount_cents) > 0 && (
+                                                        <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
+                                                            {money(o.refunded_amount_cents, currency)} refunded
+                                                        </p>
+                                                    )}
                                                 </div>
                                             </div>
                                             <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -1322,6 +1533,17 @@ export default function Orders() {
                                                     <CheckCircle2 className="h-3.5 w-3.5" />
                                                     Done
                                                 </button>
+                                                {canPartialRefund && (
+                                                    <button
+                                                        type="button"
+                                                        className="inline-flex min-h-10 items-center gap-1 rounded-md border border-slate-200 px-3 text-xs font-medium text-amber-700 disabled:opacity-40 dark:border-slate-700 dark:text-amber-300"
+                                                        onClick={() => setRefundOrderRow(o)}
+                                                        disabled={['cancelled', 'refunded'].includes(o.status)}
+                                                    >
+                                                        <BadgePercent className="h-3.5 w-3.5" />
+                                                        Partial
+                                                    </button>
+                                                )}
                                                 <button
                                                     type="button"
                                                     className="inline-flex min-h-10 items-center gap-1 rounded-md border border-slate-200 px-3 text-xs font-medium text-rose-600 disabled:opacity-40 dark:border-slate-700"
@@ -1407,6 +1629,11 @@ export default function Orders() {
                                                             <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[o.status] || STATUS_STYLES.new}`}>
                                                                 {STATUS_LABELS[o.status] || o.status}
                                                             </span>
+                                                            {Number(o.refunded_amount_cents) > 0 && (
+                                                                <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
+                                                                    {money(o.refunded_amount_cents, currency)} refunded
+                                                                </p>
+                                                            )}
                                                         </td>
                                                         <td className="px-4 py-2.5">
                                                             {primaryTicket ? (
@@ -1451,6 +1678,17 @@ export default function Orders() {
                                                                 >
                                                                     <CheckCircle2 className="h-4 w-4" />
                                                                 </button>
+                                                                {canPartialRefund && (
+                                                                    <button
+                                                                        type="button"
+                                                                        title="Partial refund"
+                                                                        className="rounded-md p-1.5 text-amber-700 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-900/20 disabled:opacity-40"
+                                                                        onClick={() => setRefundOrderRow(o)}
+                                                                        disabled={['cancelled', 'refunded'].includes(o.status)}
+                                                                    >
+                                                                        <BadgePercent className="h-4 w-4" />
+                                                                    </button>
+                                                                )}
                                                                 <button
                                                                     type="button"
                                                                     title="Cancel order"
@@ -1505,6 +1743,15 @@ export default function Orders() {
                 onClose={() => setCancelOrderRow(null)}
                 onSubmit={handleCancelOrder}
                 loading={cancelLoading}
+            />
+            <PartialRefundModal
+                open={!!refundOrderRow}
+                order={refundOrderRow}
+                storeId={selectedStore}
+                marketplaceCode={marketplaceCode}
+                onClose={() => setRefundOrderRow(null)}
+                onSubmit={handlePartialRefund}
+                loading={refundLoading}
             />
         </div>
     );

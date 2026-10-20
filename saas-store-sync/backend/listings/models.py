@@ -226,6 +226,10 @@ class MarketplaceOrder(models.Model):
     status = models.CharField(max_length=30, choices=OrderStatus.choices, default=OrderStatus.NEW, db_index=True)
     shipping_status = models.CharField(max_length=30, default='pending')
     total_amount_cents = models.IntegerField(null=True, blank=True)
+    # Cumulative seller partial refunds. Kept off the marketplace payload so a
+    # later order fetch cannot wipe it. A partial refund does not change status.
+    refunded_amount_cents = models.IntegerField(default=0)
+    partial_refunds_json = models.JSONField(blank=True, default=list)
     raw_response_json = models.JSONField(null=True, blank=True)
     environment = models.CharField(max_length=20, choices=Environment.choices, default=Environment.STAGING)
     shopify_order_id = models.CharField(max_length=64, blank=True, default='', db_index=True)

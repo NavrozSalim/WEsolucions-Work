@@ -317,6 +317,8 @@ export const completeOrderShipping = (storeId, orderId) =>
     api.post(`/stores/${storeId}/orders/${orderId}/shipping/complete/`);
 export const cancelOrder = (storeId, orderId, data = {}) =>
     api.post(`/stores/${storeId}/orders/${orderId}/cancel/`, data);
+export const partialRefundOrder = (storeId, orderId, data = {}) =>
+    api.post(`/stores/${storeId}/orders/${orderId}/partial-refund/`, data);
 export const getOrderCancelReasons = (storeId) =>
     api.get(`/stores/${storeId}/orders/cancel-reasons/`);
 
