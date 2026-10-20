@@ -596,6 +596,8 @@ function CancelOrderModal({ open, onClose, onSubmit, order, loading, storeId }) 
 }
 
 function PartialRefundModal({ open, order, storeId, marketplaceCode, onClose, onSubmit, loading }) {
+    const allowPartial = supportsPartialRefund(marketplaceCode);
+    const [refundType, setRefundType] = useState(allowPartial ? 'partial' : 'full');
     const [percent, setPercent] = useState('15');
     const [reason, setReason] = useState('');
     const [otherReason, setOtherReason] = useState('');
@@ -610,6 +612,7 @@ function PartialRefundModal({ open, order, storeId, marketplaceCode, onClose, on
         setOtherReason('');
         setNote('');
         setPercent('15');
+        setRefundType(allowPartial ? 'partial' : 'full');
         setReasonsLoading(true);
         getOrderCancelReasons(storeId)
             .then((res) => {
@@ -623,16 +626,24 @@ function PartialRefundModal({ open, order, storeId, marketplaceCode, onClose, on
                 setError('Could not load marketplace reasons; using defaults.');
             })
             .finally(() => setReasonsLoading(false));
-    }, [open, storeId]);
+    }, [open, storeId, allowPartial]);
 
     if (!open) return null;
 
+    const isPartial = refundType === 'partial';
     const currency = order?.details?.totals?.currency || 'AUD';
     const totalCents = order?.details?.totals?.totalCents ?? order?.total_amount_cents;
     const already = Number(order?.refunded_amount_cents) || 0;
     const preview = refundPreviewCents(totalCents, percent);
     const remaining = Number(totalCents) - already;
+    const fullAmount = Number.isFinite(remaining) ? Math.max(remaining, 0) : null;
     const isMydeal = String(marketplaceCode || '').toLowerCase() === 'mydeal';
+    const typeOptions = allowPartial
+        ? [
+            { value: 'partial', label: 'Partial refund' },
+            { value: 'full', label: 'Full refund' },
+        ]
+        : [{ value: 'full', label: 'Full refund' }];
 
     const handleSubmit = (e) => {
         e.preventDefault();
@@ -646,6 +657,14 @@ function PartialRefundModal({ open, order, storeId, marketplaceCode, onClose, on
             setError(selected === 'Other' ? 'Please enter a reason.' : 'Please select a reason.');
             return;
         }
+        if (!isPartial) {
+            if (order?.status === 'shipping_complete') {
+                setError('This order is already delivered. A full refund is not available from here.');
+                return;
+            }
+            onSubmit({ refundType: 'full', reason: text, note: note.trim() });
+            return;
+        }
         const pct = Number(percent);
         if (!Number.isFinite(pct) || pct <= 0 || pct >= 100) {
             setError('Enter a percent greater than 0 and less than 100.');
@@ -656,10 +675,10 @@ function PartialRefundModal({ open, order, storeId, marketplaceCode, onClose, on
             return;
         }
         if (preview >= remaining) {
-            setError('That percent would refund the rest of the order. Use Cancel for a full refund.');
+            setError('That percent would refund the rest of the order. Choose Full refund instead.');
             return;
         }
-        onSubmit({ percent: percent.trim(), reason: text, note: note.trim() });
+        onSubmit({ refundType: 'partial', percent: percent.trim(), reason: text, note: note.trim() });
     };
 
     const reasonOptions = [
@@ -676,7 +695,7 @@ function PartialRefundModal({ open, order, storeId, marketplaceCode, onClose, on
             >
                 <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-700 px-6 py-4">
                     <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-                        Partial refund — {order?.invoice_number || order?.external_order_key}
+                        Refund — {order?.invoice_number || order?.external_order_key}
                     </h2>
                     <button type="button" className="rounded-md p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={onClose}>
                         <X className="h-5 w-5" />
@@ -688,23 +707,39 @@ function PartialRefundModal({ open, order, storeId, marketplaceCode, onClose, on
                             {error}
                         </div>
                     )}
-                    <p className="text-sm text-slate-600 dark:text-slate-400">
-                        Refunds a portion of the order total ({money(totalCents, currency)}). The order stays open.
-                        {isMydeal ? ' MyDeal accepts this after the order is shipped.' : ''}
-                    </p>
-                    <Input
-                        label="Percent of order"
-                        type="number"
-                        min="0.01"
-                        max="99.99"
-                        step="0.01"
-                        value={percent}
-                        onChange={(e) => setPercent(e.target.value)}
-                        required
-                        disabled={loading}
+                    <Select
+                        label="Refund type"
+                        value={refundType}
+                        onChange={(e) => {
+                            setRefundType(e.target.value);
+                            setError('');
+                        }}
+                        options={typeOptions}
+                        disabled={loading || !allowPartial}
                     />
+                    <p className="text-sm text-slate-600 dark:text-slate-400">
+                        {isPartial
+                            ? `Refunds a portion of the order total (${money(totalCents, currency)}). The order stays open.`
+                            : `Refunds the remaining order total (${money(fullAmount, currency)}) and marks the order cancelled.`}
+                        {isPartial && isMydeal ? ' MyDeal accepts a partial refund after the order is shipped.' : ''}
+                    </p>
+                    {isPartial && (
+                        <Input
+                            label="Percent of order"
+                            type="number"
+                            min="0.01"
+                            max="99.99"
+                            step="0.01"
+                            value={percent}
+                            onChange={(e) => setPercent(e.target.value)}
+                            required
+                            disabled={loading}
+                        />
+                    )}
                     <p className="text-sm text-slate-700 dark:text-slate-300">
-                        Refund amount: {preview == null ? '—' : money(preview, currency)}
+                        Refund amount: {isPartial
+                            ? (preview == null ? '—' : money(preview, currency))
+                            : money(fullAmount, currency)}
                         {already > 0 ? ` · already refunded ${money(already, currency)}` : ''}
                     </p>
                     <Select
@@ -735,8 +770,12 @@ function PartialRefundModal({ open, order, storeId, marketplaceCode, onClose, on
                         <Button variant="secondary" type="button" onClick={onClose} disabled={loading}>
                             Keep order
                         </Button>
-                        <Button type="submit" disabled={loading || reasonsLoading || !reason || preview == null}>
-                            {loading ? 'Refunding…' : 'Refund portion'}
+                        <Button
+                            type="submit"
+                            variant={isPartial ? 'primary' : 'danger'}
+                            disabled={loading || reasonsLoading || !reason || (isPartial && preview == null)}
+                        >
+                            {loading ? 'Refunding…' : isPartial ? 'Refund portion' : 'Refund full amount'}
                         </Button>
                     </div>
                 </form>
@@ -1229,21 +1268,27 @@ export default function Orders() {
             .finally(() => setCancelLoading(false));
     };
 
-    const handlePartialRefund = ({ percent, reason, note }) => {
+    const handlePartialRefund = ({ refundType, percent, reason, note }) => {
         if (!refundOrderRow) return;
         setRefundLoading(true);
-        partialRefundOrder(selectedStore, refundOrderRow.id, { percent, reason, note })
+        const request = refundType === 'full'
+            ? cancelOrder(selectedStore, refundOrderRow.id, {
+                reason: note ? `${reason} — ${note}` : reason,
+            })
+            : partialRefundOrder(selectedStore, refundOrderRow.id, { percent, reason, note });
+        request
             .then((res) => {
+                const marketplaceOk = res.data?.marketplace_ok !== false;
                 setMessage({
-                    text: res.data?.message || 'Partial refund sent.',
-                    variant: 'success',
+                    text: res.data?.message || (refundType === 'full' ? 'Order refunded.' : 'Partial refund sent.'),
+                    variant: marketplaceOk ? 'success' : 'warning',
                 });
                 setRefundOrderRow(null);
                 loadOrders(false);
             })
             .catch((err) => {
                 setMessage({
-                    text: err.response?.data?.detail || err.response?.data?.message || 'Partial refund failed.',
+                    text: err.response?.data?.detail || err.response?.data?.message || 'Refund failed.',
                     variant: 'error',
                 });
             })
@@ -1541,7 +1586,7 @@ export default function Orders() {
                                                         disabled={['cancelled', 'refunded'].includes(o.status)}
                                                     >
                                                         <BadgePercent className="h-3.5 w-3.5" />
-                                                        Partial
+                                                        Refund
                                                     </button>
                                                 )}
                                                 <button
@@ -1681,7 +1726,7 @@ export default function Orders() {
                                                                 {canPartialRefund && (
                                                                     <button
                                                                         type="button"
-                                                                        title="Partial refund"
+                                                                        title="Refund order"
                                                                         className="rounded-md p-1.5 text-amber-700 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-900/20 disabled:opacity-40"
                                                                         onClick={() => setRefundOrderRow(o)}
                                                                         disabled={['cancelled', 'refunded'].includes(o.status)}
