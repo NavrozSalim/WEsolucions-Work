@@ -132,6 +132,13 @@ function formatDate(value, timeZone) {
     return d.toLocaleString(undefined, opts);
 }
 
+/** Marketplace purchase time. Falls back to when the row was saved. */
+function orderSortTime(order) {
+    const raw = order?.details?.dates?.orderedAt || order?.created_at;
+    const t = raw ? new Date(raw).getTime() : NaN;
+    return Number.isNaN(t) ? 0 : t;
+}
+
 function orderDetails(order) {
     return order?.details || {};
 }
@@ -1334,8 +1341,11 @@ export default function Orders() {
             }
         }
         const query = customerSearch.trim();
-        if (!query) return list;
-        return list.filter((o) => orderMatchesCustomerSearch(o, query));
+        if (query) {
+            list = list.filter((o) => orderMatchesCustomerSearch(o, query));
+        }
+        // Newest purchase date first; same date ordered by later time first.
+        return [...list].sort((a, b) => orderSortTime(b) - orderSortTime(a));
     }, [orders, statusFilter, customerSearch]);
 
     const statusFilterOptions = useMemo(() => {
