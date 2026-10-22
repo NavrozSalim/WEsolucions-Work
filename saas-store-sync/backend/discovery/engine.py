@@ -64,8 +64,9 @@ MAX_CATEGORY_PRODUCTS = 100_000
 _AMAZON_PRICE_CAP_CENTS = 2_000_000
 _AMAZON_MIN_BAND_CENTS = 100
 FETCH_TIMEOUT = 25
-# Product pages are fetched together. More than this gets eBay to refuse the server.
-EBAY_FETCH_WORKERS = 4
+# Amazon product pages share one delivery zip. A few at a time is faster
+# while pages come back clean. A run of blocks drops back to one page at a time.
+AMAZON_FETCH_WORKERS = 3
 
 _UA = (
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -153,6 +154,7 @@ def _amazon_session(marketplace: str, zip_code: str):
 
 
 _ebay_thread_sessions = threading.local()
+_amazon_thread_sessions = threading.local()
 _ebay_browser_lock = threading.Lock()
 
 
@@ -180,6 +182,34 @@ def _copy_session_cookies(source, target) -> None:
         target.cookies.update(source.cookies)
     except Exception:
         pass
+
+
+def _thread_amazon_session(parent, marketplace: str):
+    """One HTTP session per fetch thread, with the warmed delivery-zip cookies."""
+    parent_id = id(parent) if parent is not None else None
+    current = getattr(_amazon_thread_sessions, 'session', None)
+    if current is not None and getattr(_amazon_thread_sessions, 'parent_id', None) == parent_id:
+        return current
+    current = _browser_session()
+    current._marketplace = marketplace
+    current._amazon_blocks = 0
+    host = HOSTS.get(marketplace) or HOSTS['amazon_us']
+    current.headers['Accept-Language'] = 'en-US,en;q=0.9'
+    if 'amazon.com.au' in host:
+        current.cookies.set('i18n-prefs', 'AUD', domain='.amazon.com.au')
+        current.cookies.set('lc-acbau', 'en_AU', domain='.amazon.com.au')
+    else:
+        current.cookies.set('i18n-prefs', 'USD', domain='.amazon.com')
+        current.cookies.set('lc-main', 'en_US', domain='.amazon.com')
+    if parent is not None:
+        try:
+            current.headers.update(dict(parent.headers))
+        except Exception:
+            pass
+        _copy_session_cookies(parent, current)
+    _amazon_thread_sessions.session = current
+    _amazon_thread_sessions.parent_id = parent_id
+    return current
 
 
 def _apply_ebay_cookies(session, marketplace: str, parent=None) -> None:
@@ -813,24 +843,387 @@ def _category_urls(job: DiscoveryJob, inputs: list[dict]) -> list[str]:
     return urls
 
 
-def _fetch_ebay_products(rows, marketplace, errors, session, table, stop) -> None:
-    """Open several eBay product pages at once and save each one as it finishes."""
+def _discovery_ebay_html_ok(html: str | None, url: str) -> bool:
+    if not html or _blocked(html):
+        return False
+    parsed = parse_ebay_product(html, url)
+    return bool(parsed.get('title') or parsed.get('price') is not None)
+
+
+def _ebay_catalog_http(url: str, region: str, state: dict, market: str) -> tuple[str | None, str]:
+    from scrapers.ebay_common import EbayHTTP, _ebay_http_first_enabled
+
+    if not _ebay_http_first_enabled(region):
+        return None, 'http_skipped'
+    try:
+        html, _status, err = EbayHTTP.fetch(url, region, state, market)
+    except Exception as exc:
+        return None, f'http_error: {exc}'
+    return html, err or ''
+
+
+def _load_ebay_product_html(url: str, marketplace: str, state: dict) -> tuple[str | None, str]:
+    """Load one eBay product the way the catalog scraper does.
+
+    One warmed session, a short pause, HTTP first, then Chrome for this product
+    only. A failed Chrome open does not turn the browser off for later rows.
+    eBay AU goes through the catalog proxy pool when that pool is configured.
+    """
+    from scrapers.core import backoff_delay, random_delay
+    from scrapers.ebay_common import (
+        EBAY_MARKET_AU,
+        EBAY_MARKET_US,
+        RETRY_LIMIT,
+        EbayBrowserSession,
+        EbayDriver,
+    )
+
+    market = EBAY_MARKET_AU if marketplace == 'ebay_au' else EBAY_MARKET_US
+    region = 'AU' if marketplace == 'ebay_au' else 'US'
+    if marketplace == 'ebay_au':
+        random_delay(0.15, 0.4)
+        try:
+            from scrapers.ebay_au_scraper import _ensure_cookies_in_http_client
+
+            _ensure_cookies_in_http_client(state)
+        except Exception:
+            logger.warning('discovery ebay cookies were not loaded')
+    else:
+        random_delay(0.2, 0.6)
+
+    au_http_only = False
+    if marketplace == 'ebay_au':
+        try:
+            import os
+
+            from scrapers.ebay_au_proxies import proxies_configured
+
+            force_browser = (os.environ.get('EBAY_AU_FULL_ENGINE_SELENIUM') or '').strip().lower() in (
+                '1', 'true', 'yes', 'on',
+            )
+            au_http_only = bool(proxies_configured()) and not force_browser
+        except Exception:
+            au_http_only = False
+
+    last_err = 'unknown_error'
+    for attempt in range(RETRY_LIMIT):
+        if attempt > 0:
+            backoff_delay(attempt, base=2.0, jitter=1.5)
+            if marketplace == 'ebay_au':
+                try:
+                    from scrapers.ebay_au_proxies import proxies_configured
+
+                    if proxies_configured():
+                        EbayDriver.invalidate_au_proxy(state)
+                except Exception:
+                    logger.warning('discovery ebay au proxy did not rotate')
+        html, err = _ebay_catalog_http(url, region, state, market)
+        if _discovery_ebay_html_ok(html, url):
+            return html, ''
+        last_err = err or last_err
+        if last_err in ('http_404', 'not_found'):
+            return None, last_err
+        if au_http_only:
+            html2, err2 = _ebay_catalog_http(url, region, state, market)
+            if _discovery_ebay_html_ok(html2, url):
+                return html2, ''
+            last_err = err2 or last_err
+            continue
+        try:
+            browser_html, browser_err = EbayBrowserSession.warm_and_fetch(
+                url,
+                region,
+                state,
+                market,
+                force_proxy_rotate=attempt > 0,
+            )
+        except Exception as exc:
+            browser_html, browser_err = None, str(exc)
+        if _discovery_ebay_html_ok(browser_html, url):
+            return browser_html, ''
+        # The browser visit updates cookies on the HTTP client in ``state``.
+        html2, err2 = _ebay_catalog_http(url, region, state, market)
+        if _discovery_ebay_html_ok(html2, url):
+            return html2, ''
+        last_err = err2 or browser_err or last_err
+    return None, last_err
+
+
+def _ebay_miss_message(url: str, err: str) -> str:
+    if err in ('http_404', 'not_found', 'not_product_like', 'no_details'):
+        return f'{url}: product details were not in the page'
+    if err and '403' in err:
+        return (
+            f'{url}: eBay refused this server (HTTP 403). '
+            'eBay is blocking automated requests from this network.'
+        )
+    return f'{url}: the site blocked the request'
+
+
+_amazon_catalog_states = threading.local()
+
+
+def _close_amazon_catalog_http(state: dict | None) -> None:
+    if not state:
+        return
+    for key in ('amazon_http_session', 'amazon_au_http_session'):
+        sess = state.pop(key, None)
+        if sess is None:
+            continue
+        try:
+            sess.close()
+        except Exception:
+            pass
+
+
+def _amazon_catalog_http_state(marketplace: str, zip_code: str) -> dict:
+    token = (marketplace, zip_code or '')
+    current = getattr(_amazon_catalog_states, 'state', None)
+    if current is not None and current.get('_token') == token:
+        return current
+    _close_amazon_catalog_http(current)
+    current = {'_token': token}
+    _amazon_catalog_states.state = current
+    return current
+
+
+def _amazon_requests_session(marketplace: str, state: dict, zip_code: str):
+    """Catalog HTTP session. The delivery zip is set once and then reused."""
+    is_au = marketplace == 'amazon_au'
+    if is_au:
+        from scrapers.amazon_au_scraper import AmazonAUHTTP
+
+        session = AmazonAUHTTP._get_session(state, True)
+        host = 'https://www.amazon.com.au'
+    else:
+        from scrapers.amazon_us_scraper import AmazonHTTP
+
+        session = AmazonHTTP._get_session(state)
+        host = 'https://www.amazon.com'
+    if state.get('_discovery_zip_set'):
+        return session
+    code = (zip_code or '').strip()
+    if not code:
+        if is_au:
+            try:
+                from scrapers.amazon_au_scraper import amazon_au_postcode
+
+                code = amazon_au_postcode()
+            except Exception:
+                code = '2762'
+        else:
+            code = '10001'
+    try:
+        session.get(host + '/', timeout=FETCH_TIMEOUT)
+        session.post(
+            host + '/gp/delivery/ajax/address-change.html',
+            data={
+                'locationType': 'LOCATION_INPUT',
+                'zipCode': code,
+                'storeContext': 'generic',
+                'deviceType': 'web',
+                'pageType': 'Detail',
+                'actionSource': 'glow',
+            },
+            headers={
+                'x-requested-with': 'XMLHttpRequest',
+                'referer': host + '/',
+            },
+            timeout=FETCH_TIMEOUT,
+        )
+    except Exception:
+        logger.warning('Could not set Amazon delivery zip %s', code)
+    state['_discovery_zip_set'] = True
+    return session
+
+
+def _amazon_html_usable(html: str | None, url: str) -> bool:
+    if not html or _blocked(html):
+        return False
+    parsed = parse_amazon_product(html, url)
+    return bool(parsed.get('title') or parsed.get('price') is not None)
+
+
+def _amazon_http_once(url: str, marketplace: str, state: dict, zip_code: str) -> tuple[str, str]:
+    from scrapers.core import detect_block
+
+    try:
+        session = _amazon_requests_session(marketplace, state, zip_code)
+        response = session.get(url, timeout=FETCH_TIMEOUT, allow_redirects=True)
+    except requests.Timeout:
+        return '', 'timeout'
+    except requests.RequestException as exc:
+        return '', f'request_error: {exc}'
+    html = response.text or ''
+    status = getattr(response, 'status_code', 0) or 0
+    if status == 404:
+        return html, 'http_404'
+    if status != 200:
+        return html, f'http_{status}'
+    blocked, reason = detect_block(html)
+    if blocked or _blocked(html):
+        return html, f'blocked_{reason or "page"}'
+    if _amazon_html_usable(html, url):
+        return html, ''
+    return html, 'no_details'
+
+
+def _amazon_browser_html(url: str, marketplace: str, browser_state: dict) -> str | None:
+    """One Chrome page after HTTP retries fail. The driver is reused for this job."""
+    lock = browser_state.setdefault('_lock', threading.Lock())
+    with lock:
+        try:
+            from scrapers.amazon_us_scraper import AmazonDriver, AmazonScraper
+            from scrapers.core import random_delay
+        except Exception:
+            return None
+        driver = browser_state.get('amazon_driver')
+        if driver is None:
+            try:
+                driver = AmazonDriver.create()
+            except Exception:
+                logger.warning('discovery amazon browser did not start', exc_info=True)
+                return None
+            browser_state['amazon_driver'] = driver
+            if marketplace == 'amazon_au':
+                try:
+                    from scrapers.amazon_au_scraper import _ensure_au_location
+
+                    _ensure_au_location(driver, browser_state)
+                except Exception:
+                    logger.warning('discovery amazon au location was not set')
+            elif not browser_state.get('amazon_us_location_set'):
+                try:
+                    AmazonScraper.set_zip_on_product_page(driver, url)
+                    browser_state['amazon_us_location_set'] = True
+                except Exception:
+                    logger.warning('discovery amazon us zip was not set in the browser')
+        try:
+            driver.get(url)
+            random_delay(2, 4)
+            html = driver.page_source or ''
+        except Exception:
+            logger.info('discovery amazon browser missed %s', url)
+            return None
+        if _amazon_html_usable(html, url):
+            return html
+        return None
+
+
+def _load_amazon_product_html(
+    url: str,
+    marketplace: str,
+    http_state: dict,
+    browser_state: dict,
+    zip_code: str,
+) -> tuple[str | None, str]:
+    """HTTP with the catalog retry, then one Chrome open if the page is still blocked."""
+    from scrapers.amazon_us_scraper import RETRY_LIMIT
+    from scrapers.core import backoff_delay, get_random_headers
+
+    last_err = 'unknown_error'
+    is_au = marketplace == 'amazon_au'
+    use_proxies = False
+    if is_au:
+        try:
+            from scrapers.amazon_au_proxies import proxies_configured
+
+            use_proxies = bool(proxies_configured())
+        except Exception:
+            use_proxies = False
+    for attempt in range(RETRY_LIMIT):
+        html, err = _amazon_http_once(url, marketplace, http_state, zip_code)
+        if not err:
+            if is_au:
+                try:
+                    from scrapers.amazon_au_proxies import mark_success
+                    from scrapers.amazon_au_scraper import _SESSION_PROXY_KEY
+
+                    mark_success(http_state.get(_SESSION_PROXY_KEY))
+                except Exception:
+                    pass
+            return html, ''
+        last_err = err or last_err
+        if last_err in ('http_404', 'not_found'):
+            return None, last_err
+        if attempt + 1 >= RETRY_LIMIT:
+            break
+        ip_problem = (
+            last_err.startswith(('blocked', 'http_5', 'http_403', 'http_429', 'request_error'))
+            or last_err in ('timeout',)
+        )
+        if is_au and use_proxies and ip_problem:
+            try:
+                from scrapers.amazon_au_proxies import mark_blocked
+                from scrapers.amazon_au_scraper import AmazonAUHTTP, _SESSION_PROXY_KEY
+
+                mark_blocked(http_state.get(_SESSION_PROXY_KEY))
+                AmazonAUHTTP._get_session(http_state, True, rotate=True)
+                http_state.pop('_discovery_zip_set', None)
+            except Exception:
+                logger.warning('discovery amazon au proxy did not rotate')
+            continue
+        backoff_delay(attempt + 1, base=2.0, jitter=1.5)
+        if last_err.startswith('blocked'):
+            try:
+                session = _amazon_requests_session(marketplace, http_state, zip_code)
+                host = 'https://www.amazon.com.au/' if is_au else 'https://www.amazon.com/'
+                session.headers.update(get_random_headers(host))
+            except Exception:
+                pass
+    html = _amazon_browser_html(url, marketplace, browser_state)
+    if html:
+        return html, ''
+    return None, last_err
+
+
+def _catalog_amazon_product(row, marketplace, errors, zip_code='', browser_state=None):
+    stamped = stamp_identity(marketplace, row)
+    url = stamped.get('url') or ''
+    if not url:
+        errors.append('A row had no product URL or id.')
+        return None
+    http_state = _amazon_catalog_http_state(marketplace, zip_code)
+    if browser_state is None:
+        browser_state = {}
+    html, err = _load_amazon_product_html(url, marketplace, http_state, browser_state, zip_code)
+    if not html:
+        if err in ('http_404', 'not_found', 'no_details'):
+            errors.append(f'{url}: product details were not in the page')
+        else:
+            errors.append(f'{url}: the site blocked the request')
+        return None
+    parsed = parse_amazon_product(html, url)
+    if not parsed.get('title') and parsed.get('price') is None:
+        errors.append(f'{url}: product details were not in the page')
+        return None
+    return parsed
+
+
+def _fetch_amazon_products(rows, marketplace, errors, session, table, stop, zip_code='') -> None:
+    """Open a few Amazon product pages at once while they come back clean.
+
+    Each thread keeps its own catalog HTTP session and delivery zip. Two blocks
+    in a row drop the job back to one page at a time. ``session`` is the category
+    curl session and is not used for these product pages.
+    """
+    del session
+    browser_state = {'_lock': threading.Lock()}
+    pending = iter(rows)
+    streak = 0
+    degraded = False
 
     def one(row):
         local_errors = []
-        parsed = _live_product_row(
-            row,
-            marketplace,
-            local_errors,
-            _thread_ebay_session(session),
+        parsed = _catalog_amazon_product(
+            row, marketplace, local_errors, zip_code, browser_state,
         )
         if parsed:
             fill_image_columns(parsed)
         return row, parsed, local_errors
 
-    pending = iter(rows)
     try:
-        with ThreadPoolExecutor(max_workers=EBAY_FETCH_WORKERS) as pool:
+        with ThreadPoolExecutor(max_workers=AMAZON_FETCH_WORKERS) as pool:
             inflight = set()
 
             def submit_one() -> bool:
@@ -841,9 +1234,13 @@ def _fetch_ebay_products(rows, marketplace, errors, session, table, stop) -> Non
                 inflight.add(pool.submit(one, row))
                 return True
 
-            for _ in range(EBAY_FETCH_WORKERS):
-                if not submit_one():
-                    break
+            def fill() -> None:
+                target = 1 if degraded else AMAZON_FETCH_WORKERS
+                while len(inflight) < target:
+                    if not submit_one():
+                        break
+
+            fill()
             while inflight:
                 if stop():
                     for fut in inflight:
@@ -859,16 +1256,70 @@ def _fetch_ebay_products(rows, marketplace, errors, session, table, stop) -> Non
                     if local_errors:
                         errors.extend(local_errors)
                         table.warning = local_errors[-1]
-                        logger.info('discovery ebay miss %s (%s)', url, local_errors[-1])
+                        logger.info('discovery amazon miss %s (%s)', url, local_errors[-1])
                     if parsed:
-                        logger.info('discovery ebay kept %s', url)
+                        streak = 0
+                        degraded = False
+                        logger.info('discovery amazon kept %s', url)
                         table.add([parsed])
                     elif local_errors:
+                        streak += 1
+                        if streak >= 2:
+                            degraded = True
                         table.scraped += 1
                         table.publish()
-                    submit_one()
+                    fill()
     finally:
-        _close_ebay_browser(session)
+        try:
+            from scrapers.amazon_us_scraper import AmazonDriver
+
+            AmazonDriver.quit_safe(browser_state.get('amazon_driver'))
+        except Exception:
+            logger.warning('discovery amazon browser did not close')
+
+
+def _fetch_ebay_products(rows, marketplace, errors, session, table, stop) -> None:
+    """Open eBay product pages one at a time on the catalog session.
+
+    ``session`` is unused. The catalog HTTP client and browser live in a
+    state dict that stays warm for this file and is closed at the end.
+    """
+    del session
+    from scrapers.ebay_common import EBAY_MARKET_AU, EBAY_MARKET_US, close_ebay_market_session
+
+    market = EBAY_MARKET_AU if marketplace == 'ebay_au' else EBAY_MARKET_US
+    state = {}
+    try:
+        for row in rows:
+            if stop():
+                raise DiscoveryCancelled()
+            stamped = stamp_identity(marketplace, row)
+            url = stamped.get('url') or ''
+            if not url:
+                message = 'A row had no product URL or id.'
+                errors.append(message)
+                table.warning = message
+                table.scraped += 1
+                table.publish()
+                continue
+            html, err = _load_ebay_product_html(url, marketplace, state)
+            parsed = parse_ebay_product(html, url) if html else None
+            if parsed and (parsed.get('title') or parsed.get('price') is not None):
+                fill_image_columns(parsed)
+                logger.info('discovery ebay kept %s', url)
+                table.add([parsed])
+                continue
+            message = _ebay_miss_message(url, err)
+            errors.append(message)
+            table.warning = message
+            logger.info('discovery ebay miss %s (%s)', url, message)
+            table.scraped += 1
+            table.publish()
+    finally:
+        try:
+            close_ebay_market_session(state, market)
+        except Exception:
+            logger.warning('discovery ebay session did not close')
 
 
 def _promote_discovery(job: DiscoveryJob) -> None:
@@ -954,10 +1405,13 @@ def _execute_job(job_id, lock_owner=None) -> None:
         refresh_discovery_lock(job.id, lock_owner, force=True)
         stop = lambda: _should_stop(job.id)
         session = None
-        if not job.use_sample and is_amazon(job.marketplace):
-            session = _amazon_session(job.marketplace, (job.zip_code or '').strip())
-        elif not job.use_sample and is_ebay(job.marketplace):
-            session = _ebay_session(job.marketplace)
+        # Product pages open their own catalog session. Category pages still
+        # use the discovery curl session warmed here.
+        if not job.use_sample and job.mode == DiscoveryJob.Mode.CATEGORY:
+            if is_amazon(job.marketplace):
+                session = _amazon_session(job.marketplace, (job.zip_code or '').strip())
+            elif is_ebay(job.marketplace):
+                session = _ebay_session(job.marketplace)
 
         if job.mode == DiscoveryJob.Mode.CATEGORY:
             urls = _category_urls(job, inputs)
@@ -984,11 +1438,13 @@ def _execute_job(job_id, lock_owner=None) -> None:
             if not resume:
                 table.duplicates += pre_dupes
             ebay_pending = []
+            amazon_pending = []
             live_ebay = not job.use_sample and is_ebay(job.marketplace)
-            if live_ebay:
+            live_amazon = not job.use_sample and is_amazon(job.marketplace)
+            if live_ebay or live_amazon:
                 _raise_if_stopped(job.id)
             for row in unique_inputs:
-                if not live_ebay:
+                if not live_ebay and not live_amazon:
                     _raise_if_stopped(job.id)
                 done_key = product_key(job.marketplace, row)
                 if done_key and done_key in table.resumed:
@@ -1003,6 +1459,9 @@ def _execute_job(job_id, lock_owner=None) -> None:
                 if live_ebay:
                     ebay_pending.append(row)
                     continue
+                if live_amazon:
+                    amazon_pending.append(row)
+                    continue
                 parsed = (
                     _sample_product_row(job, row)
                     if job.use_sample
@@ -1011,6 +1470,16 @@ def _execute_job(job_id, lock_owner=None) -> None:
                 if parsed:
                     fill_image_columns(parsed)
                     table.add([parsed])
+            if amazon_pending:
+                _fetch_amazon_products(
+                    amazon_pending,
+                    job.marketplace,
+                    errors,
+                    session,
+                    table,
+                    stop,
+                    zip_code=(job.zip_code or '').strip(),
+                )
             if ebay_pending:
                 _fetch_ebay_products(
                     ebay_pending,

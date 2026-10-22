@@ -474,7 +474,7 @@ class ParserTests(TestCase):
         self.assertEqual([row['asin'] for row in extra], ['B0SAMPLE08'])
         self.assertEqual(extra[0]['url'], 'https://www.amazon.com/dp/B0SAMPLE08')
 
-    def test_ebay_product_is_saved_as_soon_as_its_page_returns(self):
+    def test_ebay_products_continue_after_a_blocked_page(self):
         saved = []
 
         class Table:
@@ -482,30 +482,62 @@ class ParserTests(TestCase):
             scraped = 0
 
             def add(self, batch):
-                saved.append((time.monotonic(), batch[0]['title']))
+                saved.append(batch[0]['title'])
 
             def publish(self):
                 return None
 
-        def fake_fetch(row, marketplace, errors, session):
-            if row['n']:
-                time.sleep(0.6)
-            return {
-                'title': f"p{row['n']}",
-                'price': 1,
-                'item_id': str(row['n']),
-                'url': row['url'],
-            }
+        def fake_html(url, marketplace, state):
+            if url.endswith('/1'):
+                return None, 'challenge'
+            return (
+                '<h1 class="x-item-title__mainTitle"><span>Plant Stand</span></h1>'
+                '<div data-testid="x-bin-price"><span>$9.99</span></div>'
+            ), ''
 
-        rows = [{'url': f'https://www.ebay.com.au/itm/{i}', 'n': i} for i in range(4)]
-        started = time.monotonic()
+        rows = [
+            {'url': 'https://www.ebay.com/itm/1'},
+            {'url': 'https://www.ebay.com/itm/2'},
+        ]
+        table = Table()
+        with patch('discovery.engine._load_ebay_product_html', side_effect=fake_html):
+            _fetch_ebay_products(rows, 'ebay_us', [], None, table, lambda: False)
+        self.assertEqual(saved, ['Plant Stand'])
+        self.assertIn('blocked the request', table.warning)
+
+    def test_ebay_product_html_retries_in_chrome_then_http(self):
+        from discovery.engine import _load_ebay_product_html
+
+        good = (
+            '<h1 class="x-item-title__mainTitle"><span>Bamboo Plant Stand</span></h1>'
+            '<div data-testid="x-bin-price"><span>$35.91</span></div>'
+        )
+        calls = []
+
+        def fake_http(url, region, state, market):
+            calls.append('http')
+            if calls.count('http') == 1:
+                return '<html><title>Pardon Our Interruption</title></html>', 'challenge'
+            return good, ''
+
+        def fake_browser(url, region, state, market, force_proxy_rotate=False):
+            calls.append('browser')
+            return '<html><title>Pardon Our Interruption</title></html>', 'challenge'
+
         with (
-            patch('discovery.engine._live_product_row', side_effect=fake_fetch),
-            patch('discovery.engine._thread_ebay_session', return_value=None),
+            patch('discovery.engine._ebay_catalog_http', side_effect=fake_http),
+            patch('scrapers.ebay_common.EbayBrowserSession.warm_and_fetch', side_effect=fake_browser),
+            patch('scrapers.core.random_delay'),
+            patch('scrapers.core.backoff_delay'),
         ):
-            _fetch_ebay_products(rows, 'ebay_au', [], None, Table(), lambda: False)
-        self.assertEqual(len(saved), 4)
-        self.assertLess(saved[0][0] - started, 0.4)
+            html, err = _load_ebay_product_html(
+                'https://www.ebay.com/itm/182391181967',
+                'ebay_us',
+                {},
+            )
+        self.assertEqual(err, '')
+        self.assertIn('Bamboo Plant Stand', html)
+        self.assertEqual(calls, ['http', 'browser', 'http'])
 
     def test_ebay_product_recovers_when_the_first_page_is_challenged(self):
         from discovery.engine import _live_product_row
@@ -617,6 +649,52 @@ class ParserTests(TestCase):
         self.assertEqual(parsed['title'], 'Steel Cookware Set')
         self.assertEqual(parsed['price'], 49.99)
         self.assertEqual(len(calls), 2)
+
+    def test_amazon_thread_session_keeps_the_delivery_zip_cookie(self):
+        import requests
+
+        from discovery.engine import _thread_amazon_session
+
+        parent = requests.Session()
+        parent.headers['Accept-Language'] = 'en-AU,en;q=0.9'
+        parent.cookies.set('session-id', 'zip-2762', domain='.amazon.com.au')
+        child = _thread_amazon_session(parent, 'amazon_au')
+        again = _thread_amazon_session(parent, 'amazon_au')
+        self.assertIs(again, child)
+        self.assertEqual(child.cookies.get('session-id'), 'zip-2762')
+        self.assertEqual(child.headers.get('Accept-Language'), 'en-AU,en;q=0.9')
+
+    def test_amazon_products_are_fetched_together(self):
+        from discovery.engine import _fetch_amazon_products
+
+        saved = []
+
+        class Table:
+            warning = ''
+            scraped = 0
+
+            def add(self, batch):
+                saved.append(batch[0]['title'])
+
+            def publish(self):
+                return None
+
+        def fake_fetch(row, marketplace, errors, zip_code='', browser_state=None):
+            time.sleep(0.45)
+            return {
+                'title': f"p{row['n']}",
+                'price': 1,
+                'asin': f'B0SAMPLE{row["n"]}',
+                'url': row['url'],
+            }
+
+        rows = [{'url': f'https://www.amazon.com/dp/B0SAMPLE{i}', 'n': i} for i in range(3)]
+        started = time.monotonic()
+        with patch('discovery.engine._catalog_amazon_product', side_effect=fake_fetch):
+            _fetch_amazon_products(rows, 'amazon_us', [], None, Table(), lambda: False)
+        elapsed = time.monotonic() - started
+        self.assertEqual(sorted(saved), ['p0', 'p1', 'p2'])
+        self.assertLess(elapsed, 1.15)
 
     def test_ebay_search_asks_for_240_listings_per_page(self):
         widened = ebay_results_url('https://www.ebay.com/sch/i.html?_nkw=drill')
