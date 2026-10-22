@@ -667,6 +667,10 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
 
     When replace_store_catalog is True, deactivate all active listings on the
     store before applying the file so the store reflects only this upload.
+
+    A successful Add or Update sync marks every remaining active listing
+    Pending so the next scrape refreshes vendor prices. A delete-only file
+    only deactivates the rows in that file.
     """
     sync_log_batch = int(getattr(settings, 'CATALOG_SYNC_LOG_BATCH', 32) or 32)
     progress_every = int(getattr(settings, 'CATALOG_SYNC_PROGRESS_EVERY', 32) or 32)
@@ -731,8 +735,11 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
         log_buffer.clear()
 
     processed = 0
+    has_add_or_update = False
     for row in rows_iter:
         action = _normalize_action(row.action_raw)
+        if action != 'delete':
+            has_add_or_update = True
         log_status = CatalogSyncLog.Status.SUCCESS
         log_message = None
 
@@ -866,15 +873,26 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
     upload.save(update_fields=['status', 'error_summary', 'processed_rows'])
 
     reset_stats = None
-    # After a successful sync, all active listings need a fresh vendor scrape.
-    # Failed rows on the file do not block this — users fix those separately.
-    if upload.status in (CatalogUpload.Status.SYNCED, CatalogUpload.Status.PARTIAL):
+    # Add/Update syncs mark every active listing Pending so the next scrape
+    # refreshes vendor prices. Failed rows on the file do not block this.
+    # A delete-only file must not do that: other scraped/failed listings keep
+    # their status, scrape error, and stored selling price.
+    if (
+        has_add_or_update
+        and upload.status in (CatalogUpload.Status.SYNCED, CatalogUpload.Status.PARTIAL)
+    ):
         reset_stats = _chunked_reset_store_active_listings_pending_scrape(store)
         logger.info(
             'catalog sync complete upload_id=%s store_id=%s pending_reset_batches=%s',
             upload_id,
             store.id,
             reset_stats.get('batches'),
+        )
+    elif upload.status in (CatalogUpload.Status.SYNCED, CatalogUpload.Status.PARTIAL):
+        logger.info(
+            'catalog sync skipped pending reset upload_id=%s store_id=%s reason=delete_only',
+            upload_id,
+            store.id,
         )
 
     return {

@@ -184,6 +184,99 @@ class CatalogSyncMultiTenantTests(TestCase):
         out = run_catalog_sync(str(up.id))
         self.assertEqual(out.get('error'), 'upload_store_user_mismatch')
 
+    def _listing(self, *, sku, mid, status, price, stock=1, failed_count=0, scrape_error=None):
+        product = Product.objects.create(
+            vendor=self.vendor,
+            owner=self.user_a,
+            vendor_sku=sku,
+            variation_id='',
+            vendor_url=f'https://www.ebay.com.au/itm/{sku}',
+        )
+        return ProductMapping.objects.create(
+            store=self.store_a,
+            product=product,
+            marketplace_child_sku=sku,
+            marketplace_id=mid,
+            sync_status=status,
+            store_price=price,
+            store_stock=stock,
+            failed_sync_count=failed_count,
+            scrape_error=scrape_error,
+            is_active=True,
+        )
+
+    def test_delete_only_sync_leaves_other_listings_unchanged(self):
+        scraped = self._listing(
+            sku='NPP-256089167367-New',
+            mid='MID-SCRAPED',
+            status='scraped',
+            price=Decimal('199.00'),
+            stock=4,
+        )
+        failed = self._listing(
+            sku='PP-E-390851135354',
+            mid='MID-FAILED',
+            status='failed',
+            price=None,
+            stock=0,
+            failed_count=2,
+            scrape_error='no_vendor_url: Product has no vendor URL',
+        )
+        target = self._listing(
+            sku='AMZ-DEL-1',
+            mid='AMZ-TO-DELETE',
+            status='scraped',
+            price=Decimal('42.00'),
+            stock=2,
+        )
+        upload = CatalogUpload.objects.create(
+            user=self.user_a,
+            store=self.store_a,
+            original_filename='delete.csv',
+            status=CatalogUpload.Status.VALIDATED,
+            total_rows=1,
+        )
+        CatalogUploadRow.objects.create(
+            catalog_upload=upload,
+            row_number=2,
+            vendor_name_raw='AmazonAU',
+            store_name_raw=self.store_a.name,
+            marketplace_id_raw='AMZ-TO-DELETE',
+            vendor_sku_raw='AMZ-DEL-1',
+            action_raw='Delete',
+            vendor=self.vendor,
+        )
+
+        result = run_catalog_sync(str(upload.id))
+
+        self.assertEqual(result.get('deleted'), 1, result)
+        self.assertEqual(result.get('errors', 0), 0, result)
+        self.assertIsNone(result.get('pending_reset_rows'))
+        scraped.refresh_from_db()
+        failed.refresh_from_db()
+        target.refresh_from_db()
+        self.assertEqual(scraped.sync_status, 'scraped')
+        self.assertEqual(scraped.store_price, Decimal('199.00'))
+        self.assertEqual(scraped.store_stock, 4)
+        self.assertTrue(scraped.is_active)
+        self.assertEqual(failed.sync_status, 'failed')
+        self.assertIsNone(failed.store_price)
+        self.assertEqual(failed.failed_sync_count, 2)
+        self.assertEqual(failed.scrape_error, 'no_vendor_url: Product has no vendor URL')
+        self.assertTrue(failed.is_active)
+        self.assertFalse(target.is_active)
+        self.assertEqual(target.sync_status, 'scraped')
+        self.assertEqual(target.store_price, Decimal('42.00'))
+
+    @patch('catalog.tasks._chunked_reset_store_active_listings_pending_scrape', side_effect=_noop_reset)
+    def test_add_sync_still_resets_active_listings(self, mock_reset):
+        upload = self._make_upload(
+            user=self.user_a, store=self.store_a, mid='MID-ADD-RESET', vsku='VSKU-ADD-RESET',
+        )
+        result = run_catalog_sync(str(upload.id))
+        self.assertEqual(result.get('added'), 1, result)
+        mock_reset.assert_called_once_with(self.store_a)
+
 
 class IngestApplyTenantTests(TestCase):
     def setUp(self):
