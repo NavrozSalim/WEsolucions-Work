@@ -44,20 +44,25 @@ def manual_sync_mappings(store, vendor_id=None):
 
     Sears and Walmart need a child SKU or a marketplace id. Kogan matches the
     Google Sheet by catalog SKU (parent SKU, child SKU, or a previously stored
-    sheet key), so a blank marketplace id does not drop the row. Other
-    marketplaces need a marketplace id. Pending rows are left out. Failed rows
-    that can be pushed stay in so their stock 0 is sent.
+    sheet key), so a blank marketplace id does not drop the row. Kogan also
+    includes rows with no price and sends stock 0 without changing the price
+    cells. Other marketplaces need a marketplace id and a price. Pending rows
+    are left out. Failed rows stay in so their stock 0 is sent.
     """
     from django.db.models import Q
 
     from catalog.models import ProductMapping
 
-    qs = ProductMapping.objects.filter(
-        store=store,
-        is_active=True,
-        sync_status__in=list(MANUAL_SYNC_STATUSES),
-        store_price__isnull=False,
-    )
+    filters = {
+        'store': store,
+        'is_active': True,
+        'sync_status__in': list(MANUAL_SYNC_STATUSES),
+    }
+    # A Kogan row with no price still needs stock 0 on the sheet. Other
+    # marketplaces cannot post inventory without a price.
+    if not store_is_kogan(store):
+        filters['store_price__isnull'] = False
+    qs = ProductMapping.objects.filter(**filters)
     if store_is_sears(store) or store_is_walmart(store):
         missing_child = Q(marketplace_child_sku__isnull=True) | Q(marketplace_child_sku='')
         missing_id = Q(marketplace_id__isnull=True) | Q(marketplace_id='')

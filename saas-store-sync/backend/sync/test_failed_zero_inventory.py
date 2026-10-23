@@ -77,6 +77,7 @@ class ManualSyncIncludesFailedTests(SimpleTestCase):
         objects.filter.return_value.exclude.assert_called_once_with(
             missing_parent & missing_child & missing_id,
         )
+        self.assertNotIn('store_price__isnull', objects.filter.call_args.kwargs)
 
 
 class FailedZeroInventoryTests(SimpleTestCase):

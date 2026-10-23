@@ -2014,7 +2014,15 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                         error_message='No marketplace listing ID or resolvable SKU for push',
                     )
                     continue
-                bulk_queue.append((pm, listing_id, pm.store_price, int(pm.store_stock or 0)))
+                price = pm.store_price
+                stock = int(pm.store_stock or 0)
+                if store_is_kogan(store) and price is None:
+                    # No sale price: write stock 0 only and leave the sheet price cells alone.
+                    stock = 0
+                    if pm.store_stock != 0:
+                        pm.store_stock = 0
+                        pm.save(update_fields=['store_stock'])
+                bulk_queue.append((pm, listing_id, price, stock))
                 queued_pairs.append((pm, str(listing_id)))
                 queued_count += 1
 

@@ -310,3 +310,40 @@ class KoganManualBulkPushTests(TestCase):
         self.assertIn('SHEET-ONLY', {row[0] for row in payload})
         saved = ProductMapping.objects.get(product=product)
         self.assertEqual(saved.marketplace_id, 'SHEET-ONLY')
+
+    @patch('store_adapters.get_adapter')
+    def test_manual_sync_sends_stock_zero_when_kogan_price_is_missing(self, get_adapter_mock):
+        product = Product.objects.create(
+            owner=self.user,
+            vendor=self.vendor,
+            vendor_sku='vendor-no-price',
+            vendor_url='https://example.com/no-price',
+        )
+        ProductMapping.objects.create(
+            store=self.store,
+            product=product,
+            is_active=True,
+            sync_status='failed',
+            store_price=None,
+            store_stock=4,
+            marketplace_parent_sku='NO-PRICE',
+            marketplace_child_sku='',
+            marketplace_id='',
+        )
+        adapter = MagicMock()
+        adapter.update_products_bulk.return_value = {
+            'ok': {'KOG-SKU-1', 'KOG-SKU-2', 'KOG-SKU-3', 'NO-PRICE'},
+            'failed': [],
+        }
+        get_adapter_mock.return_value = adapter
+
+        result = _execute_store_push_listings_only(str(self.store.id), disable_schedule=False)
+
+        self.assertEqual(result.get('pushed'), 4)
+        payload = adapter.update_products_bulk.call_args[0][0]
+        no_price = next(row for row in payload if row[0] == 'NO-PRICE')
+        self.assertIsNone(no_price[1])
+        self.assertEqual(no_price[2], 0)
+        saved = ProductMapping.objects.get(product=product)
+        self.assertEqual(saved.store_stock, 0)
+        self.assertEqual(saved.sync_status, 'failed')

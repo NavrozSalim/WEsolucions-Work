@@ -107,6 +107,38 @@ class KoganAdapterRrpTests(SimpleTestCase):
         self.assertNotIn('Sheet1!E3', ranges)
 
     @patch.object(KoganAdapter, '_get_service')
+    def test_bulk_update_writes_stock_only_when_price_is_missing(self, mock_get_service):
+        store = _kogan_store()
+        adapter = KoganAdapter(store)
+        adapter._header_cache = [
+            'PRODUCT_SKU',
+            'STOCK',
+            'PRICE',
+            'kogan_first_price',
+            'rrp',
+        ]
+        batch_updates = []
+
+        def _batch_update(**kwargs):
+            batch_updates.extend(kwargs['body']['data'])
+            return MagicMock(execute=MagicMock(return_value={}))
+
+        values_api = MagicMock()
+        values_api.get.return_value.execute.return_value = {'values': [['NO-PRICE']]}
+        values_api.batchUpdate.side_effect = _batch_update
+        spreadsheets_api = MagicMock()
+        spreadsheets_api.values.return_value = values_api
+        mock_get_service.return_value.spreadsheets.return_value = spreadsheets_api
+
+        result = adapter.update_products_bulk([
+            ('NO-PRICE', None, 0, None, None),
+        ])
+
+        self.assertEqual(result['ok'], {'NO-PRICE'})
+        ranges = {u['range']: u['values'][0][0] for u in batch_updates}
+        self.assertEqual(ranges, {'Sheet1!B2': 0})
+
+    @patch.object(KoganAdapter, '_get_service')
     def test_bulk_update_matches_price_rrp_headers_case_insensitive(self, mock_get_service):
         store = _kogan_store(kogan_price_column='PRICE', kogan_rrp_column='rrp')
         adapter = KoganAdapter(store)
