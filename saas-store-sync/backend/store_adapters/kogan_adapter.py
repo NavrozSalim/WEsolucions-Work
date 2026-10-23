@@ -204,8 +204,9 @@ class KoganAdapter(BaseStoreAdapter):
         Bulk update many SKU rows in a single run.
 
         items: list of (sku, first_price, stock, rrp, list_price) — rrp/list_price may be None.
-        on_batch_progress(batch_num, total_batches, skus_sent, skus_to_write) runs after
-        each Google Sheets batchUpdate. should_abort() is checked between batches.
+        on_batch_progress(batch_num, total_batches, skus_sent, skus_to_write, finished_skus)
+        runs after each Google Sheets batchUpdate. finished_skus are the SKUs whose
+        cells were all written in that batch. should_abort() is checked between batches.
         Returns: {'ok': set(sku), 'failed': [{'sku':..., 'error':...}, ...], 'cancelled': bool}
         """
         if not items:
@@ -297,13 +298,16 @@ class KoganAdapter(BaseStoreAdapter):
             remaining[sku] = remaining.get(sku, 0) + 1
         sent_skus = set()
 
-        def _report(batch_num: int):
+        def _report(batch_num: int, finished_skus: list[str]):
             if not on_batch_progress:
                 return
-            try:
-                on_batch_progress(batch_num, total_batches, len(sent_skus), len(remaining))
-            except Exception:
-                logger.warning("Kogan sheet progress callback failed", exc_info=True)
+            on_batch_progress(
+                batch_num,
+                total_batches,
+                len(sent_skus),
+                len(remaining),
+                finished_skus,
+            )
 
         for batch_num, i in enumerate(range(0, len(updates), batch_size), start=1):
             if should_abort and should_abort():
@@ -318,11 +322,13 @@ class KoganAdapter(BaseStoreAdapter):
                 )
                 .execute()
             )
+            just_finished = []
             for sku in update_skus[i : i + batch_size]:
                 remaining[sku] -= 1
                 if remaining[sku] <= 0:
                     sent_skus.add(sku)
-            _report(batch_num)
+                    just_finished.append(sku)
+            _report(batch_num, just_finished)
 
         return {"ok": ok, "failed": failed, "cancelled": False}
 

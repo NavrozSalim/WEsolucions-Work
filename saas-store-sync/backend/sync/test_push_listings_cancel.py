@@ -347,3 +347,26 @@ class KoganManualBulkPushTests(TestCase):
         saved = ProductMapping.objects.get(product=product)
         self.assertEqual(saved.store_stock, 0)
         self.assertEqual(saved.sync_status, 'failed')
+
+    @patch('store_adapters.get_adapter')
+    def test_sheet_batch_marks_scraped_rows_synced_before_a_later_batch_fails(self, get_adapter_mock):
+        adapter = MagicMock()
+
+        def _write(_payload, **kwargs):
+            kwargs['on_batch_progress'](1, 2, 1, 2, ['KOG-SKU-1'])
+            raise RuntimeError('Google Sheet batch 2 failed')
+
+        adapter.update_products_bulk.side_effect = _write
+        get_adapter_mock.return_value = adapter
+
+        result = _execute_store_push_listings_only(str(self.store.id), disable_schedule=False)
+
+        self.assertEqual(result.get('pushed'), 1)
+        self.assertEqual(result.get('failed'), 2)
+        statuses = {
+            row.marketplace_child_sku: row.sync_status
+            for row in ProductMapping.objects.filter(store=self.store)
+        }
+        self.assertEqual(statuses['KOG-SKU-1'], 'synced')
+        self.assertEqual(statuses['KOG-SKU-2'], 'scraped')
+        self.assertEqual(statuses['KOG-SKU-3'], 'scraped')

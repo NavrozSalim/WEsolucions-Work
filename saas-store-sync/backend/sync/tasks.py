@@ -2066,8 +2066,37 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                     },
                 )
 
-            def _on_sheet_batch(batch_num, total_batches, skus_sent, _skus_total):
+            from catalog.marketplace_push import mark_mapping_pushed
+
+            marked_pm_ids = set()
+
+            def _mark_sheet_skus_pushed(finished_skus):
+                """Mark listings Synced as soon as their sheet cells are written.
+
+                A later batch can fail. Listings already written stay Synced.
+                Failed and needs-attention rows stay failed.
+                """
+                nonlocal succeeded
+                wanted = {str(sku) for sku in (finished_skus or []) if sku}
+                if not wanted:
+                    return
+                now_ok = timezone.now()
+                for pm, listing_id in queued_pairs:
+                    if pm.id in marked_pm_ids or listing_id not in wanted:
+                        continue
+                    marked_pm_ids.add(pm.id)
+                    succeeded += 1
+                    mark_mapping_pushed(pm, now=now_ok)
+                    ReverbUpdateLog.objects.create(
+                        product_mapping=pm,
+                        status=ReverbUpdateLog.Status.SUCCESS,
+                        pushed_price=pm.store_price,
+                        pushed_stock=pm.store_stock,
+                    )
+
+            def _on_sheet_batch(batch_num, total_batches, skus_sent, _skus_total, finished_skus=()):
                 nonlocal last_progress_log_at
+                _mark_sheet_skus_pushed(finished_skus)
                 now_mono = time.monotonic()
                 if (
                     batch_num not in (1, total_batches)
@@ -2084,7 +2113,7 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                     metadata={
                         'processed': skipped + len(bulk_queue),
                         'total': total_to_push,
-                        'pushed': written,
+                        'pushed': succeeded,
                         'failed': 0,
                         'skipped_no_listing': skipped,
                         'sync_step': 'bulk_push',
@@ -2103,6 +2132,8 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                 logger.warning("Bulk manual push failed for store %s: %s", store_id, e)
                 err_msg = str(e)[:500]
                 for pm, _listing_id in queued_pairs:
+                    if pm.id in marked_pm_ids:
+                        continue
                     failed += 1
                     ReverbUpdateLog.objects.create(
                         product_mapping=pm,
@@ -2119,10 +2150,11 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                 }
                 now_ok = timezone.now()
                 for pm, listing_id in queued_pairs:
+                    if pm.id in marked_pm_ids:
+                        continue
                     if listing_id in ok_set:
                         succeeded += 1
-                        from catalog.marketplace_push import mark_mapping_pushed
-
+                        marked_pm_ids.add(pm.id)
                         mark_mapping_pushed(pm, now=now_ok)
                         ReverbUpdateLog.objects.create(
                             product_mapping=pm,

@@ -195,7 +195,9 @@ class KoganAdapterRrpTests(SimpleTestCase):
         )
         self.assertEqual(result['ok'], {'SKU-1'})
         self.assertFalse(result['cancelled'])
-        self.assertEqual(progress, [(1, 1, 1, 1)])
+        self.assertEqual(len(progress), 1)
+        self.assertEqual(progress[0][:4], (1, 1, 1, 1))
+        self.assertEqual(progress[0][4], ['SKU-1'])
         values_api.batchUpdate.assert_called_once()
 
         values_api.batchUpdate.reset_mock()
