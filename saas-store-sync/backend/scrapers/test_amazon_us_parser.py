@@ -390,5 +390,87 @@ class TestAmazonUSNoFeaturedOffer(unittest.TestCase):
         self.assertIsNone(AmazonParser.extract_price(soup, html))
 
 
+PAID_SHIPPING_HTML = """
+<html><body>
+<div id="desktop_buybox">
+  <div id="corePrice_feature_div">
+    <span class="a-price"><span class="a-offscreen">$1.49</span></span>
+  </div>
+  <div id="availability"><span>In Stock</span></div>
+</div>
+<div class="a-spacing-base" id="mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE">
+  <span data-csa-c-content-id="DEXUnifiedCXPDM" data-csa-c-delivery-price="$6.99"
+        data-csa-c-delivery-time="November 3 - 12" data-csa-c-delivery-benefit-program-id="paid_shipping">
+    $6.99 delivery <span class="a-text-bold">November 3 - 12</span>.
+  </span>
+</div>
+<div id="mir-layout-DELIVERY_BLOCK-slot-SECONDARY_DELIVERY_MESSAGE_LARGE">
+  <span data-csa-c-delivery-price="$14.99">$14.99 delivery <span class="a-text-bold">Tomorrow</span></span>
+</div>
+</body></html>
+"""
+
+FREE_SHIPPING_HTML = """
+<html><body>
+<div id="desktop_buybox">
+  <div id="corePrice_feature_div">
+    <span class="a-price"><span class="a-offscreen">$9.99</span></span>
+  </div>
+  <div id="availability"><span>In Stock</span></div>
+</div>
+<div id="mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_MEDIUM">
+  <span data-csa-c-delivery-price="FREE">
+    FREE delivery <span class="a-text-bold">Tuesday, October 27</span>.
+  </span>
+</div>
+<div id="mir-layout-DELIVERY_BLOCK-slot-SECONDARY_DELIVERY_MESSAGE_LARGE">
+  <span data-csa-c-delivery-price="$8.00">$8.00 delivery</span>
+</div>
+</body></html>
+"""
+
+TEXT_ONLY_SHIPPING_HTML = """
+<html><body>
+<div id="deliveryBlockMessage">
+  <span>$6.99 delivery <span class="a-text-bold">November 3 - 12</span>.</span>
+</div>
+</body></html>
+"""
+
+
+class TestAmazonUSDeliveryShipping(unittest.TestCase):
+    TODAY = date(2026, 10, 23)
+
+    def test_paid_primary_shipping_is_added_to_item_price(self):
+        soup = BeautifulSoup(PAID_SHIPPING_HTML, "html.parser")
+        self.assertEqual(AmazonParser.extract_price(soup, PAID_SHIPPING_HTML), 1.49)
+        self.assertEqual(AmazonParser.extract_delivery_price(soup), 6.99)
+        self.assertEqual(AmazonParser.apply_delivery_shipping(soup, 1.49), 8.48)
+
+    def test_slow_paid_delivery_still_zeros_stock(self):
+        soup = BeautifulSoup(PAID_SHIPPING_HTML, "html.parser")
+        self.assertEqual(AmazonParser.extract_delivery_days(soup, today=self.TODAY), 11)
+        self.assertGreater(AmazonParser.extract_delivery_days(soup, today=self.TODAY), MAX_DELIVERY_DAYS)
+        self.assertEqual(AmazonParser.extract_stock(soup, today=self.TODAY), 0)
+
+    def test_free_delivery_does_not_change_item_price(self):
+        soup = BeautifulSoup(FREE_SHIPPING_HTML, "html.parser")
+        self.assertEqual(AmazonParser.extract_delivery_price(soup), 0.0)
+        self.assertEqual(AmazonParser.apply_delivery_shipping(soup, 9.99), 9.99)
+
+    def test_medium_slot_and_text_fallback(self):
+        soup = BeautifulSoup(TEXT_ONLY_SHIPPING_HTML, "html.parser")
+        self.assertEqual(AmazonParser.extract_delivery_price(soup), 6.99)
+
+    def test_missing_delivery_block_keeps_item_price(self):
+        soup = BeautifulSoup(NORMAL_BUYBOX_HTML, "html.parser")
+        self.assertEqual(AmazonParser.extract_delivery_price(soup), 0.0)
+        self.assertEqual(AmazonParser.apply_delivery_shipping(soup, 65.0), 65.0)
+
+    def test_missing_price_stays_missing(self):
+        soup = BeautifulSoup(PAID_SHIPPING_HTML, "html.parser")
+        self.assertIsNone(AmazonParser.apply_delivery_shipping(soup, None))
+
+
 if __name__ == "__main__":
     unittest.main()

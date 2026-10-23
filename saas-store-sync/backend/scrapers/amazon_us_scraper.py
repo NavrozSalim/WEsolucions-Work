@@ -114,6 +114,21 @@ _PRIMARY_DELIVERY_DATE_SELECTORS = (
     "#mir-layout-DELIVERY_BLOCK span.a-text-bold",
 )
 
+# Attribute / text values Amazon uses when the primary promise is free.
+_FREE_DELIVERY_PRICE_VALUES = {
+    "",
+    "free",
+    "0",
+    "$0",
+    "$0.00",
+    "usd0",
+    "usd0.00",
+    "usd 0",
+    "usd 0.00",
+}
+_PAID_DELIVERY_TEXT_RE = re.compile(r"\$(\d[\d,.]*)\s+delivery\b", re.IGNORECASE)
+_FREE_DELIVERY_TEXT_RE = re.compile(r"\bfree\s+delivery\b", re.IGNORECASE)
+
 _DATE_WITH_WEEKDAY_RE = re.compile(
     r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday),?\s+"
     r"(january|february|march|april|may|june|july|august|september|october|november|december)\s+"
@@ -502,6 +517,82 @@ class AmazonParser:
         return min(days_found)
 
     @classmethod
+    def _delivery_price_in_scope(cls, scope) -> Optional[float]:
+        """Shipping in one delivery block. 0 is free, None means this block has no promise."""
+        if scope is None:
+            return None
+        for el in scope.select("[data-csa-c-delivery-price]"):
+            if _inside_secondary_delivery(el):
+                continue
+            raw = el.get("data-csa-c-delivery-price") or ""
+            token = " ".join(raw.strip().lower().split())
+            compact = token.replace(" ", "")
+            if (
+                token in _FREE_DELIVERY_PRICE_VALUES
+                or compact in _FREE_DELIVERY_PRICE_VALUES
+                or token.startswith("free")
+            ):
+                return 0.0
+            amount = parse_price_text(raw)
+            if amount is not None:
+                return amount
+            return 0.0
+
+        text = scope.get_text(" ", strip=True)
+        match = _PAID_DELIVERY_TEXT_RE.search(text)
+        if match:
+            amount = parse_price_text(match.group(1))
+            if amount is not None:
+                return amount
+        if _FREE_DELIVERY_TEXT_RE.search(text):
+            return 0.0
+        return None
+
+    @classmethod
+    def extract_delivery_price(cls, soup: BeautifulSoup) -> float:
+        """Paid shipping on the primary delivery promise. Free or missing is 0.
+
+        Slot ids vary (LARGE / MEDIUM / SMALL). The stable signal is
+        ``data-csa-c-delivery-price`` on the primary promise, then the visible
+        ``$X delivery`` text. Faster secondary upgrades are ignored.
+        """
+        if soup is None:
+            return 0.0
+
+        primary = []
+        seen = set()
+        for el in soup.select('[id*="PRIMARY_DELIVERY_MESSAGE"]'):
+            marker = id(el)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            primary.append(el)
+
+        scopes = primary
+        if not scopes:
+            for sel in ("#deliveryBlockMessage", "#mir-layout-DELIVERY_BLOCK"):
+                el = soup.select_one(sel)
+                if el is not None:
+                    scopes.append(el)
+                    break
+
+        for scope in scopes:
+            amount = cls._delivery_price_in_scope(scope)
+            if amount is not None:
+                return amount
+        return 0.0
+
+    @classmethod
+    def apply_delivery_shipping(cls, soup: BeautifulSoup, price: Optional[float]) -> Optional[float]:
+        """Catalog vendor price: item price plus primary paid shipping."""
+        if price is None:
+            return None
+        shipping = cls.extract_delivery_price(soup)
+        if not shipping:
+            return float(price)
+        return round(float(price) + float(shipping), 2)
+
+    @classmethod
     def _availability_stock(cls, soup: BeautifulSoup) -> Optional[int]:
         """Derive stock from availability text only (before delivery-day gate)."""
         if cls.has_no_featured_offer(soup):
@@ -605,6 +696,19 @@ def _extract_asin(url: str, soup: BeautifulSoup = None) -> Optional[str]:
             if el and el.get("value"):
                 return str(el["value"]).upper()
     return None
+
+
+def _inside_secondary_delivery(elem) -> bool:
+    """True when the node sits in a faster/secondary delivery slot, not the primary promise."""
+    cur = elem
+    for _ in range(14):
+        if cur is None or not getattr(cur, "get", None):
+            break
+        eid = (cur.get("id") or "").upper()
+        if "SECONDARY_DELIVERY" in eid:
+            return True
+        cur = getattr(cur, "parent", None)
+    return False
 
 
 def _amazon_node_hidden(elem) -> bool:
@@ -888,7 +992,9 @@ class AmazonHTTP:
         if oos is not None:
             return oos
 
-        price = AmazonParser.extract_price(soup, html)
+        price = AmazonParser.apply_delivery_shipping(
+            soup, AmazonParser.extract_price(soup, html)
+        )
         stock = AmazonParser.extract_stock(soup)
         title = AmazonParser.extract_title(soup)
 
@@ -1204,6 +1310,8 @@ class AmazonScraper:
         if price is None:
             return ScrapeResult.fail("no_price", "Price not found", html, "amazon_us", url)
 
+        price = AmazonParser.apply_delivery_shipping(soup, price)
+
         return ScrapeResult.ok(
             price=float(price),
             stock=int(stock) if stock is not None else None,
@@ -1347,6 +1455,7 @@ class AmazonScraper:
                 if cart_price is not None:
                     stock = AmazonParser.extract_stock(soup)
                     title = AmazonParser.extract_title(soup)
+                    cart_price = AmazonParser.apply_delivery_shipping(soup, cart_price)
                     return ScrapeResult.ok(price=float(cart_price), stock=stock, title=title)
 
             return result
@@ -1440,6 +1549,7 @@ def scrape_amazon_us(vendor_url: str, region: str, session: dict = None) -> dict
                     if price is None and AmazonParser.is_map_price_page(soup, html):
                         price = AmazonScraper.fetch_map_price_via_cart(vendor_url, driver, soup)
                     if price is not None:
+                        price = AmazonParser.apply_delivery_shipping(soup, price)
                         out = {"price": float(price), "stock": int(stock) if stock is not None else None}
                         if tit:
                             out["title"] = tit
