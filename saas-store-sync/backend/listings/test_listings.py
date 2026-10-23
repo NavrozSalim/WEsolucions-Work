@@ -2218,7 +2218,12 @@ class OrderNormalizeTests(TestCase):
         self.assertEqual(payload["query"], "Refunds_Create")
         self.assertEqual(payload["data"]["invoiceId"], int(order.external_order_key))
         self.assertEqual(payload["data"]["refundReason"], "Out of stock")
-        self.assertEqual(payload["data"]["items"][0]["lineItemId"], 55)
+        item = payload["data"]["items"][0]
+        self.assertEqual(item["lineItemId"], 55)
+        self.assertEqual(item["itemId"], 55)
+        self.assertEqual(item["salePriceCents"], 2500)
+        self.assertEqual(item["refundQuantity"], 2)
+        self.assertEqual(item["refundAmountCents"], 5000)
         mock_shopify_cancel.assert_called_once()
 
     @patch("listings.shopify.orders.cancel_shopify_order")

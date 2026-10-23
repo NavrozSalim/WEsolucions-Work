@@ -1369,6 +1369,25 @@ def _invoice_id_for_api(order: MarketplaceOrder):
     return order.external_order_key or order.invoice_number
 
 
+def _cents(value, default=0) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _lasoo_item_id(value):
+    """Lasoo refund lines store the connect line id as an Int itemId."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    text = str(value or "").strip()
+    if text.isdigit():
+        return int(text)
+    return value
+
+
 def _refund_line_items(order: MarketplaceOrder, reason: str) -> list[dict]:
     items = order.line_items_json
     if not isinstance(items, list):
@@ -1384,25 +1403,57 @@ def _refund_line_items(order: MarketplaceOrder, reason: str) -> list[dict]:
             or raw.get("id")
             or nested.get("id")
             or nested.get("lineItemId")
+            or nested.get("itemId")
         )
         if line_id is None:
             continue
-        qty = raw.get("quantity") or raw.get("qty") or nested.get("quantity") or 1
-        price = (
+        item_id = _lasoo_item_id(line_id)
+        qty = raw.get("quantity")
+        if qty is None:
+            qty = raw.get("qty")
+        if qty is None:
+            qty = nested.get("quantity")
+        qty = _cents(qty, default=1)
+        if qty < 1:
+            qty = 1
+        sale = _cents(
             raw.get("priceCents")
-            or raw.get("salePriceCents")
-            or nested.get("salePriceCents")
-            or 0
+            if raw.get("priceCents") is not None
+            else raw.get("salePriceCents")
+            if raw.get("salePriceCents") is not None
+            else nested.get("salePriceCents")
         )
-        total = raw.get("totalCents") or nested.get("totalCents") or (int(price) * int(qty))
+        original = _cents(
+            nested.get("originalPriceCents")
+            if nested.get("originalPriceCents") is not None
+            else raw.get("originalPriceCents")
+            if raw.get("originalPriceCents") is not None
+            else nested.get("originalPricePerItemCents"),
+            default=sale,
+        )
+        if original <= 0:
+            original = sale
+        total = raw.get("totalCents")
+        if total is None:
+            total = nested.get("totalCents")
+        if total is None:
+            total = sale * qty
+        total = _cents(total)
         out.append(
             {
-                "lineItemId": line_id,
-                "quantity": int(qty) if str(qty).isdigit() or isinstance(qty, int) else 1,
+                "itemId": item_id,
+                "lineItemId": item_id,
+                "quantity": qty,
+                "purchasedQuantity": qty,
+                # A full line refund returns every unit. A partial amount sets this to 0.
+                "refundQuantity": qty,
                 "reason": reason,
-                "salePriceCents": int(price or 0),
-                "totalCents": int(total or 0),
-                "amountPerItemCents": int(price or 0),
+                "salePriceCents": sale,
+                "purchasePricePerItemCents": sale,
+                "originalPricePerItemCents": original,
+                "amountPerItemCents": sale,
+                "totalCents": total,
+                "refundAmountCents": total,
             }
         )
     return out
@@ -1819,6 +1870,13 @@ def partial_refund(order: MarketplaceOrder, *, percent, reason: str = "", note: 
 
 
 def _scale_refund_lines(lines: list[dict], refund_cents: int) -> list[dict]:
+    """Put ``refund_cents`` on the lines without changing the price the buyer paid.
+
+    Lasoo copies ``salePriceCents`` into ``purchasePricePerItemCents``. Writing the
+    partial amount there makes the refund line look like a cheaper item and leaves
+    ``refundAmountCents`` at 0. A partial amount also keeps ``refundQuantity`` at 0
+    so one unit is not returned at the full price.
+    """
     if not lines:
         return []
     weights = [max(0, int(line.get("totalCents") or 0)) for line in lines]
@@ -1829,21 +1887,23 @@ def _scale_refund_lines(lines: list[dict], refund_cents: int) -> list[dict]:
     for line, share in zip(lines, shares):
         if share <= 0:
             continue
-        qty = line.get("quantity") or 1
-        try:
-            qty = int(qty)
-        except (TypeError, ValueError):
-            qty = 1
-        if qty < 1 or (share // qty) * qty != share:
-            qty = 1
-        per = share // qty
+        purchased = _cents(line.get("purchasedQuantity") or line.get("quantity"), default=1)
+        if purchased < 1:
+            purchased = 1
+        sale = _cents(line.get("salePriceCents"))
+        line_total = _cents(line.get("totalCents"))
+        whole_line = line_total > 0 and share == line_total
         scaled.append(
             {
                 **line,
-                "quantity": qty,
-                "salePriceCents": per,
-                "totalCents": share,
-                "amountPerItemCents": per,
+                "quantity": purchased,
+                "purchasedQuantity": purchased,
+                "salePriceCents": sale,
+                "purchasePricePerItemCents": sale,
+                "amountPerItemCents": sale,
+                "totalCents": line_total,
+                "refundAmountCents": int(share),
+                "refundQuantity": purchased if whole_line else 0,
             }
         )
     return scaled

@@ -75,8 +75,66 @@ class PartialRefundTests(TestCase):
         self.assertEqual(payload["query"], "Refunds_Create")
         self.assertTrue(payload["data"]["partialRefund"])
         self.assertEqual(payload["data"]["refundAmountCents"], 750)
-        self.assertEqual(payload["data"]["items"][0]["totalCents"], 750)
+        item = payload["data"]["items"][0]
+        self.assertEqual(item["itemId"], 55)
+        self.assertEqual(item["salePriceCents"], 2500)
+        self.assertEqual(item["purchasePricePerItemCents"], 2500)
+        self.assertEqual(item["purchasedQuantity"], 2)
+        self.assertEqual(item["refundQuantity"], 0)
+        self.assertEqual(item["refundAmountCents"], 750)
+        self.assertEqual(item["totalCents"], 5000)
         self.assertFalse(payload["data"]["refundPostage"])
+
+    @patch("listings.order_service.LasooClient")
+    def test_lasoo_partial_keeps_the_real_sale_price(self, mock_client_cls):
+        store = self._store("lasoo", api_token="", lasoo_environment="production", lasoo_production_auth_key="test-key")
+        order = self._order(
+            store,
+            external_order_key="1053373",
+            invoice_number="1053373",
+            status=OrderStatus.SHIPPING_SUBMITTED,
+            total_amount_cents=35530,
+            environment="production",
+            line_items_json=[
+                {
+                    "lineItemId": 1059023,
+                    "title": "Thing",
+                    "quantity": 1,
+                    "priceCents": 35530,
+                    "totalCents": None,
+                    "_raw": {
+                        "id": 1059023,
+                        "quantity": 1,
+                        "originalPriceCents": 40000,
+                        "salePriceCents": 35530,
+                        "totalCents": 35530,
+                    },
+                },
+            ],
+        )
+        mock_client = MagicMock()
+        mock_client.auth_key = "test-key"
+        mock_client.send.return_value = LasooResult(
+            ok=True, data={"success": True, "results": {"success": True}}, message="Success.", status=200,
+        )
+        mock_client_cls.return_value = mock_client
+
+        result = order_service.partial_refund(order, percent=50, reason="Change of mind")
+        order.refresh_from_db()
+
+        self.assertTrue(result["marketplace_ok"])
+        self.assertEqual(order.status, OrderStatus.SHIPPING_SUBMITTED)
+        self.assertEqual(order.refunded_amount_cents, 17765)
+        _, payload = mock_client.send.call_args[0]
+        item = payload["data"]["items"][0]
+        self.assertEqual(payload["data"]["refundAmountCents"], 17765)
+        self.assertEqual(item["itemId"], 1059023)
+        self.assertEqual(item["purchasedQuantity"], 1)
+        self.assertEqual(item["originalPricePerItemCents"], 40000)
+        self.assertEqual(item["salePriceCents"], 35530)
+        self.assertEqual(item["purchasePricePerItemCents"], 35530)
+        self.assertEqual(item["refundAmountCents"], 17765)
+        self.assertEqual(item["refundQuantity"], 0)
 
     @patch("listings.order_service.LasooClient")
     def test_lasoo_failure_does_not_record_a_refund(self, mock_client_cls):
@@ -115,6 +173,11 @@ class PartialRefundTests(TestCase):
         _, payload = mock_client.send.call_args[0]
         self.assertTrue(payload["data"]["partialRefund"])
         self.assertEqual(payload["data"]["refundAmountCents"], 4250)
+        item = payload["data"]["items"][0]
+        self.assertEqual(item["itemId"], 55)
+        self.assertEqual(item["salePriceCents"], 2500)
+        self.assertEqual(item["refundAmountCents"], 4250)
+        self.assertEqual(item["refundQuantity"], 0)
 
     @patch("listings.reverb.orders.get_adapter")
     def test_reverb_sends_partial_amount_and_does_not_cancel(self, mock_get_adapter):
