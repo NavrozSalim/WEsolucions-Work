@@ -20,7 +20,13 @@ from stores.models import (
 )
 from stores.pricing_tiers import resolve_margin_tier_for_raw_cost
 from catalog.models import ProductMapping
-from catalog.marketplace_catalog import listing_sku_lookup_order, store_is_sears, store_is_walmart
+from catalog.marketplace_catalog import (
+    kogan_sheet_sku,
+    listing_sku_lookup_order,
+    store_is_kogan,
+    store_is_sears,
+    store_is_walmart,
+)
 from vendor.models import VendorPrice
 from sync.models import StoreSyncRun
 from scrapers import get_price_and_stock, close_amazon_session
@@ -1322,7 +1328,10 @@ def run_store_update(self, store_id, source='beat'):
     for pm in push_mappings.iterator(chunk_size=300):
         if pm.store_price is None or not pm.product:
             continue
-        listing_id = pm.marketplace_id
+        if store_is_kogan(store):
+            listing_id = kogan_sheet_sku(pm)
+        else:
+            listing_id = pm.marketplace_id
         if not listing_id:
             lookup = getattr(adapter, 'lookup_listing_by_sku', None)
             if lookup:
@@ -1632,6 +1641,17 @@ def _crontab_matches(sched, now_local):
 
 def _resolve_listing_id_for_pm(adapter, pm, store):
     """Resolve marketplace listing id; persist marketplace_id when found via SKU lookup."""
+    if store_is_kogan(store):
+        # The sheet row is the catalog SKU, even when marketplace_id is blank
+        # or still holds an older non-sheet value.
+        sku = kogan_sheet_sku(pm)
+        if not sku:
+            return None
+        current = pm.marketplace_id if isinstance(pm.marketplace_id, str) else ''
+        if not current.strip():
+            pm.marketplace_id = sku
+            pm.save(update_fields=['marketplace_id'])
+        return sku
     if store_is_sears(store) or store_is_walmart(store):
         child = (pm.marketplace_child_sku or '').strip()
         if child:
@@ -1978,7 +1998,10 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
             bulk_queue = []
             queued_pairs = []
             queued_count = 0
-            for pm in qs.iterator(chunk_size=200):
+            # Short pk pages commit progress immediately. iterator() keeps a
+            # PostgreSQL cursor open, so the Catalog bar stalls on the first page
+            # (200 rows) while the Google Sheet write has not started.
+            for pm in _iter_mappings_by_pk(qs, page_size=200):
                 _raise_if_push_aborted(store_id)
                 visited += 1
                 _note_prepare(force=(visited == 1))
@@ -2016,9 +2039,14 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                 ))
 
             if bulk_queue:
+                sheet_write = store_is_kogan(store)
                 append_catalog_log(
                     store.id,
-                    f'Marketplace sync in progress: pushing {len(bulk_queue):,} listing(s) to marketplace in bulk.',
+                    (
+                        f'Marketplace sync in progress: writing {len(bulk_queue):,} listing(s) to the Google Sheet.'
+                        if sheet_write
+                        else f'Marketplace sync in progress: pushing {len(bulk_queue):,} listing(s) to marketplace in bulk.'
+                    ),
                     action_type='sync_progress',
                     metadata={
                         'processed': skipped + len(bulk_queue),
@@ -2030,8 +2058,39 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                     },
                 )
 
+            def _on_sheet_batch(batch_num, total_batches, skus_sent, _skus_total):
+                nonlocal last_progress_log_at
+                now_mono = time.monotonic()
+                if (
+                    batch_num not in (1, total_batches)
+                    and now_mono - last_progress_log_at < PUSH_LISTINGS_PROGRESS_LOG_SEC
+                ):
+                    return
+                last_progress_log_at = now_mono
+                written = int(skus_sent or 0)
+                append_catalog_log(
+                    store.id,
+                    f'Marketplace sync in progress: writing Google Sheet batch {batch_num:,} of {total_batches:,} '
+                    f'({written:,} of {len(bulk_queue):,} listings written, {skipped:,} skipped).',
+                    action_type='sync_progress',
+                    metadata={
+                        'processed': skipped + len(bulk_queue),
+                        'total': total_to_push,
+                        'pushed': written,
+                        'failed': 0,
+                        'skipped_no_listing': skipped,
+                        'sync_step': 'bulk_push',
+                        'batch_num': batch_num,
+                        'total_batches': total_batches,
+                    },
+                )
+
             try:
-                res = adapter.update_products_bulk(payload) or {}
+                bulk_kwargs = {}
+                if store_is_kogan(store):
+                    bulk_kwargs['on_batch_progress'] = _on_sheet_batch
+                    bulk_kwargs['should_abort'] = lambda: should_abort_push_listings(str(store_id))
+                res = adapter.update_products_bulk(payload, **bulk_kwargs) or {}
             except Exception as e:
                 logger.warning("Bulk manual push failed for store %s: %s", store_id, e)
                 err_msg = str(e)[:500]
@@ -2043,6 +2102,8 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                         error_message=err_msg,
                     )
             else:
+                if res.get('cancelled'):
+                    cancelled = True
                 ok_set = {str(s) for s in (res.get('ok') or set())}
                 failed_list = res.get('failed') or []
                 errors_by_sku = {
@@ -2061,6 +2122,8 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
                             pushed_price=pm.store_price,
                             pushed_stock=pm.store_stock,
                         )
+                    elif cancelled and listing_id not in errors_by_sku:
+                        continue
                     else:
                         failed += 1
                         ReverbUpdateLog.objects.create(

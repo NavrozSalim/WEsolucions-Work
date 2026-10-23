@@ -61,6 +61,23 @@ class ManualSyncIncludesFailedTests(SimpleTestCase):
         missing_id = Q(marketplace_id__isnull=True) | Q(marketplace_id='')
         objects.filter.return_value.exclude.assert_called_once_with(missing_child & missing_id)
 
+    def test_kogan_manual_sync_counts_catalog_sku_without_marketplace_id(self):
+        from django.db.models import Q
+
+        from catalog.marketplace_push import manual_sync_mappings
+
+        store = MagicMock()
+        store.marketplace.code = 'kogan'
+        store.marketplace.name = 'Kogan'
+        with patch('catalog.models.ProductMapping.objects') as objects:
+            manual_sync_mappings(store)
+        missing_parent = Q(marketplace_parent_sku__isnull=True) | Q(marketplace_parent_sku='')
+        missing_child = Q(marketplace_child_sku__isnull=True) | Q(marketplace_child_sku='')
+        missing_id = Q(marketplace_id__isnull=True) | Q(marketplace_id='')
+        objects.filter.return_value.exclude.assert_called_once_with(
+            missing_parent & missing_child & missing_id,
+        )
+
 
 class FailedZeroInventoryTests(SimpleTestCase):
     def test_failed_zero_only_pushes_failed_listings(self):

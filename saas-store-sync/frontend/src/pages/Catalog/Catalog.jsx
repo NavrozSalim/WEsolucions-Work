@@ -900,10 +900,11 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId, onSt
     const total = Number(state.total || 0);
     const pct = Math.max(0, Math.min(100, Number(state.pct || 0)));
     const syncStep = state.sync_step || (isQueued ? 'queued' : (processed > 0 ? 'bulk_push' : 'queue_build'));
+    const writingSheet = /google sheet/i.test(state.status_message || '');
     const stepLabels = {
         queued: 'Queued',
         queue_build: 'Preparing listings',
-        bulk_push: 'Pushing to marketplace',
+        bulk_push: writingSheet ? 'Writing Google Sheet' : 'Pushing to marketplace',
         waiting_sears: 'Waiting on Sears',
     };
     const stepLabel = stepLabels[syncStep] || 'Syncing';
@@ -967,7 +968,9 @@ function ManualSyncProgressStrip({ state, progressStoreId, selectedStoreId, onSt
                     )}
                     {!isQueued && !isWaitingSears && !isQueueBuild && (
                         <p className="text-xs text-emerald-700 dark:text-emerald-300 mt-0.5">
-                            Pushing local prices and stock to your marketplace. You can leave this page — use Stop Syncing to cancel.
+                            {writingSheet
+                                ? 'Writing price and stock into the Kogan Google Sheet. You can leave this page — use Stop Syncing to cancel.'
+                                : 'Pushing local prices and stock to your marketplace. You can leave this page — use Stop Syncing to cancel.'}
                         </p>
                     )}
                     {isWaitingSears && (

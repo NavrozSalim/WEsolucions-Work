@@ -87,17 +87,41 @@ def store_is_etsy(store) -> bool:
     return (code or '').strip().lower() == 'etsy'
 
 
+def kogan_sheet_sku(pm) -> str:
+    """SKU that identifies a row in the Kogan Google Sheet.
+
+    The Kogan catalog template stores that value in Marketplace Parent SKU.
+    Child SKU and a previously saved marketplace id are fallbacks. The vendor
+    SKU (an Amazon ASIN, for example) is not a sheet key.
+    """
+    for raw in (
+        getattr(pm, 'marketplace_parent_sku', None),
+        getattr(pm, 'marketplace_child_sku', None),
+        getattr(pm, 'marketplace_id', None),
+    ):
+        sku = str(raw or '').strip()
+        if sku.endswith('.0'):
+            sku = sku[:-2]
+        if sku:
+            return sku
+    return ''
+
+
 def listing_sku_lookup_order(pm, store):
     """
     SKUs to try for adapters that resolve listing id by SKU.
 
     Reverb stores and eBay-sourced products use Marketplace Parent SKU first.
-    Sears / Walmart use child SKU only. Others (including Etsy) try child, parent, vendor.
+    Sears / Walmart use child SKU only. Kogan uses the Google Sheet SKU only.
+    Others (including Etsy) try child, parent, vendor.
     """
     prod_sku = pm.product.vendor_sku if pm.product else None
     ebay_source = bool(
         pm.product and pm.product.vendor and vendor_is_ebay(pm.product.vendor, '')
     )
+    if store_is_kogan(store):
+        sheet_sku = kogan_sheet_sku(pm)
+        return [sheet_sku] if sheet_sku else []
     if store_is_sears(store) or store_is_walmart(store):
         return [x for x in (pm.marketplace_child_sku,) if x]
     if store_is_reverb(store) or ebay_source:

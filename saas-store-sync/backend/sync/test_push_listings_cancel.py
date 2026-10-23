@@ -274,3 +274,39 @@ class KoganManualBulkPushTests(TestCase):
         self.assertEqual(len(payload), 3)
         skus = {row[0] for row in payload}
         self.assertEqual(skus, {'KOG-SKU-1', 'KOG-SKU-2', 'KOG-SKU-3'})
+        self.assertIn('on_batch_progress', adapter.update_products_bulk.call_args.kwargs)
+        self.assertIn('should_abort', adapter.update_products_bulk.call_args.kwargs)
+
+    @patch('store_adapters.get_adapter')
+    def test_manual_sync_pushes_kogan_parent_sku_when_marketplace_id_is_blank(self, get_adapter_mock):
+        product = Product.objects.create(
+            owner=self.user,
+            vendor=self.vendor,
+            vendor_sku='vendor-sheet-only',
+            vendor_url='https://example.com/sheet-only',
+        )
+        ProductMapping.objects.create(
+            store=self.store,
+            product=product,
+            is_active=True,
+            sync_status='scraped',
+            store_price=19,
+            store_stock=4,
+            marketplace_parent_sku='SHEET-ONLY',
+            marketplace_child_sku='',
+            marketplace_id='',
+        )
+        adapter = MagicMock()
+        adapter.update_products_bulk.return_value = {
+            'ok': {'KOG-SKU-1', 'KOG-SKU-2', 'KOG-SKU-3', 'SHEET-ONLY'},
+            'failed': [],
+        }
+        get_adapter_mock.return_value = adapter
+
+        result = _execute_store_push_listings_only(str(self.store.id), disable_schedule=False)
+
+        self.assertEqual(result.get('pushed'), 4)
+        payload = adapter.update_products_bulk.call_args[0][0]
+        self.assertIn('SHEET-ONLY', {row[0] for row in payload})
+        saved = ProductMapping.objects.get(product=product)
+        self.assertEqual(saved.marketplace_id, 'SHEET-ONLY')

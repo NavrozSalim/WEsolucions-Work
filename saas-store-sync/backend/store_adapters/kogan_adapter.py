@@ -193,15 +193,23 @@ class KoganAdapter(BaseStoreAdapter):
         self.update_products_bulk([(sku, price, stock, rrp, list_price)])
         return True
 
-    def update_products_bulk(self, items: list[tuple[str, float | None, int | None, float | None, float | None]]):
+    def update_products_bulk(
+        self,
+        items: list[tuple[str, float | None, int | None, float | None, float | None]],
+        *,
+        on_batch_progress=None,
+        should_abort=None,
+    ):
         """
         Bulk update many SKU rows in a single run.
 
         items: list of (sku, first_price, stock, rrp, list_price) — rrp/list_price may be None.
-        Returns: {'ok': set(sku), 'failed': [{'sku':..., 'error':...}, ...]}
+        on_batch_progress(batch_num, total_batches, skus_sent, skus_to_write) runs after
+        each Google Sheets batchUpdate. should_abort() is checked between batches.
+        Returns: {'ok': set(sku), 'failed': [{'sku':..., 'error':...}, ...], 'cancelled': bool}
         """
         if not items:
-            return {"ok": set(), "failed": []}
+            return {"ok": set(), "failed": [], "cancelled": False}
 
         cfg = self._config()
         self._validate_sheet_columns()
@@ -237,10 +245,11 @@ class KoganAdapter(BaseStoreAdapter):
                 sku_to_row[s] = row_num
 
         updates = []
+        update_skus = []
         ok = set()
         failed = []
 
-        def _add_cell_update(col_idx: int, row_num: int, value):
+        def _add_cell_update(col_idx: int, row_num: int, value, sku: str):
             col_letter = _col_index_to_letter(col_idx)
             updates.append(
                 {
@@ -248,6 +257,7 @@ class KoganAdapter(BaseStoreAdapter):
                     "values": [[value]],
                 }
             )
+            update_skus.append(sku)
 
         for item in items:
             sku = item[0] if item else ''
@@ -265,23 +275,39 @@ class KoganAdapter(BaseStoreAdapter):
             # Only update provided fields
             if stock is not None:
                 try:
-                    _add_cell_update(stock_idx, row_num, int(stock))
+                    _add_cell_update(stock_idx, row_num, int(stock), s)
                 except Exception:
-                    _add_cell_update(stock_idx, row_num, stock)
+                    _add_cell_update(stock_idx, row_num, stock, s)
             if first_price is not None:
-                _add_cell_update(first_price_idx, row_num, float(first_price))
+                _add_cell_update(first_price_idx, row_num, float(first_price), s)
             if list_price is not None and list_price_idx is not None:
-                _add_cell_update(list_price_idx, row_num, float(list_price))
+                _add_cell_update(list_price_idx, row_num, float(list_price), s)
             if rrp is not None and rrp_idx is not None:
-                _add_cell_update(rrp_idx, row_num, float(rrp))
+                _add_cell_update(rrp_idx, row_num, float(rrp), s)
             ok.add(s)
 
         if not updates:
-            return {"ok": ok, "failed": failed}
+            return {"ok": ok, "failed": failed, "cancelled": False}
 
         # Google Sheets API limit: 1000 updates per batchUpdate request.
         batch_size = 1000
-        for i in range(0, len(updates), batch_size):
+        total_batches = (len(updates) + batch_size - 1) // batch_size
+        remaining = {}
+        for sku in update_skus:
+            remaining[sku] = remaining.get(sku, 0) + 1
+        sent_skus = set()
+
+        def _report(batch_num: int):
+            if not on_batch_progress:
+                return
+            try:
+                on_batch_progress(batch_num, total_batches, len(sent_skus), len(remaining))
+            except Exception:
+                logger.warning("Kogan sheet progress callback failed", exc_info=True)
+
+        for batch_num, i in enumerate(range(0, len(updates), batch_size), start=1):
+            if should_abort and should_abort():
+                return {"ok": set(sent_skus), "failed": failed, "cancelled": True}
             batch = updates[i : i + batch_size]
             (
                 service.spreadsheets()
@@ -292,6 +318,11 @@ class KoganAdapter(BaseStoreAdapter):
                 )
                 .execute()
             )
+            for sku in update_skus[i : i + batch_size]:
+                remaining[sku] -= 1
+                if remaining[sku] <= 0:
+                    sent_skus.add(sku)
+            _report(batch_num)
 
-        return {"ok": ok, "failed": failed}
+        return {"ok": ok, "failed": failed, "cancelled": False}
 

@@ -29,6 +29,20 @@ def _kogan_store(**overrides):
     return store
 
 
+class KoganSheetSkuTests(SimpleTestCase):
+    def test_sheet_sku_prefers_catalog_parent_over_a_stale_marketplace_id(self):
+        from catalog.marketplace_catalog import kogan_sheet_sku, listing_sku_lookup_order
+
+        pm = MagicMock()
+        pm.marketplace_parent_sku = 'SHEET-ONLY'
+        pm.marketplace_child_sku = ''
+        pm.marketplace_id = 'NOT-THE-SHEET-KEY'
+        pm.product.vendor_sku = 'B0AMAZON'
+        store = _kogan_store()
+        self.assertEqual(kogan_sheet_sku(pm), 'SHEET-ONLY')
+        self.assertEqual(listing_sku_lookup_order(pm, store), ['SHEET-ONLY'])
+
+
 class KoganAdapterRrpTests(SimpleTestCase):
     def test_adapter_push_kwargs_adds_rrp_and_list_price_for_kogan(self):
         store = _kogan_store()
@@ -129,6 +143,37 @@ class KoganAdapterRrpTests(SimpleTestCase):
         self.assertEqual(ranges['Sheet1!C2'], 92.5)
         self.assertEqual(ranges['Sheet1!D2'], 74.0)
         self.assertEqual(ranges['Sheet1!E2'], 100.0)
+
+    @patch.object(KoganAdapter, '_get_service')
+    def test_bulk_update_reports_each_sheet_batch_and_stops_between_batches(self, mock_get_service):
+        store = _kogan_store()
+        adapter = KoganAdapter(store)
+        adapter._header_cache = ['PRODUCT_SKU', 'STOCK', 'kogan_first_price']
+        values_api = MagicMock()
+        values_api.get.return_value.execute.return_value = {'values': [['SKU-1']]}
+        spreadsheets_api = MagicMock()
+        spreadsheets_api.values.return_value = values_api
+        mock_get_service.return_value.spreadsheets.return_value = spreadsheets_api
+
+        progress = []
+        result = adapter.update_products_bulk(
+            [('SKU-1', 10.0, 4, None, None)],
+            on_batch_progress=lambda *args: progress.append(args),
+            should_abort=lambda: False,
+        )
+        self.assertEqual(result['ok'], {'SKU-1'})
+        self.assertFalse(result['cancelled'])
+        self.assertEqual(progress, [(1, 1, 1, 1)])
+        values_api.batchUpdate.assert_called_once()
+
+        values_api.batchUpdate.reset_mock()
+        stopped = adapter.update_products_bulk(
+            [('SKU-1', 10.0, 4, None, None)],
+            should_abort=lambda: True,
+        )
+        self.assertTrue(stopped['cancelled'])
+        self.assertEqual(stopped['ok'], set())
+        values_api.batchUpdate.assert_not_called()
 
 
 class KoganPostScrapePushTests(SimpleTestCase):

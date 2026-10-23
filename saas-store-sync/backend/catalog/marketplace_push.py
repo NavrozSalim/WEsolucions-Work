@@ -42,9 +42,11 @@ def mark_mapping_pushed(pm, *, now=None, clear_error: bool = False, scrape_error
 def manual_sync_mappings(store, vendor_id=None):
     """Rows Manual sync can update.
 
-    A product with no marketplace ID and no child SKU is skipped later, so it is
-    not counted. Sears and Walmart accept either field. Failed rows that do have
-    an ID stay in the sync so their stock 0 is sent.
+    Sears and Walmart need a child SKU or a marketplace id. Kogan matches the
+    Google Sheet by catalog SKU (parent SKU, child SKU, or a previously stored
+    sheet key), so a blank marketplace id does not drop the row. Other
+    marketplaces need a marketplace id. Pending rows are left out. Failed rows
+    that can be pushed stay in so their stock 0 is sent.
     """
     from django.db.models import Q
 
@@ -60,6 +62,11 @@ def manual_sync_mappings(store, vendor_id=None):
         missing_child = Q(marketplace_child_sku__isnull=True) | Q(marketplace_child_sku='')
         missing_id = Q(marketplace_id__isnull=True) | Q(marketplace_id='')
         qs = qs.exclude(missing_child & missing_id)
+    elif store_is_kogan(store):
+        missing_parent = Q(marketplace_parent_sku__isnull=True) | Q(marketplace_parent_sku='')
+        missing_child = Q(marketplace_child_sku__isnull=True) | Q(marketplace_child_sku='')
+        missing_id = Q(marketplace_id__isnull=True) | Q(marketplace_id='')
+        qs = qs.exclude(missing_parent & missing_child & missing_id)
     else:
         qs = qs.exclude(
             Q(marketplace_id__isnull=True) | Q(marketplace_id=''),
