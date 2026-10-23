@@ -1436,7 +1436,7 @@ def _lasoo_error_message(result) -> str:
             continue
         # Trim huge Prisma/stack dumps from Lasoo staging errors.
         if "prisma" in text.lower() or "Invalid `" in text:
-            return "Lasoo refund API failed (server error). Cancel it in the Lasoo portal if needed."
+            return "Lasoo refund API failed (server error). The order was left unchanged."
         return text[:400]
     return "Lasoo cancel/refund request failed."
 
@@ -1535,8 +1535,8 @@ def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
 
     Lasoo: Refunds_Create. Reverb: seller-initiated refund_requests (full refund).
     MyDeal: POST /orders/{id}/cancel for unshipped orders.
-    The order is always marked cancelled locally so fulfillment can stop;
-    ``marketplace_ok`` reports whether the marketplace accepted the request.
+    A Lasoo order is marked cancelled here only after Lasoo accepts the refund.
+    Shopify is cancelled only when the marketplace accepted.
     """
     kind = marketplace_kind(order.store.marketplace)
     if kind == "reverb":
@@ -1556,8 +1556,9 @@ def cancel(order: MarketplaceOrder, *, reason: str = "") -> dict:
         result = temu_orders.cancel(order, reason=reason)
     else:
         result = _cancel_lasoo(order, reason=reason)
-    from .shopify.orders import cancel_shopify_order
-    cancel_shopify_order(order, order.store)
+    if result.get("marketplace_ok"):
+        from .shopify.orders import cancel_shopify_order
+        cancel_shopify_order(order, order.store)
     return result
 
 
@@ -1599,7 +1600,21 @@ def _cancel_lasoo(order: MarketplaceOrder, *, reason: str = "") -> dict:
     }
     payload = build_payload("refunds_create", data=data, auth=client.auth_key)
     result = client.send("refunds_create", payload)
-    marketplace_ok = _lasoo_results_ok(result)
+    if not _lasoo_results_ok(result):
+        message = _lasoo_error_message(result)
+        logger.warning(
+            "Lasoo cancel/refund rejected order=%s invoice=%s: %s",
+            order.external_order_key,
+            order.invoice_number,
+            message,
+        )
+        if "left unchanged" not in message.lower():
+            message = f"{message} The order was left unchanged."
+        return {
+            "ok": False,
+            "marketplace_ok": False,
+            "message": message,
+        }
 
     order.status = OrderStatus.CANCELLED
     raw = order.raw_response_json if isinstance(order.raw_response_json, dict) else {}
@@ -1607,26 +1622,15 @@ def _cancel_lasoo(order: MarketplaceOrder, *, reason: str = "") -> dict:
         **raw,
         "_local_cancel": {
             "reason": reason_text,
-            "marketplace_ok": marketplace_ok,
-            "marketplace_message": None if marketplace_ok else _lasoo_error_message(result),
+            "marketplace_ok": True,
+            "marketplace_message": None,
         },
     }
     order.save(update_fields=["status", "raw_response_json", "updated_at"])
-
-    if marketplace_ok:
-        return {
-            "ok": True,
-            "marketplace_ok": True,
-            "message": "Order cancelled on Lasoo and marked cancelled here.",
-        }
-
     return {
         "ok": True,
-        "marketplace_ok": False,
-        "message": (
-            "Order marked cancelled here. "
-            f"{_lasoo_error_message(result)}"
-        ),
+        "marketplace_ok": True,
+        "message": "Order cancelled on Lasoo and marked cancelled here.",
     }
 
 

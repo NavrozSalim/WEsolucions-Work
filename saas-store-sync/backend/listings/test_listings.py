@@ -2194,8 +2194,9 @@ class OrderNormalizeTests(TestCase):
         self.assertIn("Warehouse damage", labels)
         self.assertEqual(labels[-1], "Other")
 
+    @patch("listings.shopify.orders.cancel_shopify_order")
     @patch("listings.order_service.LasooClient")
-    def test_cancel_marks_local_and_reports_marketplace_ok(self, mock_client_cls):
+    def test_cancel_marks_local_and_reports_marketplace_ok(self, mock_client_cls, mock_shopify_cancel):
         order = self._make_cancel_order("1")
         mock_client = MagicMock()
         mock_client.auth_key = "test-key"
@@ -2218,9 +2219,11 @@ class OrderNormalizeTests(TestCase):
         self.assertEqual(payload["data"]["invoiceId"], int(order.external_order_key))
         self.assertEqual(payload["data"]["refundReason"], "Out of stock")
         self.assertEqual(payload["data"]["items"][0]["lineItemId"], 55)
+        mock_shopify_cancel.assert_called_once()
 
+    @patch("listings.shopify.orders.cancel_shopify_order")
     @patch("listings.order_service.LasooClient")
-    def test_cancel_still_marks_local_when_lasoo_fails(self, mock_client_cls):
+    def test_cancel_leaves_order_open_when_lasoo_fails(self, mock_client_cls, mock_shopify_cancel):
         order = self._make_cancel_order("2")
         mock_client = MagicMock()
         mock_client.auth_key = "test-key"
@@ -2230,7 +2233,7 @@ class OrderNormalizeTests(TestCase):
                 "success": True,
                 "results": {
                     "success": False,
-                    "message": "Fatal error in Refunds_Create",
+                    "message": "Invalid `prisma.refund.create()` invocation: server blew up",
                 },
             },
             message="Success.",
@@ -2240,9 +2243,13 @@ class OrderNormalizeTests(TestCase):
 
         result = order_service.cancel(order, reason="Damaged")
         order.refresh_from_db()
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
         self.assertFalse(result["marketplace_ok"])
-        self.assertEqual(order.status, OrderStatus.CANCELLED)
+        self.assertNotIn("marked cancelled", result["message"].lower())
+        self.assertIn("left unchanged", result["message"].lower())
+        self.assertEqual(order.status, OrderStatus.PAID)
+        self.assertNotIn("_local_cancel", order.raw_response_json or {})
+        mock_shopify_cancel.assert_not_called()
 
     def test_cancel_reasons_reverb_returns_api_codes(self):
         User = get_user_model()
