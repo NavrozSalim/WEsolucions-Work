@@ -965,7 +965,7 @@ class ListingServiceTests(TestCase):
                     "sku": "BAD-1",
                     "valid": False,
                     "imported": False,
-                    "errors": ['A listing with SKU "NA" already exists. Use the Mapped action to update it.'],
+                    "errors": ['A listing with SKU "NA" already exists. Use Update to correct it, or Mapped if it is already on the marketplace.'],
                     "fields": {
                         "sku": "BAD-1",
                         "title": "Bad",

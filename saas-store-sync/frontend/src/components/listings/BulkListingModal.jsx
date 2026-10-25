@@ -7,6 +7,7 @@ import { BunningsCategoryMultiSelect } from './BunningsCatalogSelects';
 
 const ACTION_OPTIONS = [
     { value: 'create', label: 'Create — new listings' },
+    { value: 'update', label: 'Update — fix created products' },
     { value: 'mapped', label: 'Mapped — already on the store' },
     { value: 'delete_system', label: 'Delete from the system' },
     { value: 'delete', label: 'Delete from the marketplace' },
@@ -70,7 +71,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
         const suffix = extra.hierarchies
             ? `_${bunningsCategories.length}`
             : '';
-        const ext = isBunnings && (action === 'create' || action === 'mapped') ? 'xlsx' : 'csv';
+        const ext = isBunnings && (action === 'create' || action === 'mapped' || action === 'update') ? 'xlsx' : 'csv';
         downloadListingTemplate(storeId, action, extra, `listing_template_${action}${suffix}.${ext}`)
             .catch((err) => setError(err.message || 'Could not download the template.'))
             .finally(() => setDownloading(false));
@@ -110,7 +111,8 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
 
     const invalidRows = (result?.rows || []).filter((r) => !r.valid);
     const actionHelp = {
-        create: 'Each row creates a new listing. Duplicate Child SKUs in the file or already in this app are rejected — use Mapped to update them.',
+        create: 'Each row creates a new listing. A SKU already in Created products is rejected — use Update to correct it.',
+        update: 'Corrects products already in Created products. They stay as Create, so Publish sends them again. Products already live on the marketplace are left unchanged.',
         mapped: 'For products already live on the marketplace. Links them into this app by SKU. Also updates existing app rows.',
         delete_system: 'Each row needs SKU. Removes the listing from this app only. Does not call the marketplace.',
         delete: 'Each row needs SKU. Ends the listing on the marketplace in one request, then removes it from this app.',
@@ -246,7 +248,9 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                             disabled={downloading || (isBunnings && (action === 'create' || action === 'mapped') && bunningsCategories.length === 0)}
                         >
                             <Download className="mr-1.5 h-4 w-4" />
-                            {downloading ? 'Preparing template…' : 'Download template'}
+                            {downloading
+                                ? 'Preparing file…'
+                                : (action === 'update' ? 'Download products to update' : 'Download template')}
                         </Button>
                         <input
                             ref={fileRef}

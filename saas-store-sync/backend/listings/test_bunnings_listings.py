@@ -1340,6 +1340,85 @@ class BunningsListingServiceTests(TestCase):
         self.assertEqual(sheet.cell(2, 4).value, "2006")
         self.assertEqual(sheet.cell(2, 6).value, "Not created")
 
+    def test_edit_clears_bunnings_rejection(self):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        listing.status = ListingStatus.FAILED
+        listing.validation_errors_json = [
+            "2006|BRAND=ExampleBrand: The value is not in the list of accepted values",
+        ]
+        listing.marketplace_response_json = {
+            "bunnings_errors": [{
+                "field": "Brand",
+                "attribute": "BRAND",
+                "value": "ExampleBrand",
+                "code": "2006",
+                "message": "The value is not in the list of accepted values",
+            }],
+        }
+        listing.save()
+        listing_service.update(listing, {**VALID_BUNNINGS, "brand": "ApprovedBrand"})
+        listing.refresh_from_db()
+        self.assertEqual(listing.brand, "ApprovedBrand")
+        self.assertEqual(listing.status, ListingStatus.READY)
+        self.assertEqual(listing.action, "create")
+        self.assertIsNone(listing.marketplace_response_json)
+        self.assertFalse(listing.validation_errors_json)
+
+    def test_update_file_corrects_a_rejected_product_and_keeps_it_a_create(self):
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
+        from listings.bunnings.template_xlsx import build_correction_xlsx
+
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        listing.status = ListingStatus.FAILED
+        listing.marketplace_response_json = {
+            "bunnings_errors": [{
+                "field": "Brand",
+                "attribute": "BRAND",
+                "value": "ExampleBrand",
+                "code": "2006",
+                "message": "The value is not in the list of accepted values",
+            }],
+        }
+        listing.save()
+        workbook = load_workbook(BytesIO(build_correction_xlsx(self.store, [listing])))
+        sheet = workbook["Data"]
+        headers = [sheet.cell(2, col).value for col in range(1, sheet.max_column + 1)]
+        brand_col = headers.index("BRAND") + 1
+        action_col = headers.index("Action") + 1
+        self.assertEqual(sheet.cell(3, action_col).value, "Update")
+        self.assertIn("Brand", str(sheet.cell(3, headers.index("Bunnings error") + 1).value))
+        sheet.cell(3, brand_col, "ApprovedBrand")
+        out = BytesIO()
+        workbook.save(out)
+        result = listing_service.bulk_import(
+            self.user, self.store, "update.xlsx", out.getvalue(), action="update",
+        )
+        self.assertEqual(result["imported"], 1, result["rows"])
+        listing.refresh_from_db()
+        self.assertEqual(listing.brand, "ApprovedBrand")
+        self.assertEqual(listing.action, "create")
+        self.assertEqual(listing.status, ListingStatus.READY)
+        self.assertIsNone(listing.marketplace_response_json)
+
+    def test_update_file_leaves_live_products_and_unknown_skus(self):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        listing.status = ListingStatus.UPLOADED_PRODUCTION
+        listing.save()
+        content = "Action,SKU\nUpdate,MISSING\nUpdate,BN-1\n".encode()
+        result = listing_service.bulk_import(
+            self.user, self.store, "update.csv", content, action="update",
+        )
+        self.assertEqual(result["imported"], 0)
+        messages = " ".join(" ".join(row["errors"]) for row in result["rows"])
+        self.assertIn("No created product", messages)
+        self.assertIn("already on the marketplace", messages)
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.UPLOADED_PRODUCTION)
+        self.assertEqual(listing.brand, "ExampleBrand")
+
     @patch("listings.bunnings.products.BunningsClient")
     def test_publish_skips_product_import_when_sku_already_in_catalog(self, mock_cls):
         listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))

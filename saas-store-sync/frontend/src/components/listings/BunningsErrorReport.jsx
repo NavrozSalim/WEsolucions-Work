@@ -28,9 +28,14 @@ export default function BunningsErrorReport({ errors, onDownload }) {
     return (
         <div className="rounded-md border border-rose-200 bg-rose-50/80 dark:border-rose-900 dark:bg-rose-950/30">
             <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
-                <p className="text-xs font-semibold text-rose-800 dark:text-rose-200">
-                    Not created on Bunnings
-                </p>
+                <div>
+                    <p className="text-xs font-semibold text-rose-800 dark:text-rose-200">
+                        Not created on Bunnings
+                    </p>
+                    <p className="text-xs text-rose-700/90 dark:text-rose-300/90">
+                        Edit this product, or use Bulk Listing → Update for many products, then publish again.
+                    </p>
+                </div>
                 {onDownload && (
                     <button
                         type="button"

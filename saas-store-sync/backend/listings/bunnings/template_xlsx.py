@@ -241,7 +241,7 @@ def _sample_row(columns: list[TemplateColumn], *, category: str, index: int, sto
         "Vendor URL (Optional)": "https://www.amazon.com.au/dp/EXAMPLE",
         "Marketplace Name (Optional)": marketplace_name or "Bunnings",
         "Store Name (Optional)": store_name,
-        "Action": "Mapped" if action == "mapped" else "Create",
+        "Action": "Mapped" if action == "mapped" else ("Update" if action == "update" else "Create"),
         "Option 1 Name (Optional)": "Size",
         "Option 1 Value (Optional)": size,
         "Option 2 Name (Optional)": "Colour",
@@ -276,11 +276,112 @@ def _sample_row(columns: list[TemplateColumn], *, category: str, index: int, sto
     return {col.code: samples.get(col.code, "") for col in columns}
 
 
-def build_template_xlsx(action: str = "create", store=None, hierarchies=None) -> bytes:
+def _listing_correction_row(listing, *, store_name: str, marketplace_name: str) -> dict:
+    """One filled template row plus the Mirakl error the seller needs to fix."""
+    product = bunnings_products.product_row(listing)
+    offer = bunnings_products.offer_row(listing)
+    values = {}
+    values.update(product)
+    values.update(offer)
+    extras = bunnings_products.parse_extras(listing)
+    attrs = extras.get("attributes") if isinstance(extras.get("attributes"), dict) else {}
+    for code, value in attrs.items():
+        if not str(values.get(code) or "").strip():
+            values[str(code)] = str(value)
+    sku = bunnings_products.listing_sku(listing)
+    values["SUPPLIER_ITEM_NUMBER"] = sku
+    values["Vendor Name (Optional)"] = getattr(listing, "source_vendor_code", "") or ""
+    values["Vendor URL (Optional)"] = getattr(listing, "vendor_url", "") or ""
+    values["Vendor ID (Optional)"] = getattr(listing, "vendor_id", "") or ""
+    values["Marketplace Name (Optional)"] = marketplace_name
+    values["Store Name (Optional)"] = store_name
+    values["Action"] = "Update"
+    for index in (1, 2, 3, 4):
+        values[f"Option {index} Name (Optional)"] = getattr(listing, f"option_{index}_name", "") or ""
+        values[f"Option {index} Value (Optional)"] = getattr(listing, f"option_{index}_value", "") or ""
+    values["Variation Img URL (Optional)"] = getattr(listing, "variation_image_url", "") or ""
+    saved = bunnings_products.stored_bunnings_errors(listing)
+    parts = []
+    for item in saved:
+        field = str(item.get("field") or item.get("attribute") or "Field").strip()
+        sent = str(item.get("value") or "").strip()
+        message = str(item.get("message") or item.get("errors") or "").strip()
+        bit = field
+        if sent:
+            bit = f"{bit}={sent}"
+        if message:
+            bit = f"{bit}: {message}"
+        if bit:
+            parts.append(bit)
+    if not parts:
+        texts = getattr(listing, "validation_errors_json", None) or []
+        if isinstance(texts, str):
+            texts = [texts]
+        parts = [str(text).strip() for text in texts if str(text or "").strip()]
+    values["Bunnings error"] = " | ".join(parts)
+    return values
+
+
+def build_correction_xlsx(store, listings) -> bytes:
+    """Bunnings template filled with created products that are not on the marketplace yet."""
+    categories: list[str] = []
+    seen: set[str] = set()
+    extra: list[str] = []
+    extra_seen: set[str] = set()
+    for listing in listings:
+        category = str(getattr(listing, "category", "") or "").strip()
+        if category and category.lower() not in seen:
+            seen.add(category.lower())
+            categories.append(category)
+        attrs = bunnings_products.parse_extras(listing).get("attributes") or {}
+        if isinstance(attrs, dict):
+            for code in attrs:
+                text = str(code or "").strip()
+                if text and text.lower() not in extra_seen:
+                    extra_seen.add(text.lower())
+                    extra.append(text)
+    store_name = (getattr(store, "name", None) or "").strip()
+    marketplace_name = ""
+    mp = getattr(store, "marketplace", None)
+    if mp is not None:
+        marketplace_name = (getattr(mp, "name", None) or getattr(mp, "code", None) or "").strip()
+    rows = [
+        _listing_correction_row(listing, store_name=store_name, marketplace_name=marketplace_name)
+        for listing in listings
+    ]
+    return build_template_xlsx(
+        "update",
+        store=store,
+        hierarchies=categories,
+        filled_rows=rows,
+        extra_attribute_codes=extra,
+    )
+
+
+def build_template_xlsx(
+    action: str = "create",
+    store=None,
+    hierarchies=None,
+    filled_rows=None,
+    extra_attribute_codes=None,
+) -> bytes:
     """Colored Bunnings listing workbook: system, product required, category required, offer."""
     action = (action or "create").strip().lower()
     hierarchy_codes = [str(c).strip() for c in (hierarchies or []) if str(c or "").strip()]
     columns = build_template_columns(store, hierarchy_codes)
+    known = {col.code.lower() for col in columns}
+    for code in extra_attribute_codes or []:
+        text = str(code or "").strip()
+        if text and text.lower() not in known:
+            known.add(text.lower())
+            columns.append(TemplateColumn(code=text, label=text, band="category"))
+    if filled_rows is not None:
+        columns.append(TemplateColumn(
+            code="Bunnings error",
+            label="Bunnings error",
+            band="system",
+            prompt="Why this product was rejected. Correct the field, keep Action as Update, and upload the file.",
+        ))
     store_name = (getattr(store, "name", None) or "").strip()
     marketplace_name = ""
     mp = getattr(store, "marketplace", None)
@@ -309,24 +410,30 @@ def build_template_xlsx(action: str = "create", store=None, hierarchies=None) ->
     last_col = get_column_letter(len(columns))
     ws.auto_filter.ref = f"A2:{last_col}2"
 
-    # Two example rows show a variation pair. Every selected category stays in the
-    # CATEGORY dropdown; writing a pair per category makes Select all time out.
-    samples = hierarchy_codes[:1] or [""]
     excel_row = 3
-    for i, code in enumerate(samples, start=1):
-        for variant_index in (1, 2):
-            values = _sample_row(
-                columns,
-                category=code or "HIERARCHY_CODE",
-                index=i,
-                variant_index=variant_index,
-                store_name=store_name,
-                marketplace_name=marketplace_name,
-                action=action,
-            )
+    if filled_rows is not None:
+        for values in filled_rows:
             for idx, col in enumerate(columns, start=1):
                 ws.cell(excel_row, idx, values.get(col.code, ""))
             excel_row += 1
+    else:
+        # Two example rows show a variation pair. Every selected category stays in the
+        # CATEGORY dropdown; writing a pair per category makes Select all time out.
+        samples = hierarchy_codes[:1] or [""]
+        for i, code in enumerate(samples, start=1):
+            for variant_index in (1, 2):
+                values = _sample_row(
+                    columns,
+                    category=code or "HIERARCHY_CODE",
+                    index=i,
+                    variant_index=variant_index,
+                    store_name=store_name,
+                    marketplace_name=marketplace_name,
+                    action=action,
+                )
+                for idx, col in enumerate(columns, start=1):
+                    ws.cell(excel_row, idx, values.get(col.code, ""))
+                excel_row += 1
 
     ref_col = 1
     for col_idx, col in enumerate(columns, start=1):

@@ -599,7 +599,7 @@ BUNNINGS_EXPORT_FIELDS = [
 
 TEMPLATE_HEADERS = LASOO_TEMPLATE_HEADERS
 DELETE_TEMPLATE_HEADERS = ["Action", "SKU"]
-VALID_ACTIONS = {"create", "mapped", "delete", "delete_system"}
+VALID_ACTIONS = {"create", "mapped", "update", "delete", "delete_system"}
 _TRUE_VALUES = {"true", "1", "yes", "y", "t"}
 
 _HEADER_MARKERS = {
@@ -637,6 +637,8 @@ _SKIP_EXTRA_ATTR_HEADERS = frozenset({
     "update-delete",
     "update_delete",
     "update delete",
+    "bunnings error",
+    "bunnings_error",
     "sku",
     "price",
     "quantity",
@@ -709,7 +711,7 @@ def _normalize_action(raw: str) -> str:
         return "delete_system"
     if compact in VALID_ACTIONS:
         return compact
-    for valid in ("create", "mapped", "delete"):
+    for valid in ("update", "create", "mapped", "delete"):
         if compact.startswith(valid):
             return valid
     return ""
@@ -966,6 +968,20 @@ def inspect_upload(filename: str, content: bytes) -> dict:
     }
 
 
+def template_action_label(action: str) -> str:
+    """Action cell written into a blank template."""
+    action = (action or "create").strip().lower()
+    if action == "mapped":
+        return "Mapped"
+    if action == "update":
+        return "Update"
+    if action == "delete_system":
+        return "Delete from system"
+    if action == "delete":
+        return "Delete"
+    return "Create"
+
+
 def _marketplace_label(store) -> str:
     mp = getattr(store, "marketplace", None)
     return (getattr(mp, "name", None) or getattr(mp, "code", None) or "").strip()
@@ -991,7 +1007,7 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
             "Vendor URL (Optional)": "https://www.amazon.com/dp/EXAMPLE",
             "Marketplace Name (Optional)": marketplace_name or "Reverb",
             "Store Name (Optional)": store_name,
-            "Action": "Mapped" if action == "mapped" else "Create",
+            "Action": template_action_label(action),
             "SKU": "AMH-EXAMPLE-001",
             "Title": "Example Guitar Pedal",
             "Make": "Unbranded",
@@ -1022,7 +1038,7 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
             "Vendor URL (Optional)": "https://www.amazon.com/dp/EXAMPLE",
             "Marketplace Name (Optional)": marketplace_name or "Etsy",
             "Store Name (Optional)": store_name,
-            "Action": "Mapped" if action == "mapped" else "Create",
+            "Action": template_action_label(action),
             "SKU": "ETSY-EXAMPLE-001",
             "Title": "Handmade Example Pendant",
             "Description": "Example Etsy listing description.",
@@ -1050,7 +1066,7 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
                 "Vendor ID (Optional)": "",
                 "Marketplace Name (Optional)": marketplace_name or "Temu",
                 "Store Name (Optional)": store_name,
-                "Action": "Mapped" if action == "mapped" else "Create",
+                "Action": template_action_label(action),
                 "Parent SKU": parent,
                 "SKU": sku,
                 "Title": f"Example Cotton Tee{title_suffix}",
@@ -1102,7 +1118,7 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
                 "Vendor ID (Optional)": "",
                 "Marketplace Name (Optional)": marketplace_name or "MyDeal",
                 "Store Name (Optional)": store_name,
-                "Action": "Mapped" if action == "mapped" else "Create",
+                "Action": template_action_label(action),
                 "Parent SKU": parent_sku,
                 "SKU": sku,
                 "Title": f"Example Polo Shirt{title_suffix}",
@@ -1191,7 +1207,7 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
                 "Vendor ID (Optional)": "",
                 "Marketplace Name (Optional)": marketplace_name or "Bunnings",
                 "Store Name (Optional)": store_name,
-                "Action": "Mapped" if action == "mapped" else "Create",
+                "Action": template_action_label(action),
                 "category": category_code or "HIERARCHY_CODE",
                 "product-id": sku,
                 "product-id-type": "SHOP_SKU",
@@ -1266,7 +1282,7 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
         "Vendor ID (Optional)": "8FNZ100-DL-G1",
         "Marketplace Name (Optional)": marketplace_name or "Lasoo",
         "Store Name (Optional)": store_name,
-        "Action": "Mapped" if action == "mapped" else "Create",
+        "Action": template_action_label(action),
         "Parent SKU": "JDXTY",
         "SKU": "JDXTY-XL-B",
         "Option 1 Name (Optional)": "Size",

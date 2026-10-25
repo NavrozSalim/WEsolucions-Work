@@ -529,6 +529,32 @@ def _template_hierarchies(raw) -> list[str]:
 
 def _template_response(store, action: str, hierarchies: list[str]):
     action = (action or 'create').strip().lower()
+    if marketplace_kind(store.marketplace) == 'bunnings' and action == 'update':
+        from listings.bunnings.template_xlsx import build_correction_xlsx
+
+        listings = list(
+            StoreListing.objects.filter(
+                store=store,
+                status__in=(
+                    ListingStatus.DRAFT,
+                    ListingStatus.VALIDATION_FAILED,
+                    ListingStatus.READY,
+                    ListingStatus.FAILED,
+                ),
+            ).order_by('sku', 'id')
+        )
+        if not listings:
+            return Response(
+                {'detail': 'No created products to update. Use Create for a new product, or the pencil icon to fix one product.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        content = build_correction_xlsx(store, listings)
+        resp = HttpResponse(
+            content,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        resp['Content-Disposition'] = 'attachment; filename="bunnings-products-to-update.xlsx"'
+        return resp
     if marketplace_kind(store.marketplace) == 'bunnings' and action in ('create', 'mapped'):
         from listings.bunnings.template_xlsx import build_template_xlsx
 

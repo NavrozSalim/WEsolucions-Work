@@ -89,6 +89,7 @@ SYSTEM_LOG_FILENAMES = frozenset({
 HISTORY_ACTIONS = (
     ListingAction.CREATE,
     ListingAction.MAPPED,
+    ListingAction.UPDATE,
     ListingAction.DELETE,
     ListingAction.DELETE_SYSTEM,
 )
@@ -718,7 +719,10 @@ def create(user, store, data: dict, action: str = ListingAction.CREATE) -> Store
     ).exists():
         raise MarketplaceError(
             f'A created product with SKU/variant "{variant_key}" already exists for this store.'
-            + (' Use the Mapped action to update it.' if action == ListingAction.CREATE else '')
+            + (
+                ' Use Update to correct it, or Mapped if it is already on the marketplace.'
+                if action == ListingAction.CREATE else ''
+            )
         )
     _finalize_validation(listing, data)
     link_errors = _attach_mapped_listing(listing)
@@ -785,6 +789,8 @@ def update(listing: StoreListing, data: dict) -> StoreListing:
         merged = list(listing.validation_errors_json or []) + link_errors
         listing.validation_errors_json = merged
         listing.status = ListingStatus.VALIDATION_FAILED
+    if not was_on_marketplace:
+        listing.marketplace_response_json = None
     listing.save()
     if link_errors and _store_kind(listing.store) == "lasoo":
         raise MarketplaceError(link_errors[0])
@@ -1580,25 +1586,48 @@ def bulk_import(
         existing = StoreListing.objects.filter(
             store=target_store, external_variant_key=variant_key, environment=environment,
         ).first()
-        if file_action == ListingAction.CREATE and existing and not errors:
+        if file_action == ListingAction.UPDATE:
+            if existing is None:
+                row_result["valid"] = False
+                row_result["errors"] = [
+                    f'No created product with SKU "{variant_key}". Use Create for a new product.'
+                ]
+                error_rows += 1
+                preview.append(row_result)
+                continue
+            if existing.status in ON_MARKETPLACE_STATUSES or existing.last_uploaded_at:
+                row_result["valid"] = False
+                row_result["errors"] = [
+                    f'SKU "{variant_key}" is already on the marketplace. '
+                    "Edit it from Inventory management."
+                ]
+                error_rows += 1
+                preview.append(row_result)
+                continue
+            listing = existing
+            listing.action = ListingAction.CREATE
+        elif file_action == ListingAction.CREATE and existing and not errors:
             row_result["valid"] = False
             row_result["errors"] = [
                 f'A listing with SKU "{variant_key}" already exists. '
-                'Use the Mapped action to update it.'
+                'Use Update to correct it, or Mapped if it is already on the marketplace.'
             ]
             error_rows += 1
             preview.append(row_result)
             continue
-
-        listing = existing or StoreListing(
-            user=user, store=target_store,
-            external_variant_key=variant_key,
-            external_product_key=variant_key,
-            environment=environment,
-        )
-        listing.action = file_action
+        else:
+            listing = existing or StoreListing(
+                user=user, store=target_store,
+                external_variant_key=variant_key,
+                external_product_key=variant_key,
+                environment=environment,
+            )
+            listing.action = file_action
         _apply_fields(listing, row)
         _finalize_validation(listing, row)
+        if file_action == ListingAction.UPDATE:
+            listing.action = ListingAction.CREATE
+            listing.marketplace_response_json = None
         link_errors = _attach_mapped_listing(listing)
         if link_errors:
             merged = list(listing.validation_errors_json or []) + link_errors
@@ -1635,7 +1664,11 @@ def bulk_import(
         filename=filename,
         total=len(rows), success=imported, errors=error_rows,
         rows=preview,
-        message=f"Imported {imported} of {len(rows)} row(s).",
+        message=(
+            f"Updated {imported} of {len(rows)} product(s). Publish them to send the corrections."
+            if file_action == ListingAction.UPDATE
+            else f"Imported {imported} of {len(rows)} row(s)."
+        ),
     )
     return {"total_rows": len(rows), "imported": imported, "action": file_action, "rows": preview}
 
