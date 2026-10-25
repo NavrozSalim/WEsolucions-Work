@@ -323,12 +323,23 @@ class BunningsProductsUnitTests(SimpleTestCase):
         )
         text = bunnings_products.products_csv([listing])
         header = text.splitlines()[0]
-        self.assertIn("variant-group-code", header)
+        header_cells = header.split(";")
+        mapped = dict(zip(header_cells, text.splitlines()[1].split(";")))
+        self.assertIn("VARIANT_GROUP_CODE", header_cells)
+        self.assertEqual(mapped["VARIANT_GROUP_CODE"], "BN-1")
+        self.assertEqual(mapped["variant-group-code"], "BN-1")
         self.assertIn("size", header)
         self.assertIn("colour", header)
         self.assertIn("BN-1-M", text)
         self.assertIn("BN-1", text)
         self.assertIn("https://example.com/red-m.jpg", text)
+
+    def test_products_csv_sends_variant_group_when_it_matches_the_sku(self):
+        listing = _listing_ns(sku="BN-1", product_key="BN-1")
+        text = bunnings_products.products_csv([listing])
+        header_cells = text.splitlines()[0].split(";")
+        mapped = dict(zip(header_cells, text.splitlines()[1].split(";")))
+        self.assertEqual(mapped["VARIANT_GROUP_CODE"], "BN-1")
 
     def test_products_csv_uses_semicolon_and_sku(self):
         text = bunnings_products.products_csv([_listing_ns()])

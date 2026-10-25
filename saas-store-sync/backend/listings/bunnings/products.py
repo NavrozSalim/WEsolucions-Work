@@ -54,6 +54,7 @@ PRODUCT_CSV_HEADERS = [
     "CATEGORY",
 ]
 VARIANT_GROUP_HEADER = "variant-group-code"
+OPERATOR_VARIANT_GROUP = "VARIANT_GROUP_CODE"
 OPTION_ATTR_ALIASES = {
     "size": "size",
     "colour": "colour",
@@ -386,10 +387,10 @@ def variant_group_code(listing_or_data, sku: str = "") -> str:
     else:
         key = str(getattr(listing_or_data, "external_product_key", "") or "").strip()
         sku = sku or listing_sku(listing_or_data)
-    if key and key != sku:
+    if key:
         return key
     if collect_option_pairs(listing_or_data):
-        return key or sku
+        return sku
     return ""
 
 
@@ -835,7 +836,8 @@ def product_row(
         "category": category,
         "product-id": sku,
         "product-id-type": extras.get("product_id_type") or PRODUCT_ID_TYPE_SHOP_SKU,
-        VARIANT_GROUP_HEADER: variant_group_code(listing, sku),
+        VARIANT_GROUP_HEADER: "",
+        OPERATOR_VARIANT_GROUP: "",
         "title": title,
         "description": description,
         "brand": brand,
@@ -848,6 +850,9 @@ def product_row(
         "PRIMARY_IMAGE": _attr_lookup(extras_attrs, "PRIMARY_IMAGE") or "",
         "CATEGORY": _attr_lookup(extras_attrs, "CATEGORY") or category,
     }
+    group = variant_group_code(listing, sku) or _attr_lookup(extras_attrs, OPERATOR_VARIANT_GROUP)
+    row[VARIANT_GROUP_HEADER] = group
+    row[OPERATOR_VARIANT_GROUP] = group
     gallery = gallery_urls(listing, extras_attrs)
     if gallery and not row["PRIMARY_IMAGE"]:
         row["PRIMARY_IMAGE"] = gallery[0]

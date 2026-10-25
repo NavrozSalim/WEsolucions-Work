@@ -1450,7 +1450,7 @@ export default function ListingFormModal({
                                     />
                                 )}
                                 <Input
-                                    label="variant-group-code"
+                                    label="VARIANT_GROUP_CODE"
                                     placeholder="Same on every size/colour"
                                     value={form.product_key}
                                     onChange={set('product_key')}
@@ -1462,8 +1462,8 @@ export default function ListingFormModal({
                                     onChange={set('sku')}
                                 />
                                 <div className="sm:col-span-2 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 px-3 py-2 text-xs text-slate-600 dark:text-slate-300">
-                                    Standalone: fill <span className="font-medium">variant-group-code</span> (sku can be blank).
-                                    Variations: same variant-group-code on every size/colour, unique sku per row, Option Name/Value
+                                    Standalone: fill <span className="font-medium">VARIANT_GROUP_CODE</span> (sku can be blank).
+                                    Variations: same VARIANT_GROUP_CODE on every size/colour, unique sku per row, Option Name/Value
                                     (e.g. Size / M).
                                 </div>
                                 <Input
