@@ -277,6 +277,14 @@ export async function bulkLookupListingsOnMarketplace(storeId, payload = {}) {
     return startMarketplaceLookupJob(storeId, payload);
 }
 
+/** Excel of Mirakl errors for Bunnings products that were not created. */
+export const downloadBunningsErrorReport = (storeId, listingId = '') =>
+    apiDownload(api, `/stores/${storeId}/listings/bunnings/error-report/`, {
+        params: listingId ? { listing: listingId } : undefined,
+        fallbackFilename: 'bunnings-not-created.xlsx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+
 /** Download failed rows from a managed Upload history entry as Excel. */
 export const downloadListingUploadErrors = (storeId, uploadId, filename = '') => {
     const base = (filename || 'upload').replace(/\.[^.]+$/, '') || 'upload';

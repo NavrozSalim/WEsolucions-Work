@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from ..errors import MarketplaceError
 from ..models import ListingAction, ListingStatus, StoreListing
-from .client import BunningsClient, extract_import_id, line_errors_by_sku
+from .client import BunningsClient, extract_import_id, line_error_rows
 
 logger = logging.getLogger("listings.bunnings")
 
@@ -971,6 +971,250 @@ def import_offers_waiting_for_products(client, listings, *, attempts: int | None
     return last
 
 
+_FIELD_LABELS = {
+    "brand": "Brand",
+    "category": "Category",
+    "primary_uom": "Primary unit of measure",
+    "gtin": "Barcode",
+    "ean": "Barcode",
+    "barcode": "Barcode",
+    "display_name": "Website Display Name",
+    "title": "Title",
+    "description": "Description",
+    "long_description": "Product Overview",
+    "product_description": "Product Description",
+    "section_description": "Section Description",
+    "logistic_class": "Logistic class",
+    "leadtime_to_ship": "Lead time to ship",
+    "price": "Offer price",
+    "quantity": "Offer quantity",
+    "image_1": "Image",
+    "primary_image": "Image",
+    "state": "Offer state",
+    "product_id": "Product ID",
+    "sku": "SKU",
+    "supplier_item_number": "Supplier item number",
+}
+
+
+def _norm_attr(code: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in str(code or "").strip().lower()).strip("_")
+
+
+def _field_label(attribute: str) -> str:
+    norm = _norm_attr(attribute)
+    if norm in _FIELD_LABELS:
+        return _FIELD_LABELS[norm]
+    if not str(attribute or "").strip():
+        return ""
+    return str(attribute).replace("_", " ").replace("-", " ").strip().title()
+
+
+def _add_sent_value(bag: dict[str, set[str]], code, value) -> None:
+    key = _norm_attr(code)
+    text = str(value or "").strip()
+    if key and text:
+        bag.setdefault(key, set()).add(text.casefold())
+
+
+def _listing_sent_values(listing: StoreListing) -> dict[str, set[str]]:
+    """Values we sent, so a Mirakl row with no SKU can still be tied to this product."""
+    bag: dict[str, set[str]] = {}
+    _add_sent_value(bag, "sku", listing_sku(listing))
+    _add_sent_value(bag, "product-id", listing_sku(listing))
+    _add_sent_value(bag, "brand", getattr(listing, "brand", ""))
+    _add_sent_value(bag, "category", getattr(listing, "category", ""))
+    _add_sent_value(bag, "title", getattr(listing, "title", ""))
+    _add_sent_value(bag, "description", getattr(listing, "description", ""))
+    _add_sent_value(bag, "gtin", getattr(listing, "barcode", ""))
+    _add_sent_value(bag, "ean", getattr(listing, "barcode", ""))
+    extras = parse_extras(listing)
+    for key in ("gtin", "mpn", "logistic_class", "leadtime_to_ship"):
+        _add_sent_value(bag, key, extras.get(key))
+    attrs = extras.get("attributes") if isinstance(extras.get("attributes"), dict) else {}
+    for code, value in attrs.items():
+        _add_sent_value(bag, code, value)
+    try:
+        for code, value in product_row(listing).items():
+            _add_sent_value(bag, code, value)
+        for code, value in offer_row(listing).items():
+            _add_sent_value(bag, code, value)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Bunnings sent-value lookup failed for %s: %s", listing_sku(listing), exc)
+    return bag
+
+
+def _assign_import_errors(listings: list[StoreListing], rows: list[dict]) -> dict[int, list[dict]]:
+    sent = {id(listing): _listing_sent_values(listing) for listing in listings}
+    by_sku: dict[str, list[StoreListing]] = {}
+    for listing in listings:
+        for key in (listing_sku(listing), getattr(listing, "external_variant_key", "") or ""):
+            text = str(key or "").strip()
+            if text:
+                by_sku.setdefault(text.casefold(), []).append(listing)
+    assigned: dict[int, list[dict]] = {id(listing): [] for listing in listings}
+
+    def targets(row: dict) -> list[StoreListing]:
+        sku = str(row.get("sku") or "").strip()
+        if sku:
+            return list(by_sku.get(sku.casefold(), []))
+        attr = _norm_attr(row.get("attribute"))
+        val = str(row.get("value") or "").strip()
+        if attr and val:
+            hits = [
+                listing for listing in listings
+                if val.casefold() in (sent[id(listing)].get(attr) or set())
+            ]
+            if hits:
+                return hits
+            return list(listings) if len(listings) == 1 else []
+        if len(listings) == 1:
+            return list(listings)
+        text = f"{row.get('errors') or ''} {row.get('message') or ''}".casefold()
+        return [
+            listing for listing in listings
+            if listing_sku(listing) and listing_sku(listing).casefold() in text
+        ]
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for listing in targets(row):
+            assigned[id(listing)].append(row)
+    return assigned
+
+
+def _public_bunnings_error(listing: StoreListing, row: dict) -> dict:
+    attribute = str(row.get("attribute") or "").strip()
+    message = str(row.get("message") or "").strip()
+    errors = str(row.get("errors") or "").strip()
+    if not message:
+        message = errors
+    return {
+        "sku": listing_sku(listing) or str(row.get("sku") or "").strip(),
+        "code": str(row.get("code") or "").strip(),
+        "attribute": attribute,
+        "field": _field_label(attribute),
+        "value": str(row.get("value") or "").strip(),
+        "message": message,
+        "errors": errors or message,
+    }
+
+
+def fail_listings_from_import(listings: list[StoreListing], result, *, request: dict) -> None:
+    """Mark each product not created and keep the Mirakl error rows that belong to it."""
+    data = getattr(result, "data", None)
+    rows = line_error_rows(data)
+    assigned = _assign_import_errors(listings, rows)
+    fallback = (getattr(result, "message", None) or "").strip() or "Bunnings did not create this product."
+    safe_data = data if isinstance(data, (dict, list)) else {"raw": "" if data is None else str(data)[:4000]}
+    for listing in listings:
+        public = []
+        messages = []
+        seen: set[tuple] = set()
+        for row in assigned.get(id(listing)) or []:
+            item = _public_bunnings_error(listing, row)
+            key = (
+                item["code"],
+                item["attribute"].casefold(),
+                item["value"].casefold(),
+                item["message"],
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            public.append(item)
+            text = item["errors"] or item["message"]
+            if text and text not in messages:
+                messages.append(text)
+        if not messages:
+            messages = [fallback]
+            public = []
+        _mark_listing(
+            listing,
+            status=ListingStatus.FAILED,
+            request=request,
+            response={
+                "error": messages[0],
+                "data": safe_data,
+                "bunnings_errors": public,
+            },
+            errors=messages,
+        )
+
+
+def stored_bunnings_errors(listing: StoreListing) -> list[dict]:
+    raw = getattr(listing, "marketplace_response_json", None)
+    rows = raw.get("bunnings_errors") if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def error_report_rows(listings: list[StoreListing]) -> list[dict]:
+    """Flat rows for the Excel file a seller downloads from Created products."""
+    out: list[dict] = []
+    for listing in listings:
+        public = stored_bunnings_errors(listing)
+        if not public:
+            texts = getattr(listing, "validation_errors_json", None) or []
+            if isinstance(texts, str):
+                texts = [texts]
+            public = [
+                {
+                    "sku": listing_sku(listing),
+                    "field": "",
+                    "value": "",
+                    "code": "",
+                    "message": str(text).strip(),
+                }
+                for text in texts
+                if str(text or "").strip()
+            ]
+        if not public:
+            public = [{
+                "sku": listing_sku(listing),
+                "field": "",
+                "value": "",
+                "code": "",
+                "message": "Bunnings did not create this product.",
+            }]
+        for item in public:
+            out.append({
+                "sku": item.get("sku") or listing_sku(listing),
+                "field": item.get("field") or _field_label(item.get("attribute") or ""),
+                "value": item.get("value") or "",
+                "code": item.get("code") or "",
+                "message": item.get("message") or item.get("errors") or "",
+                "result": "Not created",
+            })
+    return out
+
+
+def error_report_xlsx(listings: list[StoreListing]) -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Not created"
+    headers = ["SKU", "Field", "Value sent", "Error code", "Message", "Result"]
+    bold = Font(bold=True)
+    for col, header in enumerate(headers, start=1):
+        cell = sheet.cell(1, col, header)
+        cell.font = bold
+    for row_i, item in enumerate(error_report_rows(listings), start=2):
+        sheet.cell(row_i, 1, item["sku"])
+        sheet.cell(row_i, 2, item["field"])
+        sheet.cell(row_i, 3, item["value"])
+        sheet.cell(row_i, 4, item["code"])
+        sheet.cell(row_i, 5, item["message"])
+        sheet.cell(row_i, 6, item["result"])
+    buf = io.BytesIO()
+    workbook.save(buf)
+    return buf.getvalue()
+
+
 def _mark_listing(listing: StoreListing, *, status: str, request: dict, response, errors=None):
     listing.status = status
     listing.marketplace_request_json = request
@@ -1027,13 +1271,11 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
         if not product_result.ok:
             for listing in need_p41:
                 p41_failed_ids.add(listing.id)
-                _mark_listing(
-                    listing,
-                    status=ListingStatus.FAILED,
-                    request={"p41": csv_text[:4000]},
-                    response={"error": product_result.message, "data": product_result.data},
-                    errors=[product_result.message or "P41 product import failed."],
-                )
+            fail_listings_from_import(
+                need_p41,
+                product_result,
+                request={"p41": csv_text[:4000]},
+            )
             if not mapped and not already_in_catalog:
                 return {
                     "ok": False,
@@ -1049,19 +1291,13 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
                 now_found, _still_missing = _partition_by_catalog(client, need_p41)
                 already_in_catalog = already_in_catalog + now_found
             elif not polled.ok:
-                sku_errors = line_errors_by_sku(polled.data)
                 for listing in need_p41:
                     p41_failed_ids.add(listing.id)
-                    sku = listing_sku(listing)
-                    detail = sku_errors.get(sku.lower()) if sku else ""
-                    msg = detail or polled.message or "P41 product import failed."
-                    _mark_listing(
-                        listing,
-                        status=ListingStatus.FAILED,
-                        request={"p41_import_id": product_import_id},
-                        response={"error": msg, "data": polled.data},
-                        errors=[msg],
-                    )
+                fail_listings_from_import(
+                    need_p41,
+                    polled,
+                    request={"p41_import_id": product_import_id},
+                )
                 if not mapped and not already_in_catalog:
                     return {
                         "ok": False,
@@ -1115,13 +1351,11 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
                 },
                 errors=None,
             )
-        for listing in hard_fail:
-            _mark_listing(
-                listing,
-                status=ListingStatus.FAILED,
+        if hard_fail:
+            fail_listings_from_import(
+                hard_fail,
+                offer_result,
                 request={"p41_import_id": product_import_id, "of01": offer_text[:4000]},
-                response={"error": offer_result.message, "data": offer_result.data},
-                errors=[offer_result.message or "OF01 offer import failed."],
             )
         if waiting and not hard_fail:
             return {
@@ -1143,8 +1377,8 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
 
     published = 0
     failed = 0
-    for listing in offer_targets:
-        if offer_result.ok:
+    if offer_result.ok:
+        for listing in offer_targets:
             _mark_listing(
                 listing,
                 status=target_status,
@@ -1155,15 +1389,13 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
                 },
             )
             published += 1
-        else:
-            _mark_listing(
-                listing,
-                status=ListingStatus.FAILED,
-                request={"p41_import_id": product_import_id, "of01": offer_text[:4000]},
-                response={"error": offer_result.message, "data": offer_result.data},
-                errors=[offer_result.message or "OF01 offer import failed."],
-            )
-            failed += 1
+    else:
+        fail_listings_from_import(
+            offer_targets,
+            offer_result,
+            request={"p41_import_id": product_import_id, "of01": offer_text[:4000]},
+        )
+        failed = len(offer_targets)
 
     if published and failed == 0:
         message = (

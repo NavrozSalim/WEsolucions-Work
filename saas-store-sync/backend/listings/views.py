@@ -423,6 +423,43 @@ class StoreBunningsAttributesView(APIView):
         })
 
 
+class StoreBunningsErrorReportView(APIView):
+    """Excel of Bunnings/Mirakl errors for products that were not created."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        store = _get_store(request, store_pk)
+        if marketplace_kind(store.marketplace) != 'bunnings':
+            return Response(
+                {'detail': 'Error reports are only available for Bunnings stores.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        listing_id = (request.query_params.get('listing') or '').strip()
+        qs = StoreListing.objects.filter(store=store, status=ListingStatus.FAILED)
+        if listing_id:
+            qs = qs.filter(id=listing_id)
+        listings = list(qs.order_by('sku', 'id'))
+        if not listings:
+            return Response(
+                {'detail': 'No Bunnings products failed to be created.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        from listings.bunnings import products as bunnings_products
+
+        blob = bunnings_products.error_report_xlsx(listings)
+        sku = ''
+        if len(listings) == 1:
+            sku = (listings[0].sku or listings[0].external_variant_key or '').strip()
+        filename = f'bunnings-not-created-{sku}.xlsx' if sku else 'bunnings-not-created.xlsx'
+        filename = ''.join(ch if ch.isalnum() or ch in '-_.' else '_' for ch in filename)
+        response = HttpResponse(
+            blob,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+
 class StoreListingDetailView(APIView):
     permission_classes = [IsAuthenticated]
 

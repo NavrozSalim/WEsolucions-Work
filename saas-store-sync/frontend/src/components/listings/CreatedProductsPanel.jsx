@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Pencil, RefreshCw, Send, Trash2 } from 'lucide-react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { FileDown, Pencil, RefreshCw, Send, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
 import {
     deleteListing,
+    downloadBunningsErrorReport,
     getCreatedListings,
     getListingPublishProgress,
     persistListingPublishJob,
     publishListings,
     readListingPublishJob,
 } from '../../services/listingService';
+import BunningsErrorReport, { bunningsErrorsFromListing } from './BunningsErrorReport';
 import ListingFormModal from './ListingFormModal';
 
 const STATUS_STYLES = {
@@ -220,6 +222,12 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
             });
     };
 
+    const handleDownloadErrors = (listingId = '') => {
+        downloadBunningsErrorReport(storeId, listingId).catch((err) => {
+            onMessage?.(err.message || 'Could not download the Bunnings error report.', 'error');
+        });
+    };
+
     const handleDelete = (listing) => {
         if (!window.confirm(`Delete "${listing.external_variant_key}" from this app and the marketplace?`)) return;
         deleteListing(storeId, listing.id)
@@ -236,6 +244,7 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
             });
     };
 
+    const showBunningsErrorReport = marketplaceKey === 'bunnings' && listings.some((l) => l.status === 'failed');
     const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE) || 1);
     const safePage = Math.min(Math.max(1, page), totalPages);
     const rangeStart = totalCount === 0 ? 0 : (safePage - 1) * PAGE_SIZE + 1;
@@ -267,6 +276,12 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                             </button>
                         ))}
                     </div>
+                    {showBunningsErrorReport && (
+                        <Button variant="secondary" size="sm" onClick={() => handleDownloadErrors('')}>
+                            <FileDown className="mr-1.5 h-4 w-4" />
+                            Error report
+                        </Button>
+                    )}
                     <Button variant="secondary" size="sm" onClick={load} disabled={loading}>
                         <RefreshCw className={`mr-1.5 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
                         Refresh
@@ -314,9 +329,14 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                         </thead>
                         <tbody>
                             {listings.map((l) => {
-                                const errorText = listingErrorText(l);
+                                const bunningsErrors = marketplaceKey === 'bunnings' ? bunningsErrorsFromListing(l) : [];
+                                const errorText = bunningsErrors.length ? '' : listingErrorText(l);
+                                const statusLabel = marketplaceKey === 'bunnings' && l.status === 'failed'
+                                    ? 'Not created'
+                                    : (STATUS_LABELS[l.status] || l.status);
                                 return (
-                                <tr key={l.id} className="border-t border-slate-100 dark:border-slate-800">
+                                <Fragment key={l.id}>
+                                <tr className="border-t border-slate-100 dark:border-slate-800">
                                     <td className="px-4 py-2.5">
                                         <p className="font-medium text-slate-900 dark:text-slate-100">{l.sku || l.external_variant_key}</p>
                                     </td>
@@ -337,7 +357,7 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                                             className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[l.status] || STATUS_STYLES.draft}`}
                                             title={errorText || undefined}
                                         >
-                                            {STATUS_LABELS[l.status] || l.status}
+                                            {statusLabel}
                                         </span>
                                         {errorText && (l.status === 'failed' || l.status === 'validation_failed') && (
                                             <p className="mt-1 max-w-[220px] text-xs text-rose-600 dark:text-rose-400" title={errorText}>
@@ -377,6 +397,17 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                                         </div>
                                     </td>
                                 </tr>
+                                {bunningsErrors.length > 0 && (
+                                    <tr className="bg-rose-50/40 dark:bg-rose-950/20">
+                                        <td colSpan={7} className="px-4 pb-3">
+                                            <BunningsErrorReport
+                                                errors={bunningsErrors}
+                                                onDownload={() => handleDownloadErrors(l.id)}
+                                            />
+                                        </td>
+                                    </tr>
+                                )}
+                                </Fragment>
                                 );
                             })}
                         </tbody>

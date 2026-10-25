@@ -3,11 +3,12 @@ import { X } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
-import { createListing, updateListing } from '../../services/listingService';
+import { createListing, downloadBunningsErrorReport, updateListing } from '../../services/listingService';
 import { getStore } from '../../services/storeService';
 import ListingPhotoUploader from './ListingPhotoUploader';
 import { ReverbCategorySelect, ReverbConditionSelect } from './ReverbCatalogSelects';
 import { BunningsAttributeFields, BunningsCategorySelect, BunningsLogisticSelect } from './BunningsCatalogSelects';
+import BunningsErrorReport, { bunningsErrorsFromListing } from './BunningsErrorReport';
 
 const EMPTY_LASOO = {
     action: 'create',
@@ -937,6 +938,21 @@ export default function ListingFormModal({
                                 : ''}
                         </p>
                         {isEdit && (() => {
+                            const bunningsErrors = isBunnings ? bunningsErrorsFromListing(listing) : [];
+                            if (bunningsErrors.length) {
+                                return (
+                                    <div className="mb-4">
+                                        <BunningsErrorReport
+                                            errors={bunningsErrors}
+                                            onDownload={() => {
+                                                downloadBunningsErrorReport(storeId, listing.id).catch((err) => {
+                                                    setError(err.message || 'Could not download the Bunnings error report.');
+                                                });
+                                            }}
+                                        />
+                                    </div>
+                                );
+                            }
                             const errs = Array.isArray(listing?.validation_errors_json)
                                 ? listing.validation_errors_json.filter((x) => typeof x === 'string' && x.trim())
                                 : [];

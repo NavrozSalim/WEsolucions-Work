@@ -177,13 +177,11 @@ class BunningsClient:
                 status=response.status_code,
             )
 
-        if not (response.content or b"").strip():
-            return BunningsResult(ok=True, data={}, status=response.status_code)
-        try:
-            payload = response.json()
-        except ValueError:
-            payload = response.text
-        return BunningsResult(ok=True, data=payload, status=response.status_code)
+        return BunningsResult(
+            ok=True,
+            data=_response_payload(response),
+            status=response.status_code,
+        )
 
     def get(self, path: str, *, params: dict | None = None, accept: str | None = None) -> BunningsResult:
         return self.request("GET", path, params=params, accept=accept)
@@ -580,19 +578,259 @@ def import_has_line_errors(data) -> bool:
     return False
 
 
+def _is_spreadsheet(content_type: str, raw: bytes) -> bool:
+    """True for Mirakl Excel error reports. CSV and JSON stay text."""
+    if "json" in content_type or "csv" in content_type or content_type.startswith("text/"):
+        return False
+    if "spreadsheet" in content_type or "excel" in content_type:
+        return True
+    return raw[:4] == b"PK\x03\x04"
+
+
+def _response_payload(response):
+    raw = response.content or b""
+    if not raw.strip():
+        return {}
+    headers = getattr(response, "headers", None) or {}
+    content_type = ""
+    if hasattr(headers, "get"):
+        content_type = str(headers.get("Content-Type") or headers.get("content-type") or "")
+    content_type = content_type.split(";")[0].strip().lower()
+    if _is_spreadsheet(content_type, raw):
+        return raw
+    try:
+        return response.json()
+    except ValueError:
+        return response.text
+
+
+def _cell(value) -> str:
+    return str(value or "").strip().strip('"')
+
+
+def _assemble_error(code: str, attr: str, val: str, message: str) -> str:
+    text = message
+    if attr and text and not text.lower().startswith(attr.lower()):
+        text = f"{attr}={val}: {text}" if val else f"{attr}: {text}"
+    elif not text and (attr or val):
+        text = f"{attr}={val}".strip("=")
+    if code and text and code not in text:
+        text = f"{code}|{text}"
+    return text or code
+
+
+def _split_code(err: str) -> tuple[str, str]:
+    """Pull a Mirakl code such as 1004 or 2006 off the front of an errors cell."""
+    text = _cell(err)
+    if "|" not in text:
+        return "", text
+    left, right = text.split("|", 1)
+    left = left.strip()
+    right = right.strip()
+    if not left or not right or " " in left or len(left) > 20:
+        return "", text
+    if left.isdigit() or any(ch.isdigit() for ch in left):
+        return left, right
+    return "", text
+
+
+_FIELD_HINTS = (
+    ("category", "category"),
+    ("brand", "brand"),
+    ("barcode", "ean"),
+    ("gtin", "ean"),
+    ("ean", "ean"),
+    ("image", "image-1"),
+    ("description", "description"),
+    ("title", "title"),
+    ("logistic", "logistic-class"),
+)
+
+
+def _infer_field(message: str, mapped: dict) -> tuple[str, str]:
+    """Integration reports name the bad column in the sentence, not in its own column."""
+    text = _cell(message).casefold()
+    if "|" in text:
+        text = text.split("|", 1)[1]
+    for word, column in _FIELD_HINTS:
+        if word not in text:
+            continue
+        return column, _cell(mapped.get(column.lower()))
+    return "", ""
+
+
+def _rows_from_mapped(mapped: dict) -> list[dict]:
+    sku = (
+        mapped.get("product-id")
+        or mapped.get("product_id")
+        or mapped.get("sku")
+        or mapped.get("shop_sku")
+        or mapped.get("product-sku")
+        or mapped.get("supplier_item_number")
+        or mapped.get("supplier-item-number")
+        or ""
+    )
+    sku = _cell(sku)
+    err = (
+        mapped.get("errors")
+        or mapped.get("error")
+        or mapped.get("error-message")
+        or mapped.get("error_message")
+        or mapped.get("message")
+        or ""
+    )
+    attr = _cell(
+        mapped.get("attribute-code")
+        or mapped.get("attribute_code")
+        or mapped.get("attribute")
+        or ""
+    )
+    explicit_value = bool(
+        mapped.get("attribute-value")
+        or mapped.get("attribute_value")
+        or mapped.get("rejected-value")
+        or mapped.get("error-code")
+        or mapped.get("error_code")
+        or mapped.get("error-message")
+        or mapped.get("error_message")
+    )
+    val = _cell(
+        mapped.get("attribute-value")
+        or mapped.get("attribute_value")
+        or mapped.get("rejected-value")
+        or (mapped.get("value") if explicit_value or attr else "")
+        or ""
+    )
+    code = _cell(mapped.get("error-code") or mapped.get("error_code") or "")
+    parts = [part.strip() for part in _cell(err).replace("\r", "\n").split("\n") if part.strip()]
+    if not parts:
+        parts = [""]
+    rows: list[dict] = []
+    for part in parts:
+        part_attr = attr
+        part_val = val
+        part_code = code
+        message = part
+        if not part_code:
+            part_code, message = _split_code(part)
+        if not part_val and "=" in message and ":" in message:
+            left, right = message.split(":", 1)
+            name, sep, raw_val = left.partition("=")
+            if sep and name.strip() and raw_val.strip():
+                if not part_attr:
+                    part_attr = name.strip()
+                part_val = raw_val.strip()
+                message = right.strip()
+        if not part_attr:
+            inferred_attr, inferred_val = _infer_field(message, mapped)
+            part_attr = inferred_attr
+            if not part_val:
+                part_val = inferred_val
+        display = _assemble_error(part_code, part_attr, part_val, message)
+        if not display:
+            continue
+        rows.append({
+            "sku": sku,
+            "errors": display,
+            "code": part_code,
+            "attribute": part_attr,
+            "value": part_val,
+            "message": message or display,
+        })
+    return rows
+
+
+def normalize_line_error(row) -> dict | None:
+    """Keep sku/errors and fill code, attribute, value, and message when we can."""
+    if not isinstance(row, dict):
+        return None
+    sku = _cell(row.get("sku") or row.get("product-id") or "")
+    errors = _cell(row.get("errors") or row.get("error") or "")
+    code = _cell(row.get("code") or "")
+    attr = _cell(row.get("attribute") or "")
+    val = _cell(row.get("value") or "")
+    message = _cell(row.get("message") or "")
+    if code or attr or message:
+        if not message:
+            message = errors
+            if code and message.startswith(f"{code}|"):
+                message = message[len(code) + 1:].strip()
+            prefix = f"{attr}={val}:".lower() if attr and val else ""
+            if prefix and message.lower().startswith(prefix):
+                message = message.split(":", 1)[1].strip()
+        if not errors:
+            errors = _assemble_error(code, attr, val, message)
+        if not (errors or message):
+            return None
+        return {
+            "sku": sku,
+            "errors": errors or message,
+            "code": code,
+            "attribute": attr,
+            "value": val,
+            "message": message or errors,
+        }
+    if not errors:
+        return None
+    parsed = _rows_from_mapped({"sku": sku, "errors": errors})
+    if not parsed:
+        return None
+    item = parsed[0]
+    item["errors"] = errors
+    if sku:
+        item["sku"] = sku
+    return item
+
+
+def _parse_xlsx_error_report(blob: bytes) -> list[dict]:
+    from openpyxl import load_workbook
+
+    try:
+        workbook = load_workbook(io.BytesIO(blob), read_only=True, data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Bunnings error report Excel could not be read: %s", exc)
+        return []
+    try:
+        sheet = workbook.active
+        grid: list[list[str]] = []
+        for raw in sheet.iter_rows(values_only=True):
+            grid.append([_cell(cell) for cell in raw])
+            if len(grid) > 5000:
+                break
+    finally:
+        workbook.close()
+    if not grid:
+        return []
+    header_at = 0
+    for index, row in enumerate(grid[:8]):
+        if any("error" in cell.casefold() for cell in row):
+            header_at = index
+            break
+    header = grid[header_at]
+    rows: list[dict] = []
+    for raw in grid[header_at + 1:]:
+        if not any(raw):
+            continue
+        mapped: dict[str, str] = {}
+        for index, key in enumerate(header):
+            name = _cell(key).lower()
+            if not name:
+                continue
+            mapped[name] = raw[index] if index < len(raw) else ""
+        rows.extend(_rows_from_mapped(mapped))
+    return rows
+
+
 def parse_mirakl_error_report(payload) -> list[dict]:
-    """Parse P44/OF03 CSV (or JSON wrapper) into [{sku, errors}, ...]."""
+    """Parse P44/P47/OF03 CSV or Excel into [{sku, errors, code, attribute, value, message}, ...]."""
     if isinstance(payload, dict):
         nested = payload.get("line_errors")
         if isinstance(nested, list) and nested:
             out = []
             for row in nested:
-                if not isinstance(row, dict):
-                    continue
-                sku = str(row.get("sku") or row.get("product-id") or "").strip()
-                err = str(row.get("errors") or row.get("error") or "").strip()
-                if err:
-                    out.append({"sku": sku, "errors": err})
+                item = normalize_line_error(row)
+                if item:
+                    out.append(item)
             if out:
                 return out
         payload = (
@@ -602,7 +840,10 @@ def parse_mirakl_error_report(payload) -> list[dict]:
             or ""
         )
     if isinstance(payload, (bytes, bytearray)):
-        text = payload.decode("utf-8-sig", errors="replace")
+        blob = bytes(payload)
+        if blob[:4] == b"PK\x03\x04" or blob[:2] == b"PK":
+            return _parse_xlsx_error_report(blob)
+        text = blob.decode("utf-8-sig", errors="replace")
     else:
         text = str(payload or "")
     text = text.strip()
@@ -616,44 +857,26 @@ def parse_mirakl_error_report(payload) -> list[dict]:
         if not isinstance(raw, dict):
             continue
         mapped = {(k or "").strip().strip('"').lower(): (v or "").strip() for k, v in raw.items()}
-        sku = (
-            mapped.get("product-id")
-            or mapped.get("product_id")
-            or mapped.get("sku")
-            or mapped.get("shop_sku")
-            or mapped.get("product-sku")
-            or ""
-        )
-        err = (
-            mapped.get("errors")
-            or mapped.get("error")
-            or mapped.get("error-message")
-            or mapped.get("error_message")
-            or mapped.get("message")
-            or ""
-        )
-        attr = (
-            mapped.get("attribute-code")
-            or mapped.get("attribute_code")
-            or mapped.get("attribute")
-            or ""
-        )
-        val = (
-            mapped.get("attribute-value")
-            or mapped.get("attribute_value")
-            or mapped.get("value")
-            or ""
-        )
-        code = mapped.get("error-code") or mapped.get("error_code") or ""
-        if attr and err:
-            err = f"{attr}={val}: {err}" if val else f"{attr}: {err}"
-        elif not err and (attr or val):
-            err = f"{attr}={val}".strip("=")
-        if code and err and code not in err:
-            err = f"{code}|{err}"
-        if err:
-            rows.append({"sku": sku, "errors": err})
+        rows.extend(_rows_from_mapped(mapped))
     return rows
+
+
+def line_error_rows(data) -> list[dict]:
+    """Error rows from a poll payload, including a stored error_report file."""
+    if isinstance(data, dict):
+        nested = data.get("line_errors")
+        if isinstance(nested, list) and nested:
+            rows = []
+            for row in nested:
+                item = normalize_line_error(row)
+                if item:
+                    rows.append(item)
+            if rows:
+                return rows
+        report = data.get("error_report")
+        if report:
+            return parse_mirakl_error_report(report)
+    return parse_mirakl_error_report(data)
 
 
 def format_line_errors(rows: list[dict], *, limit: int = 8) -> str:

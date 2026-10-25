@@ -107,6 +107,10 @@ class BunningsProductsUnitTests(SimpleTestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["sku"], "TEST-BN-001")
         self.assertIn("1004", rows[0]["errors"])
+        self.assertEqual(rows[0]["code"], "1004")
+        self.assertEqual(rows[0]["attribute"], "category")
+        self.assertEqual(rows[0]["value"], "REPLACE_WITH_CATEGORY_CODE")
+        self.assertIn("could not be identified", rows[0]["message"])
 
     def test_import_has_line_errors_on_complete_with_errors(self):
         self.assertTrue(
@@ -151,8 +155,33 @@ class BunningsProductsUnitTests(SimpleTestCase):
         self.assertIn("2006", rows[0]["errors"])
         self.assertIn("BRAND", rows[0]["errors"])
         self.assertIn("Shemaya", rows[0]["errors"])
+        self.assertEqual(rows[0]["code"], "2006")
+        self.assertEqual(rows[0]["attribute"], "BRAND")
+        self.assertEqual(rows[0]["value"], "Shemaya")
+        self.assertIn("not in the list", rows[0]["message"])
         self.assertIn("PRIMARY_UOM", rows[1]["errors"])
         self.assertIn("Each", rows[1]["errors"])
+        self.assertEqual(rows[1]["attribute"], "PRIMARY_UOM")
+        self.assertEqual(rows[1]["value"], "Each")
+
+    def test_parse_excel_transformation_error_report(self):
+        from io import BytesIO
+
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["error-code", "error-message", "attribute-code", "attribute-value"])
+        sheet.append(["2006", "The value is not in the list of accepted values", "BRAND", "Shemaya"])
+        sheet.append(["2006", "The value is not in the list of accepted values", "PRIMARY_UOM", "Each"])
+        buf = BytesIO()
+        workbook.save(buf)
+        rows = parse_mirakl_error_report(buf.getvalue())
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["attribute"], "BRAND")
+        self.assertEqual(rows[0]["value"], "Shemaya")
+        self.assertEqual(rows[1]["value"], "Each")
+        self.assertIn("2006", rows[0]["errors"])
 
     def test_poll_import_fails_complete_with_line_errors(self):
         store = SimpleNamespace(
@@ -228,6 +257,44 @@ class BunningsProductsUnitTests(SimpleTestCase):
         self.assertFalse(result.ok)
         self.assertIn("2006", result.message)
         self.assertIn("BRAND", result.message)
+
+    @patch("listings.bunnings.client.requests.request")
+    def test_error_report_keeps_excel_bytes(self, mock_request):
+        from io import BytesIO
+
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["error-code", "error-message", "attribute-code", "attribute-value"])
+        sheet.append(["2006", "The value is not in the list of accepted values", "BRAND", "Shemaya"])
+        buf = BytesIO()
+        workbook.save(buf)
+        blob = buf.getvalue()
+
+        class _Response:
+            status_code = 200
+            content = blob
+            text = "not-csv"
+            headers = {
+                "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            }
+
+            def json(self):
+                raise ValueError("xlsx")
+
+        mock_request.return_value = _Response()
+        store = SimpleNamespace(
+            name="t",
+            bunnings_environment="production",
+            bunnings_production_base_url="https://bunnings-prod.mirakl.net",
+            bunnings_production_shop_key="key",
+        )
+        result = BunningsClient(store).import_error_report("product", "1664882")
+        self.assertIsInstance(result.data, bytes)
+        rows = parse_mirakl_error_report(result.data)
+        self.assertEqual(rows[0]["attribute"], "BRAND")
+        self.assertEqual(rows[0]["value"], "Shemaya")
 
     def test_validate_variations_require_shared_product_key(self):
         data = {
@@ -1147,6 +1214,131 @@ class BunningsListingServiceTests(TestCase):
         self.assertEqual(listing.status, ListingStatus.FAILED)
         self.assertIn("2006", listing.validation_errors_json[0])
         client.import_offers.assert_not_called()
+
+    @patch("listings.bunnings.products.BunningsClient")
+    def test_publish_stores_every_transform_error_on_the_product(self, mock_cls):
+        listing = listing_service.create(
+            self.user,
+            self.store,
+            {**VALID_BUNNINGS, "attributes": {"PRIMARY_UOM": "Each"}},
+        )
+        client = mock_cls.return_value
+        client.environment = "production"
+        client.import_products.return_value = BunningsResult(ok=True, data={"import_id": "p1"})
+        client.poll_import.return_value = BunningsResult(
+            ok=False,
+            data={
+                "import_status": "COMPLETE",
+                "line_errors": [
+                    {
+                        "sku": "",
+                        "code": "2006",
+                        "attribute": "BRAND",
+                        "value": "ExampleBrand",
+                        "message": "The value is not in the list of accepted values",
+                        "errors": "2006|BRAND=ExampleBrand: The value is not in the list of accepted values",
+                    },
+                    {
+                        "sku": "",
+                        "code": "2006",
+                        "attribute": "PRIMARY_UOM",
+                        "value": "Each",
+                        "message": "The value is not in the list of accepted values",
+                        "errors": "2006|PRIMARY_UOM=Each: The value is not in the list of accepted values",
+                    },
+                ],
+            },
+            message="Bunnings product import p1 COMPLETE with errors.",
+        )
+        result = listing_service.publish(self.user, self.store)
+        self.assertFalse(result["ok"])
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.FAILED)
+        saved = listing.marketplace_response_json["bunnings_errors"]
+        self.assertEqual(
+            {(row["field"], row["value"]) for row in saved},
+            {("Brand", "ExampleBrand"), ("Primary unit of measure", "Each")},
+        )
+        client.import_offers.assert_not_called()
+
+    @patch("listings.bunnings.products.BunningsClient")
+    def test_publish_keeps_each_brand_error_on_its_own_product(self, mock_cls):
+        first = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        second = listing_service.create(
+            self.user,
+            self.store,
+            {**VALID_BUNNINGS, "sku": "BN-2", "brand": "OtherBrand"},
+        )
+        client = mock_cls.return_value
+        client.environment = "production"
+        client.import_products.return_value = BunningsResult(ok=True, data={"import_id": "p1"})
+        client.poll_import.return_value = BunningsResult(
+            ok=False,
+            data={
+                "line_errors": [
+                    {
+                        "code": "2006",
+                        "attribute": "BRAND",
+                        "value": "ExampleBrand",
+                        "message": "The value is not in the list of accepted values",
+                        "errors": "2006|BRAND=ExampleBrand: The value is not in the list of accepted values",
+                    },
+                    {
+                        "code": "2006",
+                        "attribute": "BRAND",
+                        "value": "OtherBrand",
+                        "message": "The value is not in the list of accepted values",
+                        "errors": "2006|BRAND=OtherBrand: The value is not in the list of accepted values",
+                    },
+                ],
+            },
+            message="Bunnings product import p1 COMPLETE with errors.",
+        )
+        listing_service.publish(self.user, self.store)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.marketplace_response_json["bunnings_errors"][0]["value"], "ExampleBrand")
+        self.assertEqual(second.marketplace_response_json["bunnings_errors"][0]["value"], "OtherBrand")
+        self.assertEqual(len(first.marketplace_response_json["bunnings_errors"]), 1)
+        self.assertEqual(len(second.marketplace_response_json["bunnings_errors"]), 1)
+
+    def test_error_report_download_says_not_created(self):
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+        from rest_framework.test import APIClient
+
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        listing.status = ListingStatus.FAILED
+        listing.validation_errors_json = [
+            "2006|BRAND=ExampleBrand: The value is not in the list of accepted values",
+        ]
+        listing.marketplace_response_json = {
+            "bunnings_errors": [{
+                "sku": "BN-1",
+                "code": "2006",
+                "attribute": "BRAND",
+                "field": "Brand",
+                "value": "ExampleBrand",
+                "message": "The value is not in the list of accepted values",
+                "errors": "2006|BRAND=ExampleBrand: The value is not in the list of accepted values",
+            }],
+        }
+        listing.save()
+        api = APIClient()
+        api.force_authenticate(user=self.user)
+        resp = api.get(f"/api/v1/stores/{self.store.id}/listings/bunnings/error-report/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("spreadsheet", resp["Content-Type"])
+        sheet = load_workbook(BytesIO(resp.content)).active
+        self.assertEqual([sheet.cell(1, col).value for col in range(1, 7)], [
+            "SKU", "Field", "Value sent", "Error code", "Message", "Result",
+        ])
+        self.assertEqual(sheet.cell(2, 1).value, "BN-1")
+        self.assertEqual(sheet.cell(2, 2).value, "Brand")
+        self.assertEqual(sheet.cell(2, 3).value, "ExampleBrand")
+        self.assertEqual(sheet.cell(2, 4).value, "2006")
+        self.assertEqual(sheet.cell(2, 6).value, "Not created")
 
     @patch("listings.bunnings.products.BunningsClient")
     def test_publish_skips_product_import_when_sku_already_in_catalog(self, mock_cls):
