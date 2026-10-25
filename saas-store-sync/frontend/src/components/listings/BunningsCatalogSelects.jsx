@@ -396,7 +396,11 @@ export function BunningsAttributeFields({ storeId, hierarchy, value, onChange })
             .then((res) => {
                 if (cancelled) return;
                 const list = Array.isArray(res.data?.attributes) ? res.data.attributes : [];
-                setFields(list.filter((f) => f?.code && !FORM_COVERED_ATTRS.has(String(f.code).toLowerCase())));
+                setFields(list.filter((f) => (
+                    f?.code
+                    && !f.extra_image
+                    && !FORM_COVERED_ATTRS.has(String(f.code).toLowerCase())
+                )));
             })
             .catch((err) => {
                 if (cancelled) return;

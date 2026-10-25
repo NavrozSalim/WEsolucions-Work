@@ -812,15 +812,23 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
         records = _read_csv_rows(content)
         first_data_row = 2
 
+    from listings.bunnings.products import _photo_urls, additional_image_slot
+
     rows = []
     for idx, raw in enumerate(records, start=first_data_row):
         normalized = {}
         extra_attrs = {}
+        extra_image_slots = []
         for header, value in raw.items():
             text = str(header or "").strip()
             if not text:
                 continue
             attr_code = _attribute_code_from_header(text)
+            image_slot = additional_image_slot(attr_code or text)
+            if image_slot and str(value).strip():
+                extra_image_slots.append((image_slot, str(value).strip()))
+                extra_attrs[attr_code or text] = str(value).strip()
+                continue
             canonical = _canonical_header(text)
             key = None if attr_code else COLUMN_MAP.get(canonical)
             if key:
@@ -903,6 +911,13 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
             normalized["attributes"] = merged_attrs
         elif "attributes" in normalized:
             normalized.pop("attributes", None)
+        if extra_image_slots:
+            parts = _photo_urls(normalized.get("image_urls"))
+            for _slot, url in sorted(extra_image_slots):
+                if url not in parts:
+                    parts.append(url)
+            if parts:
+                normalized["image_urls"] = "|".join(parts)
         normalized["row_number"] = idx
         rows.append(normalized)
     return rows
@@ -1184,13 +1199,21 @@ def build_template_csv(action: str = "create", store=None, hierarchies=None) -> 
             from listings.bunnings import products as bunnings_products
 
             attr_columns = bunnings_products.template_attribute_columns(store, hierarchy_codes)
+        from listings.bunnings.products import additional_image_slot, extra_image_codes_for
+
         known_headers = {h.lower() for h in BUNNINGS_PREFIX_HEADERS + BUNNINGS_OPERATOR_HEADERS + BUNNINGS_OFFER_HEADERS}
         extra_attr_headers = [
             col["header"]
             for col in attr_columns
             if str(col.get("header") or "").strip().lower() not in known_headers
+            and not additional_image_slot(col.get("header"))
         ]
-        headers = list(BUNNINGS_PREFIX_HEADERS) + list(BUNNINGS_OPERATOR_HEADERS) + extra_attr_headers + list(BUNNINGS_OFFER_HEADERS)
+        operator_headers = list(BUNNINGS_OPERATOR_HEADERS)
+        image_at = operator_headers.index("PRIMARY_IMAGE") + 1 if "PRIMARY_IMAGE" in operator_headers else len(operator_headers)
+        for offset, code in enumerate(extra_image_codes_for(store, hierarchy_codes)):
+            if code not in operator_headers:
+                operator_headers.insert(image_at + offset, code)
+        headers = list(BUNNINGS_PREFIX_HEADERS) + operator_headers + extra_attr_headers + list(BUNNINGS_OFFER_HEADERS)
 
         def _bunnings_sample(category_code: str, index: int = 1, variant_index: int = 1) -> dict:
             parent = f"BN-EXAMPLE-{index:03d}"

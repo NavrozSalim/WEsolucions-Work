@@ -342,6 +342,55 @@ class BunningsProductsUnitTests(SimpleTestCase):
         self.assertIn("9300000000001", text)
         self.assertIn("https://example.com/a.jpg", text)
         self.assertIn("Power Drill", text)
+        header_cells = header.split(";")
+        mapped = dict(zip(header_cells, text.splitlines()[1].split(";")))
+        self.assertEqual(mapped["PRIMARY_IMAGE"], "https://example.com/a.jpg")
+        self.assertEqual(mapped["ADDITIONAL_IMAGE_1"], "https://example.com/b.jpg")
+        self.assertNotIn("image-2", header_cells)
+
+    def test_products_csv_uses_the_category_image_attribute(self):
+        listing = _listing_ns()
+        listing.store = SimpleNamespace(id="s1")
+        with patch(
+            "listings.bunnings.products.load_category_attributes",
+            return_value=[{
+                "code": "ALT_IMAGE_1",
+                "label": "Additional image 1",
+                "extra_image": True,
+                "type": "MEDIA",
+            }],
+        ):
+            text = bunnings_products.products_csv([listing])
+        header_cells = text.splitlines()[0].split(";")
+        mapped = dict(zip(header_cells, text.splitlines()[1].split(";")))
+        self.assertIn("ALT_IMAGE_1", header_cells)
+        self.assertNotIn("ADDITIONAL_IMAGE_1", header_cells)
+        self.assertEqual(mapped["ALT_IMAGE_1"], "https://example.com/b.jpg")
+        self.assertEqual(mapped["PRIMARY_IMAGE"], "https://example.com/a.jpg")
+
+    def test_legacy_image_2_column_is_sent_as_an_additional_image(self):
+        listing = _listing_ns(
+            image_urls="https://example.com/a.jpg",
+            attributes={"image-2": "https://example.com/alt.jpg"},
+        )
+        text = bunnings_products.products_csv([listing])
+        header_cells = text.splitlines()[0].split(";")
+        mapped = dict(zip(header_cells, text.splitlines()[1].split(";")))
+        self.assertEqual(mapped["ADDITIONAL_IMAGE_1"], "https://example.com/alt.jpg")
+        self.assertNotIn("image-2", header_cells)
+
+    def test_parse_additional_image_columns_into_the_photo_list(self):
+        content = (
+            "SKU,Title,Description,Brand,Category,PRIMARY_IMAGE,ADDITIONAL_IMAGE_1,"
+            "image-3,Inventory,Price,Logistic Class\n"
+            "BN-IMG,T,D,B,DRILLS,https://example.com/a.jpg,https://example.com/b.jpg,"
+            "https://example.com/c.jpg,1,9.99,SMALL\n"
+        )
+        rows = csv_import.parse_upload("bunnings.csv", content.encode())
+        self.assertEqual(
+            rows[0]["image_urls"],
+            "https://example.com/a.jpg|https://example.com/b.jpg|https://example.com/c.jpg",
+        )
 
     def test_offers_csv_price_qty_and_delete(self):
         text = bunnings_products.offers_csv([_listing_ns()])
@@ -406,6 +455,25 @@ class BunningsProductsUnitTests(SimpleTestCase):
         self.assertNotIn("optional-foo", codes)
         assembly = next(r for r in rows if r["code"] == "attribute_pdb_assembly")
         self.assertTrue(assembly["required"])
+        kept = bunnings_products.flatten_product_attributes({
+            "attributes": [
+                {
+                    "code": "ADDITIONAL_IMAGE_1",
+                    "label": "Additional image 1",
+                    "requirement_level": "OPTIONAL",
+                    "type": "MEDIA",
+                },
+                {
+                    "code": "image-2",
+                    "label": "Image 2",
+                    "requirement_level": "OPTIONAL",
+                    "type": "MEDIA",
+                },
+            ]
+        })
+        kept_codes = [row["code"] for row in kept]
+        self.assertEqual(kept_codes, ["ADDITIONAL_IMAGE_1", "image-2"])
+        self.assertTrue(all(row["extra_image"] for row in kept))
 
     def test_flatten_product_attributes_keeps_values_list_code(self):
         rows = bunnings_products.flatten_product_attributes({
@@ -903,7 +971,10 @@ class BunningsListingServiceTests(TestCase):
         self.assertIn("DISPLAY_NAME", codes)
         self.assertIn("attribute_pdb_assembly", codes)
         self.assertIn("sku", codes)
-        self.assertIn("image-2", codes)
+        self.assertIn("ADDITIONAL_IMAGE_1", codes)
+        self.assertIn("ADDITIONAL_IMAGE_8", codes)
+        self.assertNotIn("image-2", codes)
+        self.assertLess(codes.index("PRIMARY_IMAGE"), codes.index("ADDITIONAL_IMAGE_1"))
         self.assertIn("size", codes)
         self.assertNotIn("colour", codes)
         self.assertEqual(codes.count("DISPLAY_NAME"), 1)
@@ -949,7 +1020,11 @@ class BunningsListingServiceTests(TestCase):
         self.assertEqual(rows[0]["description"], "Example product text")
         self.assertEqual(rows[0]["brand"], "ExampleBrand")
         self.assertEqual(rows[0]["gtin"], "9300000000001")
-        self.assertEqual(rows[0]["image_urls"], "https://example.com/photo1.jpg")
+        self.assertEqual(
+            rows[0]["image_urls"],
+            "https://example.com/photo1.jpg|https://example.com/photo2.jpg",
+        )
+        self.assertEqual(rows[1]["image_urls"], "https://example.com/photo1.jpg")
         self.assertEqual(rows[0]["category"], "BEDSIDE")
         self.assertEqual(rows[1]["category"], "BEDSIDE")
         self.assertEqual(rows[0]["sale_price"], "79.99")

@@ -39,11 +39,6 @@ BUNNINGS_PRODUCT_REQUIRED = [
     ("PRODUCT_DESCRIPTION", "Product Description", "Maximum 30 characters. No special characters."),
     ("PRIMARY_UOM", "Primary unit of measure", "Primary unit of measure."),
     ("PRIMARY_IMAGE", "Image", "Primary image, product only, white background."),
-    ("image-2", "Image 2", "Optional extra product image URL."),
-    ("image-3", "Image 3", "Optional extra product image URL."),
-    ("image-4", "Image 4", "Optional extra product image URL."),
-    ("image-5", "Image 5", "Optional extra product image URL."),
-    ("image-6", "Image 6", "Optional extra product image URL."),
     ("VARIANT_GROUP_CODE", "Variant group code", "Same code on every size/colour variant."),
     ("DEFAULT_VARIANT", "Default Variant", "Yes on one row per variant group, No on the others."),
     ("KEY_SELLING_POINT_1", "Key Selling Point 1", "Short sentence, different from the product overview."),
@@ -137,6 +132,7 @@ def _pm11_lookup(store, hierarchy_codes) -> dict[str, dict]:
                 "required": required,
                 "variant": variant,
                 "values": values,
+                "extra_image": bool(item.get("extra_image")) or bool((prev or {}).get("extra_image")),
             }
     return by_code
 
@@ -191,10 +187,20 @@ def build_template_columns(store, hierarchy_codes) -> list[TemplateColumn]:
         else:
             values = _dropdown_defaults(code, values)
         columns.append(TemplateColumn(code=code, label=label, band="product", prompt=prompt, values=values))
+        if code == "PRIMARY_IMAGE":
+            for image_code, image_label in _extra_image_column_specs(pm11):
+                columns.append(TemplateColumn(
+                    code=image_code,
+                    label=image_label,
+                    band="product",
+                    prompt="Optional extra product image URL.",
+                ))
 
     seen = {col.code.lower() for col in columns}
     for item in pm11.values():
         code = item["code"]
+        if item.get("extra_image") or bunnings_products.additional_image_slot(code):
+            continue
         if not item.get("required") and not item.get("variant"):
             continue
         if code.lower() in seen or code.lower() in ALWAYS_PRODUCT_CODES or code.lower() in ALWAYS_OFFER_CODES:
@@ -220,6 +226,19 @@ def build_template_columns(store, hierarchy_codes) -> list[TemplateColumn]:
             values = logistics
         columns.append(TemplateColumn(code=code, label=label, band="offer", prompt=prompt, values=values))
     return columns
+
+
+def _extra_image_column_specs(pm11: dict) -> list[tuple[str, str]]:
+    found = [item for item in pm11.values() if item.get("extra_image") or bunnings_products.additional_image_slot(item.get("code"))]
+    found.sort(key=lambda item: (
+        bunnings_products.additional_image_slot(item.get("code"))
+        or bunnings_products.additional_image_slot(item.get("label"))
+        or 99,
+        str(item.get("code") or "").lower(),
+    ))
+    if found:
+        return [(item["code"], item.get("label") or item["code"]) for item in found]
+    return list(bunnings_products.FALLBACK_EXTRA_IMAGE_CODES)
 
 
 def _sample_row(columns: list[TemplateColumn], *, category: str, index: int, store_name: str, marketplace_name: str, action: str, variant_index: int = 1) -> dict:
@@ -257,7 +276,6 @@ def _sample_row(columns: list[TemplateColumn], *, category: str, index: int, sto
         "PRODUCT_DESCRIPTION": "Example product text",
         "PRIMARY_UOM": uom,
         "PRIMARY_IMAGE": image,
-        "image-2": "https://example.com/photo2.jpg" if variant_index == 1 else "",
         "VARIANT_GROUP_CODE": parent,
         "DEFAULT_VARIANT": "Yes" if variant_index == 1 else "No",
         "KEY_SELLING_POINT_1": "Example selling point 1",
@@ -273,7 +291,13 @@ def _sample_row(columns: list[TemplateColumn], *, category: str, index: int, sto
         "logistic-class": logistic,
         "leadtime-to-ship": "2",
     }
-    return {col.code: samples.get(col.code, "") for col in columns}
+    row = {col.code: samples.get(col.code, "") for col in columns}
+    if variant_index == 1:
+        for col in columns:
+            if bunnings_products.additional_image_slot(col.code) == 1 and not row.get(col.code):
+                row[col.code] = "https://example.com/photo2.jpg"
+                break
+    return row
 
 
 def _listing_correction_row(listing, *, store_name: str, marketplace_name: str) -> dict:

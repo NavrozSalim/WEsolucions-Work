@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import logging
+import re
 import threading
 import time
 from decimal import Decimal, InvalidOperation
@@ -44,12 +45,6 @@ PRODUCT_CSV_HEADERS = [
     "description",
     "brand",
     "ean",
-    "image-1",
-    "image-2",
-    "image-3",
-    "image-4",
-    "image-5",
-    "image-6",
     "DISPLAY_NAME",
     "PRODUCT_DESCRIPTION",
     "LONG_DESCRIPTION",
@@ -98,8 +93,105 @@ def _photo_urls(listing_or_raw) -> list[str]:
         return []
     for sep in ("|", ";", "\n", ","):
         if sep in text:
-            return [p.strip() for p in text.replace(";", "|").replace("\n", "|").replace(",", "|").split("|") if p.strip()][:6]
+            return [p.strip() for p in text.replace(";", "|").replace("\n", "|").replace(",", "|").split("|") if p.strip()][:9]
     return [text] if text.startswith("http") else []
+
+
+# Bunnings reads these operator codes. PM11 replaces the list when a category
+# defines its own additional-image attributes. image-2 is not one of them.
+FALLBACK_EXTRA_IMAGE_CODES = tuple(
+    (f"ADDITIONAL_IMAGE_{index}", f"Additional image {index}")
+    for index in range(1, 9)
+)
+_EXTRA_IMAGE_LABEL_RE = re.compile(
+    r"(?:additional|alt|alternative|secondary) image 0*(\d+)"
+)
+_PLAIN_IMAGE_RE = re.compile(r"image 0*(\d+)")
+_NOT_GALLERY_IMAGE = ("brochure", "document", "swatch", "thumbnail", "icon", "logo")
+
+
+def additional_image_slot(text: str) -> int | None:
+    """1-based additional-image position. image-2 and Additional image 1 are both slot 1."""
+    raw = str(text or "").strip().lower().replace("-", " ").replace("_", " ")
+    raw = re.sub(r"\s+", " ", raw).strip()
+    raw = re.sub(r"\(optional\)$", "", raw).strip()
+    if not raw or "primary" in raw:
+        return None
+    if any(word in raw for word in _NOT_GALLERY_IMAGE):
+        return None
+    labelled = _EXTRA_IMAGE_LABEL_RE.fullmatch(raw)
+    if labelled:
+        number = int(labelled.group(1))
+        return number if number >= 1 else None
+    plain = _PLAIN_IMAGE_RE.fullmatch(raw)
+    if plain:
+        number = int(plain.group(1))
+        if number <= 1:
+            return None
+        return number - 1
+    return None
+
+
+def is_additional_image_attribute(code: str, label: str = "", attr_type: str = "") -> bool:
+    if not (additional_image_slot(code) or additional_image_slot(label)):
+        return False
+    kind = str(attr_type or "").strip().upper()
+    if kind in {"LIST", "INTEGER", "DECIMAL", "NUMERIC", "BOOLEAN", "DATE", "MEASUREMENT"}:
+        return False
+    return True
+
+
+def extra_image_codes_from_items(items) -> list[str]:
+    """Operator codes for additional images, ordered by image slot."""
+    found: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code") or "").strip()
+        if not code or code.lower() in seen:
+            continue
+        label = str(item.get("label") or "")
+        kind = str(item.get("type") or "")
+        if not item.get("extra_image") and not is_additional_image_attribute(code, label, kind):
+            continue
+        slot = additional_image_slot(code) or additional_image_slot(label) or (len(found) + 1)
+        seen.add(code.lower())
+        found.append((slot, code))
+    found.sort(key=lambda pair: (pair[0], pair[1].lower()))
+    return [code for _slot, code in found]
+
+
+def extra_image_codes_for(store, categories) -> list[str]:
+    items = []
+    if store is not None:
+        for raw in categories or []:
+            category = str(raw or "").strip()
+            if category:
+                items.extend(load_category_attributes(store, category))
+    codes = extra_image_codes_from_items(items)
+    if codes:
+        return codes
+    return [code for code, _label in FALLBACK_EXTRA_IMAGE_CODES]
+
+
+def gallery_urls(listing, attrs: dict | None = None) -> list[str]:
+    """Primary image first, then additional images from the listing and saved attributes."""
+    photos = _photo_urls(listing)
+    variant_img = str(getattr(listing, "variation_image_url", "") or "").strip()
+    if variant_img:
+        photos = [variant_img] + [url for url in photos if url != variant_img]
+    ordered = list(photos)
+    slots: list[tuple[int, str]] = []
+    for code, value in (attrs or {}).items():
+        slot = additional_image_slot(code)
+        url = str(value or "").strip()
+        if slot and url.startswith("http"):
+            slots.append((slot, url))
+    for _slot, url in sorted(slots, key=lambda pair: pair[0]):
+        if url not in ordered:
+            ordered.append(url)
+    return ordered[:9]
 
 
 def parse_extras(listing_or_json) -> dict:
@@ -133,11 +225,6 @@ CORE_PRODUCT_CODES = frozenset({
     "ean",
     "sku",
     "image-1",
-    "image-2",
-    "image-3",
-    "image-4",
-    "image-5",
-    "image-6",
 })
 _ATTR_CACHE: dict[tuple, list] = {}
 _ATTR_LOCK = threading.Lock()
@@ -417,16 +504,19 @@ def flatten_product_attributes(payload) -> list[dict]:
         if not isinstance(raw, dict):
             continue
         code = str(raw.get("code") or raw.get("name") or "").strip()
-        if not code or code in CORE_PRODUCT_CODES or code in seen:
+        label = str(raw.get("label") or raw.get("description") or code).strip()
+        attr_type = str(raw.get("type") or "TEXT").strip()
+        extra_image = is_additional_image_attribute(code, label, attr_type)
+        if not code or code in seen:
             continue
-        if code.startswith("image-"):
+        if (code in CORE_PRODUCT_CODES or code.startswith("image-")) and not extra_image:
             continue
         seen.add(code)
         level = str(raw.get("requirement_level") or raw.get("requirementLevel") or "").strip().upper()
         required = bool(raw.get("required")) or level in ("REQUIRED", "MANDATORY")
         recommended = level in ("RECOMMENDED",)
         variant = bool(raw.get("variant"))
-        if not required and not recommended and not variant:
+        if not required and not recommended and not variant and not extra_image:
             continue
         values = []
         raw_values = raw.get("values") or []
@@ -441,13 +531,14 @@ def flatten_product_attributes(payload) -> list[dict]:
                     values.append({"code": str(val), "label": str(val)})
         out.append({
             "code": code,
-            "label": str(raw.get("label") or raw.get("description") or code).strip(),
+            "label": label,
             "required": required,
             "recommended": recommended,
-            "type": str(raw.get("type") or "TEXT").strip(),
+            "type": attr_type,
             "values": values,
             "values_list": _values_list_code(raw),
             "variant": variant,
+            "extra_image": extra_image,
         })
     out.sort(key=lambda r: (not r["required"], r["label"].lower()))
     return out
@@ -464,6 +555,8 @@ def template_attribute_columns(store, hierarchy_codes) -> list[dict]:
         for item in load_category_attributes(store, hierarchy):
             code = str(item.get("code") or "").strip()
             if not code or code in seen or code.lower() in TEMPLATE_SKIP_ATTRS:
+                continue
+            if item.get("extra_image") or additional_image_slot(code):
                 continue
             seen.add(code)
             columns.append({
@@ -664,6 +757,11 @@ def _attribute_satisfied(code: str, data: dict, attrs: dict) -> bool:
         return True
     if low in ("primary_image",) or low.startswith("image"):
         return bool(_photo_urls(data.get("image_urls")))
+    image_slot = additional_image_slot(code)
+    if image_slot:
+        photos = _photo_urls(data.get("image_urls"))
+        if len(photos) > image_slot or _attr_lookup(attrs, code):
+            return True
     extras_map = {
         "weight": "weight",
         "product-weight": "weight",
@@ -698,14 +796,33 @@ def _write_csv(headers: list[str], rows: list[dict]) -> str:
     return buf.getvalue()
 
 
-def product_row(listing: StoreListing, value_lists: dict | None = None, list_by_attr: dict | None = None) -> dict:
+def _assign_additional_images(row: dict, gallery: list[str], codes: list[str], attrs: dict) -> None:
+    """Write extra photo URLs onto the attribute codes Bunnings reads."""
+    by_slot: dict[int, list[str]] = {}
+    for code in codes:
+        slot = additional_image_slot(code) or (len(by_slot) + 1)
+        by_slot.setdefault(slot, []).append(code)
+    for slot, slot_codes in by_slot.items():
+        url = gallery[slot] if slot < len(gallery) else ""
+        if not url:
+            for code in slot_codes:
+                url = _attr_lookup(attrs, code)
+                if url:
+                    break
+        if not url:
+            continue
+        for code in slot_codes:
+            row[code] = url
+
+
+def product_row(
+    listing: StoreListing,
+    value_lists: dict | None = None,
+    list_by_attr: dict | None = None,
+    extra_image_codes: list[str] | None = None,
+) -> dict:
     extras = parse_extras(listing)
     sku = listing_sku(listing)
-    photos = _photo_urls(listing)
-    variant_img = str(getattr(listing, "variation_image_url", "") or "").strip()
-    if variant_img:
-        photos = [variant_img] + [p for p in photos if p != variant_img]
-        photos = photos[:6]
     gtin = extras.get("gtin") or (listing.barcode or "").strip()
     title = (listing.title or sku)[:500]
     description = listing.description or listing.title or sku
@@ -728,11 +845,16 @@ def product_row(listing: StoreListing, value_lists: dict | None = None, list_by_
         "LONG_DESCRIPTION": _attr_lookup(extras_attrs, "LONG_DESCRIPTION") or description,
         "BRAND": _attr_lookup(extras_attrs, "BRAND") or brand,
         "GTIN": _attr_lookup(extras_attrs, "GTIN") or gtin,
-        "PRIMARY_IMAGE": _attr_lookup(extras_attrs, "PRIMARY_IMAGE") or (photos[0] if photos else ""),
+        "PRIMARY_IMAGE": _attr_lookup(extras_attrs, "PRIMARY_IMAGE") or "",
         "CATEGORY": _attr_lookup(extras_attrs, "CATEGORY") or category,
     }
-    for i in range(6):
-        row[f"image-{i + 1}"] = photos[i] if i < len(photos) else ""
+    gallery = gallery_urls(listing, extras_attrs)
+    if gallery and not row["PRIMARY_IMAGE"]:
+        row["PRIMARY_IMAGE"] = gallery[0]
+    codes = extra_image_codes
+    if codes is None:
+        codes = extra_image_codes_for(getattr(listing, "store", None), [category])
+    _assign_additional_images(row, gallery, codes, extras_attrs)
     for name, value in collect_option_pairs(listing):
         code = _slug_attr(name)
         if code and value:
@@ -746,7 +868,7 @@ def product_row(listing: StoreListing, value_lists: dict | None = None, list_by_
         key = str(code or "").strip()
         if not key or value in (None, ""):
             continue
-        if key.lower() in skip_extra:
+        if key.lower() in skip_extra or additional_image_slot(key):
             continue
         if not str(row.get(key) or "").strip():
             row[key] = str(value).strip()
@@ -800,7 +922,11 @@ def products_csv(listings: list[StoreListing]) -> str:
                 attr = str(item.get("code") or "").strip()
                 if list_code and attr:
                     list_by_attr[attr.upper()] = list_code
-    rows = [product_row(l, value_lists=value_lists, list_by_attr=list_by_attr) for l in listings]
+    image_codes = extra_image_codes_for(store, categories)
+    rows = [
+        product_row(l, value_lists=value_lists, list_by_attr=list_by_attr, extra_image_codes=image_codes)
+        for l in listings
+    ]
     extra: list[str] = []
     known = set(PRODUCT_CSV_HEADERS)
     for row in rows:
