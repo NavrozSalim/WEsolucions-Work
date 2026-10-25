@@ -9,15 +9,19 @@ from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 
-from catalog.models import MydealTemplateRow, ProductMapping
+from unittest.mock import patch
+
+from catalog.models import CatalogUpload, CatalogUploadRow, MydealTemplateRow, ProductMapping
 from catalog.marketplace_rrp import compute_marketplace_rrp
 from catalog.mydeal_templates import (
     MYDEAL_INVENTORY_HEADERS,
     MYDEAL_PRICE_HEADERS,
+    _export_inventory_csv,
     _export_price_csv,
     ingest_mydeal_template,
     ingest_mydeal_templates_zip,
 )
+from catalog.tasks import run_catalog_sync
 from marketplace.models import Marketplace
 from products.models import Product
 from stores.models import Store, StoreVendorPriceSettings
@@ -181,3 +185,136 @@ class MydealTemplateTests(TestCase):
         self.assertEqual(data[3], 'MD-SKU-1')
         self.assertEqual(data[6], '50.00')
         self.assertEqual(data[7], '100.00')
+
+    def _inventory_row(self, sku='MD-SKU-1', discontinued='FALSE'):
+        return MydealTemplateRow.objects.create(
+            store=self.store,
+            kind=MydealTemplateRow.Kind.INVENTORY,
+            row_number=1,
+            deal_id='18217957',
+            variant_id='V1',
+            external_id='E1',
+            sku=sku,
+            options='',
+            deal_title='2.7M Patio',
+            discontinued=discontinued,
+            mydeal_approved='Approved',
+        )
+
+    def _inventory_cells(self):
+        import csv
+        text = _export_inventory_csv(self.store).decode('utf-8')
+        rows = list(csv.reader(text.splitlines()))
+        self.assertEqual(rows[0], MYDEAL_INVENTORY_HEADERS)
+        return rows[1]
+
+    def test_export_inventory_keeps_stock_for_active_product(self):
+        self._inventory_row()
+        cells = self._inventory_cells()
+        self.assertEqual(cells[6], '12')
+        self.assertEqual(cells[7], 'FALSE')
+
+    def test_export_inventory_zeros_discontinued_row(self):
+        self._inventory_row(discontinued='TRUE')
+        cells = self._inventory_cells()
+        self.assertEqual(cells[6], '0')
+        self.assertEqual(cells[7], 'TRUE')
+
+    def test_export_inventory_zeros_deleted_catalog_product(self):
+        self._inventory_row()
+        mapping = ProductMapping.objects.get(store=self.store)
+        mapping.is_active = False
+        mapping.store_stock = 12
+        mapping.save(update_fields=['is_active', 'store_stock'])
+        cells = self._inventory_cells()
+        self.assertEqual(cells[6], '0')
+        self.assertEqual(cells[7], 'TRUE')
+
+    def test_export_inventory_leaves_unmapped_stock_blank(self):
+        self._inventory_row(sku='NOT-IN-CATALOG')
+        cells = self._inventory_cells()
+        self.assertEqual(cells[6], '')
+        self.assertEqual(cells[7], 'FALSE')
+
+    def _delete_upload(self, sku):
+        upload = CatalogUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            original_filename='delete.csv',
+            status=CatalogUpload.Status.VALIDATED,
+            total_rows=1,
+        )
+        CatalogUploadRow.objects.create(
+            catalog_upload=upload,
+            row_number=2,
+            vendor_name_raw='AmazonAU',
+            store_name_raw=self.store.name,
+            marketplace_child_sku_raw=sku,
+            action_raw='Delete',
+            vendor=self.vendor,
+        )
+        return upload
+
+    @patch('catalog.tasks._chunked_reset_store_active_listings_pending_scrape')
+    def test_file_delete_marks_inventory_discontinued_and_zero_stock(self, _reset):
+        self._inventory_row()
+        result = run_catalog_sync(str(self._delete_upload('MD-SKU-1').id))
+        self.assertEqual(result.get('deleted'), 1, result)
+        mapping = ProductMapping.objects.get(store=self.store)
+        self.assertFalse(mapping.is_active)
+        self.assertEqual(mapping.store_stock, 0)
+        row = MydealTemplateRow.objects.get(store=self.store, sku='MD-SKU-1')
+        self.assertEqual(row.discontinued, 'TRUE')
+        cells = self._inventory_cells()
+        self.assertEqual(cells[6], '0')
+        self.assertEqual(cells[7], 'TRUE')
+
+    @patch(
+        'catalog.tasks._chunked_reset_store_active_listings_pending_scrape',
+        return_value={'batches': 0, 'rows_updated': 0, 'elapsed_ms': 0},
+    )
+    def test_readd_clears_discontinued_so_stock_returns(self, _reset):
+        self._inventory_row()
+        run_catalog_sync(str(self._delete_upload('MD-SKU-1').id))
+        upload = CatalogUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            original_filename='add.csv',
+            status=CatalogUpload.Status.VALIDATED,
+            total_rows=1,
+        )
+        CatalogUploadRow.objects.create(
+            catalog_upload=upload,
+            row_number=2,
+            vendor_name_raw='AmazonAU',
+            store_name_raw=self.store.name,
+            marketplace_child_sku_raw='MD-SKU-1',
+            vendor_sku_raw='VSKU-1',
+            vendor_url_raw='https://www.amazon.com.au/dp/B0TESTMD1',
+            action_raw='Add',
+            vendor=self.vendor,
+        )
+        result = run_catalog_sync(str(upload.id))
+        self.assertEqual(result.get('errors', 0), 0, result)
+        mapping = ProductMapping.objects.get(store=self.store, product=self.product)
+        self.assertTrue(mapping.is_active)
+        row = MydealTemplateRow.objects.get(store=self.store, sku='MD-SKU-1')
+        self.assertEqual(row.discontinued, 'FALSE')
+
+    def test_listing_delete_marks_inventory_template_without_api(self):
+        from types import SimpleNamespace
+
+        from listings.listing_service import _end_mydeal_listing
+
+        self._inventory_row(sku='COW-27553123-NP1')
+        listing = SimpleNamespace(
+            sku='COW-27553123-NP1',
+            external_product_key='COW-27553123-NP1',
+            external_variant_key='COW-27553123-NP1',
+        )
+        self.assertFalse(_end_mydeal_listing(self.store, listing))
+        row = MydealTemplateRow.objects.get(store=self.store, sku='COW-27553123-NP1')
+        self.assertEqual(row.discontinued, 'TRUE')
+        cells = self._inventory_cells()
+        self.assertEqual(cells[6], '0')
+        self.assertEqual(cells[7], 'TRUE')

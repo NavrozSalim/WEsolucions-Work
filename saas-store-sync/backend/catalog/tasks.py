@@ -699,6 +699,15 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
         }
 
     store = upload.store
+    from catalog.mydeal_templates import (
+        mapping_sku_keys,
+        mark_inventory_discontinued,
+        store_is_mydeal,
+    )
+
+    mydeal_catalog = store_is_mydeal(store)
+    deleted_mydeal_skus: list[str] = []
+    restored_mydeal_skus: list[str] = []
     replace_deactivated = 0
     if replace_store_catalog:
         replace_deactivated = ProductMapping.objects.filter(
@@ -749,7 +758,12 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
                     pm = _find_product_mapping(row, store, active_only=False, vendor_index=vendor_index)
                     if pm:
                         pm.is_active = False
-                        pm.save(update_fields=['is_active'])
+                        update_fields = ['is_active']
+                        if mydeal_catalog:
+                            pm.store_stock = 0
+                            update_fields.append('store_stock')
+                            deleted_mydeal_skus.extend(mapping_sku_keys(pm))
+                        pm.save(update_fields=update_fields)
                         row.sync_status = CatalogUploadRow.SyncStatus.DELETED
                         row.product_mapping = pm
                         deleted += 1
@@ -791,7 +805,8 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
                                 'is_active': True,
                             },
                         )
-                        if not created and not pm.is_active:
+                        reactivated = (not created) and (not pm.is_active)
+                        if reactivated:
                             pm.is_active = True
                             pm.save(update_fields=['is_active'])
                         row.product = product
@@ -802,6 +817,8 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
                             else CatalogUploadRow.SyncStatus.UPDATED
                         )
                         _update_product_mapping(pm, row)
+                        if mydeal_catalog and (created or reactivated):
+                            restored_mydeal_skus.extend(mapping_sku_keys(pm))
                         if created:
                             added += 1
                         else:
@@ -894,6 +911,28 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
             upload_id,
             store.id,
         )
+
+    if mydeal_catalog and upload.status in (
+        CatalogUpload.Status.SYNCED,
+        CatalogUpload.Status.PARTIAL,
+        CatalogUpload.Status.FAILED,
+    ):
+        # Products left inactive by a full-file replace are gone from Big W's
+        # catalog file, so the inventory template must send stock 0 for them.
+        if replace_store_catalog:
+            inactive = (
+                ProductMapping.objects.filter(store=store, is_active=False)
+                .select_related('product')
+            )
+            for pm in inactive.iterator(chunk_size=500):
+                deleted_mydeal_skus.extend(mapping_sku_keys(pm))
+            ProductMapping.objects.filter(
+                store=store, is_active=False,
+            ).exclude(store_stock=0).update(store_stock=0)
+        if deleted_mydeal_skus:
+            mark_inventory_discontinued(store, deleted_mydeal_skus, discontinued=True)
+        if restored_mydeal_skus:
+            mark_inventory_discontinued(store, restored_mydeal_skus, discontinued=False)
 
     return {
         'upload_id': str(upload_id),

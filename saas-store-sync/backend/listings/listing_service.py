@@ -1018,39 +1018,97 @@ def _end_listing_on_marketplace(store, listing: StoreListing) -> bool:
     return False
 
 
-def _end_mydeal_listing(store, listing: StoreListing) -> bool:
-    """Set MyDeal ListingStatus=NotLive via Universal API (API-mode stores only)."""
+def _mydeal_delete_item(listing) -> dict | None:
+    """Ids for a MyDeal quantity-zero + NotLive call. Parent SKU is the product id."""
+    sku = (getattr(listing, "sku", None) or getattr(listing, "external_variant_key", None) or "").strip()
+    if not sku:
+        return None
+    parent = (getattr(listing, "external_product_key", None) or "").strip() or sku
+    variant = (getattr(listing, "external_variant_key", None) or sku).strip() or sku
+    return {
+        "sku": parent,
+        "external_product_id": parent,
+        "buyable_sku": sku,
+        "external_buyable_id": variant,
+    }
+
+
+def _mydeal_result_absent(result) -> bool:
+    msg = (getattr(result, "message", None) or "").lower()
+    status = getattr(result, "status", 0) or 0
+    return status == 404 or "not found" in msg or "does not exist" in msg or "no product" in msg
+
+
+def _mydeal_unconfigured(exc: BaseException) -> bool:
+    msg = str(exc or "").lower()
+    return "not configured" in msg or "no sandbox" in msg or "no production" in msg
+
+
+def _mark_mydeal_template_discontinued(store, items: list[dict]) -> None:
+    """Flag Big W / MyDeal inventory-template rows so the next CSV sends stock 0."""
+    from catalog.mydeal_templates import mark_inventory_discontinued
+
+    skus = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        skus.extend((
+            item.get("sku"),
+            item.get("buyable_sku"),
+            item.get("external_product_id"),
+            item.get("external_buyable_id"),
+        ))
+    mark_inventory_discontinued(store, skus, discontinued=True)
+
+
+def _end_mydeal_items(store, items: list[dict]) -> int:
+    """Zero MyDeal quantity, then set ListingStatus=NotLive.
+
+    Upload-template stores have no product API. Those deletes still mark the
+    inventory template discontinued so the downloaded Big W file has stock 0.
+    Missing credentials or a missing product do not raise. Any other API error
+    raises so the Hub row is kept.
+    """
+    cleaned = [
+        item for item in (items or [])
+        if isinstance(item, dict) and str(item.get("sku") or "").strip()
+    ]
+    if not cleaned:
+        return 0
+    _mark_mydeal_template_discontinued(store, cleaned)
     method = (getattr(store, "mydeal_setup_method", None) or "upload").strip().lower()
     if method != "api":
-        # Upload-template stores have no live product API to call.
-        return False
-    sku = (listing.sku or listing.external_variant_key or "").strip()
-    if not sku:
-        return False
-    parent = (listing.external_product_key or "").strip() or sku
-    variant = (listing.external_variant_key or sku).strip() or sku
+        return 0
     try:
         from .mydeal.client import MyDealClient
 
         client = MyDealClient(store)
-        result = client.end_listing(
-            sku=parent,
-            external_product_id=parent,
-            buyable_sku=sku,
-            external_buyable_id=variant,
-        )
+        zero = client.zero_quantity(cleaned)
     except MarketplaceError as exc:
-        msg = str(exc or "").lower()
-        if "not configured" in msg or "no sandbox" in msg or "no production" in msg:
-            return False
+        if _mydeal_unconfigured(exc):
+            return 0
         raise
-    if result.ok:
-        return True
-    msg = (result.message or "").lower()
-    status = getattr(result, "status", 0) or 0
-    if status == 404 or "not found" in msg or "does not exist" in msg or "no product" in msg:
+    if not getattr(zero, "ok", False) and not _mydeal_result_absent(zero):
+        raise MarketplaceError(getattr(zero, "message", None) or "Could not set MyDeal inventory to 0.")
+    try:
+        result = client.end_listings(cleaned)
+    except MarketplaceError as exc:
+        if _mydeal_unconfigured(exc):
+            return 0
+        raise
+    if getattr(result, "ok", False):
+        return len(cleaned)
+    if _mydeal_result_absent(result):
+        return 0
+    raise MarketplaceError(getattr(result, "message", None) or "Could not end MyDeal listings.")
+
+
+def _end_mydeal_listing(store, listing: StoreListing) -> bool:
+    """Zero inventory and set ListingStatus=NotLive (API-mode stores)."""
+    item = _mydeal_delete_item(listing)
+    if not item:
         return False
-    raise MarketplaceError(result.message or "Could not end the MyDeal listing.")
+    return _end_mydeal_items(store, [item]) > 0
 
 
 def delete(user, store, listing: StoreListing) -> dict:
@@ -1115,37 +1173,12 @@ def _delete_listings_marketplace(store, listings: list) -> int:
         client = LasooClient(store, environment)
         return delete_connect_variants(client, items)
     if kind == "mydeal":
-        method = (getattr(store, "mydeal_setup_method", None) or "upload").strip().lower()
-        if method != "api":
-            return 0
         items = []
         for listing in listings:
-            sku = (listing.sku or listing.external_variant_key or "").strip()
-            if not sku:
-                continue
-            ext = (listing.external_product_key or "").strip()
-            if not ext or ext == listing.external_variant_key:
-                ext = sku
-            items.append({"sku": sku, "external_product_id": ext})
-        if not items:
-            return 0
-        try:
-            from .mydeal.client import MyDealClient
-
-            client = MyDealClient(store)
-            result = client.end_listings(items)
-        except MarketplaceError as exc:
-            msg = str(exc or "").lower()
-            if "not configured" in msg:
-                return 0
-            raise
-        if result.ok:
-            return len(items)
-        msg = (result.message or "").lower()
-        status = getattr(result, "status", 0) or 0
-        if status == 404 or "not found" in msg or "does not exist" in msg:
-            return 0
-        raise MarketplaceError(result.message or "Could not end MyDeal listings.")
+            item = _mydeal_delete_item(listing)
+            if item:
+                items.append(item)
+        return _end_mydeal_items(store, items)
     removed = 0
     for listing in listings:
         if _end_listing_on_marketplace(store, listing):

@@ -262,7 +262,7 @@ function phoneFieldsMatch(query, phones) {
     });
 }
 
-/** Match a free-text query against customer identity, contact, address, and order ids. */
+/** Match a free-text query against customer, address, order ids, title, and SKU. */
 function orderMatchesCustomerSearch(order, rawQuery) {
     const query = String(rawQuery || '').trim().toLowerCase();
     if (!query) return true;
@@ -275,6 +275,7 @@ function orderMatchesCustomerSearch(order, rawQuery) {
         customer.shippingAddress,
         customer.billingAddress,
     ];
+    const items = Array.isArray(d.lineItems) ? d.lineItems : (order.line_items_json || []);
     const parts = [
         customer.firstName,
         customer.first_name,
@@ -286,6 +287,14 @@ function orderMatchesCustomerSearch(order, rawQuery) {
         order.invoice_number,
         order.external_order_key,
         ...addresses.flatMap(addressSearchParts),
+        ...items.flatMap((it) => [
+            it?.title,
+            it?.name,
+            it?.marketplaceSku,
+            it?.sku,
+            it?.externalVariantKey,
+            it?.variantKey,
+        ]),
     ];
     const haystack = parts.filter((part) => part != null && String(part).trim() !== '').join(' ').toLowerCase();
     if (haystack.includes(query)) return true;
@@ -1436,7 +1445,7 @@ export default function Orders() {
                             type="search"
                             value={customerSearch}
                             onChange={(e) => setCustomerSearch(e.target.value)}
-                            placeholder="Name, email, phone, address, or invoice"
+                            placeholder="Name, email, phone, address, invoice, title, or SKU"
                         />
                     </div>
                 )}

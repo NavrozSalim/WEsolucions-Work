@@ -377,6 +377,13 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         sku = instance.product.vendor_sku
         store_id = str(instance.store_id)
+        from catalog.mydeal_templates import mapping_sku_keys, mark_inventory_discontinued
+
+        mark_inventory_discontinued(
+            instance.store,
+            mapping_sku_keys(instance),
+            discontinued=True,
+        )
         log_action(
             self.request.user, 'product_deleted', 'product_mapping', str(instance.id),
             metadata={'sku': sku, 'store_id': store_id}, request=self.request
@@ -390,6 +397,15 @@ class CatalogClearView(APIView):
 
     def delete(self, request, store_pk):
         store = get_store_for_user(request.user, store_pk)
+        from catalog.mydeal_templates import mapping_sku_keys, mark_inventory_discontinued
+
+        mappings = list(
+            ProductMapping.objects.filter(store=store).select_related('product')
+        )
+        skus = []
+        for pm in mappings:
+            skus.extend(mapping_sku_keys(pm))
+        mark_inventory_discontinued(store, skus, discontinued=True)
         count, _ = ProductMapping.objects.filter(store=store).delete()
         log_action(
             request.user, 'catalog_cleared', 'store', str(store.id),
@@ -521,6 +537,12 @@ class CatalogUploadDeleteView(APIView):
         deleted_count = 0
         if pm_ids or product_ids:
             qs = ProductMapping.objects.filter(store=store).filter(mapping_filter)
+            from catalog.mydeal_templates import mapping_sku_keys, mark_inventory_discontinued
+
+            skus = []
+            for pm in qs.select_related('product'):
+                skus.extend(mapping_sku_keys(pm))
+            mark_inventory_discontinued(store, skus, discontinued=True)
             deleted_count = qs.count()
             qs.delete()
         upload.delete()

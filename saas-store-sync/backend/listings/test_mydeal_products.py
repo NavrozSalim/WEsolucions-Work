@@ -5,7 +5,7 @@ from django.test import SimpleTestCase
 
 from listings.models import ListingStatus
 from listings.mydeal import products as mydeal_products
-from listings.mydeal.client import MyDealResult
+from listings.mydeal.client import MyDealResult, product_groups_from_items
 
 
 def _listing(**overrides):
@@ -43,6 +43,48 @@ def _listing(**overrides):
     )
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+class MyDealZeroQuantityTests(SimpleTestCase):
+    def test_zero_group_sets_quantity_without_price(self):
+        groups = product_groups_from_items(
+            [{
+                "sku": "PARENT",
+                "external_product_id": "PARENT",
+                "buyable_sku": "COW-1",
+                "external_buyable_id": "COW-1",
+            }],
+            {"Quantity": 0, "ProductUnlimited": False},
+        )
+        buyable = groups[0]["BuyableProducts"][0]
+        self.assertEqual(groups[0]["ProductSKU"], "PARENT")
+        self.assertEqual(buyable["SKU"], "COW-1")
+        self.assertEqual(buyable["Quantity"], 0)
+        self.assertFalse(buyable["ProductUnlimited"])
+        self.assertNotIn("Price", buyable)
+        self.assertNotIn("ListingStatus", buyable)
+
+    @patch("listings.mydeal.client.MyDealClient")
+    def test_end_listing_zeros_quantity_before_not_live(self, mock_client_cls):
+        from listings.listing_service import _end_mydeal_listing
+
+        store = SimpleNamespace(mydeal_setup_method="api", name="BigW")
+        listing = SimpleNamespace(
+            sku="COW-1",
+            external_product_key="PARENT",
+            external_variant_key="COW-1",
+        )
+        client = mock_client_cls.return_value
+        client.zero_quantity.return_value = MyDealResult(ok=True)
+        client.end_listings.return_value = MyDealResult(ok=True)
+        self.assertTrue(_end_mydeal_listing(store, listing))
+        self.assertEqual(
+            [call[0] for call in client.method_calls],
+            ["zero_quantity", "end_listings"],
+        )
+        item = client.zero_quantity.call_args[0][0][0]
+        self.assertEqual(item["sku"], "PARENT")
+        self.assertEqual(item["buyable_sku"], "COW-1")
 
 
 class MyDealProductGroupTests(SimpleTestCase):

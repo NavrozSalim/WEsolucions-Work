@@ -279,6 +279,91 @@ def ingest_mydeal_templates_zip(store: Store, file_obj) -> dict[str, Any]:
     }
 
 
+def _sku_key(raw: Any) -> str:
+    return _normalize_sku(raw).lower()
+
+
+def _is_discontinued(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"true", "1", "yes", "y"}
+
+
+def mapping_sku_keys(mapping) -> list[str]:
+    """Marketplace and vendor SKUs that can match an inventory-template row."""
+    product = getattr(mapping, "product", None)
+    raws = [
+        getattr(mapping, "marketplace_child_sku", None),
+        getattr(mapping, "marketplace_parent_sku", None),
+    ]
+    if product is not None:
+        raws.append(getattr(product, "vendor_sku", None))
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in raws:
+        key = _sku_key(raw)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(_normalize_sku(raw))
+    return out
+
+
+def mark_inventory_discontinued(store: Store, skus, *, discontinued: bool) -> int:
+    """Set Discontinued on inventory-template rows whose SKU is in ``skus``.
+
+    Non-MyDeal stores are ignored. Matching is case-insensitive.
+    """
+    if store is None or not store_is_mydeal(store):
+        return 0
+    wanted: set[str] = set()
+    for raw in skus or []:
+        key = _sku_key(raw)
+        if key:
+            wanted.add(key)
+    if not wanted:
+        return 0
+    value = "TRUE" if discontinued else "FALSE"
+    ids: list = []
+    rows = MydealTemplateRow.objects.filter(
+        store=store,
+        kind=MydealTemplateRow.Kind.INVENTORY,
+    ).only("id", "sku", "discontinued")
+    for row in rows.iterator(chunk_size=1000):
+        if _sku_key(row.sku) not in wanted:
+            continue
+        current = str(row.discontinued or "").strip().upper()
+        if current == value:
+            continue
+        ids.append(row.id)
+    updated = 0
+    for start in range(0, len(ids), 500):
+        updated += MydealTemplateRow.objects.filter(
+            id__in=ids[start:start + 500],
+        ).update(discontinued=value)
+    return updated
+
+
+def _catalog_removed_sku_keys(store: Store) -> set[str]:
+    """SKUs that exist only on inactive mappings (deleted from the catalog)."""
+    active: set[str] = set()
+    inactive: set[str] = set()
+    qs = (
+        ProductMapping.objects.filter(store=store)
+        .select_related("product")
+        .only(
+            "is_active",
+            "marketplace_child_sku",
+            "marketplace_parent_sku",
+            "product__vendor_sku",
+        )
+    )
+    for pm in qs.iterator(chunk_size=500):
+        keys = {_sku_key(sku) for sku in mapping_sku_keys(pm)}
+        if pm.is_active:
+            active.update(keys)
+        else:
+            inactive.update(keys)
+    return inactive - active
+
+
 def _listing_data_by_sku(store: Store) -> dict[str, dict[str, Any]]:
     """Map normalized SKU -> {price, stock, rrp_margin_pct}."""
     margin_by_vendor: dict[str, Decimal | None] = {}
@@ -368,19 +453,29 @@ def _export_inventory_csv(store: Store) -> bytes:
         raise ValueError('Inventory template not uploaded yet.')
 
     by_sku = _listing_data_by_sku(store)
+    by_key = {_sku_key(sku): data for sku, data in by_sku.items()}
+    removed_keys = _catalog_removed_sku_keys(store)
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(MYDEAL_INVENTORY_HEADERS)
     for tr in rows:
         sku = _normalize_sku(tr.sku)
-        data = by_sku.get(sku, {})
-        stock = data.get('stock')
-        stock_str = ''
-        if stock is not None:
-            try:
-                stock_str = str(int(stock))
-            except (TypeError, ValueError):
-                stock_str = ''
+        key = _sku_key(sku)
+        # Discontinued deals and products deleted from the catalog must go
+        # back to Big W with stock 0. A blank cell leaves the old quantity.
+        if _is_discontinued(tr.discontinued) or key in removed_keys:
+            stock_str = '0'
+            discontinued = 'TRUE'
+        else:
+            data = by_sku.get(sku) or by_key.get(key) or {}
+            stock = data.get('stock')
+            stock_str = ''
+            if stock is not None:
+                try:
+                    stock_str = str(int(stock))
+                except (TypeError, ValueError):
+                    stock_str = ''
+            discontinued = tr.discontinued or 'FALSE'
         writer.writerow([
             tr.deal_id,
             tr.variant_id,
@@ -389,7 +484,7 @@ def _export_inventory_csv(store: Store) -> bytes:
             tr.options,
             tr.deal_title,
             stock_str,
-            tr.discontinued or 'FALSE',
+            discontinued,
             tr.mydeal_approved or 'Approved',
         ])
     return buf.getvalue().encode('utf-8')
