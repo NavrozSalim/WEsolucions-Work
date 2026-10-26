@@ -944,6 +944,9 @@ export default function ListingFormModal({
                                     <div className="mb-4">
                                         <BunningsErrorReport
                                             errors={bunningsErrors}
+                                            heading={listing?.marketplace_response_json?.catalog_status === 'invalid'
+                                                ? 'Invalid data on Bunnings'
+                                                : 'Not created on Bunnings'}
                                             onDownload={() => {
                                                 downloadBunningsErrorReport(storeId, listing.id).catch((err) => {
                                                     setError(err.message || 'Could not download the Bunnings error report.');

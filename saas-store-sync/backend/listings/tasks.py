@@ -386,3 +386,19 @@ def push_store_inventory(self, user_id, store_id, listing_ids=None, vendor_code=
         live = pub_prog.get_publish_progress(store_id, scope=scope)
         if live.get("active") and (not my_id or live.get("job_id") == my_id):
             pub_prog.finish_publish_progress(store_id, scope=scope, job_id=my_id)
+
+
+@shared_task(name="listings.sync_bunnings_catalog_errors", ignore_result=True, soft_time_limit=600, time_limit=660)
+def sync_bunnings_catalog_errors(store_id):
+    """Read Bunnings Invalid data onto products that are still waiting on Create."""
+    from django.core.cache import cache
+
+    from .bunnings import products as bunnings_products
+
+    try:
+        store = Store.objects.select_related("marketplace").get(pk=store_id)
+        bunnings_products.sync_invalid_catalog(store)
+    except Exception:
+        logger.exception("Bunnings invalid-data sync failed store=%s", store_id)
+    finally:
+        cache.delete(bunnings_products.catalog_invalid_lock_key(store_id))

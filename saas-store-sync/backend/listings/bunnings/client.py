@@ -351,6 +351,128 @@ class BunningsClient:
             found.update(_matching_requested_ids(result.data, chunk))
         return found
 
+    def source_product_statuses(self, product_ids) -> list | None:
+        """Catalog rows for these shop SKUs, including Invalid data errors.
+
+        None means the catalog status could not be read. An empty list means
+        Bunnings returned no matching product status.
+        """
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for raw in product_ids or []:
+            pid = str(raw or "").strip()
+            key = pid.casefold()
+            if not pid or key in seen:
+                continue
+            seen.add(key)
+            ordered.append(pid)
+        if not ordered:
+            return []
+
+        shop_id = self._account_shop_id()
+        if shop_id:
+            rows: list = []
+            failed = False
+            for start in range(0, len(ordered), CATALOG_LOOKUP_CHUNK):
+                chunk = ordered[start:start + CATALOG_LOOKUP_CHUNK]
+                result = self.get(
+                    "/api/mcm/products/sources/status/export",
+                    params={
+                        "provider_id": shop_id,
+                        "provider_unique_identifier": chunk,
+                    },
+                    timeout=CATALOG_LOOKUP_TIMEOUT,
+                )
+                if result.status == 401:
+                    raise MarketplaceError(
+                        result.message or "Bunnings rejected these credentials (401 Unauthorized)."
+                    )
+                if result.status in (400, 404, 405):
+                    failed = True
+                    break
+                if not result.ok:
+                    logger.warning(
+                        "Bunnings product status failed status=%s message=%s",
+                        result.status,
+                        (result.message or "")[:300],
+                    )
+                    return None
+                rows.extend(_status_rows(result.data))
+            if not failed:
+                return rows
+
+        return self._mcm_product_records(ordered)
+
+    def _account_shop_id(self) -> str:
+        cached = getattr(self, "_shop_id_value", None)
+        if cached is not None:
+            return cached
+        result = self.get("/api/account", timeout=CATALOG_LOOKUP_TIMEOUT)
+        shop = ""
+        data = result.data if result.ok and isinstance(result.data, dict) else {}
+        nested = data.get("shop") if isinstance(data.get("shop"), dict) else {}
+        shop = str(data.get("shop_id") or data.get("shopId") or nested.get("id") or "").strip()
+        self._shop_id_value = shop
+        return shop
+
+    def _mcm_product_records(self, skus: list[str]) -> list | None:
+        """Product records that carry validation errors, when the status export is unavailable."""
+        rows: list = []
+        for start in range(0, len(skus), CATALOG_LOOKUP_CHUNK):
+            chunk = skus[start:start + CATALOG_LOOKUP_CHUNK]
+            result = self.get(
+                "/api/mcm/products",
+                params={"product_sku": chunk},
+                timeout=CATALOG_LOOKUP_TIMEOUT,
+            )
+            if result.status == 401:
+                raise MarketplaceError(
+                    result.message or "Bunnings rejected these credentials (401 Unauthorized)."
+                )
+            if result.ok:
+                rows.extend(_status_rows(result.data))
+                continue
+            if rows:
+                logger.warning(
+                    "Bunnings MCM product read failed status=%s message=%s",
+                    result.status,
+                    (result.message or "")[:300],
+                )
+                return rows
+            if result.status in (400, 404, 405):
+                return self._mcm_products_one_by_one(skus)
+            logger.warning(
+                "Bunnings MCM product read failed status=%s message=%s",
+                result.status,
+                (result.message or "")[:300],
+            )
+            return None
+        return rows
+
+    def _mcm_products_one_by_one(self, skus: list[str]) -> list | None:
+        rows: list = []
+        for sku in skus:
+            result = self.get(f"/api/mcm/products/{sku}", timeout=CATALOG_LOOKUP_TIMEOUT)
+            if result.status == 401:
+                raise MarketplaceError(
+                    result.message or "Bunnings rejected these credentials (401 Unauthorized)."
+                )
+            if result.status in (404, 405) and not rows:
+                if result.status == 405:
+                    return None
+                continue
+            if not result.ok:
+                if result.status in (404, 405):
+                    continue
+                logger.warning(
+                    "Bunnings MCM product read failed sku=%s status=%s",
+                    sku,
+                    result.status,
+                )
+                return rows or None
+            rows.extend(_status_rows(result.data))
+        return rows or None
+
     def poll_import(
         self,
         kind: str,
@@ -526,6 +648,20 @@ def _product_items(data) -> list:
         if isinstance(nested, list):
             return nested
         if any(data.get(key) for key in ("product_id", "product-id", "product_sku", "shop_sku", "sku")):
+            return [data]
+    return []
+
+
+def _status_rows(data) -> list:
+    """Product dicts from a catalog status or MCM payload."""
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    if isinstance(data, dict):
+        for key in ("products", "data", "mcm_products"):
+            nested = data.get(key)
+            if isinstance(nested, list):
+                return [row for row in nested if isinstance(row, dict)]
+        if any(data.get(key) for key in ("product_sku", "provider_unique_identifier", "validation", "mirakl_product_id")):
             return [data]
     return []
 

@@ -762,6 +762,76 @@ class BunningsCatalogProductUnitTests(SimpleTestCase):
                 client.products_in_catalog(["SKU-1"])
         self.assertIn("401", str(ctx.exception))
 
+    def test_catalog_invalid_data_keeps_the_field_error(self):
+        rows = bunnings_products.catalog_issue_rows({
+            "provider_unique_identifier": "SHM120-50X50CM",
+            "status": "NOT_LIVE",
+            "warnings": [{
+                "attribute_code": "colour",
+                "code": "MCM-05000",
+                "message": "The 'colour' attribute is required.",
+            }],
+        })
+        self.assertEqual(rows[0]["attribute"], "colour")
+        self.assertIn("required", rows[0]["message"])
+
+    def test_catalog_still_integrating_is_not_invalid_data(self):
+        rows = bunnings_products.catalog_issue_rows({
+            "provider_unique_identifier": "SHM120-50X50CM",
+            "status": "NOT_LIVE",
+            "errors": [{
+                "code": "MCM-0L000",
+                "message": "The product has not been synchronized yet.",
+            }],
+        })
+        self.assertEqual(rows, [])
+
+    def test_mcm_validation_errors_are_invalid_data(self):
+        rows = bunnings_products.catalog_issue_rows({
+            "product_sku": "SHM108-50X50CM",
+            "validation": {
+                "status": "INVALID",
+                "validation_errors": [{
+                    "attribute_code": "brand",
+                    "code": "CAT_ERR_01",
+                    "message": "Brand is not in the list.",
+                }],
+            },
+        })
+        self.assertEqual(rows[0]["attribute"], "brand")
+        self.assertEqual(rows[0]["code"], "CAT_ERR_01")
+
+    def test_source_status_uses_the_shop_and_shop_skus(self):
+        store = SimpleNamespace(
+            name="Batch",
+            bunnings_environment="production",
+            bunnings_production_base_url="https://example.test",
+            bunnings_production_shop_key="shop-key",
+        )
+        client = BunningsClient(store)
+        calls = []
+
+        def fake_get(path, *, params=None, accept=None, timeout=None):
+            calls.append((path, params))
+            if path == "/api/account":
+                return BunningsResult(ok=True, data={"shop_id": 2179}, status=200)
+            return BunningsResult(
+                ok=True,
+                data=[{
+                    "provider_unique_identifier": "SHM120-50X50CM",
+                    "status": "NOT_LIVE",
+                    "warnings": [{"attribute_code": "colour", "code": "MCM-05000", "message": "Required."}],
+                }],
+                status=200,
+            )
+
+        with patch.object(client, "get", side_effect=fake_get):
+            rows = client.source_product_statuses(["SHM120-50X50CM", "SHM120-50X50CM"])
+        self.assertEqual(calls[0][0], "/api/account")
+        self.assertEqual(calls[1][1]["provider_id"], "2179")
+        self.assertEqual(calls[1][1]["provider_unique_identifier"], ["SHM120-50X50CM"])
+        self.assertEqual(rows[0]["status"], "NOT_LIVE")
+
 
 class BunningsOrdersUnitTests(SimpleTestCase):
     def test_map_order_status(self):
@@ -1741,6 +1811,25 @@ class BunningsListingServiceTests(TestCase):
         self.assertEqual(listing.status, ListingStatus.FAILED)
         self.assertIn("503", " ".join(listing.validation_errors_json or []))
         self.assertEqual(listing.marketplace_response_json.get("error"), "Bunnings HTTP 503")
+
+    def test_invalid_catalog_data_is_saved_on_the_product(self):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        marked = bunnings_products.apply_catalog_invalid([listing], [{
+            "provider_unique_identifier": "BN-1",
+            "status": "NOT_LIVE",
+            "warnings": [{
+                "attribute_code": "colour",
+                "code": "MCM-05000",
+                "message": "The 'colour' attribute is required.",
+            }],
+        }])
+        self.assertEqual(marked, 1)
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.FAILED)
+        self.assertEqual(listing.marketplace_response_json.get("catalog_status"), "invalid")
+        saved = listing.marketplace_response_json["bunnings_errors"][0]
+        self.assertEqual(saved["attribute"], "colour")
+        self.assertIn("required", saved["message"])
 
     @patch("listings.bunnings.products.BunningsClient")
     def test_lookup_offer_raises_on_api_error(self, mock_cls):

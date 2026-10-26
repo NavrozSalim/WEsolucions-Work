@@ -14,7 +14,7 @@ from django.utils import timezone
 
 from ..errors import MarketplaceError
 from ..models import ListingAction, ListingStatus, StoreListing
-from .client import BunningsClient, extract_import_id, line_error_rows
+from .client import BunningsClient, extract_import_id, import_has_line_errors, line_error_rows
 
 logger = logging.getLogger("listings.bunnings")
 
@@ -1455,10 +1455,306 @@ def note_publish_stopped(listings: list[StoreListing], message: str) -> int:
     return marked
 
 
+_PENDING_CATALOG_CODES = {"MCM-0L000"}
+_RUNNING_IMPORT_STATUSES = {
+    "SENT",
+    "WAITING",
+    "RUNNING",
+    "QUEUED",
+    "TRANSFORMATION_WAITING",
+    "TRANSFORMATION_RUNNING",
+}
+
+
+def _catalog_status_method(client):
+    fn = getattr(type(client), "source_product_statuses", None)
+    return fn if callable(fn) else None
+
+
+def catalog_issue_rows(item: dict) -> list[dict]:
+    """Field errors when Bunnings shows this catalog product as invalid data.
+
+    A product that is still integrating, or already live, is not invalid data.
+    """
+    if not isinstance(item, dict):
+        return []
+    validation = item.get("validation") if isinstance(item.get("validation"), dict) else {}
+    validation_status = str(validation.get("status") or "").strip().upper()
+    sync = item.get("synchronization") if isinstance(item.get("synchronization"), dict) else {}
+    acceptance = item.get("acceptance") if isinstance(item.get("acceptance"), dict) else {}
+    live = str(item.get("status") or "").strip().upper()
+
+    rows: list[dict] = []
+
+    def add(attribute, code, message) -> None:
+        text = str(message or "").strip()
+        attr = str(attribute or "").strip()
+        err_code = str(code or "").strip()
+        if not text and not attr:
+            return
+        rows.append({
+            "attribute": attr,
+            "code": err_code,
+            "message": text or "Bunnings marked this product as invalid data.",
+            "value": "",
+        })
+
+    for err in validation.get("validation_errors") or []:
+        if isinstance(err, dict):
+            add(err.get("attribute_code"), err.get("code"), err.get("message") or "Invalid data")
+    for err in sync.get("integration_errors") or []:
+        if isinstance(err, dict):
+            add(err.get("attribute_code"), err.get("code"), err.get("message") or "Invalid data")
+    if str(acceptance.get("status") or "").strip().upper() == "REJECTED":
+        add(
+            acceptance.get("reason_code"),
+            acceptance.get("reason_code") or "REJECTED",
+            acceptance.get("message") or "Bunnings rejected this product.",
+        )
+
+    for err in item.get("errors") or []:
+        if not isinstance(err, dict):
+            continue
+        code = str(err.get("code") or "").strip()
+        message = str(err.get("message") or "").strip()
+        details = err.get("integration_details") or []
+        if details:
+            for detail in details:
+                if isinstance(detail, dict):
+                    add(detail.get("attribute_code"), detail.get("code") or code, detail.get("message") or message)
+            continue
+        rejection = err.get("rejection_details") if isinstance(err.get("rejection_details"), dict) else {}
+        if rejection.get("reason_label") or rejection.get("message"):
+            add(rejection.get("reason_label"), rejection.get("reason_code") or code, rejection.get("message") or message)
+            continue
+        if code in _PENDING_CATALOG_CODES or "not been synchron" in message.lower():
+            continue
+        if message:
+            add("", code, message)
+
+    for warn in item.get("warnings") or []:
+        if isinstance(warn, dict):
+            add(warn.get("attribute_code"), warn.get("code"), warn.get("message") or "Invalid data")
+
+    rejected = str(acceptance.get("status") or "").strip().upper() == "REJECTED"
+    if live == "LIVE" and validation_status != "INVALID" and not sync.get("integration_errors") and not rejected:
+        return []
+    if not rows:
+        if validation_status == "INVALID" or live in {"INVALID", "INVALID_DATA"}:
+            return [{
+                "attribute": "",
+                "code": "INVALID",
+                "message": "Bunnings marked this product as invalid data.",
+                "value": "",
+            }]
+        return []
+    seen: set[tuple] = set()
+    unique: list[dict] = []
+    for row in rows:
+        key = (str(row.get("attribute") or "").casefold(), str(row.get("code") or ""), row.get("message"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique
+
+
+def _catalog_item_skus(item: dict) -> list[str]:
+    found: list[str] = []
+    for key in ("provider_unique_identifier", "product_sku", "product_id", "shop_sku", "sku"):
+        val = str(item.get(key) or "").strip()
+        if val:
+            found.append(val)
+    for ident in item.get("unique_identifiers") or []:
+        if isinstance(ident, dict):
+            val = str(ident.get("value") or "").strip()
+            if val:
+                found.append(val)
+    return found
+
+
+def _attribute_sent_value(listing: StoreListing, attribute: str) -> str:
+    key = _norm_attr(attribute)
+    if not key:
+        return ""
+    try:
+        row = product_row(listing)
+    except Exception:  # noqa: BLE001
+        return ""
+    for code, value in row.items():
+        if _norm_attr(code) == key:
+            text = str(value or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _mark_product_errors(listing: StoreListing, rows: list[dict], *, request: dict, catalog: bool) -> None:
+    public = []
+    messages = []
+    seen: set[tuple] = set()
+    for row in rows:
+        item_row = dict(row)
+        if not str(item_row.get("value") or "").strip():
+            item_row["value"] = _attribute_sent_value(listing, item_row.get("attribute") or "")
+        item = _public_bunnings_error(listing, item_row)
+        key = (item["code"], item["attribute"].casefold(), item["message"])
+        if key in seen:
+            continue
+        seen.add(key)
+        public.append(item)
+        text = item["errors"] or item["message"]
+        if text and text not in messages:
+            messages.append(text)
+    if not messages:
+        messages = ["Bunnings marked this product as invalid data."]
+    kept = dict(listing.marketplace_request_json or {}) if isinstance(listing.marketplace_request_json, dict) else {}
+    kept.update(request)
+    response = {
+        "error": messages[0],
+        "bunnings_errors": public,
+    }
+    if catalog:
+        response["catalog_status"] = "invalid"
+    _mark_listing(
+        listing,
+        status=ListingStatus.FAILED,
+        request=kept,
+        response=response,
+        errors=messages,
+    )
+
+
+def apply_catalog_invalid(listings: list[StoreListing], items) -> int:
+    """Save Invalid data field errors on the matching ready product. Returns how many changed."""
+    by_sku: dict[str, list[dict]] = {}
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        rows = catalog_issue_rows(item)
+        if not rows:
+            continue
+        for sku in _catalog_item_skus(item):
+            by_sku.setdefault(sku.casefold(), rows)
+    marked = 0
+    for listing in listings:
+        if listing.status != ListingStatus.READY:
+            continue
+        sku = listing_sku(listing)
+        rows = by_sku.get(sku.casefold()) if sku else None
+        if not rows:
+            continue
+        _mark_product_errors(listing, rows, request={"catalog_invalid": True}, catalog=True)
+        marked += 1
+    return marked
+
+
+def refresh_stored_import_errors(client, listings: list[StoreListing]) -> int:
+    """Read a finished product import again and save any error rows it now has."""
+    groups: dict[str, list[StoreListing]] = {}
+    for listing in listings:
+        if listing.status != ListingStatus.READY:
+            continue
+        req = listing.marketplace_request_json if isinstance(listing.marketplace_request_json, dict) else {}
+        import_id = str(req.get("p41_import_id") or "").strip()
+        if import_id:
+            groups.setdefault(import_id, []).append(listing)
+    marked = 0
+    for import_id, group in groups.items():
+        status = client.product_import_status(import_id)
+        if not getattr(status, "ok", False):
+            continue
+        data = status.data if isinstance(getattr(status, "data", None), dict) else {}
+        state = str(data.get("import_status") or data.get("status") or "").strip().upper()
+        if not state or state in _RUNNING_IMPORT_STATUSES:
+            continue
+        has_report = bool(
+            data.get("has_error_report") or data.get("has_transformation_error_report")
+        )
+        if not has_report and not import_has_line_errors(data):
+            continue
+        report = client.import_error_report("product", import_id)
+        if not getattr(report, "ok", False):
+            continue
+        assigned = _assign_import_errors(group, line_error_rows(report.data))
+        for listing in group:
+            got = assigned.get(id(listing)) or []
+            if not got:
+                continue
+            _mark_product_errors(
+                listing,
+                got,
+                request={"p41_import_id": import_id},
+                catalog=False,
+            )
+            marked += 1
+    return marked
+
+
+def sync_invalid_catalog(store, listings: list[StoreListing] | None = None) -> int:
+    """Copy Bunnings Invalid data onto products that are still waiting on Create."""
+    if listings is None:
+        listings = list(
+            StoreListing.objects.filter(store=store, status=ListingStatus.READY)
+        )
+    else:
+        listings = [listing for listing in listings if listing.status == ListingStatus.READY]
+    if not listings:
+        return 0
+    client = BunningsClient(store)
+    marked = 0
+    if callable(getattr(type(client), "product_import_status", None)) and callable(
+        getattr(type(client), "import_error_report", None)
+    ):
+        try:
+            marked += refresh_stored_import_errors(client, listings)
+        except MarketplaceError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning("Bunnings import error refresh failed", exc_info=True)
+    pending = [listing for listing in listings if listing.status == ListingStatus.READY]
+    if not pending or _catalog_status_method(client) is None:
+        return marked
+    try:
+        items = client.source_product_statuses([listing_sku(listing) for listing in pending])
+    except MarketplaceError:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.warning("Bunnings invalid-data lookup failed", exc_info=True)
+        return marked
+    if not items:
+        return marked
+    return marked + apply_catalog_invalid(pending, items)
+
+
+def catalog_invalid_lock_key(store_id) -> str:
+    return f"bunnings:catalog-invalid:{store_id}"
+
+
+def enqueue_catalog_invalid_sync(store) -> bool:
+    """Queue one catalog check for products still on Create. Repeated opens do not stack jobs."""
+    from django.core.cache import cache
+
+    from ..tasks import sync_bunnings_catalog_errors
+
+    if not StoreListing.objects.filter(store=store, status=ListingStatus.READY).exists():
+        return False
+    key = catalog_invalid_lock_key(store.id)
+    if not cache.add(key, "1", timeout=600):
+        return False
+    try:
+        sync_bunnings_catalog_errors.apply_async(args=[str(store.id)], queue="ingest")
+    except Exception:
+        cache.delete(key)
+        logger.exception("Could not queue the Bunnings invalid-data check store=%s", store.id)
+        return False
+    return True
+
+
 def publish_listings(user, store, listings: list[StoreListing]) -> dict:
     """Send products to Bunnings and keep any failure on the product rows."""
     try:
-        return _publish_listings(user, store, listings)
+        result = _publish_listings(user, store, listings)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Bunnings publish stopped store=%s", getattr(store, "id", ""))
         message = str(exc).strip() or "Publish stopped before Bunnings returned a result."
@@ -1475,6 +1771,19 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
             "message": message,
             "environment": "",
         }
+    try:
+        invalid = sync_invalid_catalog(store, listings)
+    except Exception:  # noqa: BLE001
+        logger.exception("Bunnings invalid-data check failed store=%s", getattr(store, "id", ""))
+        invalid = 0
+    if invalid:
+        result["ok"] = False
+        result["failed"] = int(result.get("failed") or 0) + invalid
+        result["message"] = (
+            f"Bunnings marked {invalid} product(s) as invalid data. "
+            "The field errors are on those products."
+        )
+    return result
 
 
 def _publish_listings(user, store, listings: list[StoreListing]) -> dict:

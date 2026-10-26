@@ -79,6 +79,7 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
     const [filter, setFilter] = useState('all');
     const publishWasActiveRef = useRef(false);
     const publishStartingRef = useRef(false);
+    const catalogWaitStarted = useRef(0);
     const loadRef = useRef(() => {});
     const onMessageRef = useRef(onMessage);
     onMessageRef.current = onMessage;
@@ -135,6 +136,22 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
     useEffect(() => {
         loadRef.current = load;
     }, [load]);
+
+    useEffect(() => {
+        const waiting = marketplaceKey === 'bunnings' && listings.some(
+            (row) => row.status === 'ready' && row.marketplace_response_json?.waiting_for_product,
+        );
+        if (!waiting) {
+            catalogWaitStarted.current = 0;
+            return undefined;
+        }
+        if (!catalogWaitStarted.current) catalogWaitStarted.current = Date.now();
+        const id = setInterval(() => {
+            if (Date.now() - catalogWaitStarted.current > 120000) return;
+            loadRef.current();
+        }, 8000);
+        return () => clearInterval(id);
+    }, [listings, marketplaceKey]);
 
     useEffect(() => {
         if (storeId && readListingPublishJob(storeId)) {
@@ -338,8 +355,10 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                                     || l.status === 'validation_failed'
                                     || l.status === 'ready'
                                 );
+                                const invalidData = marketplaceKey === 'bunnings'
+                                    && l.marketplace_response_json?.catalog_status === 'invalid';
                                 const statusLabel = marketplaceKey === 'bunnings' && l.status === 'failed'
-                                    ? 'Not created'
+                                    ? (invalidData ? 'Invalid data' : 'Not created')
                                     : (STATUS_LABELS[l.status] || l.status);
                                 return (
                                 <Fragment key={l.id}>
@@ -414,6 +433,7 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                                         <td colSpan={7} className="px-4 pb-3">
                                             <BunningsErrorReport
                                                 errors={bunningsErrors}
+                                                heading={invalidData ? 'Invalid data on Bunnings' : 'Not created on Bunnings'}
                                                 onDownload={() => handleDownloadErrors(l.id)}
                                             />
                                         </td>

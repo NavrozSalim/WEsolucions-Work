@@ -23,14 +23,14 @@ function errorText(row) {
 }
 
 /** Field, value sent, and the Bunnings message — the same facts as the Mirakl error file. */
-export default function BunningsErrorReport({ errors, onDownload }) {
+export default function BunningsErrorReport({ errors, onDownload, heading = 'Not created on Bunnings' }) {
     if (!errors?.length) return null;
     return (
         <div className="rounded-md border border-rose-200 bg-rose-50/80 dark:border-rose-900 dark:bg-rose-950/30">
             <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
                 <div>
                     <p className="text-xs font-semibold text-rose-800 dark:text-rose-200">
-                        Not created on Bunnings
+                        {heading}
                     </p>
                     <p className="text-xs text-rose-700/90 dark:text-rose-300/90">
                         Edit this product, or use Bulk Listing → Update for many products, then publish again.

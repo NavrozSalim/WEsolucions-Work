@@ -138,6 +138,16 @@ class StoreListingListCreateView(APIView):
             except Exception:
                 logger.exception("MyDeal confirm-on-load failed store=%s", store.id)
             mydeal_products.requeue_unconfirmed_uploads(store)
+        if (
+            (request.query_params.get('view') or '').strip().lower() == 'created'
+            and marketplace_kind(store.marketplace) == 'bunnings'
+        ):
+            try:
+                from .bunnings.products import enqueue_catalog_invalid_sync
+
+                enqueue_catalog_invalid_sync(store)
+            except Exception:
+                logger.exception("Bunnings invalid-data check failed store=%s", store.id)
         qs = (
             StoreListing.objects.filter(store=store)
             .select_related('store')
