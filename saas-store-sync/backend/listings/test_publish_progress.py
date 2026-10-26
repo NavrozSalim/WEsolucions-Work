@@ -267,6 +267,35 @@ class LasooPublishAsyncServiceTests(TestCase):
         self.assertTrue(res.data["async"])
         self.assertEqual(res.data["queued"], 1)
 
+    @patch("listings.tasks.publish_store_listings.apply_async")
+    @patch("listings.listing_service._collect_publishable")
+    def test_bunnings_publish_runs_in_the_background(self, mock_collect, mock_apply):
+        bunnings, _ = Marketplace.objects.get_or_create(code="bunnings", defaults={"name": "Bunnings"})
+        store = Store.objects.create(
+            user=self.user,
+            name="Bunnings Publish Progress",
+            region="AU",
+            marketplace=bunnings,
+            management_mode="full_store",
+        )
+        listing = StoreListing.objects.create(
+            user=self.user,
+            store=store,
+            external_product_key="BN-1",
+            external_variant_key="BN-1",
+            sku="BN-1",
+            title="Canvas",
+            status=ListingStatus.READY,
+        )
+        mock_collect.return_value = [listing]
+        mock_apply.return_value = MagicMock(id="bun-job")
+        result = listing_service.start_publish_async(self.user, store)
+        self.assertTrue(result["async"])
+        self.assertEqual(result["job_id"], "bun-job")
+        self.assertIn("Bunnings", result["message"])
+        self.assertEqual(mock_apply.call_args.kwargs["queue"], "ingest")
+        pub_prog.clear_publish_progress(store.id)
+
     @patch("listings.tasks.push_store_inventory.apply_async")
     def test_lasoo_inventory_push_api_returns_202_when_queued(self, mock_apply):
         self.listing.status = ListingStatus.UPLOADED_PRODUCTION

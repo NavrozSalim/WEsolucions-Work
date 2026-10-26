@@ -670,6 +670,98 @@ class BunningsCatalogProductUnitTests(SimpleTestCase):
             )
         )
 
+    def test_partition_reads_the_catalog_once(self):
+        class Client:
+            def __init__(self):
+                self.calls = []
+                self.product_exists_calls = 0
+
+            def products_in_catalog(self, skus):
+                self.calls.append(list(skus))
+                return {"A"}
+
+            def product_exists(self, sku):
+                self.product_exists_calls += 1
+                return False
+
+        client = Client()
+        listings = [
+            SimpleNamespace(sku="A", external_variant_key="A"),
+            SimpleNamespace(sku="B", external_variant_key="B"),
+        ]
+        found, missing = bunnings_products._partition_by_catalog(client, listings)
+        self.assertEqual([item.sku for item in found], ["A"])
+        self.assertEqual([item.sku for item in missing], ["B"])
+        self.assertEqual(client.calls, [["A", "B"]])
+        self.assertEqual(client.product_exists_calls, 0)
+
+    def test_partition_sends_every_product_when_the_catalog_cannot_be_read(self):
+        class Client:
+            def __init__(self):
+                self.product_exists_calls = 0
+
+            def products_in_catalog(self, skus):
+                return None
+
+            def product_exists(self, sku):
+                self.product_exists_calls += 1
+                return False
+
+        client = Client()
+        listings = [
+            SimpleNamespace(sku=str(i), external_variant_key=str(i))
+            for i in range(5)
+        ]
+        found, missing = bunnings_products._partition_by_catalog(client, listings)
+        self.assertEqual(found, [])
+        self.assertEqual(len(missing), 5)
+        self.assertEqual(client.product_exists_calls, 0)
+
+    def test_products_in_catalog_uses_one_call_per_chunk(self):
+        store = SimpleNamespace(
+            name="Batch",
+            bunnings_environment="production",
+            bunnings_production_base_url="https://example.test",
+            bunnings_production_shop_key="shop-key",
+        )
+        client = BunningsClient(store)
+        calls = []
+
+        def fake_get(path, *, params=None, accept=None, timeout=None):
+            calls.append((path, params, timeout))
+            ids = (params or {}).get("product_ids", "").split(",")
+            products = [{"product_sku": sku} for sku in ids if sku.endswith("0")]
+            return BunningsResult(ok=True, data={"products": products}, status=200)
+
+        skus = [f"SKU-{i}" for i in range(120)]
+        with patch.object(client, "get", side_effect=fake_get):
+            found = client.products_in_catalog(skus)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][2], 20)
+        self.assertIn("SKU-10", found)
+        self.assertNotIn("SKU-11", found)
+
+    def test_products_in_catalog_reports_rejected_credentials(self):
+        store = SimpleNamespace(
+            name="Batch",
+            bunnings_environment="production",
+            bunnings_production_base_url="https://example.test",
+            bunnings_production_shop_key="shop-key",
+        )
+        client = BunningsClient(store)
+        with patch.object(
+            client,
+            "get",
+            return_value=BunningsResult(
+                ok=False,
+                message="Bunnings rejected these credentials (401 Unauthorized).",
+                status=401,
+            ),
+        ):
+            with self.assertRaises(MarketplaceError) as ctx:
+                client.products_in_catalog(["SKU-1"])
+        self.assertIn("401", str(ctx.exception))
+
 
 class BunningsOrdersUnitTests(SimpleTestCase):
     def test_map_order_status(self):
@@ -1634,6 +1726,21 @@ class BunningsListingServiceTests(TestCase):
         listing.refresh_from_db()
         self.assertEqual(listing.status, ListingStatus.FAILED)
         client.import_products.assert_not_called()
+
+    @patch("listings.bunnings.products.BunningsClient")
+    def test_publish_stores_the_failure_on_the_product(self, mock_cls):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        client = mock_cls.return_value
+        client.environment = "production"
+        client.product_exists.return_value = False
+        client.import_products.side_effect = MarketplaceError("Bunnings HTTP 503")
+        result = listing_service.publish(self.user, self.store)
+        self.assertFalse(result["ok"])
+        self.assertIn("503", result["message"])
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, ListingStatus.FAILED)
+        self.assertIn("503", " ".join(listing.validation_errors_json or []))
+        self.assertEqual(listing.marketplace_response_json.get("error"), "Bunnings HTTP 503")
 
     @patch("listings.bunnings.products.BunningsClient")
     def test_lookup_offer_raises_on_api_error(self, mock_cls):

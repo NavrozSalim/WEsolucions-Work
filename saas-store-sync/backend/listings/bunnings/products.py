@@ -1028,6 +1028,12 @@ def flatten_logistic_classes(payload) -> list[dict]:
     return out
 
 
+def _batch_catalog_method(client):
+    """Real client batch lookup. A mock's auto-attribute is not a catalog API."""
+    fn = getattr(type(client), "products_in_catalog", None)
+    return fn if callable(fn) else None
+
+
 def _catalog_product_known(client, sku: str):
     """True/False when the client can answer; None skips the wait (tests / mocks)."""
     fn = getattr(client, "product_exists", None)
@@ -1042,23 +1048,50 @@ def _catalog_product_known(client, sku: str):
     return None
 
 
+def _catalog_skus_known(client, skus: list[str]):
+    """Set of shop SKUs already in Bunnings, or None when the catalog could not be read."""
+    batch = _batch_catalog_method(client)
+    if batch is None:
+        return None
+    try:
+        found = client.products_in_catalog(skus)
+    except MarketplaceError:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.warning("Bunnings catalog lookup failed", exc_info=True)
+        return None
+    if found is None:
+        return None
+    if isinstance(found, (set, list, tuple)):
+        return {str(sku).strip() for sku in found if str(sku or "").strip()}
+    return None
+
+
 def wait_for_catalog_products(client, skus, *, attempts: int | None = None, interval: float | None = None) -> list[str]:
     """Poll until shop product-ids exist. Returns SKUs still missing."""
     remaining = [str(sku or "").strip() for sku in skus if str(sku or "").strip()]
     tries = attempts if attempts is not None else PRODUCT_WAIT_ATTEMPTS
     wait = interval if interval is not None else PRODUCT_WAIT_SECONDS
+    batch = _batch_catalog_method(client) is not None
     for i in range(max(1, tries)):
-        still = []
-        unknown = False
-        for sku in remaining:
-            known = _catalog_product_known(client, sku)
+        if batch:
+            known = _catalog_skus_known(client, remaining)
             if known is None:
-                unknown = True
-                break
-            if not known:
-                still.append(sku)
-        if unknown:
-            return []
+                return []
+            known_cf = {sku.casefold() for sku in known}
+            still = [sku for sku in remaining if sku.casefold() not in known_cf]
+        else:
+            still = []
+            unknown = False
+            for sku in remaining:
+                known = _catalog_product_known(client, sku)
+                if known is None:
+                    unknown = True
+                    break
+                if not known:
+                    still.append(sku)
+            if unknown:
+                return []
         remaining = still
         if not remaining:
             return []
@@ -1365,9 +1398,25 @@ def _mark_listing(listing: StoreListing, *, status: str, request: dict, response
 
 
 def _partition_by_catalog(client, listings: list[StoreListing]) -> tuple[list, list]:
-    """Split listings whose shop SKU is already in Bunnings vs those that still need P41."""
+    """Split listings whose shop SKU is already in Bunnings vs those that still need P41.
+
+    One catalog call covers the whole batch. A failed lookup does not walk
+    every SKU — those products are sent in the product file instead.
+    """
     found: list[StoreListing] = []
     missing: list[StoreListing] = []
+    if _batch_catalog_method(client) is not None:
+        known = _catalog_skus_known(client, [listing_sku(listing) for listing in listings])
+        if known is None:
+            return [], list(listings)
+        known_cf = {sku.casefold() for sku in known}
+        for listing in listings:
+            sku = listing_sku(listing)
+            if sku and sku.casefold() in known_cf:
+                found.append(listing)
+            else:
+                missing.append(listing)
+        return found, missing
     for listing in listings:
         if _catalog_product_known(client, listing_sku(listing)) is True:
             found.append(listing)
@@ -1376,7 +1425,59 @@ def _partition_by_catalog(client, listings: list[StoreListing]) -> tuple[list, l
     return found, missing
 
 
+def note_publish_stopped(listings: list[StoreListing], message: str) -> int:
+    """Save a publish failure on products that never received a Bunnings result.
+
+    Rows already marked uploaded or not-created keep the result they have.
+    """
+    text = (message or "").strip() or "Publish stopped before Bunnings returned a result."
+    marked = 0
+    for listing in listings:
+        try:
+            listing.refresh_from_db(fields=["status"])
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not refresh listing before saving the publish failure", exc_info=True)
+            continue
+        if listing.status in (
+            ListingStatus.UPLOADED_STAGING,
+            ListingStatus.UPLOADED_PRODUCTION,
+            ListingStatus.FAILED,
+        ):
+            continue
+        _mark_listing(
+            listing,
+            status=ListingStatus.FAILED,
+            request={"publish_stopped": True},
+            response={"error": text, "bunnings_errors": []},
+            errors=[text],
+        )
+        marked += 1
+    return marked
+
+
 def publish_listings(user, store, listings: list[StoreListing]) -> dict:
+    """Send products to Bunnings and keep any failure on the product rows."""
+    try:
+        return _publish_listings(user, store, listings)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Bunnings publish stopped store=%s", getattr(store, "id", ""))
+        message = str(exc).strip() or "Publish stopped before Bunnings returned a result."
+        note_publish_stopped(listings, message)
+        failed = sum(1 for listing in listings if listing.status == ListingStatus.FAILED)
+        published = sum(
+            1 for listing in listings
+            if str(listing.status or "").startswith("uploaded")
+        )
+        return {
+            "ok": False,
+            "published": published,
+            "failed": failed or len(listings),
+            "message": message,
+            "environment": "",
+        }
+
+
+def _publish_listings(user, store, listings: list[StoreListing]) -> dict:
     """P41 product import (create only) then OF01 offer import.
 
     If Bunnings already has the shop SKU (Pending/accepted), skip P41 and

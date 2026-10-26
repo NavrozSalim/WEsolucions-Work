@@ -235,7 +235,7 @@ def fetch_all_reverb_orders():
     time_limit=7500,
 )
 def publish_store_listings(self, user_id, store_id, listing_ids=None):
-    """Background MyDeal/Lasoo listing publish on the ingest queue."""
+    """Background MyDeal, Lasoo, or Bunnings listing publish on the ingest queue."""
     from . import listing_service
     from . import publish_progress as pub_prog
     from .models import ListingAction, ListingUpload

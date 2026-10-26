@@ -331,6 +331,13 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                             {listings.map((l) => {
                                 const bunningsErrors = marketplaceKey === 'bunnings' ? bunningsErrorsFromListing(l) : [];
                                 const errorText = bunningsErrors.length ? '' : listingErrorText(l);
+                                const waitingForReview = l.status === 'ready'
+                                    && Boolean(l.marketplace_response_json?.waiting_for_product);
+                                const showError = Boolean(errorText) && (
+                                    l.status === 'failed'
+                                    || l.status === 'validation_failed'
+                                    || l.status === 'ready'
+                                );
                                 const statusLabel = marketplaceKey === 'bunnings' && l.status === 'failed'
                                     ? 'Not created'
                                     : (STATUS_LABELS[l.status] || l.status);
@@ -359,9 +366,14 @@ export default function CreatedProductsPanel({ storeId, marketplaceCode = '', re
                                         >
                                             {statusLabel}
                                         </span>
-                                        {errorText && (l.status === 'failed' || l.status === 'validation_failed') && (
+                                        {showError && (
                                             <p className="mt-1 max-w-[220px] text-xs text-rose-600 dark:text-rose-400" title={errorText}>
                                                 {errorText}
+                                            </p>
+                                        )}
+                                        {waitingForReview && !showError && (
+                                            <p className="mt-1 max-w-[220px] text-xs text-amber-700 dark:text-amber-300">
+                                                Sent. Waiting for Bunnings review.
                                             </p>
                                         )}
                                     </td>

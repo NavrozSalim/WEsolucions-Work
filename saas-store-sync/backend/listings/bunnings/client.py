@@ -36,6 +36,10 @@ from ..errors import MarketplaceError
 logger = logging.getLogger("listings.bunnings")
 
 REQUEST_TIMEOUT = 60
+# One catalog read for many shop SKUs. A per-SKU lookup of a large publish
+# exceeds the web worker limit before the product file is sent.
+CATALOG_LOOKUP_TIMEOUT = 20
+CATALOG_LOOKUP_CHUNK = 100
 IMPORT_POLL_ATTEMPTS = 15
 IMPORT_POLL_SECONDS = 2.0
 DEFAULT_PRODUCTION_BASE_URL = "https://bunnings-prod.mirakl.net"
@@ -183,8 +187,15 @@ class BunningsClient:
             status=response.status_code,
         )
 
-    def get(self, path: str, *, params: dict | None = None, accept: str | None = None) -> BunningsResult:
-        return self.request("GET", path, params=params, accept=accept)
+    def get(
+        self,
+        path: str,
+        *,
+        params: dict | None = None,
+        accept: str | None = None,
+        timeout: int | None = None,
+    ) -> BunningsResult:
+        return self.request("GET", path, params=params, accept=accept, timeout=timeout)
 
     def verify_connection(self) -> BunningsResult:
         """GET /api/hierarchies (H11) — same check as the standalone test script."""
@@ -298,6 +309,47 @@ class BunningsClient:
     def product_exists(self, product_id: str) -> bool:
         result = self.get_product(product_id)
         return bool(result.ok and _payload_has_product(result.data, product_id))
+
+    def products_in_catalog(self, product_ids) -> set[str] | None:
+        """Shop SKUs Bunnings already has.
+
+        One P31 call per chunk, not one call per SKU. None means the catalog
+        could not be read, so the caller should still send the product file.
+        """
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for raw in product_ids or []:
+            pid = str(raw or "").strip()
+            key = pid.casefold()
+            if not pid or key in seen:
+                continue
+            seen.add(key)
+            ordered.append(pid)
+        if not ordered:
+            return set()
+
+        found: set[str] = set()
+        chunk_size = max(1, CATALOG_LOOKUP_CHUNK)
+        for start in range(0, len(ordered), chunk_size):
+            chunk = ordered[start:start + chunk_size]
+            result = self.get(
+                "/api/products",
+                params={"product_ids": ",".join(chunk), "max": len(chunk)},
+                timeout=CATALOG_LOOKUP_TIMEOUT,
+            )
+            if result.status == 401:
+                raise MarketplaceError(
+                    result.message or "Bunnings rejected these credentials (401 Unauthorized)."
+                )
+            if not result.ok:
+                logger.warning(
+                    "Bunnings catalog lookup failed status=%s message=%s",
+                    result.status,
+                    (result.message or "")[:300],
+                )
+                return None
+            found.update(_matching_requested_ids(result.data, chunk))
+        return found
 
     def poll_import(
         self,
@@ -464,6 +516,46 @@ def extract_import_id(data) -> str:
             if val not in (None, ""):
                 return str(val)
     return ""
+
+
+def _product_items(data) -> list:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        nested = data.get("products") or data.get("data") or data.get("mcm_products")
+        if isinstance(nested, list):
+            return nested
+        if any(data.get(key) for key in ("product_id", "product-id", "product_sku", "shop_sku", "sku")):
+            return [data]
+    return []
+
+
+def _matching_requested_ids(data, requested: list[str]) -> set[str]:
+    """Requested shop SKUs that appear in a P31 payload."""
+    wanted = {pid.casefold(): pid for pid in requested if str(pid or "").strip()}
+    if not wanted:
+        return set()
+    found: set[str] = set()
+    for item in _product_items(data):
+        if not isinstance(item, dict):
+            continue
+        for key in (
+            "product_id",
+            "product-id",
+            "product_sku",
+            "product-sku",
+            "shop_sku",
+            "sku",
+            "code",
+            "id",
+            "mirakl_product_id",
+        ):
+            val = str(item.get(key) or "").strip()
+            hit = wanted.get(val.casefold())
+            if hit:
+                found.add(hit)
+                break
+    return found
 
 
 def _payload_has_product(data, product_id: str) -> bool:

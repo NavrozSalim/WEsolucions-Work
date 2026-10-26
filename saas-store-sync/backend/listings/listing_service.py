@@ -2244,17 +2244,18 @@ MYDEAL_PUBLISH_ASYNC_MIN = 15
 
 
 def start_publish_async(user, store, listing_ids=None) -> dict:
-    """Queue MyDeal/Lasoo publish on the ingest worker so Gunicorn is not killed.
+    """Queue MyDeal, Lasoo, or Bunnings publish on the ingest worker.
 
-    Lasoo batches under ``LASOO_PUBLISH_ASYNC_MIN`` still run in-request
-    (chunked). Large Lasoo publishes go to Celery.
+    A Bunnings publish of many new products used to run inside the web request
+    and was cut off before Bunnings returned an error. Lasoo batches under
+    ``LASOO_PUBLISH_ASYNC_MIN`` still run in-request (chunked).
     """
     from . import publish_progress as pub_prog
     from .tasks import publish_store_listings
 
     kind = marketplace_kind(store.marketplace)
-    if kind not in ("mydeal", "lasoo"):
-        raise MarketplaceError("Background publish is only used for MyDeal and Lasoo.")
+    if kind not in ("mydeal", "lasoo", "bunnings"):
+        raise MarketplaceError("Background publish is only used for MyDeal, Lasoo, and Bunnings.")
 
     live = pub_prog.enrich_publish_progress(store.id)
     if live.get("active"):
@@ -2274,6 +2275,8 @@ def start_publish_async(user, store, listing_ids=None) -> dict:
         mydeal_products.requeue_unconfirmed_uploads(store)
 
     statuses = [ListingStatus.READY, ListingStatus.FAILED]
+    if kind == "bunnings" and listing_ids:
+        statuses.extend([ListingStatus.UPLOADED_STAGING, ListingStatus.UPLOADED_PRODUCTION])
     qs = StoreListing.objects.filter(store=store, status__in=statuses)
     if kind != "mydeal":
         qs = qs.filter(user=user)
@@ -2304,7 +2307,9 @@ def start_publish_async(user, store, listing_ids=None) -> dict:
         return result
 
     id_strs = [str(item.id) for item in publishable]
-    marketplace_label = "MyDeal" if kind == "mydeal" else "Lasoo"
+    marketplace_label = {"mydeal": "MyDeal", "lasoo": "Lasoo", "bunnings": "Bunnings"}.get(
+        kind, "the marketplace"
+    )
     try:
         async_res = publish_store_listings.apply_async(
             args=[user.id, str(store.id), id_strs],
