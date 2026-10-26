@@ -297,6 +297,10 @@ def publish_store_listings(self, user_id, store_id, listing_ids=None):
         )
         return result
     finally:
+        try:
+            listing_service.refresh_bunnings_file_statuses(store)
+        except Exception:
+            logger.exception("Bunnings file status refresh failed store=%s", store_id)
         live = pub_prog.get_publish_progress(store_id)
         if live.get("active") and (not my_id or live.get("job_id") == my_id):
             pub_prog.finish_publish_progress(store_id, job_id=my_id)
@@ -398,6 +402,9 @@ def sync_bunnings_catalog_errors(store_id):
     try:
         store = Store.objects.select_related("marketplace").get(pk=store_id)
         bunnings_products.sync_invalid_catalog(store)
+        from . import listing_service
+
+        listing_service.refresh_bunnings_file_statuses(store)
     except Exception:
         logger.exception("Bunnings invalid-data sync failed store=%s", store_id)
     finally:

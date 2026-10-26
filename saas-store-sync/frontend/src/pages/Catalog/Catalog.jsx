@@ -90,7 +90,7 @@ const syncStatusLabel = {
 };
 const uploadStatusVariant = {
     synced: 'success', validated: 'success', pending: 'warning',
-    processing: 'warning', partial: 'error', failed: 'error',
+    processing: 'warning', fetching: 'warning', partial: 'error', failed: 'error',
     completed: 'success',
 };
 const uploadStatusLabel = {
@@ -110,9 +110,16 @@ function managedUploadStatusText(u) {
     if (u.status === 'pending' || u.status === 'processing') {
         const done = Number(u.processed_rows) || 0;
         const total = Number(u.total_rows) || 0;
-        if (total > 0 && done > 0) return `Pending (${done}/${total})`;
-        return 'Pending';
+        if (total > 0 && done > 0) return `Creating (${done}/${total})`;
+        return 'Creating';
     }
+    if (u.status === 'fetching') return 'Fetching status from Bunnings';
+    if (u.status === 'completed' && /on Bunnings/i.test(u.message || '')) return 'Created on Bunnings';
+    const bunningsErrors = (u.status === 'partial' || u.status === 'failed')
+        && /Bunnings/i.test(u.message || '')
+        && Number(u.error_rows) > 0
+        && Number(u.total_rows) > 0;
+    if (bunningsErrors) return `${u.error_rows} of ${u.total_rows} in error`;
     if (u.status === 'partial' || u.status === 'failed') return 'Error';
     if (u.action === 'delete_system') return 'Deleted from system';
     if (u.action === 'delete') return 'Deleted';
@@ -371,7 +378,7 @@ function ManagedUploadActionsDropdown({
     }, [open]);
 
     const u = upload;
-    const inflight = u.status === 'pending' || u.status === 'processing';
+    const inflight = u.status === 'pending' || u.status === 'processing' || u.status === 'fetching';
     const hasErrors = !inflight && ((u.error_rows ?? 0) > 0 || u.status === 'failed' || u.status === 'partial');
     const busy = deletingId === u.id;
     const items = [];
@@ -1326,7 +1333,7 @@ export default function Catalog() {
 
     const listingUploadPending = Boolean(
         isManagedStore
-        && uploads.some((u) => u.status === 'pending' || u.status === 'processing'),
+        && uploads.some((u) => u.status === 'pending' || u.status === 'processing' || u.status === 'fetching'),
     );
     const catalogIngestPending = Boolean(
         !isManagedStore

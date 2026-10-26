@@ -639,6 +639,11 @@ class StoreListingUploadHistoryView(APIView):
     def get(self, request, store_pk):
         store = _get_store(request, store_pk)
         scope = request.query_params.get('scope', 'history')
+        if marketplace_kind(store.marketplace) == 'bunnings' and scope != 'logs':
+            try:
+                listing_service.refresh_bunnings_file_statuses(store)
+            except Exception:
+                logger.exception("Bunnings file status refresh failed store=%s", store.id)
         qs = listing_service.filter_listing_uploads(
             ListingUpload.objects.filter(store=store).select_related('user').defer('rows_json'),
             scope=scope,

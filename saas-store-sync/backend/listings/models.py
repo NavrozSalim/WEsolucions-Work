@@ -167,6 +167,7 @@ class ListingUpload(models.Model):
     class Status(models.TextChoices):
         PENDING = 'pending', 'Pending'
         PROCESSING = 'processing', 'Processing'
+        FETCHING = 'fetching', 'Fetching'
         COMPLETED = 'completed', 'Completed'
         PARTIAL = 'partial', 'Partial'
         FAILED = 'failed', 'Failed'

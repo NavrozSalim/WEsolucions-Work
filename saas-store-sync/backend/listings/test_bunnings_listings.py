@@ -22,7 +22,7 @@ from listings.bunnings.client import (
     parse_mirakl_error_report,
 )
 from listings.errors import MarketplaceError
-from listings.models import ListingStatus, MarketplaceOrder, OrderStatus, SupportTicket, TicketStatus
+from listings.models import ListingStatus, ListingUpload, MarketplaceOrder, OrderStatus, SupportTicket, TicketStatus
 from listings.bunnings import tickets as bunnings_tickets
 
 VALID_BUNNINGS = {
@@ -1830,6 +1830,53 @@ class BunningsListingServiceTests(TestCase):
         saved = listing.marketplace_response_json["bunnings_errors"][0]
         self.assertEqual(saved["attribute"], "colour")
         self.assertIn("required", saved["message"])
+
+    def test_file_waits_for_bunnings_then_counts_invalid_products(self):
+        listing = listing_service.create(self.user, self.store, dict(VALID_BUNNINGS))
+        listing.marketplace_response_json = {"waiting_for_product": True}
+        listing.marketplace_request_json = {"p41_import_id": "1770125"}
+        listing.save()
+        upload = ListingUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            filename="New - Abstract.xlsx",
+            source=ListingUpload.Source.FILE,
+            action="create",
+            status=ListingUpload.Status.COMPLETED,
+            total_rows=1,
+            success_rows=1,
+            rows_json=[{
+                "sku": "BN-1",
+                "valid": True,
+                "imported": True,
+                "fields": {"sku": "BN-1", "action": "Create", "title": "Power Drill"},
+            }],
+        )
+        with patch("listings.bunnings.products.enqueue_catalog_invalid_sync"):
+            changed = listing_service.refresh_bunnings_file_statuses(self.store)
+        self.assertEqual(changed, 1)
+        upload.refresh_from_db()
+        self.assertEqual(upload.status, ListingUpload.Status.FETCHING)
+        self.assertIn("Fetching status from Bunnings", upload.message)
+
+        listing.status = ListingStatus.FAILED
+        listing.marketplace_response_json = {
+            "catalog_status": "invalid",
+            "bunnings_errors": [{
+                "attribute": "colour",
+                "field": "Colour",
+                "message": "The 'colour' attribute is required.",
+            }],
+        }
+        listing.validation_errors_json = ["Colour: The 'colour' attribute is required."]
+        listing.save()
+        listing_service.refresh_bunnings_file_statuses(self.store)
+        upload.refresh_from_db()
+        self.assertEqual(upload.status, ListingUpload.Status.PARTIAL)
+        self.assertEqual(upload.error_rows, 1)
+        self.assertIn("1 of 1 are in error on Bunnings", upload.message)
+        self.assertEqual(upload.rows_json[0]["fields"]["action"], "Update")
+        self.assertIn("colour", upload.rows_json[0]["errors"][0])
 
     @patch("listings.bunnings.products.BunningsClient")
     def test_lookup_offer_raises_on_api_error(self, mock_cls):

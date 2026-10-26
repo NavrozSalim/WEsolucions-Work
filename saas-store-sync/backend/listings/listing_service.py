@@ -209,6 +209,182 @@ def _finish_file_upload(
     return upload
 
 
+def _upload_row_skus(upload: ListingUpload) -> list[str]:
+    rows = upload.rows_json if isinstance(upload.rows_json, list) else []
+    skus: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        fields = row.get("fields") if isinstance(row.get("fields"), dict) else {}
+        sku = str(row.get("sku") or fields.get("sku") or row.get("variant_key") or "").strip()
+        key = sku.casefold()
+        if sku and key not in seen:
+            seen.add(key)
+            skus.append(sku)
+    return skus
+
+
+def _bunnings_listing_phase(listing) -> str:
+    """system, waiting, live, or error for one product in a Bunnings file."""
+    response = listing.marketplace_response_json if isinstance(listing.marketplace_response_json, dict) else {}
+    request = listing.marketplace_request_json if isinstance(listing.marketplace_request_json, dict) else {}
+    errors = response.get("bunnings_errors") if isinstance(response.get("bunnings_errors"), list) else []
+    if listing.status == ListingStatus.FAILED or response.get("catalog_status") == "invalid" or errors:
+        if listing.status == ListingStatus.FAILED or response.get("catalog_status") == "invalid":
+            return "error"
+    if str(listing.status or "").startswith("uploaded"):
+        return "live"
+    if response.get("waiting_for_product") or request.get("p41_import_id") or request.get("publish_stopped"):
+        return "waiting"
+    return "system"
+
+
+def _bunnings_listing_error_text(listing) -> str:
+    messages: list[str] = []
+    saved = listing.validation_errors_json if isinstance(listing.validation_errors_json, list) else []
+    for item in saved:
+        text = str(item or "").strip()
+        if text and text not in messages:
+            messages.append(text)
+    response = listing.marketplace_response_json if isinstance(listing.marketplace_response_json, dict) else {}
+    for item in response.get("bunnings_errors") or []:
+        if not isinstance(item, dict):
+            continue
+        field = str(item.get("field") or item.get("attribute") or "").strip()
+        message = str(item.get("message") or item.get("errors") or "").strip()
+        text = f"{field}: {message}" if field and message else (message or field)
+        if text and text not in messages:
+            messages.append(text)
+    return "; ".join(messages) or "Bunnings marked this product as invalid data."
+
+
+def _mark_upload_rows_for_bunnings_errors(upload: ListingUpload, listings_by_sku: dict) -> int:
+    rows = upload.rows_json if isinstance(upload.rows_json, list) else []
+    failed = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        fields = row.get("fields") if isinstance(row.get("fields"), dict) else {}
+        sku = str(row.get("sku") or fields.get("sku") or row.get("variant_key") or "").strip()
+        listing = listings_by_sku.get(sku.casefold())
+        if listing is None or _bunnings_listing_phase(listing) != "error":
+            continue
+        text = _bunnings_listing_error_text(listing)
+        row["valid"] = False
+        row["errors"] = [text]
+        if isinstance(row.get("fields"), dict):
+            row["fields"]["action"] = "Update"
+        failed += 1
+    upload.rows_json = rows
+    return failed
+
+
+def refresh_bunnings_file_statuses(store) -> int:
+    """Move a Bunnings file from Created to fetching, then to the Bunnings result.
+
+    A file that only passed SellerPilot stays Created. Once Bunnings has the
+    products, the row says it is fetching. When Bunnings rejects products, the
+    row counts them and the error download contains those rows with every column.
+    """
+    if _store_kind(store) != "bunnings":
+        return 0
+    uploads = list(
+        ListingUpload.objects.filter(
+            store=store,
+            source=ListingUpload.Source.FILE,
+            action__in=(ListingAction.CREATE, ListingAction.UPDATE),
+            status__in=(
+                ListingUpload.Status.COMPLETED,
+                ListingUpload.Status.FETCHING,
+                ListingUpload.Status.PARTIAL,
+            ),
+        ).order_by("-created_at")[:8]
+    )
+    changed = 0
+    should_check_catalog = False
+    for upload in uploads:
+        skus = _upload_row_skus(upload)
+        if not skus:
+            continue
+        listings = list(StoreListing.objects.filter(store=store, sku__in=skus))
+        by_sku = {}
+        for listing in listings:
+            sku = (listing.sku or "").strip()
+            if sku:
+                by_sku[sku.casefold()] = listing
+        phases = [_bunnings_listing_phase(listing) for listing in by_sku.values()]
+        if not phases:
+            continue
+        waiting = any(phase == "waiting" for phase in phases)
+        in_flight = waiting or (
+            upload.status == ListingUpload.Status.FETCHING and any(phase == "system" for phase in phases)
+        )
+        errors = sum(1 for phase in phases if phase == "error")
+        if in_flight:
+            should_check_catalog = True
+            if upload.status != ListingUpload.Status.FETCHING or upload.message != "Fetching status from Bunnings.":
+                upload.status = ListingUpload.Status.FETCHING
+                upload.error_rows = 0
+                upload.message = "Fetching status from Bunnings."
+                upload.save(update_fields=["status", "error_rows", "message"])
+                changed += 1
+            continue
+        if errors:
+            _mark_upload_rows_for_bunnings_errors(upload, by_sku)
+            upload.status = ListingUpload.Status.PARTIAL
+            upload.error_rows = errors
+            upload.success_rows = max(0, len(phases) - errors)
+            upload.message = f"{errors} of {upload.total_rows or len(phases)} are in error on Bunnings."
+            upload.save(update_fields=["status", "error_rows", "success_rows", "message", "rows_json"])
+            changed += 1
+            continue
+        if upload.status == ListingUpload.Status.FETCHING and all(phase == "live" for phase in phases):
+            upload.status = ListingUpload.Status.COMPLETED
+            upload.error_rows = 0
+            upload.success_rows = len(phases)
+            upload.message = "Created on Bunnings."
+            upload.save(update_fields=["status", "error_rows", "success_rows", "message"])
+            changed += 1
+    if should_check_catalog:
+        try:
+            from .bunnings.products import enqueue_catalog_invalid_sync
+
+            enqueue_catalog_invalid_sync(store)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not queue the Bunnings status check store=%s", store.id)
+    return changed
+
+
+def _queue_bunnings_file_status(user, store, upload: ListingUpload) -> None:
+    """After SellerPilot accepts a Bunnings file, send it and watch that batch."""
+    if _store_kind(store) != "bunnings":
+        return
+    if upload.action not in (ListingAction.CREATE, ListingAction.UPDATE):
+        return
+    if upload.error_rows or not upload.success_rows:
+        return
+    upload.status = ListingUpload.Status.FETCHING
+    upload.message = "Created in the system. Fetching status from Bunnings."
+    upload.save(update_fields=["status", "message"])
+    skus = _upload_row_skus(upload)
+    listing_ids = [
+        str(pk)
+        for pk in StoreListing.objects.filter(
+            store=store,
+            sku__in=skus,
+            status=ListingStatus.READY,
+        ).values_list("id", flat=True)
+    ]
+    if not listing_ids:
+        return
+    try:
+        start_publish_async(user, store, listing_ids)
+    except MarketplaceError as exc:
+        upload.message = f"Created in the system. {exc}"
+        upload.save(update_fields=["message"])
+
+
 def _safe_decimal(value) -> Decimal:
     try:
         return Decimal(str(value))
@@ -1657,7 +1833,7 @@ def bulk_import(
                 total=len(rows),
             )
 
-    _finish_file_upload(
+    finished = _finish_file_upload(
         upload,
         user=user, store=activity_store,
         action=file_action,
@@ -1670,6 +1846,8 @@ def bulk_import(
             else f"Imported {imported} of {len(rows)} row(s)."
         ),
     )
+    if upload is not None and error_rows == 0 and imported:
+        _queue_bunnings_file_status(user, activity_store, finished)
     return {"total_rows": len(rows), "imported": imported, "action": file_action, "rows": preview}
 
 
