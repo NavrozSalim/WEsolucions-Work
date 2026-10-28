@@ -204,27 +204,70 @@ def read_result_sheet(uploaded) -> tuple[list[str], list[dict]]:
     return columns, rows
 
 
-def csv_bytes(columns: list[str], rows: list[dict]) -> bytes:
+def csv_chunks(columns: list[str], rows, batch: int = 200):
+    """CSV bytes in small pieces, including the Excel BOM on the first piece.
+
+    Callers can stream a large result without holding the whole file in memory.
+    """
+    columns = list(columns)
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=list(columns), extrasaction='ignore')
+    writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction='ignore')
     writer.writeheader()
+    pending = 0
+    started = False
+
+    def flush(with_bom: bool):
+        text = buffer.getvalue()
+        buffer.seek(0)
+        buffer.truncate(0)
+        if not text:
+            return b''
+        payload = text.encode('utf-8')
+        if with_bom:
+            return b'\xef\xbb\xbf' + payload
+        return payload
+
     for row in rows:
+        data = row or {}
         writer.writerow({
-            column: _sheet_value(row.get(column, ''))
+            column: _sheet_value(data.get(column, ''))
             for column in columns
         })
-    return buffer.getvalue().encode('utf-8-sig')
+        pending += 1
+        if pending >= batch:
+            payload = flush(not started)
+            started = True
+            pending = 0
+            if payload:
+                yield payload
+    payload = flush(not started)
+    if payload:
+        yield payload
 
 
-def workbook_bytes(columns: list[str], rows: list[dict]) -> bytes:
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = 'Results'
+def csv_bytes(columns: list[str], rows) -> bytes:
+    return b''.join(csv_chunks(columns, rows))
+
+
+def write_workbook(columns: list[str], rows, handle) -> None:
+    """Write an xlsx straight to ``handle``.
+
+    ``write_only`` flushes each row instead of keeping every cell in memory,
+    which is what made an 80,000-row Amazon sheet blow the web worker.
+    """
+    workbook = Workbook(write_only=True)
+    sheet = workbook.create_sheet('Results')
+    columns = list(columns)
     sheet.append([_sheet_value(column) for column in columns])
     for row in rows:
-        sheet.append([_sheet_value(row.get(column, '')) for column in columns])
+        data = row or {}
+        sheet.append([_sheet_value(data.get(column, '')) for column in columns])
+    workbook.save(handle)
+
+
+def workbook_bytes(columns: list[str], rows) -> bytes:
     buffer = io.BytesIO()
-    workbook.save(buffer)
+    write_workbook(columns, rows, buffer)
     return buffer.getvalue()
 
 

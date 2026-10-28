@@ -1,11 +1,14 @@
 import io
 import json
 import re
+import tempfile
 from datetime import timedelta
 
 from django.core.files.base import ContentFile
+from django.db.models import BooleanField, Case, Value, When
+from django.http import FileResponse, StreamingHttpResponse
 from django.utils import timezone
-from django.http import FileResponse
+from django.utils.http import content_disposition_header
 from rest_framework import status
 from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.permissions import BasePermission, IsAuthenticated
@@ -16,12 +19,13 @@ from rest_framework.views import APIView
 from .columns import ID_FIELD, options_payload
 from .files import (
     SpreadsheetError,
-    csv_bytes,
+    csv_chunks,
     open_bytes,
     read_result_sheet,
     read_spreadsheet,
     template_bytes,
     workbook_bytes,
+    write_workbook,
 )
 from . import limits
 from .models import DiscoveryJob
@@ -41,11 +45,33 @@ class CanUseDiscovery(BasePermission):
         return user.has_product_permission('scraping')
 
 
+def _workbook_is_saved(job: DiscoveryJob) -> bool:
+    """True when a workbook is stored, without reading the file into memory."""
+    if getattr(job.result_file, 'name', ''):
+        return True
+    flagged = getattr(job, 'has_result_bytes', None)
+    if flagged is not None:
+        return bool(flagged)
+    if not job.pk:
+        return False
+    return DiscoveryJob.objects.filter(pk=job.pk, result_bytes__isnull=False).exists()
+
+
 def _jobs_for(user):
     org_id = getattr(user, 'organization_id', None)
     if org_id:
-        return DiscoveryJob.objects.filter(owner__organization_id=org_id)
-    return DiscoveryJob.objects.filter(owner=user)
+        jobs = DiscoveryJob.objects.filter(owner__organization_id=org_id)
+    else:
+        jobs = DiscoveryJob.objects.filter(owner=user)
+    # The workbook lives in result_bytes. Loading it just to list jobs pulls
+    # tens of megabytes into the web worker for every Amazon file.
+    return jobs.defer('source_bytes', 'result_bytes').annotate(
+        has_result_bytes=Case(
+            When(result_bytes__isnull=False, then=Value(True)),
+            default=Value(False),
+            output_field=BooleanField(),
+        ),
+    )
 
 
 def _job_payload(job: DiscoveryJob, queue_position: int = 0) -> dict:
@@ -71,7 +97,7 @@ def _job_payload(job: DiscoveryJob, queue_position: int = 0) -> dict:
         'finished_at': job.finished_at,
         'download_url': (
             f'/api/v1/discovery/jobs/{job.id}/download/'
-            if job.result_bytes or job.result_file
+            if _workbook_is_saved(job)
             else None
         ),
     }
@@ -112,18 +138,68 @@ def _delete_job(job: DiscoveryJob) -> None:
     job.delete()
 
 
-def _export_table(job: DiscoveryJob) -> tuple[list, list]:
-    stored = list(job.products.order_by('created_at'))
-    if stored:
-        columns = list(job.columns or []) or list(stored[0].data.keys())
-        return columns, [item.data for item in stored]
-    try:
-        blob = job.read_result()
-    except FileNotFoundError:
-        blob = b''
+_XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+
+
+def _not_ready(job: DiscoveryJob):
+    if job.status in (DiscoveryJob.Status.QUEUED, DiscoveryJob.Status.RUNNING):
+        detail = 'No products have been saved yet. Try again in a moment.'
+    else:
+        detail = 'Result file is not ready.'
+    return Response({'detail': detail}, status=status.HTTP_404_NOT_FOUND)
+
+
+def _open_saved_workbook(job: DiscoveryJob):
+    """Open the workbook the scrape already wrote.
+
+    The database copy is the one shared with the US and AU workers. The disk
+    file is only a fallback from before that copy existed.
+    """
+    blob = job.result_bytes
     if blob:
-        return read_result_sheet(io.BytesIO(blob))
-    return list(job.columns or []), []
+        if isinstance(blob, memoryview):
+            blob = blob.tobytes()
+        elif not isinstance(blob, (bytes, bytearray)):
+            blob = bytes(blob)
+        return io.BytesIO(blob)
+    if getattr(job.result_file, 'name', ''):
+        try:
+            return job.result_file.open('rb')
+        except (OSError, FileNotFoundError, ValueError):
+            return None
+    return None
+
+
+def _xlsx_response(handle, filename: str):
+    response = FileResponse(handle, as_attachment=True, filename=filename)
+    response['Content-Type'] = _XLSX_TYPE
+    return response
+
+
+def _csv_response(chunks, filename: str):
+    response = StreamingHttpResponse(chunks, content_type='text/csv; charset=utf-8')
+    response['Content-Disposition'] = content_disposition_header(True, filename)
+    return response
+
+
+def _export_columns(job: DiscoveryJob) -> list[str]:
+    columns = [str(column) for column in (job.columns or []) if str(column or '').strip()]
+    if columns:
+        return columns
+    first = job.products.order_by('created_at').values_list('data', flat=True).first()
+    if isinstance(first, dict) and first:
+        return list(first.keys())
+    return []
+
+
+def _iter_product_rows(job: DiscoveryJob):
+    stored = (
+        job.products.order_by('created_at')
+        .values_list('data', flat=True)
+        .iterator(chunk_size=500)
+    )
+    for data in stored:
+        yield data or {}
 
 
 class DiscoveryOptionsView(APIView):
@@ -297,25 +373,28 @@ class DiscoveryJobDownloadView(APIView):
         job = _jobs_for(request.user).filter(id=job_id).first()
         if job is None:
             return Response({'detail': 'Result file is not ready.'}, status=status.HTTP_404_NOT_FOUND)
-        columns, rows = _export_table(job)
-        if not rows:
-            if job.status in (DiscoveryJob.Status.QUEUED, DiscoveryJob.Status.RUNNING):
-                detail = 'No products have been saved yet. Try again in a moment.'
-            else:
-                detail = 'Result file is not ready.'
-            return Response({'detail': detail}, status=status.HTTP_404_NOT_FOUND)
+        if not job.products.exists():
+            return _not_ready(job)
         export_format = (request.query_params.get('format') or 'xlsx').strip().lower()
+        # A finished or stopped scrape already stored the workbook. Sending that
+        # copy skips rebuilding tens of thousands of Amazon rows inside the
+        # request, which is what the web worker was timing out on.
+        if export_format != 'csv' and job.status != DiscoveryJob.Status.RUNNING:
+            saved = _open_saved_workbook(job)
+            if saved is not None:
+                return _xlsx_response(saved, f'{job.marketplace}-{job.mode}-results.xlsx')
+        columns = _export_columns(job)
+        rows = _iter_product_rows(job)
         if export_format == 'csv':
-            payload = csv_bytes(columns, rows)
-            filename = f'{job.marketplace}-{job.mode}-results.csv'
-            content_type = 'text/csv; charset=utf-8'
-        else:
-            payload = workbook_bytes(columns, rows)
-            filename = f'{job.marketplace}-{job.mode}-results.xlsx'
-            content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        response = FileResponse(ContentFile(payload), as_attachment=True, filename=filename)
-        response['Content-Type'] = content_type
-        return response
+            return _csv_response(csv_chunks(columns, rows), f'{job.marketplace}-{job.mode}-results.csv')
+        handle = tempfile.TemporaryFile()
+        try:
+            write_workbook(columns, rows, handle)
+        except Exception:
+            handle.close()
+            raise
+        handle.seek(0)
+        return _xlsx_response(handle, f'{job.marketplace}-{job.mode}-results.xlsx')
 
 
 class DiscoveryJobCancelView(APIView):
@@ -402,24 +481,44 @@ class DiscoveryJobIdsDownloadView(APIView):
         if job.mode != DiscoveryJob.Mode.CATEGORY or job.status != DiscoveryJob.Status.SUCCEEDED:
             return Response({'detail': 'ASINs are ready after a category scrape finishes.'}, status=status.HTTP_400_BAD_REQUEST)
         field = ID_FIELD[job.marketplace]
-        stored = list(job.products.order_by('created_at'))
-        if stored:
-            rows = [{field: (item.data or {}).get(field) or ''} for item in stored]
-        else:
+        if job.products.exists():
+            stored = (
+                job.products.order_by('created_at')
+                .values_list('data', flat=True)
+                .iterator(chunk_size=1000)
+            )
+
+            def rows():
+                for data in stored:
+                    value = str((data or {}).get(field) or '').strip()
+                    if value:
+                        yield {field: value}
+
+            handle = tempfile.TemporaryFile()
             try:
-                blob = job.read_result()
-            except FileNotFoundError:
-                blob = b''
-            if not blob:
-                return Response({'detail': 'Result file is not ready.'}, status=status.HTTP_404_NOT_FOUND)
-            _columns, sheet_rows = read_result_sheet(io.BytesIO(blob))
-            rows = [{field: row.get(field) or ''} for row in sheet_rows]
-        rows = [row for row in rows if str(row.get(field) or '').strip()]
-        payload = workbook_bytes([field], rows)
-        filename = f'{job.marketplace}-category-{field}s.xlsx'
-        response = FileResponse(ContentFile(payload), as_attachment=True, filename=filename)
-        response['Content-Type'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        return response
+                write_workbook([field], rows(), handle)
+            except Exception:
+                handle.close()
+                raise
+            handle.seek(0)
+            filename = f'{job.marketplace}-category-{field}s.xlsx'
+            return _xlsx_response(handle, filename)
+        try:
+            blob = job.read_result()
+        except FileNotFoundError:
+            blob = b''
+        if not blob:
+            return Response({'detail': 'Result file is not ready.'}, status=status.HTTP_404_NOT_FOUND)
+        _columns, sheet_rows = read_result_sheet(io.BytesIO(blob))
+        rows = [
+            {field: row.get(field) or ''}
+            for row in sheet_rows
+            if str(row.get(field) or '').strip()
+        ]
+        return _xlsx_response(
+            io.BytesIO(workbook_bytes([field], rows)),
+            f'{job.marketplace}-category-{field}s.xlsx',
+        )
 
 
 class DiscoveryJobContinueView(APIView):

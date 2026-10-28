@@ -397,6 +397,36 @@ def _project(row: dict, columns: list[str]) -> dict:
     return {column: row.get(column, '') for column in columns}
 
 
+def _iter_saved_rows(job: DiscoveryJob, columns: list[str]):
+    """Yield kept products in save order without loading the whole table."""
+    stored = (
+        job.products.order_by('created_at')
+        .values_list('data', flat=True)
+        .iterator(chunk_size=500)
+    )
+    for data in stored:
+        yield _project(data or {}, columns)
+
+
+def _store_result(job: DiscoveryJob, columns: list[str], *, partial: bool = False) -> int:
+    """Write the result workbook once, in the database and on disk when possible."""
+    kept_count = job.products.count()
+    payload = workbook_bytes(columns, _iter_saved_rows(job, columns))
+    job.result_bytes = payload
+    try:
+        job.result_file.save(
+            f'{job.marketplace}-{job.mode}-{job.id}.xlsx',
+            ContentFile(payload),
+            save=False,
+        )
+    except OSError:
+        if partial:
+            logger.warning('discovery job %s partial result stayed in the database', job.id)
+        else:
+            logger.warning('discovery job %s result stayed in the database', job.id)
+    return kept_count
+
+
 def _load_inputs(job: DiscoveryJob) -> list[dict]:
     try:
         blob = job.read_source()
@@ -1347,7 +1377,9 @@ def execute_job(job_id, lock_owner=None) -> None:
 
 def _execute_job(job_id, lock_owner=None) -> None:
     try:
-        job = DiscoveryJob.objects.get(id=job_id)
+        # Leave the previous workbook out of this process. A long Amazon run
+        # used to keep that file in memory until the next one was built.
+        job = DiscoveryJob.objects.defer('source_bytes', 'result_bytes').get(id=job_id)
     except DiscoveryJob.DoesNotExist:
         return
     if job.status == DiscoveryJob.Status.SUCCEEDED:
@@ -1490,20 +1522,12 @@ def _execute_job(job_id, lock_owner=None) -> None:
                     stop,
                 )
 
-        kept_rows = [
-            item.data for item in job.products.order_by('created_at')
-        ]
+        kept_count = job.products.count()
         _raise_if_stopped(job.id)
-        if not job.use_sample and not kept_rows and errors and table.scraped == 0:
+        if not job.use_sample and not kept_count and errors and table.scraped == 0:
             raise DiscoveryError(errors[0])
 
-        payload = workbook_bytes(columns, [_project(row, columns) for row in kept_rows])
-        filename = f'{job.marketplace}-{job.mode}-{job.id}.xlsx'
-        job.result_bytes = payload
-        try:
-            job.result_file.save(filename, ContentFile(payload), save=False)
-        except OSError:
-            logger.warning('discovery job %s result stayed in the database', job_id)
+        _store_result(job, columns)
         job.columns = columns
         job.rules = rules
         warning = table.warning
@@ -1511,7 +1535,7 @@ def _execute_job(job_id, lock_owner=None) -> None:
         if job.mode != DiscoveryJob.Mode.CATEGORY:
             missed = max(
                 0,
-                input_count - table.duplicates - table.removed_by_rules - len(kept_rows),
+                input_count - table.duplicates - table.removed_by_rules - kept_count,
             )
         if (
             not job.use_sample
@@ -1538,7 +1562,7 @@ def _execute_job(job_id, lock_owner=None) -> None:
             'scraped': table.scraped,
             'duplicates_removed': table.duplicates,
             'removed_by_rules': table.removed_by_rules,
-            'kept': len(kept_rows),
+            'kept': kept_count,
             'missed': missed,
             'errors': errors[:20],
             'warning': warning,
@@ -1551,23 +1575,14 @@ def _execute_job(job_id, lock_owner=None) -> None:
             job.refresh_from_db()
         except DiscoveryJob.DoesNotExist:
             return
-        kept_rows = [item.data for item in job.products.order_by('created_at')]
         try:
-            payload = workbook_bytes(columns, [_project(row, columns) for row in kept_rows])
-            job.result_bytes = payload
-            try:
-                job.result_file.save(
-                    f'{job.marketplace}-{job.mode}-{job.id}.xlsx',
-                    ContentFile(payload),
-                    save=False,
-                )
-            except OSError:
-                logger.warning('discovery job %s partial result stayed in the database', job_id)
+            kept_count = _store_result(job, columns, partial=True)
         except Exception:
             logger.exception('discovery job %s could not save a partial result', job_id)
+            kept_count = job.products.count()
         stats = dict(job.stats or {})
         stats['errors'] = errors[:20]
-        stats['kept'] = len(kept_rows)
+        stats['kept'] = kept_count
         job.stats = stats
         job.status = DiscoveryJob.Status.CANCELLED
         job.error_message = 'Stopped.'

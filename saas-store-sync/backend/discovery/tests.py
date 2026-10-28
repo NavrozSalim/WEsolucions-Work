@@ -1167,6 +1167,111 @@ class DiscoveryJobTests(TestCase):
         self.assertIn('Lampshade', text)
         self.assertNotIn('\x00', text)
 
+    def test_finished_excel_download_sends_the_saved_workbook(self):
+        columns = ['asin', 'url', 'title']
+        payload = workbook_bytes(columns, [{
+            'asin': 'B000000099',
+            'url': 'https://www.amazon.com/dp/B000000099',
+            'title': 'Saved row',
+        }])
+        job = DiscoveryJob.objects.create(
+            owner=self.user,
+            marketplace='amazon_us',
+            mode=DiscoveryJob.Mode.PRODUCT,
+            status=DiscoveryJob.Status.SUCCEEDED,
+            columns=columns,
+            result_bytes=payload,
+            original_filename='amazon_us-product-template.xlsx',
+        )
+        DiscoveryProduct.objects.create(
+            job=job,
+            product_key='B000000099',
+            data={
+                'asin': 'B000000099',
+                'url': 'https://www.amazon.com/dp/B000000099',
+                'title': 'Saved row',
+                'description': 'not in the file',
+            },
+        )
+        with patch('discovery.views.write_workbook') as build:
+            download = self.client.get(f'/api/v1/discovery/jobs/{job.id}/download/')
+        self.assertEqual(download.status_code, 200, getattr(download, 'content', b'')[:500])
+        build.assert_not_called()
+        self.assertEqual(b''.join(download.streaming_content), payload)
+        csv_download = self.client.get(
+            f'/api/v1/discovery/jobs/{job.id}/download/',
+            {'format': 'csv'},
+        )
+        self.assertEqual(csv_download.status_code, 200)
+        text = b''.join(csv_download.streaming_content).decode('utf-8-sig')
+        self.assertIn('Saved row', text)
+        self.assertNotIn('not in the file', text)
+
+    def test_excel_download_prefers_the_database_copy_over_a_stale_disk_file(self):
+        columns = ['asin', 'url', 'title']
+        fresh = workbook_bytes(columns, [{
+            'asin': 'B000000099',
+            'url': 'https://www.amazon.com/dp/B000000099',
+            'title': 'From the database',
+        }])
+        stale = workbook_bytes(columns, [{
+            'asin': 'B000000099',
+            'url': 'https://www.amazon.com/dp/B000000099',
+            'title': 'Old disk file',
+        }])
+        job = DiscoveryJob.objects.create(
+            owner=self.user,
+            marketplace='amazon_us',
+            mode=DiscoveryJob.Mode.PRODUCT,
+            status=DiscoveryJob.Status.SUCCEEDED,
+            columns=columns,
+            result_bytes=fresh,
+            original_filename='amazon_us-product-template.xlsx',
+        )
+        job.result_file.save('stale.xlsx', ContentFile(stale), save=False)
+        job.save(update_fields=['result_file'])
+        DiscoveryProduct.objects.create(
+            job=job,
+            product_key='B000000099',
+            data={'asin': 'B000000099', 'url': 'https://www.amazon.com/dp/B000000099', 'title': 'From the database'},
+        )
+        download = self.client.get(f'/api/v1/discovery/jobs/{job.id}/download/')
+        self.assertEqual(download.status_code, 200, getattr(download, 'content', b'')[:500])
+        sheet = load_workbook(io.BytesIO(b''.join(download.streaming_content))).active
+        self.assertEqual(sheet['C2'].value, 'From the database')
+
+    def test_running_download_ignores_a_stale_workbook(self):
+        columns = ['asin', 'url', 'title']
+        stale = workbook_bytes(columns, [{
+            'asin': 'B000000099',
+            'url': 'https://www.amazon.com/dp/B000000099',
+            'title': 'Old',
+        }])
+        job = DiscoveryJob.objects.create(
+            owner=self.user,
+            marketplace='amazon_au',
+            mode=DiscoveryJob.Mode.PRODUCT,
+            status=DiscoveryJob.Status.RUNNING,
+            columns=columns,
+            result_bytes=stale,
+            original_filename='amazon_au-product-template.xlsx',
+        )
+        DiscoveryProduct.objects.create(
+            job=job,
+            product_key='B000000099',
+            data={
+                'asin': 'B000000099',
+                'url': 'https://www.amazon.com.au/dp/B000000099',
+                'title': 'New',
+            },
+        )
+        download = self.client.get(f'/api/v1/discovery/jobs/{job.id}/download/')
+        self.assertEqual(download.status_code, 200, getattr(download, 'content', b'')[:500])
+        body = b''.join(download.streaming_content)
+        self.assertNotEqual(body, stale)
+        sheet = load_workbook(io.BytesIO(body)).active
+        self.assertEqual(sheet['C2'].value, 'New')
+
     def test_resume_continues_from_the_last_saved_product(self):
         rows = [
             {'url': f'https://www.amazon.com/dp/B{index:09d}'}
