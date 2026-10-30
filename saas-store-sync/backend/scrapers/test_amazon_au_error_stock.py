@@ -68,6 +68,21 @@ class AmazonAUErrorStockTests(SimpleTestCase):
         self.assertEqual(apply_au_error_stock(soup, 99), 0)
         self.assertEqual(apply_au_error_stock(soup, 3), 0)
 
+    def test_imported_products_disclaimer_forces_stock_zero(self):
+        html = """
+        <div id="availability"><span>In stock</span></div>
+        <div id="amazonGlobal_feature_div">
+          <span class="a-size-base">
+            Imported products may differ from local products.
+            Additional terms apply.
+          </span>
+        </div>
+        <span class="a-price"><span class="a-offscreen">$70.50</span></span>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        self.assertEqual(apply_au_error_stock(soup, 99), 0)
+        self.assertEqual(apply_au_error_stock(soup, 3), 0)
+
     def test_other_country_import_disclaimer_forces_stock_zero(self):
         html = """
         <div id="availability"><span>In stock</span></div>
