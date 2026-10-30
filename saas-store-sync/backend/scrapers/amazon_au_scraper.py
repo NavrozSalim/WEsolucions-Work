@@ -20,7 +20,7 @@ from .core import (
     save_debug_html, random_delay, backoff_delay, parse_price_text,
     get_random_headers, USER_AGENTS,
 )
-from .amazon_us_scraper import AmazonDriver, AmazonParser, AmazonScraper
+from .amazon_us_scraper import AmazonDriver, AmazonParser, AmazonScraper, _amazon_node_hidden
 
 logger = logging.getLogger("scrapers.amazon_au")
 
@@ -196,6 +196,66 @@ def au_asin_mismatch_result(
     )
 
 
+_AU_CURRENTLY_UNAVAILABLE = "currently unavailable"
+_AU_UNAVAILABLE_SELECTORS = (
+    "#availability",
+    "#outOfStock",
+    "#availabilityInsideBuyBox_feature_div",
+    "#buybox span.a-color-state",
+    "#desktop_buybox span.a-color-state",
+    "#apex_desktop span.a-color-state",
+)
+
+
+def au_currently_unavailable_result(soup: BeautifulSoup, url: str = ""):
+    """Fail when the selected offer says it is currently unavailable.
+
+    A successful empty-offer result would leave the catalog row scraped with a
+    blank price. An error code sends the row through the failed-scrape path.
+    Hidden variation copy is ignored.
+    """
+    if soup is None:
+        return None
+    for sel in _AU_UNAVAILABLE_SELECTORS:
+        for el in soup.select(sel):
+            if _amazon_node_hidden(el):
+                continue
+            text = " ".join(el.get_text(" ", strip=True).lower().split())
+            if _AU_CURRENTLY_UNAVAILABLE in text:
+                return ScrapeResult.fail(
+                    "currently_unavailable",
+                    "Amazon AU shows this product as currently unavailable.",
+                    "",
+                    "amazon_au",
+                    url,
+                )
+    return None
+
+
+def au_parsed_offer_result(soup, html: str, url: str, *, no_price_message: str):
+    """Price and stock for one Amazon AU page, or a terminal failure."""
+    unavailable = au_currently_unavailable_result(soup, url)
+    if unavailable is not None:
+        return unavailable
+
+    oos = AmazonParser.oos_without_offer_result(soup)
+    if oos is not None:
+        return oos
+
+    price = AmazonParser.extract_price(soup, html, market="AU")
+    stock = AmazonParser.extract_stock(soup)
+    title = AmazonParser.extract_title(soup)
+    stock = apply_au_error_stock(soup, stock)
+
+    if price is None:
+        return ScrapeResult.fail("no_price", no_price_message, html, "amazon_au", url)
+
+    if stock is None:
+        stock = 2
+
+    return ScrapeResult.ok(price=price, stock=stock, title=title)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # HTTP-based scraper (primary)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -311,22 +371,12 @@ class AmazonAUHTTP:
         if mismatch is not None:
             return mismatch
 
-        oos = AmazonParser.oos_without_offer_result(soup)
-        if oos is not None:
-            return oos
-
-        price = AmazonParser.extract_price(soup, html, market="AU")
-        stock = AmazonParser.extract_stock(soup)
-        title = AmazonParser.extract_title(soup)
-        stock = apply_au_error_stock(soup, stock)
-
-        if price is None:
-            return ScrapeResult.fail("no_price", "Price not found via HTTP", html, vendor, url)
-
-        if stock is None and price is not None:
-            stock = 2
-
-        return ScrapeResult.ok(price=price, stock=stock, title=title)
+        return au_parsed_offer_result(
+            soup,
+            html,
+            url,
+            no_price_message="Price not found via HTTP",
+        )
 
     @classmethod
     def scrape_with_retry(cls, url: str, session_dict: dict = None, is_au: bool = False) -> ScrapeResult:
@@ -341,7 +391,9 @@ class AmazonAUHTTP:
                 mark_success(assignment)
                 return result
             last_result = result
-            if result.error_code in ("http_404", "asin_mismatch", "no_price"):
+            if result.error_code in (
+                "http_404", "asin_mismatch", "no_price", "currently_unavailable",
+            ):
                 break
             if attempt + 1 >= RETRY_LIMIT:
                 break
@@ -480,22 +532,12 @@ def _selenium_scrape_page(url: str, driver) -> ScrapeResult:
         if mismatch is not None:
             return mismatch
 
-        oos = AmazonParser.oos_without_offer_result(soup)
-        if oos is not None:
-            return oos
-
-        price = AmazonParser.extract_price(soup, html, market="AU")
-        stock = AmazonParser.extract_stock(soup)
-        title = AmazonParser.extract_title(soup)
-        stock = apply_au_error_stock(soup, stock)
-
-        if price is None:
-            return ScrapeResult.fail("no_price", "Price not found", html, "amazon_au", url)
-
-        if stock is None and price is not None:
-            stock = 2
-
-        return ScrapeResult.ok(price=price, stock=stock, title=title)
+        return au_parsed_offer_result(
+            soup,
+            html,
+            url,
+            no_price_message="Price not found",
+        )
 
     except Exception as exc:
         logger.exception("Amazon AU Selenium error for %s", url)
@@ -527,9 +569,10 @@ def scrape_amazon_au(vendor_url: str, region: str, session: dict = None) -> dict
     if http_result.success:
         logger.info("HTTP scrape OK for %s (price=%s)", vendor_url[:60], http_result.price)
         return http_result.to_legacy()
-    if http_result.error_code == "asin_mismatch":
+    if http_result.error_code in ("asin_mismatch", "currently_unavailable"):
         logger.info(
-            "Amazon AU ASIN mismatch is final for %s; not trying the browser",
+            "Amazon AU %s is final for %s; not trying the browser",
+            http_result.error_code,
             vendor_url[:80],
         )
         return http_result.to_legacy()
@@ -575,7 +618,9 @@ def scrape_amazon_au(vendor_url: str, region: str, session: dict = None) -> dict
             if result.success:
                 return result.to_legacy()
             last_result = result
-            if result.error_code in ("captcha", "dog_page", "asin_mismatch"):
+            if result.error_code in (
+                "captcha", "dog_page", "asin_mismatch", "currently_unavailable",
+            ):
                 break
 
         logger.warning(

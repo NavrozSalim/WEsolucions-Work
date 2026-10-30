@@ -11,6 +11,7 @@ from scrapers.amazon_au_scraper import (
     apply_au_error_stock,
     asin_from_amazon_page,
     au_asin_mismatch_result,
+    au_parsed_offer_result,
 )
 from scrapers.amazon_us_scraper import AmazonParser
 
@@ -261,3 +262,60 @@ class AmazonAUAsinMismatchTests(SimpleTestCase):
             soup,
             "https://www.amazon.com.au/dp/B0C9ZQC2FT",
         ))
+
+
+class AmazonAUCurrentlyUnavailableTests(SimpleTestCase):
+    def test_currently_unavailable_fails_instead_of_successful_oos(self):
+        html = """
+        <html><body>
+          <span id="productTitle">Elegant Comfort 2-Piece Sheer Panel</span>
+          <div id="desktop_buybox">
+            <div id="availability">
+              <span class="a-color-state">Currently unavailable.</span>
+              <span>We don't know when or if this item will be back in stock.</span>
+            </div>
+            <span id="buybox-see-all-buying-options">See All Buying Options</span>
+          </div>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        self.assertIsNotNone(AmazonParser.oos_without_offer_result(soup))
+        result = au_parsed_offer_result(
+            soup,
+            html,
+            "https://www.amazon.com.au/dp/B000VLZJLS",
+            no_price_message="Price not found via HTTP",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "currently_unavailable")
+        self.assertIsNone(result.price)
+        self.assertIsNone(result.stock)
+        legacy = result.to_legacy()
+        self.assertEqual(legacy["error_code"], "currently_unavailable")
+        self.assertIsNone(legacy["price"])
+
+    def test_hidden_unavailable_copy_keeps_the_in_stock_offer(self):
+        html = """
+        <html><body>
+          <span id="productTitle">In stock curtain</span>
+          <div id="desktop_buybox">
+            <div id="corePrice_feature_div">
+              <span class="a-price"><span class="a-offscreen">$21.00</span></span>
+            </div>
+            <div id="availability"><span>In stock</span></div>
+            <div id="outOfStock" class="aok-hidden">
+              <span>Currently unavailable.</span>
+            </div>
+          </div>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        result = au_parsed_offer_result(
+            soup,
+            html,
+            "https://www.amazon.com.au/dp/B000VLZJLS",
+            no_price_message="Price not found via HTTP",
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(result.price, 21.0)
+        self.assertEqual(result.stock, 99)
