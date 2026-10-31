@@ -433,15 +433,22 @@ class MyDealClient:
         *,
         page: int = 1,
         limit: int = 250,
-        listing_status: str = "All",
+        listing_status: str = "",
         fields: str = "",
     ) -> MyDealResult:
-        """GET /products. Fields is required or MyDeal returns an empty body."""
+        """GET /products. Fields is required or MyDeal returns an empty body.
+
+        Leave listing_status empty to use MyDeal's default, which is every
+        status. The API rejects the literal value \"All\"; Live and NotLive
+        are the only values it accepts.
+        """
         params = {
-            "listingStatus": listing_status or "All",
             "page": max(1, int(page or 1)),
             "Limit": min(250, max(1, int(limit or 100))),
         }
+        status = str(listing_status or "").strip()
+        if status and status.lower() != "all":
+            params["listingStatus"] = status
         if fields:
             params["Fields"] = fields
         return self.request("GET", "/products", params=params)

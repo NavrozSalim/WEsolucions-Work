@@ -626,6 +626,22 @@ class MarketplaceLookupTests(TestCase):
         self.assertEqual(result["results"][0]["sku"], "BUY-1")
         mock_client.list_products.assert_not_called()
 
+    def test_mydeal_list_products_does_not_send_listing_status_all(self):
+        from .mydeal.client import MyDealClient
+
+        store = self._mydeal_store()
+        client = MyDealClient(store)
+        with patch.object(client, "request", return_value=MyDealResult(ok=True)) as req:
+            client.list_products(page=1, limit=250, fields="ProductSKU")
+            client.list_products(page=1, limit=250, listing_status="All", fields="ProductSKU")
+            client.list_products(page=1, limit=250, listing_status="Live", fields="ProductSKU")
+        first = req.call_args_list[0].kwargs["params"]
+        second = req.call_args_list[1].kwargs["params"]
+        third = req.call_args_list[2].kwargs["params"]
+        self.assertNotIn("listingStatus", first)
+        self.assertNotIn("listingStatus", second)
+        self.assertEqual(third["listingStatus"], "Live")
+
     def test_mydeal_groups_from_data_list(self):
         groups = marketplace_lookup._mydeal_groups(
             {
