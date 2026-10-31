@@ -1625,7 +1625,10 @@ def _bulk_delete(
             .first()
         )
         if not listing:
-            row_result["errors"] = [f'No listing found with SKU "{sku}".']
+            message = f'No listing found with SKU "{sku}".'
+            if on_marketplace and _store_kind(store) == "mydeal":
+                message += ' If it is only on MyDeal, choose "Not mapped (on MyDeal only)".'
+            row_result["errors"] = [message]
             row_result["valid"] = False
             preview.append(row_result)
             continue
@@ -1683,9 +1686,50 @@ def _bulk_delete(
     return {"total_rows": len(rows), "imported": deleted, "action": action, "rows": preview}
 
 
+def _bulk_delete_mydeal_unmapped(
+    user,
+    store,
+    filename: str,
+    rows: list[dict],
+    upload: ListingUpload | None = None,
+) -> dict:
+    """Delete MyDeal products that are not mapped in this app."""
+    from .mydeal.unmapped_delete import delete_unmapped_rows
+
+    action = ListingAction.DELETE
+    preview, deleted, message = delete_unmapped_rows(store, rows)
+    error_rows = sum(1 for r in preview if not r["valid"])
+    _finish_file_upload(
+        upload,
+        user=user, store=store,
+        action=action,
+        filename=filename,
+        total=len(rows), success=deleted, errors=error_rows,
+        rows=preview,
+        message=message,
+    )
+    return {"total_rows": len(rows), "imported": deleted, "action": action, "rows": preview}
+
+
+def _checked_delete_scope(store, file_action: str, delete_scope: str) -> str:
+    from .mydeal.unmapped_delete import DELETE_SCOPE_UNMAPPED, normalize_delete_scope
+
+    scope = normalize_delete_scope(delete_scope)
+    if scope != DELETE_SCOPE_UNMAPPED:
+        return scope
+    if _store_kind(store) != "mydeal":
+        raise MarketplaceError('"Not mapped (on MyDeal only)" is only for MyDeal stores.')
+    if file_action != ListingAction.DELETE:
+        raise MarketplaceError(
+            '"Not mapped (on MyDeal only)" works with the "Delete from the marketplace" action.'
+        )
+    return scope
+
+
 def bulk_import(
     user, store, filename: str, content: bytes, action: str = "",
     upload: ListingUpload | None = None,
+    delete_scope: str = "",
 ) -> dict:
     """Import listings from a CSV/XLSX template. One action per file:
     Create, Mapped, Delete from marketplace, or Delete from system.
@@ -1711,6 +1755,8 @@ def bulk_import(
         duplicate_child = temu_products.duplicate_child_sku_errors(rows)
 
     file_action = _resolve_file_action(rows, action)
+    if _checked_delete_scope(store, file_action, delete_scope) == "unmapped":
+        return _bulk_delete_mydeal_unmapped(user, store, filename, rows, upload=upload)
     if file_action in DELETE_FILE_ACTIONS:
         return _bulk_delete(
             user, store, filename, rows, upload=upload,
@@ -1851,7 +1897,9 @@ def bulk_import(
     return {"total_rows": len(rows), "imported": imported, "action": file_action, "rows": preview}
 
 
-def queue_bulk_import(user, store, filename: str, content: bytes, action: str = "") -> dict:
+def queue_bulk_import(
+    user, store, filename: str, content: bytes, action: str = "", delete_scope: str = "",
+) -> dict:
     """Accept a listing template, show it as Pending, process on the ingest worker."""
     try:
         info = csv_import.inspect_upload(filename, content)
@@ -1861,6 +1909,7 @@ def queue_bulk_import(user, store, filename: str, content: bytes, action: str = 
     requested = (action or "").strip().lower()
     row_actions = info.get("actions") or set()
     file_action = _coerce_file_action(requested, row_actions)
+    scope = _checked_delete_scope(store, file_action, delete_scope)
 
     upload = ListingUpload.objects.create(
         user=user,
@@ -1879,7 +1928,10 @@ def queue_bulk_import(user, store, filename: str, content: bytes, action: str = 
     from .tasks import ingest_listing_bulk_upload
 
     try:
-        ingest_listing_bulk_upload.delay(str(upload.id), file_action)
+        if scope:
+            ingest_listing_bulk_upload.delay(str(upload.id), file_action, scope)
+        else:
+            ingest_listing_bulk_upload.delay(str(upload.id), file_action)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to enqueue listing bulk import upload=%s", upload.id)
         upload.status = ListingUpload.Status.FAILED
@@ -1905,7 +1957,7 @@ def queue_bulk_import(user, store, filename: str, content: bytes, action: str = 
     }
 
 
-def run_queued_bulk_import(upload_id: str, action: str = "") -> dict:
+def run_queued_bulk_import(upload_id: str, action: str = "", delete_scope: str = "") -> dict:
     """Worker entry: import a previously queued listing file."""
     ensure_db_connection()
     upload = (
@@ -1933,6 +1985,7 @@ def run_queued_bulk_import(upload_id: str, action: str = "") -> dict:
         result = bulk_import(
             user, upload.store, upload.filename, content,
             action=action or upload.action, upload=upload,
+            delete_scope=delete_scope,
         )
         return {"ok": True, **result}
     except MarketplaceError as exc:

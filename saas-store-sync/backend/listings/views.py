@@ -537,8 +537,39 @@ def _template_hierarchies(raw) -> list[str]:
     return [str(part).strip() for part in parts if str(part).strip()]
 
 
-def _template_response(store, action: str, hierarchies: list[str]):
+def _mydeal_unmapped_delete_template(store):
+    from listings.mydeal.unmapped_delete import unmapped_skus, uses_api
+
+    try:
+        skus = unmapped_skus(store)
+    except MarketplaceError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    if not skus:
+        detail = (
+            'Every product on MyDeal is already mapped in this app.'
+            if uses_api(store)
+            else 'No unmapped SKUs on the MyDeal inventory template. '
+                 'Upload the latest inventory template first.'
+        )
+        return Response({'detail': detail}, status=status.HTTP_404_NOT_FOUND)
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator='\n')
+    writer.writerow(csv_import.DELETE_TEMPLATE_HEADERS)
+    for sku in skus:
+        writer.writerow(['Delete', sku])
+    resp = HttpResponse(out.getvalue(), content_type='text/csv')
+    resp['Content-Disposition'] = 'attachment; filename="listing_template_delete_mydeal_unmapped.csv"'
+    return resp
+
+
+def _template_response(store, action: str, hierarchies: list[str], delete_scope: str = ''):
     action = (action or 'create').strip().lower()
+    if (
+        marketplace_kind(store.marketplace) == 'mydeal'
+        and action == 'delete'
+        and (delete_scope or '').strip().lower() == 'unmapped'
+    ):
+        return _mydeal_unmapped_delete_template(store)
     if marketplace_kind(store.marketplace) == 'bunnings' and action == 'update':
         from listings.bunnings.template_xlsx import build_correction_xlsx
 
@@ -595,7 +626,10 @@ class StoreListingTemplateView(APIView):
             or request.query_params.get('hierarchy')
             or ''
         )
-        return _template_response(store, action, _template_hierarchies(raw_hierarchies))
+        return _template_response(
+            store, action, _template_hierarchies(raw_hierarchies),
+            request.query_params.get('scope') or '',
+        )
 
     def post(self, request, store_pk):
         """Same file as GET, with the category list in the body so Select all is not URL-limited."""
@@ -617,9 +651,11 @@ class StoreListingBulkUploadView(APIView):
             return Response({'detail': 'Attach a CSV or XLSX file as "file".'},
                             status=status.HTTP_400_BAD_REQUEST)
         action = (request.data.get('action') or request.POST.get('action') or '').strip().lower()
+        delete_scope = (request.data.get('delete_scope') or '').strip().lower()
         try:
             result = listing_service.queue_bulk_import(
                 request.user, store, upload.name, upload.read(), action=action,
+                delete_scope=delete_scope,
             )
         except MarketplaceError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)

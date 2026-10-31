@@ -13,6 +13,11 @@ const ACTION_OPTIONS = [
     { value: 'delete', label: 'Delete from the marketplace' },
 ];
 
+const MYDEAL_DELETE_SCOPE_OPTIONS = [
+    { value: 'mapped', label: 'Mapped products' },
+    { value: 'unmapped', label: 'Not mapped (on MyDeal only)' },
+];
+
 /** Bulk listing upload: one action per file (Create, Mapped, or Delete). */
 export default function BulkListingModal({ open, onClose, onImported, storeId, marketplaceCode = '' }) {
     const code = String(marketplaceCode || '').trim().toLowerCase();
@@ -40,12 +45,17 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
     const [error, setError] = useState('');
     const [result, setResult] = useState(null);
     const [bunningsCategories, setBunningsCategories] = useState([]);
+    const [deleteScope, setDeleteScope] = useState('mapped');
 
     if (!open) return null;
+
+    const showDeleteScope = isMydeal && action === 'delete';
+    const unmappedDelete = showDeleteScope && deleteScope === 'unmapped';
 
     const reset = () => {
         setFile(null);
         setAction('create');
+        setDeleteScope('mapped');
         setError('');
         setResult(null);
         setBunningsCategories([]);
@@ -66,11 +76,12 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
             }
             extra.hierarchies = bunningsCategories.map((c) => c.code).join(',');
         }
+        if (unmappedDelete) extra.scope = 'unmapped';
         setError('');
         setDownloading(true);
         const suffix = extra.hierarchies
             ? `_${bunningsCategories.length}`
-            : '';
+            : (unmappedDelete ? '_mydeal_unmapped' : '');
         const ext = isBunnings && (action === 'create' || action === 'mapped' || action === 'update') ? 'xlsx' : 'csv';
         downloadListingTemplate(storeId, action, extra, `listing_template_${action}${suffix}.${ext}`)
             .catch((err) => setError(err.message || 'Could not download the template.'))
@@ -85,7 +96,7 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
         setUploading(true);
         setError('');
         setResult(null);
-        bulkUploadListings(storeId, file, action)
+        bulkUploadListings(storeId, file, action, showDeleteScope ? deleteScope : '')
             .then((res) => {
                 const data = res.data || {};
                 onImported?.(data);
@@ -181,14 +192,38 @@ export default function BulkListingModal({ open, onClose, onImported, storeId, m
                             value={action}
                             onChange={(e) => {
                                 setAction(e.target.value);
+                                setDeleteScope('mapped');
                                 setFile(null);
                                 setBunningsCategories([]);
                                 if (fileRef.current) fileRef.current.value = '';
                             }}
                             options={ACTION_OPTIONS}
                         />
-                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{actionHelp[action]}</p>
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                            {showDeleteScope
+                                ? (unmappedDelete
+                                    ? 'Products on MyDeal that are not mapped in this app. Download template lists their SKUs. Uploading sets stock to 0 and Discontinued TRUE, and sets them NotLive on MyDeal when the store uses the API.'
+                                    : `${actionHelp.delete} Only SKUs mapped in this app.`)
+                                : actionHelp[action]}
+                        </p>
                     </div>
+
+                    {showDeleteScope && (
+                        <div className="mt-4">
+                            <Select
+                                label="Products to delete"
+                                value={deleteScope}
+                                onChange={(e) => {
+                                    setDeleteScope(e.target.value);
+                                    setFile(null);
+                                    setResult(null);
+                                    setError('');
+                                    if (fileRef.current) fileRef.current.value = '';
+                                }}
+                                options={MYDEAL_DELETE_SCOPE_OPTIONS}
+                            />
+                        </div>
+                    )}
 
                     {isBunnings && (action === 'create' || action === 'mapped') && (
                         <div className="mt-4">

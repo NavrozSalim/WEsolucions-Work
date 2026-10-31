@@ -103,10 +103,11 @@ export const publishListings = (storeId, listingIds = null) =>
         return res;
     });
 
-export const bulkUploadListings = (storeId, file, action = 'create') => {
+export const bulkUploadListings = (storeId, file, action = 'create', deleteScope = '') => {
     const fd = new FormData();
     fd.append('file', file);
     fd.append('action', action);
+    if (deleteScope) fd.append('delete_scope', deleteScope);
     return api.post(`/stores/${storeId}/listings/bulk-upload/`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
         timeout: 180_000,
@@ -134,6 +135,7 @@ export const downloadListingTemplate = (storeId, action = 'create', extraParams 
         params: { action, ...extraParams },
         fallbackFilename,
         mimeType,
+        ...(extraParams.scope ? { timeout: 300_000 } : {}),
     });
 };
 

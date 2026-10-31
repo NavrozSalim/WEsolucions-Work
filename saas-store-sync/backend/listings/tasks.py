@@ -149,13 +149,13 @@ def scrape_store_listings(self, user_id, store_id, listing_ids=None, job_generat
 
 
 @shared_task(name="listings.ingest_bulk_upload", bind=True, ignore_result=True, max_retries=0)
-def ingest_listing_bulk_upload(self, upload_id, action=""):
+def ingest_listing_bulk_upload(self, upload_id, action="", delete_scope=""):
     """Background Create / Mapped / Delete file import (ingest queue)."""
     from . import listing_service
 
     listing_service.ensure_db_connection()
     try:
-        return listing_service.run_queued_bulk_import(upload_id, action or "")
+        return listing_service.run_queued_bulk_import(upload_id, action or "", delete_scope or "")
     except Exception as exc:  # noqa: BLE001
         logger.exception("Listing bulk ingest task failed upload=%s", upload_id)
         listing_service.mark_listing_upload_failed(
