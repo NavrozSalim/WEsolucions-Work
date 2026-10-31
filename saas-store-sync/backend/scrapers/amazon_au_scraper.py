@@ -20,7 +20,9 @@ from .core import (
     save_debug_html, random_delay, backoff_delay, parse_price_text,
     get_random_headers, USER_AGENTS,
 )
-from .amazon_us_scraper import AmazonDriver, AmazonParser, AmazonScraper, _amazon_node_hidden
+from .amazon_us_scraper import (
+    AmazonDriver, AmazonParser, AmazonScraper, _amazon_node_hidden, _selenium_with_proxies,
+)
 
 logger = logging.getLogger("scrapers.amazon_au")
 
@@ -583,6 +585,11 @@ def scrape_amazon_au(vendor_url: str, region: str, session: dict = None) -> dict
     )
 
     if os.environ.get("AMAZON_AU_SELENIUM_FALLBACK", "1").strip().lower() in ("0", "false", "no", "off"):
+        return http_result.to_legacy()
+    from .amazon_au_proxies import proxies_configured
+    if is_au and proxies_configured() and not _selenium_with_proxies("AMAZON_AU_SELENIUM_WITH_PROXIES"):
+        # Chrome has no proxy here, so it would load the page from the VPS IP.
+        logger.info("Amazon AU proxies on; skipping Chrome fallback for %s", vendor_url[:60])
         return http_result.to_legacy()
 
     # --- Fallback: Selenium ---

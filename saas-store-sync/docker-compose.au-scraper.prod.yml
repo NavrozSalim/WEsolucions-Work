@@ -65,10 +65,11 @@ services:
       - EBAY_AU_PAGE_LOAD_TIMEOUT_SEC=${EBAY_AU_PAGE_LOAD_TIMEOUT_SEC:-12}
       - EBAY_AU_PAGE_WAIT_TIMEOUT_SEC=${EBAY_AU_PAGE_WAIT_TIMEOUT_SEC:-10}
       - EBAY_BIN_HYDRATE_MAX_SEC=${EBAY_BIN_HYDRATE_MAX_SEC:-2}
-      # One lane per Costco proxy. Keep this equal to CELERY_AU_SCRAPER_CONCURRENCY
-      # and do not exceed the number of COSTCO_AU_PROXY_URLS.
-      - CATALOG_SCRAPE_CHUNK_SIZE=${CATALOG_SCRAPE_CHUNK_SIZE:-40}
-      - CATALOG_SCRAPE_LANES=${CATALOG_SCRAPE_LANES:-10}
+      # Lanes are per store. Two stores at 5 lanes share the 10 worker processes;
+      # small batches let a store that starts later get a process within minutes.
+      # Lanes across all running stores should not exceed the COSTCO_AU_PROXY_URLS count.
+      - CATALOG_SCRAPE_CHUNK_SIZE=${CATALOG_SCRAPE_CHUNK_SIZE:-20}
+      - CATALOG_SCRAPE_LANES=${CATALOG_SCRAPE_LANES:-5}
       - VEVOR_AU_FEED_URL=${VEVOR_AU_FEED_URL:-https://ads-feed.s3.us-west-2.amazonaws.com/ads/business/563/vevor-563.xlsx}
       - COSTWAY_AU_FEED_URL=${COSTWAY_AU_FEED_URL:-https://au.costway.com/media/feed/Dropship-AU.csv}
       - PROXY_URL=${PROXY_URL:-}
@@ -85,6 +86,10 @@ services:
       - AMAZON_AU_HTTP_TIMEOUT_SEC=${AMAZON_AU_HTTP_TIMEOUT_SEC:-15}
       - AMAZON_AU_HTTP_RETRIES=${AMAZON_AU_HTTP_RETRIES:-2}
       - AMAZON_AU_SELENIUM_FALLBACK=${AMAZON_AU_SELENIUM_FALLBACK:-1}
+      # Chrome cannot use the proxies. While AMAZON_AU_PROXY_URLS is set it is skipped
+      # unless this is 1, so Amazon never sees the VPS IP.
+      - AMAZON_AU_SELENIUM_WITH_PROXIES=${AMAZON_AU_SELENIUM_WITH_PROXIES:-0}
+      - EBAY_AU_FULL_ENGINE_SELENIUM=${EBAY_AU_FULL_ENGINE_SELENIUM:-}
       - AMAZON_AU_SELENIUM_ATTEMPTS=${AMAZON_AU_SELENIUM_ATTEMPTS:-1}
       - EBAY_AU_PROXY_URLS=${EBAY_AU_PROXY_URLS:-}
       # Safer eBay defaults (production logs showed eBay 403-cascading every IP):

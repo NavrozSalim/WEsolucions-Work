@@ -346,7 +346,7 @@ services:
     command: >-
       celery -A core worker -l info
       -Q sync
-      --concurrency=${CELERY_SYNC_CONCURRENCY:-2}
+      --concurrency=${CELERY_SYNC_CONCURRENCY:-4}
       --prefetch-multiplier=1 -O fair
     init: true
     environment:

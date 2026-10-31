@@ -14,6 +14,7 @@ Public API (consumed by scrapers/__init__.py):
   scrape_amazon_us(vendor_url, region, session) -> {"price": float|None, "stock": int|None, "title": str|None}
   close_amazon_us_session(session)
 """
+import os
 import re
 import json
 import time
@@ -898,6 +899,12 @@ _USD_COOKIES = {
 }
 
 FETCH_TIMEOUT = 30
+_SESSION_PROXY_KEY = "amazon_us_http_proxy"
+
+
+def _selenium_with_proxies(var: str) -> bool:
+    """Opt back in to the Chrome fallback while HTTP proxies are configured."""
+    return (os.environ.get(var) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 class AmazonHTTP:
@@ -906,15 +913,34 @@ class AmazonHTTP:
     _ZIP_CHANGE_URL = "https://www.amazon.com/gp/delivery/ajax/address-change.html"
 
     @classmethod
-    def _get_session(cls, session_dict: dict) -> requests.Session:
-        """Reuse or create a requests.Session, with delivery ZIP set to 10001."""
-        if session_dict is not None and "amazon_http_session" in session_dict:
-            return session_dict["amazon_http_session"]
+    def _get_session(cls, session_dict: dict, rotate: bool = False) -> requests.Session:
+        """HTTP session bound to one proxy. ``rotate`` moves it to the next proxy.
+
+        Cookies (including the delivery ZIP) belong to one IP, so a new proxy
+        gets a fresh session and the ZIP is set again.
+        """
+        existing = session_dict.get("amazon_http_session") if session_dict is not None else None
+        if existing is not None and not rotate:
+            return existing
+
+        from .amazon_us_proxies import acquire_proxy
+
+        assignment = acquire_proxy(force_rotate=rotate)
+        if existing is not None:
+            try:
+                existing.close()
+            except Exception:
+                pass
         s = requests.Session()
         s.headers.update(get_random_headers("https://www.amazon.com/"))
         s.cookies.update(_USD_COOKIES)
+        if assignment is not None:
+            s.proxies = assignment.as_requests_proxy()
+            logger.info("Amazon US HTTP session via proxy %s", assignment.label)
         if session_dict is not None:
             session_dict["amazon_http_session"] = s
+            session_dict[_SESSION_PROXY_KEY] = assignment
+            session_dict.pop("amazon_http_zip_set", None)
         return s
 
     @classmethod
@@ -954,8 +980,11 @@ class AmazonHTTP:
     @classmethod
     def fetch(cls, url: str, session_dict: dict = None) -> ScrapeResult:
         """Fetch an Amazon product page via HTTP and parse price/stock/title."""
+        from .amazon_us_proxies import wait_for_gap
+
         s = cls._get_session(session_dict)
         cls._ensure_zip(s, url, session_dict)
+        wait_for_gap((session_dict or {}).get(_SESSION_PROXY_KEY))
         try:
             resp = s.get(url, timeout=FETCH_TIMEOUT, allow_redirects=True)
         except requests.Timeout:
@@ -1017,20 +1046,38 @@ class AmazonHTTP:
 
     @classmethod
     def scrape_with_retry(cls, url: str, session_dict: dict = None) -> ScrapeResult:
-        """Fetch + parse with retries and backoff."""
+        """Fetch + parse with retries. A blocked proxy is swapped without a backoff."""
+        from .amazon_us_proxies import mark_blocked, mark_success, proxies_configured
+
+        use_proxies = proxies_configured()
         last_result = None
+        rotated = False
         for attempt in range(RETRY_LIMIT):
-            if attempt > 0:
+            if attempt > 0 and not rotated:
                 backoff_delay(attempt, base=2.0, jitter=1.5)
                 logger.info("HTTP retry %d/%d for %s", attempt + 1, RETRY_LIMIT, url)
+            rotated = False
 
             result = cls.fetch(url, session_dict)
+            assignment = (session_dict or {}).get(_SESSION_PROXY_KEY)
             if result.success:
+                mark_success(assignment)
                 return result
             last_result = result
 
             if result.error_code in ("http_404", "not_found", "not_product_page"):
                 break
+            ip_problem = (
+                result.error_code.startswith(("blocked", "http_5", "http_403", "http_429", "captcha"))
+                or result.error_code in (
+                    "timeout", "connection_error", "request_error", "upstream_error", "response_invalid",
+                )
+            )
+            if use_proxies and ip_problem:
+                mark_blocked(assignment)
+                cls._get_session(session_dict, rotate=True)
+                rotated = True
+                continue
             if not should_retry_failure(result.error_code):
                 break
             if result.error_code.startswith("blocked") or result.error_code in {"blocked", "captcha"}:
@@ -1503,6 +1550,15 @@ def scrape_amazon_us(vendor_url: str, region: str, session: dict = None) -> dict
     http_result = AmazonHTTP.scrape_with_retry(vendor_url, session)
     if http_result.success:
         logger.info("HTTP scrape OK for %s (price=%s)", vendor_url[:60], http_result.price)
+        return http_result.to_legacy()
+
+    from .amazon_us_proxies import proxies_configured
+
+    if os.environ.get("AMAZON_US_SELENIUM_FALLBACK", "1").strip().lower() in ("0", "false", "no", "off"):
+        return http_result.to_legacy()
+    if proxies_configured() and not _selenium_with_proxies("AMAZON_US_SELENIUM_WITH_PROXIES"):
+        # Chrome has no proxy here, so it would load the page from the VPS IP.
+        logger.info("Amazon US proxies on; skipping Chrome fallback for %s", vendor_url[:60])
         return http_result.to_legacy()
 
     logger.info(

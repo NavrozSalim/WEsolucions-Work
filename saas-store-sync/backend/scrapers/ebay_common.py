@@ -375,6 +375,35 @@ def _ebay_http_first_enabled(region: Optional[str]) -> bool:
     return (os.environ.get("EBAY_HTTP_FIRST", "1") or "1").strip().lower() in trueish
 
 
+def _ebay_proxy_module(market: str):
+    if market == EBAY_MARKET_AU:
+        from . import ebay_au_proxies
+
+        return ebay_au_proxies
+    from . import ebay_us_proxies
+
+    return ebay_us_proxies
+
+
+def _ebay_proxy_pool(market: str):
+    if market == EBAY_MARKET_AU:
+        from .ebay_au_proxies import get_ebay_au_pool
+
+        return get_ebay_au_pool()
+    from .ebay_us_proxies import get_ebay_us_pool
+
+    return get_ebay_us_pool()
+
+
+def _ebay_http_only_with_proxies(market: str) -> bool:
+    """Chrome cannot log in to Webshare proxies, so it would load pages from the VPS IP."""
+    prefix = "EBAY_AU" if market == EBAY_MARKET_AU else "EBAY_US"
+    force_sel = (os.environ.get(f"{prefix}_FULL_ENGINE_SELENIUM") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    return _ebay_proxy_module(market).proxies_configured() and not force_sel
+
+
 _CHROME_131_WIN_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -1481,7 +1510,7 @@ class EbayHTTP:
         }
 
     @classmethod
-    def _fetch_au_via_proxies(
+    def _fetch_via_proxies(
         cls,
         url: str,
         region: str,
@@ -1489,35 +1518,26 @@ class EbayHTTP:
         market: str,
         headers: Dict[str, str],
     ) -> Tuple[Optional[str], Optional[int], str]:
-        from .ebay_au_proxies import (
-            acquire_proxy,
-            bind_curl_client,
-            http_retry_limit,
-            mark_proxy_blocked,
-            mark_proxy_success,
-            proxies_configured,
-            remember_proxy,
-        )
-        from .ebay_au_proxies import get_ebay_au_pool
-
-        if not proxies_configured():
+        proxies = _ebay_proxy_module(market)
+        if not proxies.proxies_configured():
             return None, None, ""
 
-        pool = get_ebay_au_pool()
+        pool = _ebay_proxy_pool(market)
+        market_label = "AU" if market == EBAY_MARKET_AU else "US"
         last_err = "proxy_exhausted"
-        attempts = http_retry_limit()
+        attempts = proxies.http_retry_limit()
 
         for attempt in range(attempts):
-            assignment = acquire_proxy(session_dict, force_rotate=attempt > 0)
+            assignment = proxies.acquire_proxy(session_dict, force_rotate=attempt > 0)
             if assignment is None:
                 break
             pool.wait_for_gap(assignment)
-            remember_proxy(session_dict, assignment)
+            proxies.remember_proxy(session_dict, assignment)
 
             client = cls._get_client(session_dict, market, proxy_url=assignment.url)
             if client is None:
                 return None, None, "curl_cffi_not_installed"
-            bind_curl_client(client, assignment)
+            proxies.bind_curl_client(client, assignment)
 
             try:
                 resp = client.get(
@@ -1529,7 +1549,7 @@ class EbayHTTP:
                 )
             except Exception as exc:
                 last_err = f"http_error: {exc}"
-                mark_proxy_blocked(assignment)
+                proxies.mark_proxy_blocked(assignment)
                 continue
 
             html = getattr(resp, "text", "") or ""
@@ -1540,13 +1560,17 @@ class EbayHTTP:
 
             if status != 200:
                 last_err = f"http_{status}"
-                mark_proxy_blocked(assignment)
+                # A missing item is the same on every proxy. Return it as-is.
+                if status in (404, 410):
+                    proxies.mark_proxy_success(assignment)
+                    return html, status, last_err
+                proxies.mark_proxy_blocked(assignment)
                 continue
 
             blocked, reason = _is_challenge_or_blocked(html)
             if blocked:
                 last_err = reason
-                mark_proxy_blocked(assignment)
+                proxies.mark_proxy_blocked(assignment)
                 continue
 
             if not _looks_like_product_html(html):
@@ -1555,9 +1579,10 @@ class EbayHTTP:
                 last_err = "not_product_like"
                 continue
 
-            mark_proxy_success(assignment)
+            proxies.mark_proxy_success(assignment)
             logger.info(
-                "eBay AU HTTP via proxy OK proxy=%s url=%s",
+                "eBay %s HTTP via proxy OK proxy=%s url=%s",
+                market_label,
                 assignment.label,
                 url[:70],
             )
@@ -1569,8 +1594,8 @@ class EbayHTTP:
     def fetch(cls, url: str, region: str, session_dict: dict, market: str) -> Tuple[Optional[str], Optional[int], str]:
         headers = cls._get_headers(url, region, session_dict, market)
 
-        if market == EBAY_MARKET_AU:
-            html, status, err = cls._fetch_au_via_proxies(
+        if market in (EBAY_MARKET_AU, EBAY_MARKET_US):
+            html, status, err = cls._fetch_via_proxies(
                 url, region, session_dict or {}, market, headers,
             )
             if html is not None or err not in ("", "proxy_exhausted"):
@@ -2226,12 +2251,7 @@ def scrape_ebay_for_market(
     last_browser_html = None
     attempts = max(1, min(max_attempts if max_attempts is not None else RETRY_LIMIT, RETRY_LIMIT))
 
-    au_http_only = False
-    if market == EBAY_MARKET_AU:
-        from .ebay_au_proxies import proxies_configured as _au_proxies_on
-
-        force_sel = (os.environ.get("EBAY_AU_FULL_ENGINE_SELENIUM") or "").strip().lower() in ("1", "true", "yes", "on")
-        au_http_only = _au_proxies_on() and not force_sel
+    http_only = _ebay_http_only_with_proxies(market)
 
     for attempt in range(attempts):
         if attempt > 0:
@@ -2268,7 +2288,7 @@ def scrape_ebay_for_market(
                     _ebay_debug_write_html(session, html, "http_cold", candidate)
                     return parsed
 
-            if au_http_only:
+            if http_only:
                 # Chrome can't auth Webshare proxies via --proxy-server (no creds on
                 # bare host:port), so Selenium warm-fetches return ~39-byte stubs and
                 # only waste ~30s. Retry HTTP with the same warm curl_cffi session —
