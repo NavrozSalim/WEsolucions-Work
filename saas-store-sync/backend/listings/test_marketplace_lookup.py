@@ -700,6 +700,39 @@ class MarketplaceLookupTests(TestCase):
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0]["ProductSKU"], "WK002")
 
+    def test_mydeal_groups_reads_lowercase_list_fields(self):
+        groups = marketplace_lookup._mydeal_groups(
+            {
+                "responseStatus": "Complete",
+                "data": [
+                    {
+                        "productSKU": "9629364224227",
+                        "buyableProducts": [
+                            {"sku": "9629364224227-49613365772515", "listingStatus": "Live"}
+                        ],
+                    }
+                ],
+            }
+        )
+        self.assertEqual(len(groups), 1)
+        index = {}
+        marketplace_lookup._mydeal_index_group(index, groups[0])
+        self.assertIn("9629364224227-49613365772515", index)
+        hit = marketplace_lookup._mydeal_hit(
+            groups[0],
+            marketplace_lookup._mydeal_pick_buyable(groups[0], ["9629364224227-49613365772515"]),
+            "9629364224227-49613365772515",
+        )
+        self.assertEqual(hit["status"], "Live")
+        self.assertEqual(hit["sku"], "9629364224227-49613365772515")
+
+    def test_mydeal_variant_code_tries_both_ids(self):
+        self.assertEqual(
+            marketplace_lookup._mydeal_group_key_candidates("9629364224227-49613365772515"),
+            ["9629364224227", "49613365772515"],
+        )
+        self.assertEqual(marketplace_lookup._mydeal_group_key_candidates("SHD-10001-01"), [])
+
     def test_mydeal_groups_ignores_empty_data_dict(self):
         self.assertEqual(
             marketplace_lookup._mydeal_groups({"ResponseStatus": "Complete", "Data": {}}),

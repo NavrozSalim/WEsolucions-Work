@@ -190,35 +190,47 @@ def _norm_id(value) -> str:
     return str(value or "").strip()
 
 
+_MYDEAL_GROUP_KEYS = frozenset({"productsku", "buyableproducts", "externalproductid"})
+
+
+def _mydeal_normalize_group(row: dict) -> dict:
+    """Return a product group with BuyableProducts under that exact key."""
+    out = dict(row)
+    for key, value in row.items():
+        if str(key).casefold() == "buyableproducts" and key != "BuyableProducts":
+            out["BuyableProducts"] = value
+    return out
+
+
+def _mydeal_is_group(row) -> bool:
+    if not isinstance(row, dict):
+        return False
+    return any(str(key).casefold() in _MYDEAL_GROUP_KEYS and row.get(key) for key in row)
+
+
+def _ci_value(row: dict, name: str):
+    wanted = name.casefold()
+    for key, value in row.items():
+        if str(key).casefold() == wanted:
+            return value
+    return None
+
+
 def _mydeal_groups(payload) -> list[dict]:
     if isinstance(payload, list):
-        return [row for row in payload if isinstance(row, dict)]
+        return [_mydeal_normalize_group(row) for row in payload if _mydeal_is_group(row)]
     if not isinstance(payload, dict):
         return []
-    inner = payload.get("Data")
-    if inner is None:
-        inner = payload.get("data")
+    inner = _ci_value(payload, "Data")
     if isinstance(inner, list):
-        return [
-            row
-            for row in inner
-            if isinstance(row, dict)
-            and (row.get("ProductSKU") or row.get("BuyableProducts") or row.get("ExternalProductId") or row.get("ExternalProductID"))
-        ]
+        return [_mydeal_normalize_group(row) for row in inner if _mydeal_is_group(row)]
     if isinstance(inner, dict):
-        nested = inner.get("Items") or inner.get("items")
+        nested = _ci_value(inner, "Items")
         if isinstance(nested, list):
-            return [
-                row
-                for row in nested
-                if isinstance(row, dict)
-                and (row.get("ProductSKU") or row.get("BuyableProducts"))
-            ]
-        if inner.get("ProductSKU") or inner.get("BuyableProducts") or inner.get("ExternalProductId") or inner.get("ExternalProductID"):
-            return [inner]
-        return []
-    if payload.get("ProductSKU") or payload.get("BuyableProducts") or payload.get("ExternalProductId"):
-        return [payload]
+            return [_mydeal_normalize_group(row) for row in nested if _mydeal_is_group(row)]
+        return [_mydeal_normalize_group(inner)] if _mydeal_is_group(inner) else []
+    if _mydeal_is_group(payload):
+        return [_mydeal_normalize_group(payload)]
     return []
 
 
@@ -276,11 +288,11 @@ def _mydeal_group_ids(group: dict) -> set[str]:
 
 
 def _mydeal_group_key_candidates(sku: str) -> list[str]:
-    """Parent ids implied by a variant code.
+    """Ids implied by a ``{productId}-{variantId}`` code.
 
     GET /products/{idorsku} only accepts the product-group key
-    (ExternalProductID or ProductSKU). A Shopify-style variant is
-    ``{productId}-{variantId}``; the group key is the product id.
+    (ExternalProductID or ProductSKU). The product id is the likely group
+    key and the variant id is the likely ExternalBuyableProductID.
     """
     text = _norm_id(sku)
     if "-" not in text:
@@ -288,8 +300,8 @@ def _mydeal_group_key_candidates(sku: str) -> list[str]:
     left, right = text.split("-", 1)
     left = left.strip()
     right = right.strip()
-    if left.isdigit() and right.isdigit() and len(left) >= 8 and left != text:
-        return [left]
+    if left.isdigit() and right.isdigit() and len(left) >= 8 and len(right) >= 8:
+        return [left, right]
     return []
 
 
@@ -304,7 +316,7 @@ def _mydeal_id_match(ids: set[str], needles: list[str]) -> bool:
 
 
 def _mydeal_pick_buyable(group: dict, needles: list[str]) -> dict | None:
-    buyables = [row for row in (group.get("BuyableProducts") or []) if isinstance(row, dict)]
+    buyables = [row for row in (_ci_value(group, "BuyableProducts") or []) if isinstance(row, dict)]
     for buyable in buyables:
         if _mydeal_id_match(_mydeal_buyable_ids(buyable), needles):
             return buyable
@@ -330,7 +342,7 @@ def _mydeal_hit(group: dict, buyable: dict | None, sku: str) -> dict:
         "product_key": product_key,
         "variant_key": variant_key,
         "sku": variant_key,
-        "title": _norm_id(group.get("Title")),
+        "title": _ci_get(group, "Title"),
         "status": status,
         "advertised": advertised,
         "approved": (buyable or {}).get("Approved"),
@@ -342,13 +354,17 @@ def _mydeal_hit(group: dict, buyable: dict | None, sku: str) -> dict:
     }
 
 
+# Field names match the documented GET /products example. Unknown names make
+# MyDeal leave that field out of the response.
 _MYDEAL_LIST_FIELDS = (
     "ExternalProductId,ProductSKU,Title,"
-    "BuyableProducts(ExternalBuyableProductId,SKU,ListingStatus)"
+    "BuyableProducts(ExternalBuyableProductID,SKU,ListingStatus)"
 )
 _MYDEAL_LIST_STATUSES = ("Live", "NotLive")
+_MYDEAL_LIST_PAGE_LIMIT = 250
+_MYDEAL_LIST_MAX_PAGES = 400
 _MYDEAL_CATALOG_INDEX: dict[tuple[str, str], tuple[float, dict[str, dict]]] = {}
-_MYDEAL_CATALOG_INDEX_TTL = 120.0
+_MYDEAL_CATALOG_INDEX_TTL = 600.0
 
 
 def _mydeal_related_keys(store, sku: str) -> list[str]:
@@ -404,7 +420,7 @@ def _mydeal_related_keys(store, sku: str) -> list[str]:
 
 def _mydeal_index_group(index: dict[str, dict], group: dict) -> None:
     ids = set(_mydeal_group_ids(group))
-    for buyable in group.get("BuyableProducts") or []:
+    for buyable in _ci_value(group, "BuyableProducts") or []:
         if isinstance(buyable, dict):
             ids.update(_mydeal_buyable_ids(buyable))
     for value in ids:
@@ -422,11 +438,11 @@ def _mydeal_build_catalog_index(client) -> dict[str, dict] | None:
     if not callable(list_products):
         return None
     index: dict[str, dict] = {}
-    limit = 250
+    limit = _MYDEAL_LIST_PAGE_LIMIT
     saw_result = False
     for listing_status in _MYDEAL_LIST_STATUSES:
         page = 1
-        while page <= 40:
+        while page <= _MYDEAL_LIST_MAX_PAGES:
             result = list_products(
                 page=page,
                 limit=limit,
@@ -460,7 +476,8 @@ def _mydeal_catalog_index(client, store) -> dict[str, dict]:
     index = _mydeal_build_catalog_index(client)
     if index is None:
         return {}
-    _MYDEAL_CATALOG_INDEX[cache_key] = (now, index)
+    if index:
+        _MYDEAL_CATALOG_INDEX[cache_key] = (now, index)
     return index
 
 
