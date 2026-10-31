@@ -577,6 +577,54 @@ class MarketplaceLookupTests(TestCase):
         self.assertEqual(result["results"][0]["sku"], "SHD-10001-01-01")
         self.assertEqual(result["results"][0]["product_key"], "SHD-10001-01")
         self.assertIsNone(result["local_listing"])
+        statuses = [
+            call.kwargs.get("listing_status")
+            for call in mock_client.list_products.call_args_list
+        ]
+        self.assertEqual(statuses, ["Live", "NotLive"])
+
+    @patch("listings.mydeal.client.MyDealClient")
+    def test_mydeal_lookup_variant_code_uses_parent_product_id(self, mock_client_cls):
+        store = self._mydeal_store()
+        variant = "9629364224227-49613365706979"
+        parent = "9629364224227"
+        not_found = MyDealResult(
+            ok=False,
+            data={"ResponseStatus": "Failed", "Errors": [{"ID": "ProductNotFound", "Message": "Not found"}]},
+            message="Product not found",
+            status=200,
+            response_status="Failed",
+        )
+        product = self._mydeal_product(listing_status="Live", approved=True)
+        product["Data"]["ProductSKU"] = parent
+        product["Data"]["ExternalProductId"] = parent
+        product["Data"]["BuyableProducts"][0]["SKU"] = variant
+        product["Data"]["BuyableProducts"][0]["ExternalBuyableProductId"] = variant
+
+        def _get(key, by="sku"):
+            if key == parent and by == "id":
+                return MyDealResult(
+                    ok=True,
+                    data=product,
+                    message="ok",
+                    status=200,
+                    response_status="Complete",
+                )
+            return not_found
+
+        mock_client = MagicMock()
+        mock_client.environment = "production"
+        mock_client.get_product.side_effect = _get
+        mock_client_cls.return_value = mock_client
+
+        result = marketplace_lookup.lookup_sku(store, variant)
+        self.assertTrue(result["found"])
+        self.assertTrue(result["advertised"])
+        self.assertEqual(result["results"][0]["sku"], variant)
+        self.assertEqual(result["results"][0]["product_key"], parent)
+        mock_client.list_products.assert_not_called()
+        mock_client.get_product.assert_any_call(parent, by="id")
+        mock_client.get_product.assert_any_call(parent, by="sku")
 
     @patch("listings.mydeal.client.MyDealClient")
     def test_mydeal_lookup_uses_inventory_template_external_id(self, mock_client_cls):

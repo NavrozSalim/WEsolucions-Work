@@ -242,13 +242,23 @@ def _mydeal_is_not_found(result) -> bool:
     return "productnotfound" in compact or "not found" in blob or "5000" in blob
 
 
+def _ci_get(row: dict, *names: str) -> str:
+    """Read a MyDeal field regardless of ID/Id/SKU casing."""
+    if not isinstance(row, dict):
+        return ""
+    wanted = {name.casefold() for name in names}
+    for key, value in row.items():
+        if str(key).casefold() in wanted:
+            return _norm_id(value)
+    return ""
+
+
 def _mydeal_buyable_ids(buyable: dict) -> set[str]:
     return {
         value
         for value in (
-            _norm_id(buyable.get("SKU")),
-            _norm_id(buyable.get("ExternalBuyableProductID")),
-            _norm_id(buyable.get("ExternalBuyableProductId")),
+            _ci_get(buyable, "SKU"),
+            _ci_get(buyable, "ExternalBuyableProductId", "ExternalBuyableProductID"),
         )
         if value
     }
@@ -258,12 +268,29 @@ def _mydeal_group_ids(group: dict) -> set[str]:
     return {
         value
         for value in (
-            _norm_id(group.get("ProductSKU")),
-            _norm_id(group.get("ExternalProductId")),
-            _norm_id(group.get("ExternalProductID")),
+            _ci_get(group, "ProductSKU"),
+            _ci_get(group, "ExternalProductId", "ExternalProductID"),
         )
         if value
     }
+
+
+def _mydeal_group_key_candidates(sku: str) -> list[str]:
+    """Parent ids implied by a variant code.
+
+    GET /products/{idorsku} only accepts the product-group key
+    (ExternalProductID or ProductSKU). A Shopify-style variant is
+    ``{productId}-{variantId}``; the group key is the product id.
+    """
+    text = _norm_id(sku)
+    if "-" not in text:
+        return []
+    left, right = text.split("-", 1)
+    left = left.strip()
+    right = right.strip()
+    if left.isdigit() and right.isdigit() and len(left) >= 8 and left != text:
+        return [left]
+    return []
 
 
 def _mydeal_id_match(ids: set[str], needles: list[str]) -> bool:
@@ -287,16 +314,16 @@ def _mydeal_pick_buyable(group: dict, needles: list[str]) -> dict | None:
 
 
 def _mydeal_hit(group: dict, buyable: dict | None, sku: str) -> dict:
-    status = _norm_id((buyable or {}).get("ListingStatus")) or "unknown"
+    status = _ci_get(buyable or {}, "ListingStatus") or "unknown"
     advertised = status.lower() == "live"
     product_key = (
-        _norm_id(group.get("ProductSKU"))
-        or _norm_id(group.get("ExternalProductId"))
+        _ci_get(group, "ProductSKU")
+        or _ci_get(group, "ExternalProductId", "ExternalProductID")
         or sku
     )
     variant_key = (
-        _norm_id((buyable or {}).get("SKU"))
-        or _norm_id((buyable or {}).get("ExternalBuyableProductID"))
+        _ci_get(buyable or {}, "SKU")
+        or _ci_get(buyable or {}, "ExternalBuyableProductId", "ExternalBuyableProductID")
         or sku
     )
     return {
@@ -317,8 +344,9 @@ def _mydeal_hit(group: dict, buyable: dict | None, sku: str) -> dict:
 
 _MYDEAL_LIST_FIELDS = (
     "ExternalProductId,ProductSKU,Title,"
-    "BuyableProducts(ExternalBuyableProductID,SKU,ListingStatus,Approved)"
+    "BuyableProducts(ExternalBuyableProductId,SKU,ListingStatus)"
 )
+_MYDEAL_LIST_STATUSES = ("Live", "NotLive")
 _MYDEAL_CATALOG_INDEX: dict[tuple[str, str], tuple[float, dict[str, dict]]] = {}
 _MYDEAL_CATALOG_INDEX_TTL = 120.0
 
@@ -394,25 +422,33 @@ def _mydeal_build_catalog_index(client) -> dict[str, dict] | None:
     if not callable(list_products):
         return None
     index: dict[str, dict] = {}
-    page = 1
     limit = 250
-    while page <= 40:
-        result = list_products(page=page, limit=limit, fields=_MYDEAL_LIST_FIELDS)
-        if not isinstance(result, MyDealResult):
-            return None
-        if not result.ok:
-            if _mydeal_is_not_found(result):
+    saw_result = False
+    for listing_status in _MYDEAL_LIST_STATUSES:
+        page = 1
+        while page <= 40:
+            result = list_products(
+                page=page,
+                limit=limit,
+                listing_status=listing_status,
+                fields=_MYDEAL_LIST_FIELDS,
+            )
+            if not isinstance(result, MyDealResult):
+                return None if not saw_result else index
+            saw_result = True
+            if not result.ok:
+                if _mydeal_is_not_found(result):
+                    break
+                raise MarketplaceError(result.message or "Could not list MyDeal products.")
+            groups = _mydeal_groups(result.data)
+            if not groups:
                 break
-            raise MarketplaceError(result.message or "Could not list MyDeal products.")
-        groups = _mydeal_groups(result.data)
-        if not groups:
-            break
-        for group in groups:
-            _mydeal_index_group(index, group)
-        if len(groups) < limit:
-            break
-        page += 1
-    return index
+            for group in groups:
+                _mydeal_index_group(index, group)
+            if len(groups) < limit:
+                break
+            page += 1
+    return index if saw_result else None
 
 
 def _mydeal_catalog_index(client, store) -> dict[str, dict]:
@@ -486,6 +522,11 @@ def _lookup_mydeal(store, sku: str) -> dict:
     for key in keys:
         _queue(key, "sku")
         _queue(key, "id")
+        # A variant code is not a product-group key. Ask for the parent id
+        # with both ?sku= and ?id=, matching the store's Product Key Identifier.
+        for parent in _mydeal_group_key_candidates(key):
+            _queue(parent, "sku")
+            _queue(parent, "id")
     for key in _mydeal_related_keys(store, sku):
         _queue(key, "sku")
         _queue(key, "id")
