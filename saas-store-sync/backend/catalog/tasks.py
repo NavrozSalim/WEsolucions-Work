@@ -426,7 +426,7 @@ def _find_product_mapping(
             return pm
     vendor = vendor_early
     if not vendor:
-        return None
+        return _mydeal_mapping_by_sku(row, store, qs)
     vendor_code = (vendor.code or "").strip().lower()
     vid = _normalize(row.variation_id_raw) or ''
     if vendor_code in ("costcoau", "costco_au", "costco-au"):
@@ -463,7 +463,7 @@ def _find_product_mapping(
             or _normalize(row.marketplace_parent_sku_raw)
         )
     if not vsku:
-        return None
+        return _mydeal_mapping_by_sku(row, store, qs)
     product = Product.objects.filter(
         vendor=vendor,
         vendor_sku=vsku,
@@ -478,8 +478,49 @@ def _find_product_mapping(
     # Last resort: match by marketplace_parent_sku on ProductMapping
     mp_sku = _normalize(row.marketplace_parent_sku_raw)
     if mp_sku:
-        return qs.filter(marketplace_parent_sku=mp_sku).first()
-    return None
+        found = qs.filter(marketplace_parent_sku=mp_sku).first()
+        if found:
+            return found
+    return _mydeal_mapping_by_sku(row, store, qs)
+
+
+def _row_sku_values(row: CatalogUploadRow) -> list[str]:
+    """Distinct SKU-like values on a catalog row."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in (
+        row.marketplace_parent_sku_raw,
+        row.marketplace_child_sku_raw,
+        row.vendor_sku_raw,
+        row.vendor_id_raw,
+        row.marketplace_id_raw,
+    ):
+        val = _normalize(raw)
+        if not val:
+            continue
+        key = val.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(val)
+    return out
+
+
+def _mydeal_mapping_by_sku(row: CatalogUploadRow, store, qs):
+    """Match a MyDeal catalog SKU column against child, parent, or vendor SKU."""
+    from catalog.mydeal_templates import store_is_mydeal
+
+    if not store_is_mydeal(store):
+        return None
+    skus = _row_sku_values(row)
+    if not skus:
+        return None
+    query = Q()
+    for sku in skus:
+        query |= Q(marketplace_child_sku__iexact=sku)
+        query |= Q(marketplace_parent_sku__iexact=sku)
+        query |= Q(product__vendor_sku__iexact=sku)
+    return qs.filter(query).select_related('product').first()
 
 
 def _resolve_heb_url_for_row(
@@ -706,8 +747,13 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
     )
 
     mydeal_catalog = store_is_mydeal(store)
-    deleted_mydeal_skus: list[str] = []
     restored_mydeal_skus: list[str] = []
+    unmapped_mydeal_skus: list[str] = []
+    inventory_keys: set[str] = set()
+    if mydeal_catalog:
+        from catalog.mydeal_templates import _sku_key, inventory_template_sku_keys
+
+        inventory_keys = inventory_template_sku_keys(store)
     replace_deactivated = 0
     if replace_store_catalog:
         replace_deactivated = ProductMapping.objects.filter(
@@ -760,12 +806,20 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
                         pm.is_active = False
                         update_fields = ['is_active']
                         if mydeal_catalog:
+                            # Mapped deletes zero inventory only. Discontinued
+                            # stays FALSE; the inventory CSV writes stock 0.
                             pm.store_stock = 0
                             update_fields.append('store_stock')
-                            deleted_mydeal_skus.extend(mapping_sku_keys(pm))
                         pm.save(update_fields=update_fields)
                         row.sync_status = CatalogUploadRow.SyncStatus.DELETED
                         row.product_mapping = pm
+                        deleted += 1
+                    elif mydeal_catalog and any(
+                        _sku_key(sku) in inventory_keys for sku in _row_sku_values(row)
+                    ):
+                        # On MyDeal, not in the catalog: discontinue and zero stock.
+                        unmapped_mydeal_skus.extend(_row_sku_values(row))
+                        row.sync_status = CatalogUploadRow.SyncStatus.DELETED
                         deleted += 1
                     else:
                         row.sync_status = CatalogUploadRow.SyncStatus.ERROR
@@ -917,20 +971,14 @@ def run_catalog_sync(upload_id: str, *, replace_store_catalog: bool = False):
         CatalogUpload.Status.PARTIAL,
         CatalogUpload.Status.FAILED,
     ):
-        # Products left inactive by a full-file replace are gone from Big W's
-        # catalog file, so the inventory template must send stock 0 for them.
+        # Products left inactive by a full-file replace stay mapped, so the
+        # inventory file sends stock 0 and leaves Discontinued FALSE.
         if replace_store_catalog:
-            inactive = (
-                ProductMapping.objects.filter(store=store, is_active=False)
-                .select_related('product')
-            )
-            for pm in inactive.iterator(chunk_size=500):
-                deleted_mydeal_skus.extend(mapping_sku_keys(pm))
             ProductMapping.objects.filter(
                 store=store, is_active=False,
             ).exclude(store_stock=0).update(store_stock=0)
-        if deleted_mydeal_skus:
-            mark_inventory_discontinued(store, deleted_mydeal_skus, discontinued=True)
+        if unmapped_mydeal_skus:
+            mark_inventory_discontinued(store, unmapped_mydeal_skus, discontinued=True)
         if restored_mydeal_skus:
             mark_inventory_discontinued(store, restored_mydeal_skus, discontinued=False)
 

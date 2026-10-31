@@ -42,6 +42,13 @@ from catalog.marketplace_templates import (
     sample_template_rows_for_kind,
     upload_row_to_cells,
 )
+from catalog.mydeal_templates import (
+    MydealDeleteTemplateError,
+    mydeal_delete_template_filename,
+    mydeal_delete_template_rows,
+    normalize_mydeal_delete_scope,
+    store_is_mydeal,
+)
 from users.org_scope import get_store_for_user, stores_for_user
 from products.models import Product
 from stores.models import Store
@@ -377,17 +384,19 @@ class ProductMappingViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         sku = instance.product.vendor_sku
         store_id = str(instance.store_id)
-        from catalog.mydeal_templates import mapping_sku_keys, mark_inventory_discontinued
+        from catalog.mydeal_templates import store_is_mydeal
 
-        mark_inventory_discontinued(
-            instance.store,
-            mapping_sku_keys(instance),
-            discontinued=True,
-        )
         log_action(
             self.request.user, 'product_deleted', 'product_mapping', str(instance.id),
             metadata={'sku': sku, 'store_id': store_id}, request=self.request
         )
+        if store_is_mydeal(instance.store):
+            # Keep the inactive mapping so the inventory CSV sends stock 0
+            # and leaves Discontinued FALSE.
+            instance.is_active = False
+            instance.store_stock = 0
+            instance.save(update_fields=['is_active', 'store_stock'])
+            return
         instance.delete()
 
 
@@ -397,16 +406,14 @@ class CatalogClearView(APIView):
 
     def delete(self, request, store_pk):
         store = get_store_for_user(request.user, store_pk)
-        from catalog.mydeal_templates import mapping_sku_keys, mark_inventory_discontinued
+        from catalog.mydeal_templates import store_is_mydeal
 
-        mappings = list(
-            ProductMapping.objects.filter(store=store).select_related('product')
-        )
-        skus = []
-        for pm in mappings:
-            skus.extend(mapping_sku_keys(pm))
-        mark_inventory_discontinued(store, skus, discontinued=True)
-        count, _ = ProductMapping.objects.filter(store=store).delete()
+        qs = ProductMapping.objects.filter(store=store)
+        if store_is_mydeal(store):
+            count = qs.filter(is_active=True).count()
+            qs.update(is_active=False, store_stock=0)
+        else:
+            count, _ = qs.delete()
         log_action(
             request.user, 'catalog_cleared', 'store', str(store.id),
             metadata={'name': store.name, 'deleted_count': count}, request=request
@@ -537,14 +544,13 @@ class CatalogUploadDeleteView(APIView):
         deleted_count = 0
         if pm_ids or product_ids:
             qs = ProductMapping.objects.filter(store=store).filter(mapping_filter)
-            from catalog.mydeal_templates import mapping_sku_keys, mark_inventory_discontinued
+            from catalog.mydeal_templates import store_is_mydeal
 
-            skus = []
-            for pm in qs.select_related('product'):
-                skus.extend(mapping_sku_keys(pm))
-            mark_inventory_discontinued(store, skus, discontinued=True)
-            deleted_count = qs.count()
-            qs.delete()
+            if store_is_mydeal(store):
+                deleted_count = qs.update(is_active=False, store_stock=0)
+            else:
+                deleted_count = qs.count()
+                qs.delete()
         upload.delete()
         log_action(
             request.user, 'catalog_upload_deleted', 'catalog_upload', str(upload_id),
@@ -2096,10 +2102,23 @@ class CatalogSampleTemplateView(APIView):
             )
 
         kind = resolve_sample_template_kind(store, kind_param)
+        scope = normalize_mydeal_delete_scope(request.query_params.get('scope') or '')
 
         response = HttpResponse(content_type='text/csv')
-        fname = sample_template_filename_for_kind(kind, action=action)
-        headers, sample_rows = sample_template_rows_for_kind(kind, action=action)
+        if action == 'delete' and scope:
+            if kind != 'mydeal' or store is None or not store_is_mydeal(store):
+                return Response(
+                    {'error': 'The mapped / not-mapped delete file is only available for a MyDeal store.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                headers, sample_rows = mydeal_delete_template_rows(store, scope)
+            except MydealDeleteTemplateError as exc:
+                return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            fname = mydeal_delete_template_filename(scope)
+        else:
+            fname = sample_template_filename_for_kind(kind, action=action)
+            headers, sample_rows = sample_template_rows_for_kind(kind, action=action)
 
         response['Content-Disposition'] = f'attachment; filename="{fname}"'
         writer = csv.writer(response)

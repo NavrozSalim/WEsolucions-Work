@@ -259,18 +259,24 @@ export const resolveMarketplaceTemplateKind = (store) => {
     return '';
 };
 
-export const downloadSampleTemplate = (storeId = null, marketplaceKind = '', action = 'catalog') => {
+export const downloadSampleTemplate = (storeId = null, marketplaceKind = '', action = 'catalog', scope = '') => {
     const params = {};
     if (storeId) params.store_id = storeId;
     const kind = String(marketplaceKind || '').trim().toLowerCase();
     if (CATALOG_TEMPLATE_KINDS.includes(kind)) params.marketplace = kind;
     const act = String(action || 'catalog').trim().toLowerCase();
     if (act === 'delete') params.action = 'delete';
+    const deleteScope = String(scope || '').trim().toLowerCase();
+    if (act === 'delete' && (deleteScope === 'mapped' || deleteScope === 'unmapped')) {
+        params.scope = deleteScope;
+    }
     params._cb = String(Date.now());
     const fallback = act === 'delete'
-        ? (kind && CATALOG_TEMPLATE_KINDS.includes(kind)
-            ? `catalog_delete_template_${kind}.csv`
-            : 'catalog_delete_template.csv')
+        ? (kind === 'mydeal' && (deleteScope === 'mapped' || deleteScope === 'unmapped')
+            ? `catalog_delete_template_mydeal_${deleteScope}.csv`
+            : (kind && CATALOG_TEMPLATE_KINDS.includes(kind)
+                ? `catalog_delete_template_${kind}.csv`
+                : 'catalog_delete_template.csv'))
         : (kind && CATALOG_TEMPLATE_KINDS.includes(kind)
             ? `catalog_upload_template_${kind}.csv`
             : 'catalog_upload_template.csv');

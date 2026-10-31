@@ -341,6 +341,154 @@ def mark_inventory_discontinued(store: Store, skus, *, discontinued: bool) -> in
     return updated
 
 
+class MydealDeleteTemplateError(ValueError):
+    """The MyDeal delete file cannot be built for this store."""
+
+
+MYDEAL_CATALOG_DELETE_HEADERS = [
+    'Vendor Name',
+    'Vendor ID',
+    'Marketplace Name',
+    'Store Name',
+    'SKU',
+    'Vendor URL',
+    'Action',
+]
+
+
+def normalize_mydeal_delete_scope(raw: str) -> str:
+    scope = (raw or '').strip().lower()
+    if scope in ('mapped', 'unmapped'):
+        return scope
+    return ''
+
+
+def mydeal_delete_template_filename(scope: str) -> str:
+    scope = normalize_mydeal_delete_scope(scope) or 'mapped'
+    return f'catalog_delete_template_mydeal_{scope}.csv'
+
+
+def inventory_template_sku_keys(store: Store) -> set[str]:
+    """Normalized SKUs on the uploaded MyDeal inventory template."""
+    keys: set[str] = set()
+    rows = MydealTemplateRow.objects.filter(
+        store=store,
+        kind=MydealTemplateRow.Kind.INVENTORY,
+    ).only('sku')
+    for row in rows.iterator(chunk_size=1000):
+        key = _sku_key(row.sku)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _mapping_listing_sku(pm) -> str:
+    product = getattr(pm, 'product', None)
+    for raw in (
+        getattr(pm, 'marketplace_parent_sku', None),
+        getattr(pm, 'marketplace_child_sku', None),
+        getattr(product, 'vendor_sku', None) if product is not None else None,
+    ):
+        sku = _normalize_sku(raw)
+        if sku:
+            return sku
+    return ''
+
+
+def _all_mapping_sku_keys(store: Store) -> set[str]:
+    keys: set[str] = set()
+    qs = (
+        ProductMapping.objects.filter(store=store)
+        .select_related('product')
+        .only(
+            'marketplace_child_sku',
+            'marketplace_parent_sku',
+            'product__vendor_sku',
+        )
+    )
+    for pm in qs.iterator(chunk_size=500):
+        for sku in mapping_sku_keys(pm):
+            key = _sku_key(sku)
+            if key:
+                keys.add(key)
+    return keys
+
+
+def mydeal_delete_template_rows(store: Store, scope: str) -> tuple[list[str], list[list[str]]]:
+    """Catalog delete rows for mapped products, or MyDeal SKUs with no mapping.
+
+    Mapped rows deactivate the catalog product and zero inventory only.
+    Unmapped rows are SKUs on the inventory template that were never mapped;
+    uploading them sets Discontinued to TRUE and inventory to 0.
+    """
+    if not store_is_mydeal(store):
+        raise MydealDeleteTemplateError('Store is not a MyDeal store.')
+    scope = normalize_mydeal_delete_scope(scope)
+    if not scope:
+        raise MydealDeleteTemplateError('Choose mapped or not mapped products.')
+
+    store_name = (getattr(store, 'name', None) or '').strip()
+    headers = list(MYDEAL_CATALOG_DELETE_HEADERS)
+    if scope == 'mapped':
+        return headers, _mapped_delete_rows(store, store_name)
+    return headers, _unmapped_delete_rows(store, store_name)
+
+
+def _mapped_delete_rows(store: Store, store_name: str) -> list[list[str]]:
+    qs = (
+        ProductMapping.objects.filter(store=store, is_active=True)
+        .select_related('product', 'product__vendor')
+        .order_by('product__vendor_sku', 'marketplace_parent_sku', 'marketplace_child_sku')
+    )
+    rows: list[list[str]] = []
+    seen: set[str] = set()
+    for pm in qs.iterator(chunk_size=500):
+        sku = _mapping_listing_sku(pm)
+        key = _sku_key(sku)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        product = pm.product
+        vendor = product.vendor if product is not None else None
+        rows.append([
+            (vendor.name if vendor is not None else '') or '',
+            _normalize_sku(getattr(product, 'vendor_sku', None)) if product is not None else '',
+            'MyDeal',
+            store_name,
+            sku,
+            (getattr(product, 'vendor_url', None) or '') if product is not None else '',
+            'Delete',
+        ])
+    return rows
+
+
+def _unmapped_delete_rows(store: Store, store_name: str) -> list[list[str]]:
+    has_inventory = MydealTemplateRow.objects.filter(
+        store=store,
+        kind=MydealTemplateRow.Kind.INVENTORY,
+    ).exists()
+    if not has_inventory:
+        raise MydealDeleteTemplateError(
+            'Upload the MyDeal inventory template before downloading products '
+            'that are on MyDeal but not mapped.'
+        )
+    mapped = _all_mapping_sku_keys(store)
+    rows: list[list[str]] = []
+    seen: set[str] = set()
+    inv_rows = MydealTemplateRow.objects.filter(
+        store=store,
+        kind=MydealTemplateRow.Kind.INVENTORY,
+    ).order_by('row_number')
+    for tr in inv_rows.iterator(chunk_size=1000):
+        sku = _normalize_sku(tr.sku)
+        key = _sku_key(sku)
+        if not key or key in mapped or key in seen:
+            continue
+        seen.add(key)
+        rows.append(['', '', 'MyDeal', store_name, sku, '', 'Delete'])
+    return rows
+
+
 def _catalog_removed_sku_keys(store: Store) -> set[str]:
     """SKUs that exist only on inactive mappings (deleted from the catalog)."""
     active: set[str] = set()
@@ -461,11 +609,16 @@ def _export_inventory_csv(store: Store) -> bytes:
     for tr in rows:
         sku = _normalize_sku(tr.sku)
         key = _sku_key(sku)
-        # Discontinued deals and products deleted from the catalog must go
-        # back to Big W with stock 0. A blank cell leaves the old quantity.
-        if _is_discontinued(tr.discontinued) or key in removed_keys:
+        # A blank stock cell leaves the old quantity on MyDeal.
+        # Discontinued TRUE is only for products that are on MyDeal and not
+        # mapped. Mapped products that leave the catalog keep Discontinued
+        # FALSE and send stock 0.
+        if _is_discontinued(tr.discontinued):
             stock_str = '0'
             discontinued = 'TRUE'
+        elif key in removed_keys:
+            stock_str = '0'
+            discontinued = 'FALSE'
         else:
             data = by_sku.get(sku) or by_key.get(key) or {}
             stock = data.get('stock')

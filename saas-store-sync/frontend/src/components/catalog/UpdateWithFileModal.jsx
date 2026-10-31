@@ -61,7 +61,7 @@ function templateCopy(kind) {
                 catalogHint:
                     'MyDeal catalog: Vendor Name, Vendor ID, Marketplace Name, Store Name, SKU, Vendor URL, Action. Price/Inventory CSVs from the MyDeal portal stay on Download templates on the Catalog page.',
                 deleteHint:
-                    'Delete only the SKUs in this file. Same MyDeal catalog columns; set Action to Delete. Does not replace the MyDeal Price/Inventory portal files.',
+                    'Choose mapped products or products that are on MyDeal but not mapped, then download. Mapped deletes set inventory to 0 and leave Discontinued FALSE. Not-mapped deletes set Discontinued to TRUE and inventory to 0.',
             };
         default:
             return {
@@ -83,6 +83,7 @@ export default function UpdateWithFileModal({
     const [error, setError] = useState('');
     const [downloadError, setDownloadError] = useState('');
     const [downloading, setDownloading] = useState('');
+    const [deleteScope, setDeleteScope] = useState('mapped');
     const fileInputRef = useRef(null);
 
     const validateFile = (f) => {
@@ -150,14 +151,17 @@ export default function UpdateWithFileModal({
         setError('');
         setDownloadError('');
         setDownloading('');
+        setDeleteScope('mapped');
         onClose();
     };
 
     const handleDownload = (action) => {
         if (!downloadSample) return;
+        const kindNow = marketplaceKind(storeMarketplaceCode, storeMarketplace);
+        const scope = action === 'delete' && kindNow === 'mydeal' ? deleteScope : '';
         setDownloadError('');
         setDownloading(action);
-        Promise.resolve(downloadSample(action))
+        Promise.resolve(downloadSample(action, scope))
             .catch((err) => {
                 setDownloadError(err?.message || 'Failed to download template');
             })
@@ -223,6 +227,20 @@ export default function UpdateWithFileModal({
                                 Delete template
                             </label>
                             <p className="text-sm text-slate-600 dark:text-slate-400">{copy.deleteTitle}</p>
+                            {kind === 'mydeal' && (
+                                <label className="mt-2 block text-xs font-medium text-slate-600 dark:text-slate-300">
+                                    Products to delete
+                                    <select
+                                        value={deleteScope}
+                                        onChange={(e) => setDeleteScope(e.target.value)}
+                                        disabled={!!downloading}
+                                        className="mt-1 block w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-2 text-sm text-slate-900 dark:text-slate-100"
+                                    >
+                                        <option value="mapped">Mapped products</option>
+                                        <option value="unmapped">Not mapped (on MyDeal only)</option>
+                                    </select>
+                                </label>
+                            )}
                             <button
                                 type="button"
                                 onClick={() => handleDownload('delete')}
@@ -232,7 +250,13 @@ export default function UpdateWithFileModal({
                                 <Download className="h-4 w-4" />
                                 {downloading === 'delete' ? 'Downloading…' : 'Download delete template'}
                             </button>
-                            <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">{copy.deleteHint}</p>
+                            <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                                {kind === 'mydeal'
+                                    ? (deleteScope === 'unmapped'
+                                        ? 'SKUs on the MyDeal inventory template that are not in this catalog. Uploading sets Discontinued to TRUE and inventory to 0.'
+                                        : 'Mapped products only. Uploading sets inventory to 0 and leaves Discontinued as FALSE.')
+                                    : copy.deleteHint}
+                            </p>
                         </div>
                         {downloadError && (
                             <p className="text-sm text-rose-600 dark:text-rose-400">{downloadError}</p>

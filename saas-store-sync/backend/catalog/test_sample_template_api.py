@@ -66,6 +66,28 @@ class CatalogSampleTemplateApiTests(TestCase):
         self.assertIn('Delete', lines[1])
         self.assertNotIn(',Add,', lines[1])
 
+    def test_mydeal_scoped_delete_template(self):
+        mapped = self._get(
+            store_id=str(self.mydeal_store.id), action='delete', scope='mapped',
+        )
+        self.assertEqual(mapped.status_code, 200)
+        self.assertIn(
+            'catalog_delete_template_mydeal_mapped.csv',
+            mapped['Content-Disposition'],
+        )
+        self.assertIn('SKU', mapped.content.decode('utf-8').splitlines()[0])
+
+        unmapped = self._get(
+            store_id=str(self.mydeal_store.id), action='delete', scope='unmapped',
+        )
+        self.assertEqual(unmapped.status_code, 400)
+        self.assertIn('inventory template', str(unmapped.data.get('error', '')).lower())
+
+        other = self._get(
+            store_id=str(self.kogan_store.id), action='delete', scope='mapped',
+        )
+        self.assertEqual(other.status_code, 400)
+
     def test_kogan_catalog_and_delete_are_kogan_labeled(self):
         catalog = self._get(store_id=str(self.kogan_store.id))
         self.assertEqual(catalog.status_code, 200)

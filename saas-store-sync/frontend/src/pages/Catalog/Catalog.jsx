@@ -3771,11 +3771,12 @@ export default function Catalog() {
                 storeMarketplace={selectedStoreData?.marketplace_name}
                 storeMarketplaceCode={selectedStoreData?.marketplace_code}
                 storeId={selectedStore}
-                downloadSample={(action = 'catalog') =>
+                downloadSample={(action = 'catalog', scope = '') =>
                     downloadSampleTemplate(
                         selectedStore,
                         resolveMarketplaceTemplateKind(selectedStoreData),
                         action,
+                        scope,
                     )
                 }
                 loading={uploading}

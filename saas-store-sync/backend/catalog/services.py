@@ -216,7 +216,24 @@ def build_catalog_row_instance(
     if action_norm not in ('add', 'update', 'delete'):
         action_norm = 'add'
 
-    if _normalize(vendor_name_raw) is None:
+    # Unmapped MyDeal deletes only have the portal SKU. Vendor Name is unknown.
+    mydeal_sku_delete = False
+    if action_norm == 'delete':
+        from catalog.mydeal_templates import store_is_mydeal
+
+        sku_present = any(
+            _normalize(value)
+            for value in (
+                marketplace_parent_sku_raw,
+                marketplace_child_sku_raw,
+                vendor_sku_raw,
+                vendor_id_raw,
+                marketplace_id_raw,
+            )
+        )
+        mydeal_sku_delete = bool(sku_present) and store_is_mydeal(store)
+
+    if _normalize(vendor_name_raw) is None and not mydeal_sku_delete:
         return None, f"Row {row_num}: Vendor Name required (cannot be N/A or empty)"
     if _normalize(store_name_raw) is None:
         return None, f"Row {row_num}: Store Name required (cannot be N/A or empty)"

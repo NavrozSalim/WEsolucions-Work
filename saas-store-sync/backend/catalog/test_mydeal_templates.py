@@ -228,7 +228,7 @@ class MydealTemplateTests(TestCase):
         mapping.save(update_fields=['is_active', 'store_stock'])
         cells = self._inventory_cells()
         self.assertEqual(cells[6], '0')
-        self.assertEqual(cells[7], 'TRUE')
+        self.assertEqual(cells[7], 'FALSE')
 
     def test_export_inventory_leaves_unmapped_stock_blank(self):
         self._inventory_row(sku='NOT-IN-CATALOG')
@@ -256,7 +256,7 @@ class MydealTemplateTests(TestCase):
         return upload
 
     @patch('catalog.tasks._chunked_reset_store_active_listings_pending_scrape')
-    def test_file_delete_marks_inventory_discontinued_and_zero_stock(self, _reset):
+    def test_file_delete_zeros_mapped_stock_without_discontinue(self, _reset):
         self._inventory_row()
         result = run_catalog_sync(str(self._delete_upload('MD-SKU-1').id))
         self.assertEqual(result.get('deleted'), 1, result)
@@ -264,10 +264,91 @@ class MydealTemplateTests(TestCase):
         self.assertFalse(mapping.is_active)
         self.assertEqual(mapping.store_stock, 0)
         row = MydealTemplateRow.objects.get(store=self.store, sku='MD-SKU-1')
+        self.assertEqual(row.discontinued, 'FALSE')
+        cells = self._inventory_cells()
+        self.assertEqual(cells[6], '0')
+        self.assertEqual(cells[7], 'FALSE')
+
+    @patch('catalog.tasks._chunked_reset_store_active_listings_pending_scrape')
+    def test_unmapped_file_delete_marks_discontinued_and_zero_stock(self, _reset):
+        self._inventory_row(sku='ONLY-ON-MYDEAL')
+        result = run_catalog_sync(str(self._delete_upload('ONLY-ON-MYDEAL').id))
+        self.assertEqual(result.get('deleted'), 1, result)
+        self.assertEqual(result.get('errors', 0), 0, result)
+        row = MydealTemplateRow.objects.get(store=self.store, sku='ONLY-ON-MYDEAL')
         self.assertEqual(row.discontinued, 'TRUE')
         cells = self._inventory_cells()
         self.assertEqual(cells[6], '0')
         self.assertEqual(cells[7], 'TRUE')
+        mapping = ProductMapping.objects.get(store=self.store)
+        self.assertTrue(mapping.is_active)
+
+    def test_delete_template_splits_mapped_and_unmapped(self):
+        from catalog.mydeal_templates import (
+            MydealDeleteTemplateError,
+            mydeal_delete_template_rows,
+        )
+
+        self._inventory_row(sku='MD-SKU-1')
+        MydealTemplateRow.objects.create(
+            store=self.store,
+            kind=MydealTemplateRow.Kind.INVENTORY,
+            row_number=2,
+            deal_id='18217958',
+            variant_id='V2',
+            external_id='E2',
+            sku='ONLY-ON-MYDEAL',
+            deal_title='Portal only',
+            discontinued='FALSE',
+            mydeal_approved='Approved',
+        )
+        headers, mapped = mydeal_delete_template_rows(self.store, 'mapped')
+        self.assertEqual(headers[4], 'SKU')
+        self.assertEqual(len(mapped), 1)
+        self.assertEqual(mapped[0][4], 'MD-SKU-1')
+        self.assertEqual(mapped[0][6], 'Delete')
+        self.assertEqual(mapped[0][0], self.vendor.name)
+        _, unmapped = mydeal_delete_template_rows(self.store, 'unmapped')
+        self.assertEqual([row[4] for row in unmapped], ['ONLY-ON-MYDEAL'])
+        self.assertEqual(unmapped[0][0], '')
+        self.assertEqual(unmapped[0][3], self.store.name)
+        self.assertEqual(unmapped[0][6], 'Delete')
+
+        bare = Store.objects.create(
+            user=self.user,
+            name='No Inventory',
+            region='AU',
+            api_token='tok2',
+            marketplace=self.mp,
+            mydeal_setup_method='upload',
+        )
+        with self.assertRaises(MydealDeleteTemplateError):
+            mydeal_delete_template_rows(bare, 'unmapped')
+
+    def test_unmapped_delete_row_allows_blank_vendor(self):
+        from catalog.services import _make_row_ingest_context, build_catalog_row_instance
+
+        upload = CatalogUpload.objects.create(
+            user=self.user,
+            store=self.store,
+            original_filename='delete.csv',
+            status=CatalogUpload.Status.VALIDATED,
+            total_rows=1,
+        )
+        header = [
+            'Vendor Name', 'Vendor ID', 'Marketplace Name', 'Store Name',
+            'SKU', 'Vendor URL', 'Action',
+        ]
+        ctx = _make_row_ingest_context(self.store, header)
+        row, err = build_catalog_row_instance(
+            upload,
+            2,
+            ['', '', 'MyDeal', self.store.name, 'ONLY-ON-MYDEAL', '', 'Delete'],
+            ctx,
+        )
+        self.assertIsNone(err, err)
+        self.assertEqual(row.marketplace_parent_sku_raw, 'ONLY-ON-MYDEAL')
+        self.assertEqual(row.action_raw, 'Delete')
 
     @patch(
         'catalog.tasks._chunked_reset_store_active_listings_pending_scrape',
