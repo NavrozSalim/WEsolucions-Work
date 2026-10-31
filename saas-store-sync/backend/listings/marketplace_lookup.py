@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from django.db.models import Q
 
@@ -314,6 +315,129 @@ def _mydeal_hit(group: dict, buyable: dict | None, sku: str) -> dict:
     }
 
 
+_MYDEAL_LIST_FIELDS = (
+    "ExternalProductId,ProductSKU,Title,"
+    "BuyableProducts(ExternalBuyableProductID,SKU,ListingStatus,Approved)"
+)
+_MYDEAL_CATALOG_INDEX: dict[tuple[str, str], tuple[float, dict[str, dict]]] = {}
+_MYDEAL_CATALOG_INDEX_TTL = 120.0
+
+
+def _mydeal_related_keys(store, sku: str) -> list[str]:
+    """Other ids for this SKU from the inventory template or the catalog.
+
+    A portal row often stores the buyable SKU in SKU and the parent id in
+    ExternalID. The catalog may store the parent separately from the child.
+    """
+    from catalog.models import MydealTemplateRow, ProductMapping
+
+    wanted = _norm_id(sku).casefold()
+    if not wanted:
+        return []
+    found: list[str] = []
+    seen = {wanted}
+
+    def add(raw) -> None:
+        text = _norm_id(raw)
+        if not text:
+            return
+        key = text.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        found.append(text)
+
+    rows = (
+        MydealTemplateRow.objects.filter(store=store, kind=MydealTemplateRow.Kind.INVENTORY)
+        .filter(Q(sku__iexact=sku) | Q(external_id__iexact=sku))
+        .only("sku", "external_id")[:20]
+    )
+    for row in rows:
+        add(row.external_id)
+        add(row.sku)
+
+    mappings = (
+        ProductMapping.objects.filter(store=store)
+        .filter(
+            Q(marketplace_child_sku__iexact=sku)
+            | Q(marketplace_parent_sku__iexact=sku)
+            | Q(product__vendor_sku__iexact=sku)
+        )
+        .select_related("product")[:20]
+    )
+    for pm in mappings:
+        add(pm.marketplace_parent_sku)
+        add(pm.marketplace_child_sku)
+        product = getattr(pm, "product", None)
+        if product is not None:
+            add(getattr(product, "vendor_sku", None))
+    return found
+
+
+def _mydeal_index_group(index: dict[str, dict], group: dict) -> None:
+    ids = set(_mydeal_group_ids(group))
+    for buyable in group.get("BuyableProducts") or []:
+        if isinstance(buyable, dict):
+            ids.update(_mydeal_buyable_ids(buyable))
+    for value in ids:
+        index.setdefault(value.casefold(), group)
+
+
+def _mydeal_build_catalog_index(client) -> dict[str, dict] | None:
+    """Map parent, external, and buyable ids to a product group.
+
+    Returns None when this client cannot list products (test doubles).
+    """
+    from .mydeal.client import MyDealResult
+
+    list_products = getattr(client, "list_products", None)
+    if not callable(list_products):
+        return None
+    index: dict[str, dict] = {}
+    page = 1
+    limit = 250
+    while page <= 40:
+        result = list_products(page=page, limit=limit, fields=_MYDEAL_LIST_FIELDS)
+        if not isinstance(result, MyDealResult):
+            return None
+        if not result.ok:
+            if _mydeal_is_not_found(result):
+                break
+            raise MarketplaceError(result.message or "Could not list MyDeal products.")
+        groups = _mydeal_groups(result.data)
+        if not groups:
+            break
+        for group in groups:
+            _mydeal_index_group(index, group)
+        if len(groups) < limit:
+            break
+        page += 1
+    return index
+
+
+def _mydeal_catalog_index(client, store) -> dict[str, dict]:
+    cache_key = (str(getattr(store, "id", "") or ""), str(getattr(client, "environment", "") or ""))
+    now = time.monotonic()
+    cached = _MYDEAL_CATALOG_INDEX.get(cache_key)
+    if cached and now - cached[0] < _MYDEAL_CATALOG_INDEX_TTL:
+        return cached[1]
+    index = _mydeal_build_catalog_index(client)
+    if index is None:
+        return {}
+    _MYDEAL_CATALOG_INDEX[cache_key] = (now, index)
+    return index
+
+
+def _mydeal_fetch_group(client, key: str, *, by: str):
+    result = client.get_product(key, by=by)
+    if getattr(result, "ok", False):
+        groups = _mydeal_groups(getattr(result, "data", None))
+        return groups[0] if groups else None
+    if _mydeal_is_not_found(result):
+        return None
+    raise MarketplaceError(getattr(result, "message", None) or "Could not search MyDeal for this SKU.")
+
+
 def _mydeal_message(*, found: bool, advertised, status: str) -> str:
     if not found:
         return "Not found on MyDeal for this SKU."
@@ -346,18 +470,40 @@ def _lookup_mydeal(store, sku: str) -> dict:
 
     client = MyDealClient(store)
 
-    group = None
+    attempts: list[tuple[str, str]] = []
+    seen_attempts: set[tuple[str, str]] = set()
+
+    def _queue(key: str, by: str) -> None:
+        text = _norm_id(key)
+        if not text:
+            return
+        token = (text, by)
+        if token in seen_attempts:
+            return
+        seen_attempts.add(token)
+        attempts.append(token)
+
     for key in keys:
-        result = client.get_product(key, by="sku")
-        if result.ok:
-            groups = _mydeal_groups(result.data)
-            if groups:
-                group = groups[0]
+        _queue(key, "sku")
+        _queue(key, "id")
+    for key in _mydeal_related_keys(store, sku):
+        _queue(key, "sku")
+        _queue(key, "id")
+
+    group = None
+    for key, by in attempts:
+        group = _mydeal_fetch_group(client, key, by=by)
+        if group is not None:
+            break
+    if group is None:
+        # Buyable SKUs are not accepted by GET /products/{sku}. The seller
+        # catalog list includes those variant codes.
+        folded = {_norm_id(key).casefold() for key, _by in attempts if _norm_id(key)}
+        index = _mydeal_catalog_index(client, store)
+        for needle in folded:
+            group = index.get(needle)
+            if group is not None:
                 break
-            continue
-        if _mydeal_is_not_found(result):
-            continue
-        raise MarketplaceError(result.message or "Could not search MyDeal for this SKU.")
 
     found = group is not None
     buyable = _mydeal_pick_buyable(group, [sku, variant_key, parent_key]) if group else None

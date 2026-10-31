@@ -514,6 +514,118 @@ class MarketplaceLookupTests(TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["found"])
 
+    @patch("listings.mydeal.client.MyDealClient")
+    def test_mydeal_lookup_external_id_without_local_listing(self, mock_client_cls):
+        store = self._mydeal_store()
+        not_found = MyDealResult(
+            ok=False,
+            data={"ResponseStatus": "Failed", "Errors": [{"ID": "ProductNotFound", "Message": "Not found"}]},
+            message="Product not found",
+            status=200,
+            response_status="Failed",
+        )
+        found = MyDealResult(
+            ok=True,
+            data=self._mydeal_product(listing_status="Live", approved=True),
+            message="ok",
+            status=200,
+            response_status="Complete",
+        )
+
+        def _get(key, by="sku"):
+            if by == "id" and key == "SHD-10001-01":
+                return found
+            return not_found
+
+        mock_client = MagicMock()
+        mock_client.environment = "production"
+        mock_client.get_product.side_effect = _get
+        mock_client_cls.return_value = mock_client
+
+        result = marketplace_lookup.lookup_sku(store, "SHD-10001-01")
+        self.assertTrue(result["found"])
+        self.assertTrue(result["advertised"])
+        self.assertIn("live", result["message"].lower())
+        mock_client.list_products.assert_not_called()
+
+    @patch("listings.mydeal.client.MyDealClient")
+    def test_mydeal_lookup_buyable_sku_from_catalog_list(self, mock_client_cls):
+        store = self._mydeal_store()
+        not_found = MyDealResult(
+            ok=False,
+            data={"ResponseStatus": "Failed", "Errors": [{"ID": "ProductNotFound", "Message": "Not found"}]},
+            message="Product not found",
+            status=200,
+            response_status="Failed",
+        )
+        product = self._mydeal_product(listing_status="Live", approved=True)
+        mock_client = MagicMock()
+        mock_client.environment = "production"
+        mock_client.get_product.return_value = not_found
+        mock_client.list_products.return_value = MyDealResult(
+            ok=True,
+            data={"ResponseStatus": "Complete", "Data": [product["Data"]]},
+            message="ok",
+            status=200,
+            response_status="Complete",
+        )
+        mock_client_cls.return_value = mock_client
+
+        result = marketplace_lookup.lookup_sku(store, "SHD-10001-01-01")
+        self.assertTrue(result["found"])
+        self.assertTrue(result["advertised"])
+        self.assertEqual(result["results"][0]["sku"], "SHD-10001-01-01")
+        self.assertEqual(result["results"][0]["product_key"], "SHD-10001-01")
+        self.assertIsNone(result["local_listing"])
+
+    @patch("listings.mydeal.client.MyDealClient")
+    def test_mydeal_lookup_uses_inventory_template_external_id(self, mock_client_cls):
+        from catalog.models import MydealTemplateRow
+
+        store = self._mydeal_store()
+        MydealTemplateRow.objects.create(
+            store=store,
+            kind=MydealTemplateRow.Kind.INVENTORY,
+            row_number=1,
+            sku="BUY-1",
+            external_id="PARENT-1",
+            discontinued="FALSE",
+        )
+        not_found = MyDealResult(
+            ok=False,
+            data={"ResponseStatus": "Failed", "Errors": [{"ID": "ProductNotFound", "Message": "Not found"}]},
+            message="Product not found",
+            status=200,
+            response_status="Failed",
+        )
+        product = self._mydeal_product(listing_status="NotLive", approved=True)
+        product["Data"]["ProductSKU"] = "PARENT-1"
+        product["Data"]["ExternalProductId"] = "PARENT-1"
+        product["Data"]["BuyableProducts"][0]["SKU"] = "BUY-1"
+        product["Data"]["BuyableProducts"][0]["ExternalBuyableProductID"] = "BUY-1"
+
+        def _get(key, by="sku"):
+            if key == "PARENT-1" and by == "sku":
+                return MyDealResult(
+                    ok=True,
+                    data=product,
+                    message="ok",
+                    status=200,
+                    response_status="Complete",
+                )
+            return not_found
+
+        mock_client = MagicMock()
+        mock_client.environment = "production"
+        mock_client.get_product.side_effect = _get
+        mock_client_cls.return_value = mock_client
+
+        result = marketplace_lookup.lookup_sku(store, "BUY-1")
+        self.assertTrue(result["found"])
+        self.assertFalse(result["advertised"])
+        self.assertEqual(result["results"][0]["sku"], "BUY-1")
+        mock_client.list_products.assert_not_called()
+
     def test_mydeal_groups_from_data_list(self):
         groups = marketplace_lookup._mydeal_groups(
             {

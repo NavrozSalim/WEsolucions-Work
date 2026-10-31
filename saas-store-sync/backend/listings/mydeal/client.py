@@ -428,6 +428,24 @@ class MyDealClient:
         param = "id" if str(by or "sku").strip().lower() == "id" else "sku"
         return self.request("GET", f"/products/{key}", params={param: key})
 
+    def list_products(
+        self,
+        *,
+        page: int = 1,
+        limit: int = 250,
+        listing_status: str = "All",
+        fields: str = "",
+    ) -> MyDealResult:
+        """GET /products. Fields is required or MyDeal returns an empty body."""
+        params = {
+            "listingStatus": listing_status or "All",
+            "page": max(1, int(page or 1)),
+            "Limit": min(250, max(1, int(limit or 100))),
+        }
+        if fields:
+            params["Fields"] = fields
+        return self.request("GET", "/products", params=params)
+
     def upsert_products(self, product_groups: list[dict]) -> MyDealResult:
         """Create or update products via POST /products (async pending-responses)."""
         if not product_groups:
