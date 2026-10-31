@@ -398,6 +398,31 @@ class MyDealClient:
             return MyDealResult(ok=False, message="SKU is required to zero MyDeal inventory.")
         return self.request("POST", "/products/priceandquantity", json_body=groups)
 
+    def update_quantity_price(self, product_groups: list[dict]) -> MyDealResult:
+        """Set price and quantity via POST /products/quantityprice (doc §0.5.4).
+
+        Each group must include every buyable of that product. MyDeal treats a
+        missing variant as out of stock. A batch may contain at most 250 groups.
+        If this account does not have that route, the older price-and-quantity
+        route is used.
+        """
+        if not product_groups:
+            return MyDealResult(ok=False, message="No products to update.")
+        result = self.request(
+            "POST",
+            "/products/quantityprice",
+            json_body=product_groups,
+            timeout=90,
+        )
+        if result.ok or not _route_missing(result):
+            return result
+        return self.request(
+            "POST",
+            "/products/priceandquantity",
+            json_body=product_groups,
+            timeout=90,
+        )
+
     def end_listing(
         self,
         *,
@@ -619,6 +644,13 @@ def _error_items(body) -> list:
         return []
     errors = body.get("Errors") or body.get("errors") or []
     return errors if isinstance(errors, list) else []
+
+
+def _route_missing(result: MyDealResult) -> bool:
+    """True when the URL itself is not on this MyDeal account."""
+    status = int(getattr(result, "status", 0) or 0)
+    message = (getattr(result, "message", "") or "").lower()
+    return status in (404, 405) or "no http resource" in message
 
 
 def _is_product_not_found(err) -> bool:

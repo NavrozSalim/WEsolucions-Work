@@ -358,7 +358,7 @@ def _mydeal_hit(group: dict, buyable: dict | None, sku: str) -> dict:
 # MyDeal leave that field out of the response.
 _MYDEAL_LIST_FIELDS = (
     "ExternalProductId,ProductSKU,Title,"
-    "BuyableProducts(ExternalBuyableProductID,SKU,ListingStatus)"
+    "BuyableProducts(ExternalBuyableProductID,SKU,Price,RRP,Quantity,ListingStatus)"
 )
 _MYDEAL_LIST_STATUSES = ("Live", "NotLive")
 _MYDEAL_LIST_PAGE_LIMIT = 250

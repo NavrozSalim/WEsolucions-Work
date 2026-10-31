@@ -18,6 +18,10 @@ from ..models import StoreListing
 
 DELETE_SCOPE_MAPPED = "mapped"
 DELETE_SCOPE_UNMAPPED = "unmapped"
+# MyDeal refuses a listing-status batch above 100 product groups, and a
+# price-and-quantity batch above 250. Stay under both.
+_LISTING_BATCH = 80
+_QUANTITY_BATCH = 200
 
 
 def normalize_delete_scope(raw) -> str:
@@ -61,6 +65,37 @@ def mapped_sku_keys(store) -> set[str]:
     return keys
 
 
+def _raw_field(row: dict, *names):
+    wanted = {name.casefold() for name in names}
+    for key, value in row.items():
+        if str(key).casefold() in wanted:
+            return value
+    return None
+
+
+def _money(value) -> float:
+    text = str(value if value is not None else "").strip().replace(",", "")
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def _qty(value) -> int:
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _flag(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
 def _buyable_entries(group: dict) -> list[dict]:
     """One delete item per buyable in a MyDeal product group."""
     from ..marketplace_lookup import _ci_get, _ci_value
@@ -82,6 +117,10 @@ def _buyable_entries(group: dict) -> list[dict]:
             "external_buyable_id": buyable_id or sku,
             "title": _ci_get(group, "Title"),
             "listing_status": _ci_get(buyable, "ListingStatus"),
+            "price": _money(_raw_field(buyable, "Price")),
+            "rrp": _money(_raw_field(buyable, "RRP")),
+            "quantity": _qty(_raw_field(buyable, "Quantity")),
+            "unlimited": _flag(_raw_field(buyable, "ProductUnlimited")),
         })
     return entries
 
@@ -197,7 +236,50 @@ def _fail(row_result: dict, message: str) -> None:
     row_result["valid"] = False
 
 
-def delete_unmapped_rows(store, rows: list[dict]) -> tuple[list[dict], int, str]:
+def _chunks(items: list, size: int):
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+def _product_token(entry: dict) -> tuple[str, str]:
+    return (_key(entry.get("external_product_id")), _key(entry.get("sku")))
+
+
+def _quantity_group(members: list[dict], zero_keys: set[str]) -> dict:
+    """One product group with every variant. Only the chosen variants go to 0."""
+    buyables = []
+    for entry in members:
+        price = _money(entry.get("price"))
+        rrp = _money(entry.get("rrp")) or price
+        zero = bool(_entry_keys(entry) & zero_keys)
+        buyables.append({
+            "ExternalBuyableProductID": entry.get("external_buyable_id") or entry.get("buyable_sku"),
+            "SKU": entry.get("buyable_sku") or entry.get("external_buyable_id"),
+            "Price": price,
+            "RRP": rrp,
+            "Quantity": 0 if zero else _qty(entry.get("quantity")),
+            "ProductUnlimited": False if zero else bool(entry.get("unlimited")),
+        })
+    first = members[0]
+    return {
+        "ExternalProductID": first.get("external_product_id") or first.get("sku"),
+        "ProductSKU": first.get("sku") or first.get("external_product_id"),
+        "BuyableProducts": buyables,
+    }
+
+
+def _quantity_groups(entries: list[dict], zero_keys: set[str]) -> list[dict]:
+    products: dict[tuple[str, str], list[dict]] = {}
+    for entry in entries:
+        products.setdefault(_product_token(entry), []).append(entry)
+    groups = []
+    for members in products.values():
+        if any(_entry_keys(member) & zero_keys for member in members):
+            groups.append(_quantity_group(members, zero_keys))
+    return groups
+
+
+def delete_unmapped_rows(store, rows: list[dict], progress=None) -> tuple[list[dict], int, str]:
     """Process a "Not mapped (on MyDeal only)" delete file.
 
     Returns (row results, deleted count, message).
@@ -212,9 +294,11 @@ def delete_unmapped_rows(store, rows: list[dict]) -> tuple[list[dict], int, str]
 
     entries_by_buyable: dict[str, dict] = {}
     entries_by_group: dict[str, list[dict]] = {}
+    catalog_entries: list[dict] = []
     template_keys: set[str] = set()
     if api:
-        for entry in _catalog_entries(store):
+        catalog_entries = _catalog_entries(store)
+        for entry in catalog_entries:
             for key in _entry_keys(entry):
                 entries_by_buyable.setdefault(key, entry)
             for key in entry["group_keys"]:
@@ -273,31 +357,55 @@ def delete_unmapped_rows(store, rows: list[dict]) -> tuple[list[dict], int, str]
     if not pending:
         return preview, 0, ""
 
-    items = [target for _row, targets in pending for target in targets]
+    succeeded: list[tuple[dict, list[dict]]] = []
+    quantity_error = ""
     if api:
         from .client import MyDealClient
 
         client = MyDealClient(store)
-        zero = client.zero_quantity(items)
-        error = "" if zero.ok else (zero.message or "Could not set MyDeal inventory to 0.")
-        if not error:
+        done = 0
+        for batch in _chunks(pending, _LISTING_BATCH):
+            items = [target for _row, targets in batch for target in targets]
             ended = client.end_listings(items)
-            if not ended.ok:
-                error = ended.message or "Could not set MyDeal listings to NotLive."
-        if error:
-            for row_result, _targets in pending:
-                _fail(row_result, error)
-            return preview, 0, error[:500]
+            if ended.ok:
+                succeeded.extend(batch)
+            else:
+                message = ended.message or "Could not set MyDeal listings to NotLive."
+                for row_result, _targets in batch:
+                    _fail(row_result, message)
+            done += len(batch)
+            if progress is not None:
+                progress(done, len(succeeded), len(pending) - len(succeeded))
+        if succeeded:
+            zero_keys: set[str] = set()
+            for _row, targets in succeeded:
+                for target in targets:
+                    zero_keys.update(_entry_keys(target))
+            for batch in _chunks(_quantity_groups(catalog_entries, zero_keys), _QUANTITY_BATCH):
+                priced = client.update_quantity_price(batch)
+                if not priced.ok and not quantity_error:
+                    quantity_error = priced.message or "Could not set MyDeal inventory to 0."
+    else:
+        succeeded = pending
 
     skus: list[str] = []
-    for item in items:
-        skus.extend((item.get("buyable_sku"), item.get("external_buyable_id")))
+    for _row, targets in succeeded:
+        for item in targets:
+            skus.extend((item.get("buyable_sku"), item.get("external_buyable_id")))
     mark_inventory_discontinued(store, skus, discontinued=True)
 
-    for row_result, _targets in pending:
+    for row_result, _targets in succeeded:
         row_result["imported"] = True
-    deleted = len(pending)
-    if api:
+    deleted = len(succeeded)
+    if not deleted:
+        failed = next((row["errors"][0] for row in preview if row.get("errors")), "")
+        return preview, 0, failed[:500]
+    if api and quantity_error:
+        message = (
+            f"Set {deleted} MyDeal product(s) to NotLive and marked them Discontinued TRUE. "
+            f"Stock was not changed: {quantity_error}"
+        )
+    elif api:
         message = (
             f"Set {deleted} MyDeal product(s) to stock 0 and NotLive, "
             "and marked them Discontinued TRUE."

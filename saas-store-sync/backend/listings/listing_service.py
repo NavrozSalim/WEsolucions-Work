@@ -1697,7 +1697,13 @@ def _bulk_delete_mydeal_unmapped(
     from .mydeal.unmapped_delete import delete_unmapped_rows
 
     action = ListingAction.DELETE
-    preview, deleted, message = delete_unmapped_rows(store, rows)
+
+    def _progress(done, ok, failed):
+        _touch_upload_progress(
+            upload, processed=done, success=ok, errors=failed, total=len(rows),
+        )
+
+    preview, deleted, message = delete_unmapped_rows(store, rows, progress=_progress)
     error_rows = sum(1 for r in preview if not r["valid"])
     _finish_file_upload(
         upload,

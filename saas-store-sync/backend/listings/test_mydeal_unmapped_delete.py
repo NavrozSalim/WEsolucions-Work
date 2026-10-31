@@ -31,8 +31,14 @@ def _catalog_page():
                     "ProductSKU": "P1",
                     "Title": "Parent one",
                     "BuyableProducts": [
-                        {"ExternalBuyableProductID": "P1-A", "SKU": "P1-A", "ListingStatus": "Live"},
-                        {"ExternalBuyableProductID": "P1-B", "SKU": "P1-B", "ListingStatus": "Live"},
+                        {
+                            "ExternalBuyableProductID": "P1-A", "SKU": "P1-A",
+                            "ListingStatus": "Live", "Price": 10, "RRP": 12, "Quantity": 4,
+                        },
+                        {
+                            "ExternalBuyableProductID": "P1-B", "SKU": "P1-B",
+                            "ListingStatus": "Live", "Price": 11, "RRP": 13, "Quantity": 2,
+                        },
                     ],
                 },
                 {
@@ -152,7 +158,7 @@ class MydealUnmappedDeleteTests(TestCase):
     def test_delete_unmapped_zeros_stock_sets_notlive_and_discontinued(self, mock_client_cls):
         client = mock_client_cls.return_value
         client.list_products.side_effect = _list_products
-        client.zero_quantity.return_value = MyDealResult(ok=True)
+        client.update_quantity_price.return_value = MyDealResult(ok=True)
         client.end_listings.return_value = MyDealResult(ok=True)
         content = (
             "Action,SKU\n"
@@ -175,12 +181,17 @@ class MydealUnmappedDeleteTests(TestCase):
         self.assertIn("mapped in this app", by_sku["CAT1"]["errors"][0])
         self.assertIn("not found on MyDeal", by_sku["NOT-THERE"]["errors"][0])
 
-        zero_items = client.zero_quantity.call_args[0][0]
+        groups = client.update_quantity_price.call_args[0][0]
+        p1 = next(group for group in groups if group["ProductSKU"] == "P1")
+        by_sku = {buyable["SKU"]: buyable for buyable in p1["BuyableProducts"]}
+        self.assertEqual(set(by_sku), {"P1-A", "P1-B"})
+        self.assertEqual(by_sku["P1-B"]["Quantity"], 0)
+        self.assertEqual(by_sku["P1-B"]["Price"], 11)
+        self.assertEqual(by_sku["P1-B"]["RRP"], 13)
+        self.assertEqual(by_sku["P1-A"]["Quantity"], 4)
+        self.assertFalse(by_sku["P1-A"]["ProductUnlimited"])
         end_items = client.end_listings.call_args[0][0]
-        self.assertEqual([i["buyable_sku"] for i in zero_items], ["P1-B", "C1"])
-        self.assertEqual([i["buyable_sku"] for i in end_items], ["P1-B", "C1"])
-        self.assertEqual(zero_items[0]["sku"], "P1")
-        self.assertEqual(zero_items[0]["external_buyable_id"], "P1-B")
+        self.assertEqual([item["buyable_sku"] for item in end_items], ["P1-B", "C1"])
 
         self.assertEqual(self._discontinued("P1-B"), "TRUE")
         self.assertEqual(self._discontinued("C1"), "TRUE")
@@ -199,22 +210,66 @@ class MydealUnmappedDeleteTests(TestCase):
         self.assertEqual(result["imported"], 0)
         self.assertIn('"P1" is mapped in this app', result["rows"][0]["errors"][0])
         self.assertIn("variants mapped in this app (P2-X)", result["rows"][1]["errors"][0])
-        client.zero_quantity.assert_not_called()
+        client.update_quantity_price.assert_not_called()
         client.end_listings.assert_not_called()
 
     @patch("listings.mydeal.client.MyDealClient")
-    def test_mydeal_error_keeps_discontinued_false(self, mock_client_cls):
+    def test_listing_status_error_keeps_discontinued_false(self, mock_client_cls):
         client = mock_client_cls.return_value
         client.list_products.side_effect = _list_products
-        client.zero_quantity.return_value = MyDealResult(ok=False, message="MyDeal is down")
+        client.end_listings.return_value = MyDealResult(ok=False, message="MyDeal is down")
         result = listing_service.bulk_import(
             self.user, self.store, "del.csv", b"Action,SKU\nDelete,P1-B\n",
             action="delete", delete_scope="unmapped",
         )
         self.assertEqual(result["imported"], 0)
         self.assertEqual(result["rows"][0]["errors"], ["MyDeal is down"])
-        client.end_listings.assert_not_called()
+        client.update_quantity_price.assert_not_called()
         self.assertEqual(self._discontinued("P1-B"), "FALSE")
+
+    @patch("listings.mydeal.client.MyDealClient")
+    def test_stock_error_still_sets_notlive(self, mock_client_cls):
+        client = mock_client_cls.return_value
+        client.list_products.side_effect = _list_products
+        client.end_listings.return_value = MyDealResult(ok=True)
+        client.update_quantity_price.return_value = MyDealResult(ok=False, message="Price is required")
+        result = listing_service.bulk_import(
+            self.user, self.store, "del.csv", b"Action,SKU\nDelete,P1-B\n",
+            action="delete", delete_scope="unmapped",
+        )
+        self.assertEqual(result["imported"], 1)
+        upload = ListingUpload.objects.order_by("-created_at").first()
+        self.assertIn("Stock was not changed", upload.message)
+        self.assertIn("Price is required", upload.message)
+        self.assertEqual(self._discontinued("P1-B"), "TRUE")
+
+    @patch("listings.mydeal.client.MyDealClient")
+    def test_listing_status_is_split_under_the_mydeal_limit(self, mock_client_cls):
+        client = mock_client_cls.return_value
+        entries = []
+        for number in range(81):
+            sku = f"U-{number}"
+            entries.append({
+                "sku": sku,
+                "external_product_id": sku,
+                "buyable_sku": sku,
+                "external_buyable_id": sku,
+                "group_keys": {sku.casefold()},
+                "price": 5,
+                "rrp": 6,
+                "quantity": 1,
+                "unlimited": False,
+            })
+        client.end_listings.return_value = MyDealResult(ok=True)
+        client.update_quantity_price.return_value = MyDealResult(ok=True)
+        rows = [{"row_number": number + 2, "sku": f"U-{number}"} for number in range(81)]
+        with patch.object(unmapped_delete, "_catalog_entries", return_value=entries):
+            preview, deleted, _message = unmapped_delete.delete_unmapped_rows(self.store, rows)
+        self.assertEqual(deleted, 81)
+        self.assertEqual(client.end_listings.call_count, 2)
+        self.assertEqual(len(client.end_listings.call_args_list[0][0][0]), 80)
+        self.assertEqual(len(client.end_listings.call_args_list[1][0][0]), 1)
+        self.assertTrue(all(row["imported"] for row in preview))
 
     def test_upload_mode_store_marks_inventory_template_only(self):
         self.store.mydeal_setup_method = "upload"
