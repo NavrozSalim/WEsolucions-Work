@@ -986,9 +986,14 @@ def publish_listings(user, store, listings: list[StoreListing]) -> dict:
 
 
 def push_inventory(listings: list[StoreListing], store) -> dict:
-    """POST /products/priceandquantity for already-uploaded listings."""
+    """Push price and stock for already-uploaded listings.
+
+    Uses ``POST /products/quantityprice``. Variants that share a parent are one
+    product group, because MyDeal treats a missing variant as out of stock.
+    Pass every published variant of a parent in ``listings``.
+    """
     client = MyDealClient(store)
-    groups = []
+    groups: OrderedDict[str, dict] = OrderedDict()
     for listing in listings:
         sku = (listing.sku or listing.external_variant_key or "").strip()
         if not sku:
@@ -1001,31 +1006,34 @@ def push_inventory(listings: list[StoreListing], store) -> dict:
             price = (Decimal(cents) / Decimal(100)) if cents else Decimal("0")
         qty = int(listing.inventory or 0)
         unlimited = bool(listing.infinite_quantity)
-        groups.append(
-            {
+        buyable = {
+            "ExternalBuyableProductID": buyable_id,
+            "SKU": sku,
+            "Price": float(price) if price > 0 else None,
+            "Quantity": 0 if unlimited else max(0, qty),
+            "ProductUnlimited": unlimited,
+        }
+        group = groups.get(parent_id)
+        if group is None:
+            groups[parent_id] = {
                 "ExternalProductID": parent_id,
                 "ProductSKU": parent_id,
-                "BuyableProducts": [
-                    {
-                        "ExternalBuyableProductID": buyable_id,
-                        "SKU": sku,
-                        "Price": float(price) if price > 0 else None,
-                        "Quantity": 0 if unlimited else max(0, qty),
-                        "ProductUnlimited": unlimited,
-                    }
-                ],
+                "BuyableProducts": [buyable],
             }
-        )
-    if not groups:
+            continue
+        if sku in {row["SKU"] for row in group["BuyableProducts"]}:
+            continue
+        group["BuyableProducts"].append(buyable)
+    payload = list(groups.values())
+    if not payload:
         return {"ok": False, "message": "No listings to push.", "updated": 0}
-    # Strip None prices
-    for g in groups:
-        for b in g["BuyableProducts"]:
-            if b.get("Price") is None:
-                b.pop("Price", None)
-    result = client.update_price_quantity(groups)
+    for group in payload:
+        for buyable in group["BuyableProducts"]:
+            if buyable.get("Price") is None:
+                buyable.pop("Price", None)
+    result = client.update_quantity_price(payload)
     return {
         "ok": result.ok,
         "message": result.message or ("Price/stock pushed to MyDeal." if result.ok else "Push failed."),
-        "updated": len(groups) if result.ok else 0,
+        "updated": len(payload) if result.ok else 0,
     }

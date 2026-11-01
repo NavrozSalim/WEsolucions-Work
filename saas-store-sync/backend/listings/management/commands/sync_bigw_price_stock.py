@@ -20,6 +20,8 @@ from __future__ import annotations
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
+from collections import defaultdict
+
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections, transaction
@@ -28,7 +30,7 @@ from django.utils import timezone
 
 from listings.errors import MarketplaceError
 from listings.models import InventorySyncStatus, ListingStatus, StoreListing
-from listings.mydeal.products import push_inventory
+from listings.mydeal.products import parent_product_id, push_inventory
 from scrapers.vevor_au_ingest import clean_id
 from stores.models import Store
 from users.org_scope import organization_user_ids
@@ -244,6 +246,7 @@ class Command(BaseCommand):
         parsed = _read_rows(options["file"])
 
         listings_by_sku: dict[str, list[StoreListing]] = {}
+        published_by_parent: dict[str, list[StoreListing]] = defaultdict(list)
         for listing in StoreListing.objects.filter(store=store).only(
             "id",
             "sku",
@@ -261,6 +264,8 @@ class Command(BaseCommand):
             key = _norm_sku(listing.sku)
             if key:
                 listings_by_sku.setdefault(key, []).append(listing)
+            if listing.status in _PUBLISHED and (listing.sku or listing.external_variant_key):
+                published_by_parent[parent_product_id(listing)].append(listing)
 
         problems: list[str] = []
         planned: list[tuple[StoreListing, str, Decimal, int]] = []
@@ -301,19 +306,36 @@ class Command(BaseCommand):
             listing.updated_at = now
             listings.append(listing)
 
+        planned_ids = {listing.id for listing in listings}
+        parent_order: list[str] = []
+        seen_parents: set[str] = set()
+        for listing in listings:
+            parent = parent_product_id(listing)
+            if parent not in seen_parents:
+                seen_parents.add(parent)
+                parent_order.append(parent)
+
         pushed = 0
         total = len(listings)
         try:
-            for start in range(0, total, BATCH_SIZE):
-                batch = listings[start:start + BATCH_SIZE]
+            for start in range(0, len(parent_order), BATCH_SIZE):
+                parents = parent_order[start:start + BATCH_SIZE]
+                save_rows: list[StoreListing] = []
+                push_rows: list[StoreListing] = []
+                for parent in parents:
+                    for member in published_by_parent.get(parent, []):
+                        push_rows.append(member)
+                        if member.id in planned_ids:
+                            save_rows.append(member)
                 close_old_connections()
                 try:
                     with transaction.atomic():
-                        StoreListing.objects.bulk_update(
-                            batch, _UPDATE_FIELDS, batch_size=BATCH_SIZE,
-                        )
+                        if save_rows:
+                            StoreListing.objects.bulk_update(
+                                save_rows, _UPDATE_FIELDS, batch_size=BATCH_SIZE,
+                            )
                         try:
-                            result = push_inventory(batch, store)
+                            result = push_inventory(push_rows, store)
                         except MarketplaceError as exc:
                             raise CommandError(str(exc)) from exc
                         if not result.get("ok"):
@@ -322,7 +344,7 @@ class Command(BaseCommand):
                             )
                 except CommandError:
                     raise
-                pushed += len(batch)
+                pushed += len(save_rows)
                 self.stdout.write(f"Pushed {pushed} of {total}.")
         except CommandError as exc:
             if pushed:

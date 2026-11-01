@@ -114,7 +114,7 @@ class SyncBigWPriceStockTests(TestCase):
     @patch("listings.mydeal.products.MyDealClient")
     def test_pushes_the_file_price_and_stock(self, mock_client_cls):
         client = mock_client_cls.return_value
-        client.update_price_quantity.return_value = MyDealResult(ok=True, message="Price/stock pushed to MyDeal.")
+        client.update_quantity_price.return_value = MyDealResult(ok=True, message="Price/stock pushed to MyDeal.")
         listing = self._listing(self.store, "SKU-1", infinite=True)
         other = self._listing(self.other_mydeal, "SKU-1", price="3.00", stock=9)
         lasoo = self._listing(self.bunnings_name, "SKU-1", price="4.00", stock=8)
@@ -141,18 +141,18 @@ class SyncBigWPriceStockTests(TestCase):
         self.assertEqual(lasoo.sale_price, Decimal("4.00"))
         self.assertEqual(untouched.sale_price, Decimal("5.00"))
         self.assertEqual(untouched.inventory, 2)
-        payload = client.update_price_quantity.call_args.args[0]
+        payload = client.update_quantity_price.call_args.args[0]
         buyable = payload[0]["BuyableProducts"][0]
         self.assertEqual(buyable["SKU"], "SKU-1")
         self.assertEqual(buyable["Price"], 19.95)
         self.assertEqual(buyable["Quantity"], 6)
         self.assertFalse(buyable["ProductUnlimited"])
-        self.assertEqual(client.update_price_quantity.call_count, 1)
+        self.assertEqual(client.update_quantity_price.call_count, 1)
 
     @patch("listings.mydeal.products.MyDealClient")
     def test_final_price_header_and_zero_stock(self, mock_client_cls):
         client = mock_client_cls.return_value
-        client.update_price_quantity.return_value = MyDealResult(ok=True, message="ok")
+        client.update_quantity_price.return_value = MyDealResult(ok=True, message="ok")
         listing = self._listing(self.store, "sku-2")
         path = _workbook(
             [("SKU-2", "$12.50", 0)],
@@ -162,14 +162,14 @@ class SyncBigWPriceStockTests(TestCase):
         listing.refresh_from_db()
         self.assertEqual(listing.sale_price, Decimal("12.50"))
         self.assertEqual(listing.inventory, 0)
-        buyable = client.update_price_quantity.call_args.args[0][0]["BuyableProducts"][0]
+        buyable = client.update_quantity_price.call_args.args[0][0]["BuyableProducts"][0]
         self.assertEqual(buyable["Price"], 12.5)
         self.assertEqual(buyable["Quantity"], 0)
 
     @patch("listings.mydeal.products.MyDealClient")
     def test_excel_number_sku_matches(self, mock_client_cls):
         client = mock_client_cls.return_value
-        client.update_price_quantity.return_value = MyDealResult(ok=True, message="ok")
+        client.update_quantity_price.return_value = MyDealResult(ok=True, message="ok")
         listing = self._listing(self.store, "1001")
         path = _workbook([(1001.0, 8, 3.0)])
         self._run(path)
@@ -177,7 +177,7 @@ class SyncBigWPriceStockTests(TestCase):
         self.assertEqual(listing.sale_price, Decimal("8.00"))
         self.assertEqual(listing.inventory, 3)
         self.assertEqual(listing.sku, "1001")
-        client.update_price_quantity.assert_called_once()
+        client.update_quantity_price.assert_called_once()
 
     @patch("listings.mydeal.products.MyDealClient")
     def test_dry_run_does_not_write_or_push(self, mock_client_cls):
@@ -219,7 +219,7 @@ class SyncBigWPriceStockTests(TestCase):
     @patch("listings.mydeal.products.MyDealClient")
     def test_failed_push_rolls_back_the_saved_price(self, mock_client_cls):
         client = mock_client_cls.return_value
-        client.update_price_quantity.return_value = MyDealResult(ok=False, message="MyDeal rejected the batch.")
+        client.update_quantity_price.return_value = MyDealResult(ok=False, message="MyDeal rejected the batch.")
         listing = self._listing(self.store, "SKU-1", infinite=True)
         path = _workbook([("SKU-1", 19.95, 6)])
         with self.assertRaises(CommandError) as raised:
@@ -232,17 +232,44 @@ class SyncBigWPriceStockTests(TestCase):
         self.assertTrue(listing.infinite_quantity)
         self.assertEqual(listing.inventory_sync_status, InventorySyncStatus.PENDING)
 
+    @patch("listings.mydeal.products.MyDealClient")
+    def test_variants_of_one_product_are_sent_together(self, mock_client_cls):
+        client = mock_client_cls.return_value
+        client.update_quantity_price.return_value = MyDealResult(ok=True, message="ok")
+        changed = self._listing(self.store, "SKU-A")
+        sibling = self._listing(self.store, "SKU-B", price="9.00", stock=1)
+        changed.external_product_key = "PARENT"
+        sibling.external_product_key = "PARENT"
+        changed.save(update_fields=["external_product_key"])
+        sibling.save(update_fields=["external_product_key"])
+        path = _workbook([("SKU-A", 19.95, 6)])
+        self._run(path)
+        groups = client.update_quantity_price.call_args.args[0]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["ExternalProductID"], "PARENT")
+        by_sku = {row["SKU"]: row for row in groups[0]["BuyableProducts"]}
+        self.assertEqual(set(by_sku), {"SKU-A", "SKU-B"})
+        self.assertEqual(by_sku["SKU-A"]["Price"], 19.95)
+        self.assertEqual(by_sku["SKU-A"]["Quantity"], 6)
+        self.assertEqual(by_sku["SKU-B"]["Price"], 9.0)
+        self.assertEqual(by_sku["SKU-B"]["Quantity"], 1)
+        changed.refresh_from_db()
+        sibling.refresh_from_db()
+        self.assertEqual(changed.sale_price, Decimal("19.95"))
+        self.assertEqual(sibling.sale_price, Decimal("9.00"))
+        self.assertEqual(sibling.inventory, 1)
+
     @patch("listings.management.commands.sync_bigw_price_stock.BATCH_SIZE", 2)
     @patch("listings.mydeal.products.MyDealClient")
     def test_pushes_in_small_batches(self, mock_client_cls):
         client = mock_client_cls.return_value
-        client.update_price_quantity.return_value = MyDealResult(ok=True, message="ok")
+        client.update_quantity_price.return_value = MyDealResult(ok=True, message="ok")
         listings = [self._listing(self.store, f"SKU-{i}") for i in range(3)]
         path = _workbook([("SKU-0", 10, 2), ("SKU-1", 11, 3), ("SKU-2", 12, 4)])
         self._run(path)
-        self.assertEqual(client.update_price_quantity.call_count, 2)
-        self.assertEqual(len(client.update_price_quantity.call_args_list[0].args[0]), 2)
-        self.assertEqual(len(client.update_price_quantity.call_args_list[1].args[0]), 1)
+        self.assertEqual(client.update_quantity_price.call_count, 2)
+        self.assertEqual(len(client.update_quantity_price.call_args_list[0].args[0]), 2)
+        self.assertEqual(len(client.update_quantity_price.call_args_list[1].args[0]), 1)
         listings[0].refresh_from_db()
         listings[1].refresh_from_db()
         listings[2].refresh_from_db()
@@ -255,7 +282,7 @@ class SyncBigWPriceStockTests(TestCase):
     @patch("listings.mydeal.products.MyDealClient")
     def test_a_later_batch_failure_keeps_the_batches_already_pushed(self, mock_client_cls):
         client = mock_client_cls.return_value
-        client.update_price_quantity.side_effect = [
+        client.update_quantity_price.side_effect = [
             MyDealResult(ok=True, message="ok"),
             MyDealResult(ok=False, message="MyDeal rejected the batch."),
         ]
@@ -272,7 +299,7 @@ class SyncBigWPriceStockTests(TestCase):
         self.assertEqual(first.inventory, 4)
         self.assertEqual(second.sale_price, Decimal("9.00"))
         self.assertEqual(second.inventory, 1)
-        self.assertEqual(client.update_price_quantity.call_count, 2)
+        self.assertEqual(client.update_quantity_price.call_count, 2)
 
     @patch("listings.mydeal.products.MyDealClient")
     def test_variant_key_is_not_the_sku(self, mock_client_cls):
