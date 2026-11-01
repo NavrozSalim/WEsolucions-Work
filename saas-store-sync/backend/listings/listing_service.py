@@ -2690,11 +2690,11 @@ def start_scrape_async(user, store, listing_ids=None, vendor_code=None) -> dict:
             )
         if store_wide:
             raise MarketplaceError(
-                "No Pending listings with a Vendor URL, Nora Vendor ID, Vevor SKU, Costway SKU, or Wallkoala SKU to scrape. "
+                "No Pending listings with a Vendor URL, Nora Vendor ID, Vevor SKU, Costway SKU, or Wallkoala Vendor ID to scrape. "
                 "Use Reset status to move Scraped or Failed rows back to Pending first."
             )
         raise MarketplaceError(
-            "No listings with a Vendor URL, Nora Vendor ID, Vevor SKU, Costway SKU, or Wallkoala SKU to scrape. "
+            "No listings with a Vendor URL, Nora Vendor ID, Vevor SKU, Costway SKU, or Wallkoala Vendor ID to scrape. "
             "Add a vendor link / Vendor ID on each listing first."
         )
 
@@ -2925,7 +2925,7 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
 
     if not listings:
         raise MarketplaceError(
-            "No listings with a Vendor URL, Nora Vendor ID, Vevor SKU, Costway SKU, or Wallkoala SKU to scrape. "
+            "No listings with a Vendor URL, Nora Vendor ID, Vevor SKU, Costway SKU, or Wallkoala Vendor ID to scrape. "
             "Add a vendor link / Vendor ID on each listing first."
         )
 
@@ -3269,24 +3269,21 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                 if wallkoala_feed is None:
                     return None, None, (
                         "Upload a Wallkoala Excel file in Store Settings "
-                        "(SKU, Vendor Price, Vendor Inventory)."
+                        "(Vendor ID, Vendor Price, Vendor Inventory)."
                     )
-                entry = lookup_wallkoala_entry(
-                    wallkoala_feed,
-                    listing.vendor_id or "",
-                    listing.sku or "",
-                    listing.external_variant_key or "",
-                    listing.external_product_key or "",
-                )
+                vendor_key = (listing.vendor_id or "").strip()
+                if not vendor_key:
+                    return None, None, "Vendor ID is required for Wallkoala"
+                entry = lookup_wallkoala_entry(wallkoala_feed, vendor_key)
                 if not entry:
-                    return None, None, "SKU not in Wallkoala Excel"
+                    return None, None, "Vendor ID not in Wallkoala Excel"
                 price = entry.get("price")
                 if price is None:
-                    return None, None, "No Vendor Price in Wallkoala Excel for this SKU"
+                    return None, None, "No Vendor Price in Wallkoala Excel for this Vendor ID"
                 try:
                     price = float(price)
                 except (TypeError, ValueError):
-                    return None, None, "No Vendor Price in Wallkoala Excel for this SKU"
+                    return None, None, "No Vendor Price in Wallkoala Excel for this Vendor ID"
                 try:
                     stock = int(entry.get("inventory") or 0)
                 except (TypeError, ValueError):
@@ -3586,27 +3583,25 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     if wallkoala_feed is None:
                         _fail_row(
                             "Upload a Wallkoala Excel file in Store Settings "
-                            "(SKU, Vendor Price, Vendor Inventory)."
+                            "(Vendor ID, Vendor Price, Vendor Inventory)."
                         )
                         continue
-                    entry = lookup_wallkoala_entry(
-                        wallkoala_feed,
-                        listing.vendor_id or "",
-                        listing.sku or "",
-                        listing.external_variant_key or "",
-                        listing.external_product_key or "",
-                    )
+                    vendor_key = (listing.vendor_id or "").strip()
+                    if not vendor_key:
+                        _fail_row("Vendor ID is required for Wallkoala")
+                        continue
+                    entry = lookup_wallkoala_entry(wallkoala_feed, vendor_key)
                     if not entry:
-                        _fail_row("SKU not in Wallkoala Excel")
+                        _fail_row("Vendor ID not in Wallkoala Excel")
                         continue
                     price = entry.get("price")
                     if price is None:
-                        _fail_row("No Vendor Price in Wallkoala Excel for this SKU")
+                        _fail_row("No Vendor Price in Wallkoala Excel for this Vendor ID")
                         continue
                     try:
                         price = float(price)
                     except (TypeError, ValueError):
-                        _fail_row("No Vendor Price in Wallkoala Excel for this SKU")
+                        _fail_row("No Vendor Price in Wallkoala Excel for this Vendor ID")
                         continue
                     try:
                         stock = int(entry.get("inventory") or 0)

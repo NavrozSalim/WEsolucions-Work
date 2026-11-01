@@ -1208,7 +1208,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                         pm,
                         'no_wallkoala_file',
                         'Upload a Wallkoala Excel file in Store Settings '
-                        '(SKU, Vendor Price, Vendor Inventory).',
+                        '(Vendor ID, Vendor Price, Vendor Inventory).',
                         store=store,
                     )
                     failed += 1
@@ -1961,7 +1961,7 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
                         pm,
                         'no_wallkoala_file',
                         'Upload a Wallkoala Excel file in Store Settings '
-                        '(SKU, Vendor Price, Vendor Inventory).',
+                        '(Vendor ID, Vendor Price, Vendor Inventory).',
                         store=store,
                     )
                     failed += 1

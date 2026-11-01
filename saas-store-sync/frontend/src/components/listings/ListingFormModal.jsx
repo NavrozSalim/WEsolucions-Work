@@ -160,7 +160,7 @@ function VendorSourceFields({
                 ) : null}
                 {wallkoalaSelected ? (
                     <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                        Optional. Price and stock come from the Wallkoala Excel file (SKU, Vendor Price, Vendor Inventory). Shipping Price is ignored.
+                        Optional. Price and stock come from the Wallkoala file by Vendor ID (Vendor Price and Vendor Inventory). Vendor Shipping Price is not added.
                     </p>
                 ) : null}
                 {vevorSelected ? (
@@ -182,7 +182,7 @@ function VendorSourceFields({
                             noraSelected
                                 ? 'Nora BarCode after cleaning, e.g. 8FNZ100-DL-G1'
                                 : wallkoalaSelected
-                                    ? 'Wallkoala SKU from Excel, e.g. WK022-ST-40X30CM'
+                                    ? 'Vendor ID from the Wallkoala file, e.g. WK-NEW-1001'
                                     : costwaySelected
                                         ? 'Costway SKU from the feed, if different from listing SKU'
                                         : 'Vevor SKU from the feed, if different from listing SKU'

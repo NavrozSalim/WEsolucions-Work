@@ -92,11 +92,11 @@ export default function NoraInventoryUploadField({
             <p className="text-xs text-slate-600 dark:text-slate-400">
                 {isWallkoala ? (
                     <>
-                        Upload the vendor file. System reads <strong>SKU</strong>,{' '}
-                        <strong>Vendor Price</strong>, and <strong>Vendor Inventory</strong>.
-                        Shipping Price is ignored and is not added to cost. Price and stock
-                        are applied on Start Scraping using this store&apos;s Price margins
-                        and Inventory ranges.
+                        Upload the vendor file. Columns are <strong>Vendor ID</strong>,{' '}
+                        <strong>Vendor Price</strong>, <strong>Vendor Shipping Price</strong>,
+                        and <strong>Vendor Inventory</strong>. Vendor Shipping Price is not
+                        added to the cost. Start Scraping matches Vendor ID, then applies
+                        this store&apos;s price margins and inventory ranges.
                     </>
                 ) : (
                     <>

@@ -61,11 +61,8 @@ def resolve_wallkoala_sku(product, row=None) -> str:
 
 
 def lookup_wallkoala_for_product(feed, product, row=None) -> dict | None:
-    return lookup_wallkoala_entry(
-        feed,
-        resolve_wallkoala_sku(product, row),
-        getattr(product, "vendor_sku", None) or "",
-    )
+    """Match the price file by the product's Vendor ID only."""
+    return lookup_wallkoala_entry(feed, resolve_wallkoala_sku(product, row))
 
 
 def wallkoala_price_stock(feed, product, row=None) -> tuple[float | None, int]:
@@ -77,12 +74,12 @@ def wallkoala_price_stock(feed, product, row=None) -> tuple[float | None, int]:
     entry = lookup_wallkoala_for_product(feed, product, row)
     if not entry:
         raise ValueError(
-            f'SKU "{sku or getattr(product, "vendor_sku", "")}" not in Wallkoala Excel'
+            f'Vendor ID "{sku or getattr(product, "vendor_sku", "")}" not in Wallkoala Excel'
         )
     price = entry.get("price")
     if price is None:
         raise ValueError(
-            f'No Vendor Price in Wallkoala Excel for SKU "{sku or entry.get("sku") or ""}"'
+            f'No Vendor Price in Wallkoala Excel for Vendor ID "{sku or entry.get("sku") or ""}"'
         )
     try:
         stock = int(entry.get("inventory") or 0)

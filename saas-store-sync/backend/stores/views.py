@@ -213,7 +213,8 @@ class StoreViewSet(viewsets.ModelViewSet):
         """Upload / overwrite the Wallkoala Excel for this store.
 
         Expects multipart field ``file`` (.xlsx or .csv). Price and inventory
-        come from SKU / Vendor Price / Vendor Inventory. Shipping Price is ignored.
+        come from Vendor ID / Vendor Price / Vendor Inventory. Vendor Shipping
+        Price is not added to the cost.
         """
         from django.utils import timezone
         from scrapers.wallkoala_ingest import load_wallkoala_feed_from_file
@@ -288,7 +289,7 @@ class StoreViewSet(viewsets.ModelViewSet):
         ])
         return Response({
             'ok': True,
-            'message': f'Wallkoala inventory uploaded ({sku_count} SKU(s)).',
+            'message': f'Wallkoala inventory uploaded ({sku_count} Vendor ID(s)).',
             'skus': sku_count,
             'file_name': inv.nora_inventory_original_name,
             'uploaded_at': inv.nora_inventory_uploaded_at,

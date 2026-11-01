@@ -41,7 +41,7 @@ export const uploadNoraInventory = (storeId, file) => {
     });
 };
 
-/** Upload / overwrite Wallkoala Excel (SKU, Vendor Price, Vendor Inventory). */
+/** Upload / overwrite Wallkoala Excel (Vendor ID, Vendor Price, Vendor Inventory). */
 export const uploadWallkoalaInventory = (storeId, file, vendorId) => {
     const form = new FormData();
     form.append('file', file);

@@ -1,4 +1,4 @@
-"""Unit tests for Wallkoala Excel/CSV ingest (SKU, Vendor Price, Vendor Inventory)."""
+"""Unit tests for Wallkoala Excel/CSV ingest (Vendor ID, Vendor Price, Vendor Inventory)."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -78,3 +78,26 @@ class WallkoalaFeedTests(unittest.TestCase):
             ["WK-1", 1, 0, 1],
         ])
         self.assertIsNone(lookup_wallkoala_entry(feed, "NOPE"))
+
+    def test_vendor_id_template_does_not_add_shipping(self):
+        rows = [
+            ["Vendor ID", "Vendor Price", "Vendor Shipping Price", "Vendor Inventory"],
+            ["NEW-1", 10.50, 5.00, 12],
+        ]
+        feed = build_wallkoala_feed_from_rows(rows)
+        entry = lookup_wallkoala_entry(feed, "NEW-1")
+        self.assertEqual(entry["price"], 10.50)
+        self.assertEqual(entry["inventory"], 12)
+        self.assertNotEqual(entry["price"], 15.50)
+        self.assertIsNone(lookup_wallkoala_entry(feed, "5.00"))
+
+    def test_vendor_id_column_wins_over_sku_column(self):
+        rows = [
+            ["SKU", "Vendor ID", "Vendor Price", "Vendor Shipping Price", "Vendor Inventory"],
+            ["LISTING-SKU", "NEW-1", 10.50, 4.00, 7],
+        ]
+        feed = build_wallkoala_feed_from_rows(rows)
+        entry = lookup_wallkoala_entry(feed, "NEW-1")
+        self.assertEqual(entry["price"], 10.50)
+        self.assertEqual(entry["inventory"], 7)
+        self.assertIsNone(lookup_wallkoala_entry(feed, "LISTING-SKU"))

@@ -104,6 +104,45 @@ class ManagedListingWallkoalaScrapeTests(TestCase):
         self.assertEqual(listing.inventory_sync_status, InventorySyncStatus.FAILED)
         self.assertIn("not in Wallkoala Excel", listing.last_scrape_error)
 
+    @patch("stores.wallkoala.load_store_wallkoala_feed")
+    @patch("stores.nora.load_store_nora_stock_map", return_value=None)
+    @patch("scrapers.close_amazon_session")
+    @patch("scrapers.get_price_and_stock")
+    def test_wallkoala_uses_vendor_id_not_listing_sku(self, mock_price, _close, _nora, mock_feed):
+        wrong = {"price": 99, "inventory": 99, "sku": "LISTING-SKU"}
+        right = {"price": 21, "inventory": 4, "sku": "NEW-ID"}
+        mock_feed.return_value = {
+            "LISTING-SKU": wrong,
+            "listing-sku": wrong,
+            "NEW-ID": right,
+            "new-id": right,
+        }
+        listing = self._listing("LISTING-SKU", url="", vendor_id="NEW-ID")
+        result = listing_service.scrape_listings(self.user, self.store)
+        self.assertEqual(result["scraped"], 1)
+        self.assertEqual(result["failed"], 0)
+        mock_price.assert_not_called()
+        listing.refresh_from_db()
+        self.assertEqual(float(listing.vendor_price), 21)
+        self.assertEqual(listing.inventory, 4)
+
+    @patch("stores.wallkoala.load_store_wallkoala_feed")
+    @patch("stores.nora.load_store_nora_stock_map", return_value=None)
+    @patch("scrapers.close_amazon_session")
+    @patch("scrapers.get_price_and_stock")
+    def test_wallkoala_does_not_fall_back_to_listing_sku(self, mock_price, _close, _nora, mock_feed):
+        entry = {"price": 21, "inventory": 4, "sku": "LISTING-SKU"}
+        mock_feed.return_value = {"LISTING-SKU": entry, "listing-sku": entry}
+        listing = self._listing("LISTING-SKU", url="", vendor_id="OLD-ID")
+        result = listing_service.scrape_listings(self.user, self.store)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["scraped"], 0)
+        mock_price.assert_not_called()
+        listing.refresh_from_db()
+        self.assertEqual(listing.inventory_sync_status, InventorySyncStatus.FAILED)
+        self.assertIn("not in Wallkoala Excel", listing.last_scrape_error)
+        self.assertIsNone(listing.vendor_price)
+
     @patch("stores.wallkoala.load_store_wallkoala_feed", return_value=None)
     @patch("stores.nora.load_store_nora_stock_map", return_value=None)
     @patch("scrapers.close_amazon_session")

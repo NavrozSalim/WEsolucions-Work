@@ -1,4 +1,10 @@
-"""Wallkoala Excel/CSV feed: SKU + vendor price + inventory. Shipping is ignored."""
+"""Wallkoala Excel/CSV feed.
+
+The price file is keyed by Vendor ID. Columns are Vendor ID, Vendor Price,
+Vendor Shipping Price, and Vendor Inventory. Vendor Shipping Price is kept in
+the file and is not added to the cost. A file that has no Vendor ID column is
+still keyed by SKU so older uploads keep working.
+"""
 from __future__ import annotations
 
 import csv
@@ -23,7 +29,14 @@ INV_HEADERS = frozenset({
     "stock",
     "availableinventory",
 })
-SKIP_HEADERS = frozenset({"shippingprice", "shipping", "freight", "shippingcost"})
+SKIP_HEADERS = frozenset({
+    "shippingprice",
+    "shipping",
+    "freight",
+    "shippingcost",
+    "vendorshippingprice",
+    "vendorshipping",
+})
 # Screenshot layout when headers are missing or unrecognized.
 DEFAULT_SKU_COL = 0
 DEFAULT_PRICE_COL = 1
@@ -72,16 +85,22 @@ def _to_stock(value) -> int:
 
 def _header_indexes(header_row) -> tuple[int | None, int | None, int | None]:
     sku_i = price_i = inv_i = None
+    vendor_id_i = None
     for i, cell in enumerate(header_row or []):
         key = _canon_header(cell)
         if not key or key in SKIP_HEADERS:
             continue
+        if key == "vendorid" and vendor_id_i is None:
+            vendor_id_i = i
         if sku_i is None and key in SKU_HEADERS:
             sku_i = i
         elif price_i is None and key in PRICE_HEADERS:
             price_i = i
         elif inv_i is None and key in INV_HEADERS:
             inv_i = i
+    # Vendor ID is the price-file key even when a SKU column is also present.
+    if vendor_id_i is not None:
+        sku_i = vendor_id_i
     return sku_i, price_i, inv_i
 
 
@@ -91,7 +110,7 @@ def _looks_like_header(row) -> bool:
 
 
 def build_wallkoala_feed_from_rows(rows) -> dict[str, dict]:
-    """SKU → {price, inventory}. Duplicate SKUs keep the last row. Shipping is skipped."""
+    """Vendor ID → {price, inventory}. Duplicate keys keep the last row. Shipping is skipped."""
     rows = [tuple(r) if r is not None else () for r in (rows or [])]
     if not rows:
         return {}
@@ -107,7 +126,7 @@ def build_wallkoala_feed_from_rows(rows) -> dict[str, dict]:
         if not row:
             continue
         sku = _cell_text(row[sku_i] if sku_i is not None and sku_i < len(row) else "")
-        if not sku or sku.lower() == "sku":
+        if not sku or _canon_header(sku) in {"sku", "vendorid"}:
             continue
         price = None
         if price_i is not None and price_i < len(row):
