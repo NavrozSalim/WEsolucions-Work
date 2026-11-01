@@ -6,8 +6,9 @@ Price is the final amount sent to BigW. Inventory is the final stock.
 
 The store is the MyDeal store named by ``--store`` (for example Shemaya).
 A row updates the published listing on that store whose SKU matches. Nothing
-is written, and nothing is sent to BigW, unless every row matches. A failed
-push leaves the saved prices unchanged.
+is written, and nothing is sent to BigW, unless every row matches. Listings
+are saved and pushed 40 at a time. A failed batch is not saved. Batches that
+already succeeded stay on BigW.
 
 Usage (inside the backend container):
 
@@ -21,7 +22,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
+from django.db import close_old_connections, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -38,6 +39,19 @@ _PUBLISHED = (
     ListingStatus.UPLOADED_STAGING,
     ListingStatus.UPLOADED_PRODUCTION,
 )
+# One database update of the whole file closed Postgres. Save and push this
+# many listings at a time.
+BATCH_SIZE = 40
+_UPDATE_FIELDS = [
+    "sale_price",
+    "original_price",
+    "sale_price_cents",
+    "original_price_cents",
+    "inventory",
+    "infinite_quantity",
+    "inventory_sync_status",
+    "updated_at",
+]
 _STOCK_TOKENS = frozenset({"inventory", "stock", "qty", "quantity"})
 
 
@@ -287,27 +301,34 @@ class Command(BaseCommand):
             listing.updated_at = now
             listings.append(listing)
 
-        with transaction.atomic():
-            StoreListing.objects.bulk_update(
-                listings,
-                [
-                    "sale_price",
-                    "original_price",
-                    "sale_price_cents",
-                    "original_price_cents",
-                    "inventory",
-                    "infinite_quantity",
-                    "inventory_sync_status",
-                    "updated_at",
-                ],
-            )
-            try:
-                result = push_inventory(listings, store)
-            except MarketplaceError as exc:
-                raise CommandError(f"Nothing was changed.\n{exc}") from exc
-            if not result.get("ok"):
+        pushed = 0
+        total = len(listings)
+        try:
+            for start in range(0, total, BATCH_SIZE):
+                batch = listings[start:start + BATCH_SIZE]
+                close_old_connections()
+                try:
+                    with transaction.atomic():
+                        StoreListing.objects.bulk_update(
+                            batch, _UPDATE_FIELDS, batch_size=BATCH_SIZE,
+                        )
+                        try:
+                            result = push_inventory(batch, store)
+                        except MarketplaceError as exc:
+                            raise CommandError(str(exc)) from exc
+                        if not result.get("ok"):
+                            raise CommandError(
+                                result.get("message") or "BigW price and stock push failed."
+                            )
+                except CommandError:
+                    raise
+                pushed += len(batch)
+                self.stdout.write(f"Pushed {pushed} of {total}.")
+        except CommandError as exc:
+            if pushed:
                 raise CommandError(
-                    "Nothing was changed.\n"
-                    + (result.get("message") or "BigW price and stock push failed.")
-                )
-        self.stdout.write(result.get("message") or f"Pushed {len(listings)} listing(s) to BigW.")
+                    f"Stopped after {pushed} listing(s) were pushed to BigW. "
+                    f"The failed batch was not saved.\n{exc}"
+                ) from exc
+            raise CommandError(f"Nothing was changed.\n{exc}") from exc
+        self.stdout.write(f"Pushed {pushed} listing(s) to BigW.")

@@ -232,6 +232,48 @@ class SyncBigWPriceStockTests(TestCase):
         self.assertTrue(listing.infinite_quantity)
         self.assertEqual(listing.inventory_sync_status, InventorySyncStatus.PENDING)
 
+    @patch("listings.management.commands.sync_bigw_price_stock.BATCH_SIZE", 2)
+    @patch("listings.mydeal.products.MyDealClient")
+    def test_pushes_in_small_batches(self, mock_client_cls):
+        client = mock_client_cls.return_value
+        client.update_price_quantity.return_value = MyDealResult(ok=True, message="ok")
+        listings = [self._listing(self.store, f"SKU-{i}") for i in range(3)]
+        path = _workbook([("SKU-0", 10, 2), ("SKU-1", 11, 3), ("SKU-2", 12, 4)])
+        self._run(path)
+        self.assertEqual(client.update_price_quantity.call_count, 2)
+        self.assertEqual(len(client.update_price_quantity.call_args_list[0].args[0]), 2)
+        self.assertEqual(len(client.update_price_quantity.call_args_list[1].args[0]), 1)
+        listings[0].refresh_from_db()
+        listings[1].refresh_from_db()
+        listings[2].refresh_from_db()
+        self.assertEqual(listings[0].sale_price, Decimal("10.00"))
+        self.assertEqual(listings[1].inventory, 3)
+        self.assertEqual(listings[2].sale_price, Decimal("12.00"))
+        self.assertEqual(listings[2].inventory, 4)
+
+    @patch("listings.management.commands.sync_bigw_price_stock.BATCH_SIZE", 1)
+    @patch("listings.mydeal.products.MyDealClient")
+    def test_a_later_batch_failure_keeps_the_batches_already_pushed(self, mock_client_cls):
+        client = mock_client_cls.return_value
+        client.update_price_quantity.side_effect = [
+            MyDealResult(ok=True, message="ok"),
+            MyDealResult(ok=False, message="MyDeal rejected the batch."),
+        ]
+        first = self._listing(self.store, "SKU-1")
+        second = self._listing(self.store, "SKU-2")
+        path = _workbook([("SKU-1", 11, 4), ("SKU-2", 22, 5)])
+        with self.assertRaises(CommandError) as raised:
+            self._run(path)
+        self.assertIn("Stopped after 1", str(raised.exception))
+        self.assertIn("not saved", str(raised.exception))
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.sale_price, Decimal("11.00"))
+        self.assertEqual(first.inventory, 4)
+        self.assertEqual(second.sale_price, Decimal("9.00"))
+        self.assertEqual(second.inventory, 1)
+        self.assertEqual(client.update_price_quantity.call_count, 2)
+
     @patch("listings.mydeal.products.MyDealClient")
     def test_variant_key_is_not_the_sku(self, mock_client_cls):
         listing = self._listing(self.store, "REAL-SKU")
