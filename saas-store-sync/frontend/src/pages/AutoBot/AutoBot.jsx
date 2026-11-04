@@ -24,7 +24,7 @@ const STATUS_VARIANT = {
 };
 
 const STATUS_LABEL = {
-    pending: 'Waiting for a laptop',
+    pending: 'Pending · waiting for a free laptop',
     claimed: 'Running',
     done: 'Done',
     failed: 'Failed',
@@ -197,19 +197,31 @@ export default function AutoBot() {
 
             <section className="rounded-xl border border-slate-200 bg-white px-5 py-4 dark:border-slate-700 dark:bg-slate-900">
                 <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Laptops</h2>
+                <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                    Shared by everyone. A free laptop takes the oldest waiting job, from any user.
+                </p>
                 {laptops.length === 0 ? (
                     <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                        No laptop token with the reverb or etsy scope yet. Create one per laptop with manage.py create_ingest_token.
+                        No laptop is set up yet. Jobs wait here until one starts.
                     </p>
                 ) : (
                     <div className="mt-2 flex flex-wrap gap-2">
                         {laptops.map((laptop) => {
                             const seen = laptop.last_used_at ? Date.parse(laptop.last_used_at) : 0;
                             const online = seen && now - seen < ONLINE_MS;
+                            let state = 'offline';
+                            if (online && laptop.busy) state = laptop.job_label ? `running your ${laptop.job_label}` : 'busy';
+                            else if (online) state = 'free';
+                            else if (seen) state = `offline, last seen ${formatTime(laptop.last_used_at)}`;
+                            else state = 'never connected';
                             return (
-                                <Badge key={laptop.label} variant={online ? 'success' : 'default'} className="gap-1">
+                                <Badge
+                                    key={laptop.label}
+                                    variant={!online ? 'default' : laptop.busy ? 'warning' : 'success'}
+                                    className="gap-1"
+                                >
                                     <Laptop className="h-3 w-3" />
-                                    {laptop.label} · {online ? 'online' : seen ? `last seen ${formatTime(laptop.last_used_at)}` : 'never seen'}
+                                    {laptop.label} · {state}
                                 </Badge>
                             );
                         })}
@@ -240,6 +252,9 @@ export default function AutoBot() {
                                             <Badge variant={STATUS_VARIANT[job.status] || 'default'}>
                                                 {STATUS_LABEL[job.status] || job.status}
                                             </Badge>
+                                            {job.status === 'pending' && job.queue_position > 1 && (
+                                                <Badge>{job.queue_position - 1} ahead in the queue</Badge>
+                                            )}
                                             {job.store_name && <Badge>Store {job.store_name}</Badge>}
                                             {hasCounts && (
                                                 <Badge variant={job.remaining_count ? 'warning' : 'success'}>

@@ -213,6 +213,46 @@ class AutoBotIngestTests(TestCase):
         self.assertEqual(self.laptop(self.raw_a).get(f'/api/v1/ingest/etsy/jobs/{job_id}/').status_code, 404)
         self.assertFalse(storage.exists(name))
 
+    # --- shared laptops (token with no owner)
+
+    def test_shared_laptop_serves_every_user_oldest_first(self):
+        _, raw_shared = make_token('laptop-shared', ['reverb', 'etsy'], None)
+        first_b = self.queue(self.page_b)
+        second_a = self.queue(self.page)
+        third_b = self.queue(self.page_b)
+
+        # Waiting jobs show their place in the shared queue.
+        rows = {j['id']: j for j in self.page.get('/api/v1/auto-bot/jobs/').json()['jobs']}
+        self.assertEqual(rows[second_a]['queue_position'], 2)
+        self.assertEqual(rows[second_a]['status'], 'pending')
+
+        shared = self.laptop(raw_shared)
+        self.assertEqual(shared.get('/api/v1/ingest/etsy/next-job/').json()['job_id'], first_b)
+        self.assertEqual(shared.get('/api/v1/ingest/etsy/next-job/').json()['job_id'], second_a)
+        self.assertEqual(shared.get(f'/api/v1/ingest/etsy/jobs/{second_a}/file/').status_code, 200)
+        self.assertEqual(self.post_results(raw_shared, second_a, [['IQ', 'SKU-1', '1', '1']], []).status_code, 200)
+        self.assertEqual(shared.get('/api/v1/ingest/etsy/next-job/').json()['job_id'], third_b)
+
+    def test_page_lists_shared_laptops_as_free_or_busy(self):
+        _, raw_shared = make_token('laptop-shared', ['reverb', 'etsy'], None)
+        make_token('heb-only', ['heb'], None)
+        job_id = self.queue(self.page)
+        self.claim(raw_shared)
+
+        mine = {l['label']: l for l in self.page.get('/api/v1/auto-bot/laptops/').json()['laptops']}
+        self.assertTrue(mine['laptop-shared']['shared'])
+        self.assertTrue(mine['laptop-shared']['busy'])
+        self.assertEqual(mine['laptop-shared']['job_label'], 'Etsy - price and stock')
+        self.assertFalse(mine['laptop-1']['busy'])
+        self.assertNotIn('heb-only', mine)
+        self.assertNotIn('laptop-b', mine)
+
+        # Another user sees the shared laptop as busy, without the job name.
+        theirs = {l['label']: l for l in self.page_b.get('/api/v1/auto-bot/laptops/').json()['laptops']}
+        self.assertTrue(theirs['laptop-shared']['busy'])
+        self.assertEqual(theirs['laptop-shared']['job_label'], '')
+        self.assertEqual(self.page_b.get(f'/api/v1/auto-bot/jobs/{job_id}/download/input/').status_code, 404)
+
     # --- validation and regression
 
     def test_upload_validation(self):

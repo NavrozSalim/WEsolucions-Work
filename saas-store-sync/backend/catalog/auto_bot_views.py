@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+from django.db.models import Q
 from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import status
@@ -24,17 +25,29 @@ _DOWNLOADS = {'input': 'input_file', 'done': 'done_file', 'remaining': 'remainin
 _LIST_LIMIT = 200
 
 
+def _excel_jobs():
+    return HebScrapeJob.objects.filter(vendor_code__in=list(EXCEL_JOB_VENDORS), job_type__gt='')
+
+
 def _user_jobs(user):
-    return HebScrapeJob.objects.filter(
-        vendor_code__in=list(EXCEL_JOB_VENDORS),
-        job_type__gt='',
-        requested_by=user,
-    ).select_related('claimed_by_token')
+    return _excel_jobs().filter(requested_by=user).select_related('claimed_by_token')
 
 
-def _serialize(job: HebScrapeJob) -> dict:
+def _queue_positions() -> dict:
+    """Place of each pending job in the shared queue. Laptops take the oldest job of any user first."""
+    pending = (
+        _excel_jobs()
+        .filter(status=HebScrapeJob.Status.PENDING)
+        .order_by('requested_at')
+        .values_list('id', flat=True)
+    )
+    return {job_id: index for index, job_id in enumerate(pending, start=1)}
+
+
+def _serialize(job: HebScrapeJob, queue: dict | None = None) -> dict:
     spec = JOB_TYPES.get(job.job_type, {})
     return {
+        'queue_position': (queue or {}).get(job.id),
         'id': str(job.id),
         'vendor': job.vendor_code,
         'job_type': job.job_type,
@@ -60,9 +73,10 @@ class AutoBotJobListCreateView(APIView):
 
     def get(self, request):
         jobs = _user_jobs(request.user).order_by('-requested_at')[:_LIST_LIMIT]
+        queue = _queue_positions()
         return Response({
             'job_types': [{'value': key, 'label': spec['label']} for key, spec in JOB_TYPES.items()],
-            'jobs': [_serialize(job) for job in jobs],
+            'jobs': [_serialize(job, queue) for job in jobs],
         })
 
     def post(self, request):
@@ -135,20 +149,37 @@ class AutoBotJobDownloadView(APIView):
 
 
 class AutoBotLaptopsView(APIView):
-    """The user's ingest tokens that can run Reverb or Etsy jobs, with last seen time."""
+    """Laptops that can run this user's jobs: shared laptops (token with no owner) and the user's own.
+
+    ``busy`` is true while the laptop holds a claimed job. The job name is only
+    shown when that job belongs to the viewer.
+    """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        tokens = IngestToken.objects.filter(created_by=request.user, is_active=True).order_by('label')
+        tokens = (
+            IngestToken.objects.filter(is_active=True)
+            .filter(Q(created_by=request.user) | Q(created_by__isnull=True))
+            .order_by('label')
+        )
+        running = {
+            job.claimed_by_token_id: job
+            for job in _excel_jobs().filter(status=HebScrapeJob.Status.CLAIMED, claimed_by_token__isnull=False)
+        }
         laptops = []
         for tok in tokens:
             scopes = [s for s in (tok.scopes or []) if s in EXCEL_JOB_VENDORS]
             if not scopes:
                 continue
+            job = running.get(tok.id)
+            mine = job is not None and job.requested_by_id == request.user.id
             laptops.append({
                 'label': tok.label,
                 'scopes': scopes,
+                'shared': tok.created_by_id is None,
+                'busy': job is not None,
+                'job_label': JOB_TYPES.get(job.job_type, {}).get('label', '') if mine else '',
                 'last_used_at': tok.last_used_at.isoformat() if tok.last_used_at else None,
             })
         return Response({'laptops': laptops, 'now': timezone.now().isoformat()})
