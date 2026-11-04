@@ -18,6 +18,7 @@ import {
     Moon,
     Users,
     ScanSearch,
+    Bot,
 } from 'lucide-react';
 import { SellerPilotHubLogo } from '../components/brand';
 import { SidebarActivityProvider, useSidebarActivity } from '../context/SidebarActivityContext';
@@ -29,6 +30,7 @@ const navItems = [
     { path: '/app', labelKey: 'navApp.dashboard', icon: LayoutDashboard, permission: 'dashboard' },
     { path: '/store-settings', labelKey: 'navApp.stores', icon: Store, permission: 'stores' },
     { path: '/catalog', labelKey: 'navApp.catalog', icon: Package, permission: 'catalog' },
+    { path: '/auto-bot', labelKey: 'navApp.autoBot', icon: Bot, permission: 'catalog' },
     { path: '/scraping', labelKey: 'navApp.scraping', icon: ScanSearch, permission: 'scraping' },
     { path: '/orders', labelKey: 'navApp.orders', icon: ShoppingCart, permission: 'orders' },
     { path: '/tickets', labelKey: 'navApp.tickets', icon: MessageSquare, permission: 'tickets' },

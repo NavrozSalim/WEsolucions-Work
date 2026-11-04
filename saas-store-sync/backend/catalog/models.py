@@ -422,6 +422,27 @@ class HebScrapeJob(models.Model):
     )
     note = models.TextField(blank=True, default='')
 
+    # Auto Bot Excel jobs (vendor_code 'reverb' / 'etsy'). Blank for URL-scrape jobs.
+    job_type = models.CharField(
+        max_length=32,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text="Excel job type, e.g. 'etsy-stock'. Blank for URL-scrape jobs.",
+    )
+    store_name = models.CharField(
+        max_length=64,
+        blank=True,
+        default='',
+        help_text='Laptop store code passed to the bot as --store. Blank = every store in the file.',
+    )
+    input_file = models.FileField(upload_to='desktop_jobs/input/%Y/%m/', blank=True)
+    input_name = models.CharField(max_length=255, blank=True, default='')
+    done_file = models.FileField(upload_to='desktop_jobs/results/%Y/%m/', blank=True)
+    remaining_file = models.FileField(upload_to='desktop_jobs/results/%Y/%m/', blank=True)
+    done_count = models.PositiveIntegerField(null=True, blank=True)
+    remaining_count = models.PositiveIntegerField(null=True, blank=True)
+
     class Meta:
         db_table = 'catalog_hebscrapejob'
         ordering = ['-requested_at']

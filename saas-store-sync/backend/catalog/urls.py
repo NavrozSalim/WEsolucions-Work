@@ -1,4 +1,4 @@
-from django.urls import path, include
+from django.urls import path, include, register_converter
 from rest_framework.routers import DefaultRouter
 from .views import (
     ProductMappingViewSet,
@@ -45,6 +45,35 @@ from .ingest_views import (
     VendorIngestJobStatusView,
     VendorIngestCompleteJobView,
 )
+from .excel_ingest_views import (
+    ExcelIngestCompleteJobView,
+    ExcelIngestJobFileView,
+    ExcelIngestJobStatusView,
+    ExcelIngestNextJobView,
+    ExcelIngestResultView,
+)
+from .auto_bot_views import (
+    AutoBotJobCancelView,
+    AutoBotJobDetailView,
+    AutoBotJobDownloadView,
+    AutoBotJobListCreateView,
+    AutoBotLaptopsView,
+)
+
+
+class ExcelVendorConverter:
+    """Matches only the Auto Bot Excel vendors, so HEB/Costco keep the generic routes."""
+
+    regex = 'reverb|etsy'
+
+    def to_python(self, value):
+        return value
+
+    def to_url(self, value):
+        return value
+
+
+register_converter(ExcelVendorConverter, 'excel_vendor')
 
 router = DefaultRouter()
 router.register(r'products', ProductMappingViewSet, basename='productmapping')
@@ -100,6 +129,33 @@ urlpatterns = [
         HebIngestCompleteJobView.as_view(),
         name='ingest-heb-complete-job',
     ),
+    # Auto Bot Excel jobs (Reverb / Etsy). Must sit before the generic <str:vendor> routes.
+    path('ingest/<excel_vendor:vendor>/', ExcelIngestResultView.as_view(), name='ingest-excel-results'),
+    path('ingest/<excel_vendor:vendor>/next-job/', ExcelIngestNextJobView.as_view(), name='ingest-excel-next-job'),
+    path(
+        'ingest/<excel_vendor:vendor>/jobs/<uuid:job_id>/',
+        ExcelIngestJobStatusView.as_view(),
+        name='ingest-excel-job-status',
+    ),
+    path(
+        'ingest/<excel_vendor:vendor>/jobs/<uuid:job_id>/file/',
+        ExcelIngestJobFileView.as_view(),
+        name='ingest-excel-job-file',
+    ),
+    path(
+        'ingest/<excel_vendor:vendor>/jobs/<uuid:job_id>/complete/',
+        ExcelIngestCompleteJobView.as_view(),
+        name='ingest-excel-complete-job',
+    ),
+    path('auto-bot/jobs/', AutoBotJobListCreateView.as_view(), name='auto-bot-jobs'),
+    path('auto-bot/jobs/<uuid:job_id>/', AutoBotJobDetailView.as_view(), name='auto-bot-job-detail'),
+    path('auto-bot/jobs/<uuid:job_id>/cancel/', AutoBotJobCancelView.as_view(), name='auto-bot-job-cancel'),
+    path(
+        'auto-bot/jobs/<uuid:job_id>/download/<str:kind>/',
+        AutoBotJobDownloadView.as_view(),
+        name='auto-bot-job-download',
+    ),
+    path('auto-bot/laptops/', AutoBotLaptopsView.as_view(), name='auto-bot-laptops'),
     path('ingest/<str:vendor>/', VendorIngestView.as_view(), name='ingest-vendor'),
     path(
         'ingest/<str:vendor>/urls/',

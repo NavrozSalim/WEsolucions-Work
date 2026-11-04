@@ -20,6 +20,7 @@ import PlatformAdmin from './pages/Platform/PlatformAdmin';
 
 const Catalog = lazy(() => import('./pages/Catalog/Catalog'));
 const Scraping = lazy(() => import('./pages/Scraping/Scraping'));
+const AutoBot = lazy(() => import('./pages/AutoBot/AutoBot'));
 const ScrapingProducts = lazy(() => import('./pages/Scraping/ScrapingProducts'));
 const Orders = lazy(() => import('./pages/Orders/Orders'));
 const Tickets = lazy(() => import('./pages/Tickets/Tickets'));
@@ -67,6 +68,20 @@ function App() {
                                                     }
                                                 >
                                                     <Catalog />
+                                                </Suspense>
+                                            }
+                                        />
+                                        <Route
+                                            path="/auto-bot"
+                                            element={
+                                                <Suspense
+                                                    fallback={
+                                                        <div className="p-8 text-slate-600 dark:text-slate-400">
+                                                            Loading Auto Bot…
+                                                        </div>
+                                                    }
+                                                >
+                                                    <AutoBot />
                                                 </Suspense>
                                             }
                                         />

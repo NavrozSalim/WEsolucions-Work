@@ -249,6 +249,7 @@ const en = {
         dashboard: 'Dashboard',
         stores: 'Stores',
         catalog: 'Catalog',
+        autoBot: 'Auto Bot',
         scraping: 'Scraping',
         orders: 'Orders',
         tickets: 'Tickets',
