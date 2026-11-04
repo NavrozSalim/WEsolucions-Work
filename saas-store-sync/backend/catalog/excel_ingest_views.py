@@ -33,7 +33,6 @@ from .ingest_views import (
     IngestRateThrottle,
     _authenticate,
     _client_ip,
-    _pick_pending_desktop_job,
 )
 from .models import HebScrapeJob, IngestToken
 
@@ -65,6 +64,30 @@ def _owned_job(job_id, vendor: str, token: IngestToken) -> HebScrapeJob | None:
     return job if owner == uid else None
 
 
+def token_stores(token: IngestToken) -> list[str]:
+    return [str(s).strip().upper() for s in (token.stores or []) if str(s).strip()]
+
+
+def _pick_excel_job(vendor: str, token: IngestToken) -> HebScrapeJob | None:
+    """Oldest pending Excel job this laptop may run.
+
+    Same tenant rule as ``_pick_pending_desktop_job`` (a token with an owner only
+    sees that owner's jobs), plus the laptop's store list: a laptop assigned to
+    IQ never takes an MMS job. No store list means any store.
+    """
+    base = HebScrapeJob.objects.select_for_update(skip_locked=True).filter(
+        status=HebScrapeJob.Status.PENDING,
+        vendor_code=vendor,
+        job_type__gt='',
+    )
+    stores = token_stores(token)
+    if stores:
+        base = base.filter(store_name__in=stores)
+    if token.created_by_id:
+        base = base.filter(requested_by_id=token.created_by_id)
+    return base.order_by('requested_at').first()
+
+
 def _not_found() -> Response:
     return Response({'error': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -85,7 +108,7 @@ class ExcelIngestNextJobView(_ExcelIngestBase):
     def get(self, request, vendor=None, *args, **kwargs):
         token = self._auth(request, vendor)
         with transaction.atomic():
-            job = _pick_pending_desktop_job(vendor, token)
+            job = _pick_excel_job(vendor, token)
             if job is not None:
                 job.status = HebScrapeJob.Status.CLAIMED
                 job.claimed_at = timezone.now()

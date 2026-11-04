@@ -6,7 +6,7 @@ from .models import IngestToken
 @admin.register(IngestToken)
 class IngestTokenAdmin(admin.ModelAdmin):
     list_display = (
-        'label', 'token_prefix', 'scopes', 'is_active',
+        'label', 'token_prefix', 'scopes', 'stores', 'is_active',
         'last_used_at', 'last_used_count', 'created_at',
     )
     list_filter = ('is_active',)

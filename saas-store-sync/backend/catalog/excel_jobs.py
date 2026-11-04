@@ -11,7 +11,9 @@ otherwise queue URL-scrape jobs for these vendors.
 """
 from __future__ import annotations
 
-from openpyxl import load_workbook
+import io
+
+from openpyxl import Workbook, load_workbook
 
 EXCEL_JOB_VENDORS: dict[str, dict] = {
     'reverb': {'scope': 'reverb', 'label': 'Reverb'},
@@ -89,6 +91,57 @@ def validate_upload(job_type: str, file) -> int:
     if rows == 0:
         raise ExcelJobError('The Excel has no rows.')
     return rows
+
+
+def split_by_store(file, only_store: str = '') -> dict[str, bytes]:
+    """One .xlsx per store_name, each with the uploaded header and that store's rows.
+
+    Each laptop is assigned to a store, so a file with IQ and AMH rows becomes
+    two jobs that run on two laptops. ``only_store`` keeps just that store.
+    """
+    wb = _open(file)
+    try:
+        lines = wb.active.iter_rows(values_only=True)
+        header = list(next(lines, None) or [])
+        while header and (header[-1] is None or not str(header[-1]).strip()):
+            header.pop()
+        normalized = [_normalize(h) for h in header]
+        if 'store_name' not in normalized:
+            raise ExcelJobError('The Excel is missing columns: store_name')
+        store_col = normalized.index('store_name')
+        groups: dict[str, list[list]] = {}
+        for number, values in enumerate(lines, start=2):
+            values = list(values or [])[: len(header)]
+            if not any(v is not None and str(v).strip() for v in values):
+                continue
+            raw = values[store_col] if store_col < len(values) else None
+            store = str(raw if raw is not None else '').strip().upper()
+            if store.endswith('.0'):
+                store = store[:-2]
+            if not store:
+                raise ExcelJobError(f'Row {number} has no store_name.')
+            groups.setdefault(store, []).append(values)
+    finally:
+        wb.close()
+        file.seek(0)
+
+    if only_store:
+        if only_store not in groups:
+            raise ExcelJobError(f'The Excel has no rows for store {only_store}.')
+        groups = {only_store: groups[only_store]}
+
+    out: dict[str, bytes] = {}
+    for store, rows in groups.items():
+        book = Workbook()
+        sheet = book.active
+        sheet.title = 'input'
+        sheet.append(header)
+        for row in rows:
+            sheet.append(row)
+        buf = io.BytesIO()
+        book.save(buf)
+        out[store] = buf.getvalue()
+    return out
 
 
 def delete_job_files(job) -> None:

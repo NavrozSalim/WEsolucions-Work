@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+from django.core.files.base import ContentFile
+from django.db import transaction
 from django.db.models import Q
 from django.http import FileResponse
 from django.utils import timezone
@@ -18,7 +20,15 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .excel_jobs import EXCEL_JOB_VENDORS, JOB_TYPES, ExcelJobError, delete_job_files, validate_upload
+from .excel_ingest_views import token_stores
+from .excel_jobs import (
+    EXCEL_JOB_VENDORS,
+    JOB_TYPES,
+    ExcelJobError,
+    delete_job_files,
+    split_by_store,
+    validate_upload,
+)
 from .models import HebScrapeJob, IngestToken
 
 _DOWNLOADS = {'input': 'input_file', 'done': 'done_file', 'remaining': 'remaining_file'}
@@ -34,20 +44,48 @@ def _user_jobs(user):
 
 
 def _queue_positions() -> dict:
-    """Place of each pending job in the shared queue. Laptops take the oldest job of any user first."""
+    """Place of each pending job in its store's queue.
+
+    Each store has its own laptop, so an IQ job only waits behind older IQ jobs
+    (Etsy and Reverb together), from any user.
+    """
     pending = (
         _excel_jobs()
         .filter(status=HebScrapeJob.Status.PENDING)
         .order_by('requested_at')
-        .values_list('id', flat=True)
+        .values_list('id', 'store_name')
     )
-    return {job_id: index for index, job_id in enumerate(pending, start=1)}
+    seen: dict[str, int] = {}
+    positions = {}
+    for job_id, store in pending:
+        seen[store] = seen.get(store, 0) + 1
+        positions[job_id] = seen[store]
+    return positions
 
 
-def _serialize(job: HebScrapeJob, queue: dict | None = None) -> dict:
+def _laptop_tokens(user) -> list[IngestToken]:
+    """Active laptop tokens this user's jobs can run on: shared ones (no owner) and the user's own."""
+    tokens = (
+        IngestToken.objects.filter(is_active=True)
+        .filter(Q(created_by=user) | Q(created_by__isnull=True))
+        .order_by('label')
+    )
+    return [tok for tok in tokens if any(s in EXCEL_JOB_VENDORS for s in (tok.scopes or []))]
+
+
+def _has_laptop(job: HebScrapeJob, tokens: list[IngestToken]) -> bool:
+    for tok in tokens:
+        stores = token_stores(tok)
+        if job.vendor_code in (tok.scopes or []) and (not stores or job.store_name in stores):
+            return True
+    return False
+
+
+def _serialize(job: HebScrapeJob, queue: dict | None = None, tokens: list[IngestToken] | None = None) -> dict:
     spec = JOB_TYPES.get(job.job_type, {})
     return {
         'queue_position': (queue or {}).get(job.id),
+        'has_laptop': _has_laptop(job, tokens) if tokens is not None else True,
         'id': str(job.id),
         'vendor': job.vendor_code,
         'job_type': job.job_type,
@@ -74,9 +112,10 @@ class AutoBotJobListCreateView(APIView):
     def get(self, request):
         jobs = _user_jobs(request.user).order_by('-requested_at')[:_LIST_LIMIT]
         queue = _queue_positions()
+        tokens = _laptop_tokens(request.user)
         return Response({
             'job_types': [{'value': key, 'label': spec['label']} for key, spec in JOB_TYPES.items()],
-            'jobs': [_serialize(job, queue) for job in jobs],
+            'jobs': [_serialize(job, queue, tokens) for job in jobs],
         })
 
     def post(self, request):
@@ -89,19 +128,32 @@ class AutoBotJobListCreateView(APIView):
             return Response({'error': 'Choose an Excel file.'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             validate_upload(job_type, upload)
+            parts = split_by_store(upload, only_store=store_name)
         except ExcelJobError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        job = HebScrapeJob(
-            requested_by=request.user,
-            vendor_code=JOB_TYPES[job_type]['vendor'],
-            job_type=job_type,
-            store_name=store_name,
-            input_name=upload.name[:255],
+        # One job per store: each store runs on the laptop assigned to it.
+        stem = upload.name.rsplit('.', 1)[0]
+        created = []
+        with transaction.atomic():
+            for store, content in sorted(parts.items()):
+                name = f'{stem} - {store}.xlsx' if len(parts) > 1 else upload.name
+                job = HebScrapeJob(
+                    requested_by=request.user,
+                    vendor_code=JOB_TYPES[job_type]['vendor'],
+                    job_type=job_type,
+                    store_name=store,
+                    input_name=name[:255],
+                )
+                job.input_file.save(name, ContentFile(content), save=False)
+                job.save()
+                created.append(job)
+        queue = _queue_positions()
+        tokens = _laptop_tokens(request.user)
+        return Response(
+            {'jobs': [_serialize(job, queue, tokens) for job in created]},
+            status=status.HTTP_201_CREATED,
         )
-        job.input_file.save(upload.name, upload, save=False)
-        job.save()
-        return Response(_serialize(job), status=status.HTTP_201_CREATED)
 
 
 class AutoBotJobDetailView(APIView):
@@ -158,25 +210,19 @@ class AutoBotLaptopsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        tokens = (
-            IngestToken.objects.filter(is_active=True)
-            .filter(Q(created_by=request.user) | Q(created_by__isnull=True))
-            .order_by('label')
-        )
         running = {
             job.claimed_by_token_id: job
             for job in _excel_jobs().filter(status=HebScrapeJob.Status.CLAIMED, claimed_by_token__isnull=False)
         }
         laptops = []
-        for tok in tokens:
+        for tok in _laptop_tokens(request.user):
             scopes = [s for s in (tok.scopes or []) if s in EXCEL_JOB_VENDORS]
-            if not scopes:
-                continue
             job = running.get(tok.id)
             mine = job is not None and job.requested_by_id == request.user.id
             laptops.append({
                 'label': tok.label,
                 'scopes': scopes,
+                'stores': token_stores(tok),
                 'shared': tok.created_by_id is None,
                 'busy': job is not None,
                 'job_label': JOB_TYPES.get(job.job_type, {}).get('label', '') if mine else '',

@@ -3,6 +3,7 @@
 Examples:
     python manage.py create_ingest_token --label heb-pc-navroz --scopes heb
     python manage.py create_ingest_token --label heb-pc --scopes heb --owner-email you@example.com
+    python manage.py create_ingest_token --label laptop-1 --scopes reverb etsy --stores IQ IQR
 
 One token can list every scope your runners need. Extend scopes on an existing
 ``IngestToken`` in Django admin if you add new desktop vendors later.
@@ -36,6 +37,12 @@ class Command(BaseCommand):
             help='Store owner email — sets created_by so /ingest/heb/urls/ lists their products.',
         )
         parser.add_argument(
+            '--stores',
+            nargs='*',
+            default=[],
+            help='Auto Bot laptops: only run Excel jobs for these store codes, e.g. --stores IQ IQR.',
+        )
+        parser.add_argument(
             '--length',
             type=int,
             default=48,
@@ -58,6 +65,8 @@ class Command(BaseCommand):
             if created_by is None:
                 raise CommandError(f'No user found with email {owner_email!r}.')
 
+        stores = sorted({s.strip().upper() for s in (opts.get('stores') or []) if s.strip()})
+
         length = max(24, int(opts['length']))
         raw = secrets.token_urlsafe(length)
         token_hash = hashlib.sha256(raw.encode('utf-8')).hexdigest()
@@ -69,12 +78,15 @@ class Command(BaseCommand):
             scopes=scopes,
             is_active=True,
             created_by=created_by,
+            stores=stores,
         )
 
         self.stdout.write(self.style.SUCCESS('Ingest token created.'))
         self.stdout.write(f'  id:     {tok.id}')
         self.stdout.write(f'  label:  {tok.label}')
         self.stdout.write(f'  scopes: {scopes}')
+        if stores:
+            self.stdout.write(f'  stores: {stores}')
         if created_by:
             self.stdout.write(f'  owner:  {created_by.email}')
         else:

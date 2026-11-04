@@ -166,7 +166,7 @@ export default function AutoBot() {
                     <label className="block text-sm font-medium text-slate-800 dark:text-slate-100">
                         Store
                         <span className="mt-0.5 block text-xs font-normal text-slate-500 dark:text-slate-400">
-                            Optional. Runs only this store_name from the file (passed as --store).
+                            Optional. Empty splits the file by store_name: one job per store, each on that store&apos;s laptop.
                         </span>
                         <input
                             value={storeName}
@@ -198,7 +198,7 @@ export default function AutoBot() {
             <section className="rounded-xl border border-slate-200 bg-white px-5 py-4 dark:border-slate-700 dark:bg-slate-900">
                 <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Laptops</h2>
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                    Shared by everyone. A free laptop takes the oldest waiting job, from any user.
+                    Each laptop runs the Etsy and Reverb jobs for its own stores, oldest first, for every user.
                 </p>
                 {laptops.length === 0 ? (
                     <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
@@ -221,7 +221,8 @@ export default function AutoBot() {
                                     className="gap-1"
                                 >
                                     <Laptop className="h-3 w-3" />
-                                    {laptop.label} · {state}
+                                    {laptop.label}
+                                    {laptop.stores?.length ? ` (${laptop.stores.join(', ')})` : ' (any store)'} · {state}
                                 </Badge>
                             );
                         })}
@@ -252,8 +253,11 @@ export default function AutoBot() {
                                             <Badge variant={STATUS_VARIANT[job.status] || 'default'}>
                                                 {STATUS_LABEL[job.status] || job.status}
                                             </Badge>
-                                            {job.status === 'pending' && job.queue_position > 1 && (
-                                                <Badge>{job.queue_position - 1} ahead in the queue</Badge>
+                                            {job.status === 'pending' && !job.has_laptop && (
+                                                <Badge variant="error">No laptop is set up for store {job.store_name}</Badge>
+                                            )}
+                                            {job.status === 'pending' && job.has_laptop && job.queue_position > 1 && (
+                                                <Badge>{job.queue_position - 1} ahead for {job.store_name}</Badge>
                                             )}
                                             {job.store_name && <Badge>Store {job.store_name}</Badge>}
                                             {hasCounts && (

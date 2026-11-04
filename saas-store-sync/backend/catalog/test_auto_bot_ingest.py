@@ -36,7 +36,7 @@ def xlsx(name: str, rows: list[list], header=_STOCK_HEADER) -> SimpleUploadedFil
     )
 
 
-def make_token(label: str, scopes: list[str], user) -> tuple[IngestToken, str]:
+def make_token(label: str, scopes: list[str], user, stores=None) -> tuple[IngestToken, str]:
     raw = f'auto-bot-{label}-' + ('z' * 24)
     tok = IngestToken.objects.create(
         label=label,
@@ -44,6 +44,7 @@ def make_token(label: str, scopes: list[str], user) -> tuple[IngestToken, str]:
         token_prefix=raw[:8],
         scopes=scopes,
         created_by=user,
+        stores=stores or [],
     )
     return tok, raw
 
@@ -82,7 +83,9 @@ class AutoBotIngestTests(TestCase):
             format='multipart',
         )
         self.assertEqual(resp.status_code, 201, resp.content)
-        return resp.json()['id']
+        jobs = resp.json()['jobs']
+        self.assertEqual(len(jobs), 1)
+        return jobs[0]['id']
 
     def claim(self, raw: str, vendor='etsy'):
         return self.laptop(raw).get(f'/api/v1/ingest/{vendor}/next-job/')
@@ -253,6 +256,78 @@ class AutoBotIngestTests(TestCase):
         self.assertEqual(theirs['laptop-shared']['job_label'], '')
         self.assertEqual(self.page_b.get(f'/api/v1/auto-bot/jobs/{job_id}/download/input/').status_code, 404)
 
+    # --- one laptop per store
+
+    def test_upload_splits_into_one_job_per_store(self):
+        rows = [['IQ', 'SKU-1', '1', '1'], ['AMH', 'SKU-2', '2', '2'], ['iq', 'SKU-3', '3', '3']]
+        resp = self.page.post(
+            '/api/v1/auto-bot/jobs/',
+            {'job_type': 'etsy-stock', 'file': xlsx('Mixed.xlsx', rows)},
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        jobs = {j['store_name']: j for j in resp.json()['jobs']}
+        self.assertEqual(set(jobs), {'AMH', 'IQ'})
+        self.assertEqual(jobs['IQ']['file_name'], 'Mixed - IQ.xlsx')
+
+        iq = HebScrapeJob.objects.get(id=jobs['IQ']['id'])
+        with iq.input_file.open('rb') as fh:
+            sheet = load_workbook(io.BytesIO(fh.read())).active
+        self.assertEqual([c.value for c in sheet[1]], _STOCK_HEADER)
+        self.assertEqual([sheet.cell(row=r, column=2).value for r in (2, 3)], ['SKU-1', 'SKU-3'])
+        self.assertEqual(sheet.max_row, 3)
+
+    def test_upload_rejects_rows_without_store_or_missing_chosen_store(self):
+        blank_store = self.page.post(
+            '/api/v1/auto-bot/jobs/',
+            {'job_type': 'etsy-stock', 'file': xlsx('a.xlsx', [['IQ', 'S1', '1', '1'], [None, 'S2', '1', '1']])},
+            format='multipart',
+        )
+        self.assertEqual(blank_store.status_code, 400)
+        self.assertIn('Row 3', blank_store.json()['error'])
+        wrong_store = self.page.post(
+            '/api/v1/auto-bot/jobs/',
+            {'job_type': 'etsy-stock', 'store_name': 'MMS', 'file': xlsx('b.xlsx', [['IQ', 'S1', '1', '1']])},
+            format='multipart',
+        )
+        self.assertEqual(wrong_store.status_code, 400)
+
+    def test_laptop_only_takes_its_own_stores_for_etsy_and_reverb(self):
+        user_c = User.objects.create_user(username='bot_c', email='bot_c@example.com', password='pass12345')
+        page_c = APIClient()
+        page_c.force_authenticate(user_c)
+        _, raw_iq = make_token('worker-1', ['reverb', 'etsy'], None, stores=['IQ', 'IQR'])
+        _, raw_amh = make_token('worker-3', ['reverb', 'etsy'], None, stores=['AMH'])
+
+        mms = self.queue(page_c, rows=[['MMS', 'S1', '1', '1']], store_name='')
+        iq_etsy = self.queue(page_c, rows=[['IQ', 'S1', '1', '1']], store_name='')
+        amh = self.queue(page_c, rows=[['AMH', 'S1', '1', '1']], store_name='')
+        iq_reverb = self.queue(page_c, job_type='reverb-stock', rows=[['IQ', 'S2', '1', '1']], store_name='')
+
+        iq_laptop, amh_laptop = self.laptop(raw_iq), self.laptop(raw_amh)
+        self.assertEqual(iq_laptop.get('/api/v1/ingest/etsy/next-job/').json()['job_id'], iq_etsy)
+        self.assertEqual(iq_laptop.get('/api/v1/ingest/reverb/next-job/').json()['job_id'], iq_reverb)
+        self.assertIsNone(iq_laptop.get('/api/v1/ingest/etsy/next-job/').json()['job_id'])
+        self.assertEqual(amh_laptop.get('/api/v1/ingest/etsy/next-job/').json()['job_id'], amh)
+        self.assertIsNone(amh_laptop.get('/api/v1/ingest/etsy/next-job/').json()['job_id'])
+
+        rows = {j['id']: j for j in page_c.get('/api/v1/auto-bot/jobs/').json()['jobs']}
+        self.assertEqual(rows[mms]['status'], 'pending')
+        self.assertFalse(rows[mms]['has_laptop'])
+        self.assertTrue(rows[amh]['has_laptop'])
+
+        laptops = {l['label']: l for l in page_c.get('/api/v1/auto-bot/laptops/').json()['laptops']}
+        self.assertEqual(laptops['worker-1']['stores'], ['IQ', 'IQR'])
+
+    def test_queue_position_counts_only_the_same_store(self):
+        first_iq = self.queue(self.page_b, rows=[['IQ', 'S1', '1', '1']], store_name='')
+        amh = self.queue(self.page, rows=[['AMH', 'S1', '1', '1']], store_name='')
+        second_iq = self.queue(self.page, rows=[['IQ', 'S2', '1', '1']], store_name='')
+        rows = {j['id']: j for j in self.page.get('/api/v1/auto-bot/jobs/').json()['jobs']}
+        self.assertEqual(rows[amh]['queue_position'], 1)
+        self.assertEqual(rows[second_iq]['queue_position'], 2)
+        self.assertTrue(first_iq)
+
     # --- validation and regression
 
     def test_upload_validation(self):
@@ -276,7 +351,7 @@ class AutoBotIngestTests(TestCase):
             format='multipart',
         )
         self.assertEqual(sku_job.status_code, 201)
-        self.assertEqual(HebScrapeJob.objects.get(id=sku_job.json()['id']).vendor_code, 'reverb')
+        self.assertEqual(HebScrapeJob.objects.get(id=sku_job.json()['jobs'][0]['id']).vendor_code, 'reverb')
         bad_type = self.page.post(
             '/api/v1/auto-bot/jobs/', {'job_type': 'amazon-stock', 'file': xlsx('d.xlsx', [['a', 'b', 1, 1]])},
             format='multipart',

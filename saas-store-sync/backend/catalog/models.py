@@ -338,6 +338,11 @@ class IngestToken(models.Model):
     last_used_at = models.DateTimeField(null=True, blank=True)
     last_used_ip = models.GenericIPAddressField(null=True, blank=True)
     last_used_count = models.PositiveIntegerField(default=0)
+    stores = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Auto Bot laptops only: store codes this laptop runs, e.g. ["IQ", "IQR"]. Empty = any store.',
+    )
 
     class Meta:
         db_table = 'catalog_ingesttoken'
