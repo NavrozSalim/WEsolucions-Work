@@ -45,6 +45,10 @@ class Store(models.Model):
     )
     name = models.CharField(max_length=255)
     region = models.CharField(max_length=10, choices=[('USA', 'USA'), ('AU', 'Australia')])
+    auto_order_bot_enabled = models.BooleanField(
+        default=False,
+        help_text='Auto Order Bot page: allow uploads and runs for this store.',
+    )
     management_mode = models.CharField(
         max_length=20,
         choices=MANAGEMENT_MODE_CHOICES,
@@ -408,3 +412,62 @@ class StoreInventoryRangeMultiplier(models.Model):
         verbose_name_plural = 'Store inventory range multipliers'
 
 
+
+
+class PurchaseAccount(models.Model):
+    """A vendor purchase account the order bot buys with. Belongs to the user, not the store.
+
+    No passwords or card numbers: the Chrome profile is already logged in and the card is saved on the vendor site.
+    """
+    REGION_VENDORS = {
+        'USA': ('amazon', 'ebay'),
+        'AU': ('amazon_au', 'ebay_au', 'costco_au', 'costway_au', 'vevor_au'),
+    }
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='purchase_accounts')
+    name = models.CharField(max_length=100)
+    vendor = models.CharField(max_length=30)
+    region = models.CharField(max_length=10, choices=[('USA', 'USA'), ('AU', 'Australia')])
+    email = models.CharField(max_length=255, blank=True, default='')
+    chrome_profile = models.CharField(max_length=255, blank=True, default='')
+    user_data_dir = models.CharField(max_length=500, blank=True, default='')
+    debug_port = models.PositiveIntegerField(null=True, blank=True)
+    chrome_path = models.CharField(max_length=500, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+        constraints = [models.UniqueConstraint(fields=['user', 'name'], name='uq_purchase_account_user_name')]
+
+    def __str__(self):
+        return f'{self.name} ({self.vendor})'
+
+
+class AutoOrderRun(models.Model):
+    """One launch of the external order bot for a store."""
+    class Status(models.TextChoices):
+        RUNNING = 'running', 'Running'
+        FINISHED = 'finished', 'Finished'
+        REJECTED = 'rejected', 'Rejected'
+        FAILED = 'failed', 'Failed'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='auto_order_runs')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='+')
+    account_name = models.CharField(max_length=100)
+    vendor = models.CharField(max_length=30)
+    marketplace = models.CharField(max_length=20, help_text='Marketplace code passed to the bot (bigw for MyDeal).')
+    place = models.BooleanField(default=False)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.RUNNING, db_index=True)
+    exit_code = models.IntegerField(null=True, blank=True)
+    command = models.TextField(blank=True, default='')
+    run_dir = models.CharField(max_length=500, blank=True, default='')
+    stdout = models.TextField(blank=True, default='')
+    log_text = models.TextField(blank=True, default='')
+    done_rows = models.JSONField(default=list, blank=True)
+    remaining_rows = models.JSONField(default=list, blank=True)
+    started_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-started_at']

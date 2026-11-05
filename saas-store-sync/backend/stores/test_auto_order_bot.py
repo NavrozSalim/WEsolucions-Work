@@ -1,0 +1,225 @@
+"""Auto Order Bot API. The bot subprocess is mocked: no Chrome, no order-bot imports."""
+import json
+import shutil
+import tempfile
+from pathlib import Path
+from unittest import mock
+
+import openpyxl
+from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
+from rest_framework.test import APIClient
+
+from marketplace.models import Marketplace
+from stores.models import AutoOrderRun, PurchaseAccount, Store
+
+User = get_user_model()
+_MEDIA = tempfile.mkdtemp(prefix='aob-test-')
+
+
+def xlsx_bytes(headers, rows=()):
+    p = Path(tempfile.mkdtemp(dir=_MEDIA)) / 'x.xlsx'
+    wb = openpyxl.Workbook()
+    wb.active.append(headers)
+    for r in rows:
+        wb.active.append(r)
+    wb.save(p)
+    return p.read_bytes()
+
+
+def upload(name):
+    return SimpleUploadedFile(name, xlsx_bytes(['a']), content_type='application/octet-stream')
+
+
+class FakePopen:
+    """Stands in for subprocess.Popen; optionally writes the files the real bot would write."""
+    calls = []
+    exit_code = 0
+    stdout = 'bot output\n'
+    write_files = True
+
+    def __init__(self, cmd, **kw):
+        type(self).calls.append((cmd, kw))
+        self.cmd, self.returncode = cmd, type(self).exit_code
+        if type(self).write_files:
+            out = Path(cmd[cmd.index('--output-dir') + 1])
+            mp = cmd[cmd.index('--marketplace') + 1]
+            for kind, rows in (('done', [['K1', 'SKU1', 1, 'amazon_au', 'u', 5, 'ready_for_payment', '', '', '']]),
+                               ('remaining', [['K2', 'SKU2', 1, '', '', '', 'unmapped_sku', '', '', '']])):
+                wb = openpyxl.Workbook()
+                wb.active.append(['order_id', 'sku', 'buy_qty', 'vendor', 'vendor_url', 'stock_seen', 'status',
+                                  'vendor_order_number', 'error', 'screenshot'])
+                for r in rows:
+                    wb.active.append(r)
+                wb.save(out / f'{mp}-{kind}.xlsx')
+            (out / f'{mp}-log.txt').write_text('line1\nline2 done\n')
+
+    def communicate(self):
+        return type(self).stdout, None
+
+
+@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_INLINE=True, AUTO_ORDER_BOT_DIR='C:/bot', AUTO_ORDER_BOT_PYTHON='py')
+class AutoOrderBotTests(TestCase):
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_MEDIA, ignore_errors=True)
+
+    def setUp(self):
+        FakePopen.calls, FakePopen.exit_code, FakePopen.stdout, FakePopen.write_files = [], 0, 'bot output\n', True
+        self.user = User.objects.create_user(username='aob', email='aob@example.com', password='pw12345678')
+        self.other = User.objects.create_user(username='aob2', email='aob2@example.com', password='pw12345678')
+        self.c = APIClient()
+        self.c.force_authenticate(self.user)
+        self.mp = {code: Marketplace.objects.get_or_create(code=code, defaults={'name': code.title()})[0]
+                   for code in ('reverb', 'sears', 'kogan', 'mydeal', 'lasoo')}
+        self.accts = {
+            'amazon': self.acct('us-amazon', 'amazon', 'USA'), 'ebay': self.acct('us-ebay', 'ebay', 'USA'),
+            'amazon_au': self.acct('au-amazon', 'amazon_au', 'AU'), 'vevor_au': self.acct('au-vevor', 'vevor_au', 'AU'),
+        }
+
+    def acct(self, name, vendor, region, user=None):
+        return PurchaseAccount.objects.create(user=user or self.user, name=name, vendor=vendor, region=region,
+                                              chrome_profile='Profile 1', email='a@example.test')
+
+    def store(self, code, region, enabled=True):
+        return Store.objects.create(user=self.user, name=f'{code} store', region=region, api_token='t',
+                                    marketplace=self.mp[code], auto_order_bot_enabled=enabled)
+
+    def url(self, store, tail=''):
+        return f'/api/v1/stores/{store.id}/auto-order-bot/{tail}'
+
+    def start(self, store, account, place=None, client=None):
+        data = {'orders': upload('o.xlsx'), 'mapping': upload('m.xlsx'), 'account': account}
+        if place is not None:
+            data['place'] = place
+        with mock.patch('stores.auto_order_bot.subprocess.Popen', FakePopen):
+            return (client or self.c).post(self.url(store, 'runs/'), data, format='multipart')
+
+    # ---- commands -----------------------------------------------------------------------
+    def test_usa_dry_run_commands(self):
+        for code in ('reverb', 'sears'):
+            store = self.store(code, 'USA')
+            r = self.start(store, 'us-amazon')
+            self.assertEqual(r.status_code, 201, r.data)
+            cmd, kw = FakePopen.calls[-1]
+            self.assertEqual(cmd[:2], ['py', 'run_us.py'])
+            self.assertEqual(cmd[cmd.index('--marketplace') + 1], code)
+            self.assertEqual(cmd[cmd.index('--account') + 1], 'us-amazon')
+            self.assertNotIn('--place', cmd)
+            self.assertTrue(cmd[cmd.index('--orders') + 1].endswith('orders.xlsx'))
+            self.assertTrue(cmd[cmd.index('--mapping') + 1].endswith('mapping.xlsx'))
+            self.assertEqual(kw['cwd'], str(Path('C:/bot')))
+
+    def test_kogan_and_mydeal_commands(self):
+        r = self.start(self.store('kogan', 'AU'), 'au-amazon')
+        cmd = FakePopen.calls[-1][0]
+        self.assertEqual((cmd[1], cmd[cmd.index('--marketplace') + 1]), ('run_au.py', 'kogan'))
+        r = self.start(self.store('mydeal', 'AU'), 'au-vevor')
+        cmd = FakePopen.calls[-1][0]
+        self.assertEqual((cmd[1], cmd[cmd.index('--marketplace') + 1]), ('run_au.py', 'bigw'))
+        self.assertNotIn('mydeal', cmd)
+
+    def test_place_flag_only_when_requested(self):
+        store = self.store('reverb', 'USA')
+        self.start(store, 'us-ebay', place='false')
+        self.assertNotIn('--place', FakePopen.calls[-1][0])
+        self.start(store, 'us-ebay', place='true')
+        self.assertIn('--place', FakePopen.calls[-1][0])
+        self.assertTrue(AutoOrderRun.objects.filter(place=True).exists())
+
+    def test_accounts_file_only_has_users_accounts(self):
+        self.acct('theirs', 'ebay', 'USA', user=self.other)
+        r = self.start(self.store('reverb', 'USA'), 'us-ebay')
+        cmd = FakePopen.calls[-1][0]
+        data = json.loads(Path(cmd[cmd.index('--accounts-file') + 1]).read_text())
+        names = [a['name'] for reg in data.values() for lst in reg.values() for a in lst]
+        self.assertIn('us-ebay', names)
+        self.assertNotIn('theirs', names)
+        self.assertEqual(set(data['au']), {'amazon_au', 'ebay_au', 'costco_au', 'costway_au', 'vevor_au'})
+        self.assertNotIn('password', json.dumps(data).lower())
+
+    # ---- refusals -----------------------------------------------------------------------
+    def test_checkbox_off_blocks_run(self):
+        store = self.store('reverb', 'USA', enabled=False)
+        r = self.start(store, 'us-amazon')
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(FakePopen.calls, [])
+        self.assertEqual(AutoOrderRun.objects.count(), 0)
+
+    def test_ebay_account_cannot_run_au_store(self):
+        r = self.start(self.store('kogan', 'AU'), 'us-ebay')
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(FakePopen.calls, [])
+
+    def test_other_users_account_refused(self):
+        self.acct('theirs', 'amazon', 'USA', user=self.other)
+        r = self.start(self.store('sears', 'USA'), 'theirs')
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(FakePopen.calls, [])
+
+    def test_unsupported_marketplace_no_run(self):
+        store = self.store('lasoo', 'AU')
+        info = self.c.get(self.url(store)).data
+        self.assertFalse(info['supported'])
+        self.assertIn('Reverb, Sears, Kogan, and BigW only', info['message'])
+        self.assertEqual(self.start(store, 'au-amazon').status_code, 400)
+        self.assertEqual(FakePopen.calls, [])
+
+    def test_second_run_while_running_refused(self):
+        store = self.store('kogan', 'AU')
+        AutoOrderRun.objects.create(store=store, user=self.user, account_name='au-amazon', vendor='amazon_au',
+                                    marketplace='kogan', run_dir=_MEDIA)
+        r = self.start(store, 'au-amazon')
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(FakePopen.calls, [])
+
+    # ---- outcomes -----------------------------------------------------------------------
+    def test_exit_code_2_saved_as_rejected_with_stdout(self):
+        FakePopen.exit_code, FakePopen.stdout, FakePopen.write_files = 2, 'REJECTED: order file is a x export\n', False
+        r = self.start(self.store('sears', 'USA'), 'us-amazon')
+        self.assertEqual(r.status_code, 201)
+        run = AutoOrderRun.objects.get()
+        self.assertEqual((run.status, run.exit_code), ('rejected', 2))
+        self.assertIn('REJECTED', run.stdout)
+        self.assertEqual(r.data['done_rows'], [])
+
+    def test_finished_run_stores_workbook_rows_and_downloads(self):
+        store = self.store('kogan', 'AU')
+        r = self.start(store, 'au-amazon')
+        run = AutoOrderRun.objects.get()
+        self.assertEqual(run.status, 'finished')
+        self.assertEqual(run.done_rows[0]['order_id'], 'K1')
+        self.assertEqual(run.done_rows[0]['status'], 'ready_for_payment')
+        self.assertEqual(run.remaining_rows[0]['status'], 'unmapped_sku')
+        d = self.c.get(self.url(store, f'runs/{run.id}/')).data
+        self.assertEqual((d['done_count'], d['remaining_count']), (1, 1))
+        self.assertIn('line2 done', d['log_tail'])
+        for kind in ('done', 'remaining', 'log'):
+            self.assertEqual(self.c.get(self.url(store, f'runs/{run.id}/download/{kind}/')).status_code, 200)
+        self.assertEqual(len(self.c.get(self.url(store, 'runs/')).data['runs']), 1)
+
+    # ---- flag and accounts --------------------------------------------------------------
+    def test_checkbox_persists_and_defaults_off(self):
+        store = Store.objects.create(user=self.user, name='s', region='USA', api_token='t', marketplace=self.mp['reverb'])
+        self.assertFalse(self.c.get(self.url(store)).data['automate'])
+        self.assertTrue(self.c.patch(self.url(store), {'automate': True}, format='json').data['automate'])
+        store.refresh_from_db()
+        self.assertTrue(store.auto_order_bot_enabled)
+
+    def test_accounts_api_region_scoped(self):
+        store = self.store('kogan', 'AU')
+        names = {a['name'] for a in self.c.get(self.url(store, 'accounts/')).data['accounts']}
+        self.assertEqual(names, {'au-amazon', 'au-vevor'})
+        bad = self.c.post(self.url(store, 'accounts/'), {'name': 'x', 'vendor': 'ebay', 'chrome_profile': 'P'}, format='json')
+        self.assertEqual(bad.status_code, 400)
+        ok = self.c.post(self.url(store, 'accounts/'), {'name': 'au-costco', 'vendor': 'costco_au', 'chrome_profile': 'P4'}, format='json')
+        self.assertEqual(ok.status_code, 201)
+        self.assertEqual(self.c.delete(self.url(store, f'accounts/{ok.data["id"]}/')).status_code, 204)
+
+    def test_other_users_store_not_visible(self):
+        store = self.store('kogan', 'AU')
+        c2 = APIClient()
+        c2.force_authenticate(self.other)
+        self.assertEqual(c2.get(self.url(store)).status_code, 404)
