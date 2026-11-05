@@ -29,6 +29,9 @@ export function startAutoOrderRun(storeId, { account, place }) {
     return api.post(`${base(storeId)}/runs/`, body).then((r) => r.data);
 }
 
+export const cancelAutoOrderRun = (storeId, runId) =>
+    api.post(`${base(storeId)}/runs/${runId}/cancel/`).then((r) => r.data);
+
 /** kind is 'done', 'remaining' or 'log'. */
 export function downloadAutoOrderFile(storeId, runId, kind) {
     return apiDownload(api, `${base(storeId)}/runs/${runId}/download/${kind}/`, {

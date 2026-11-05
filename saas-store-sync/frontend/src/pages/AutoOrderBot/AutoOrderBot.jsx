@@ -7,6 +7,7 @@ import Toggle from '../../components/ui/Toggle';
 import PageHeader from '../../components/design/PageHeader';
 import Badge from '../../components/design/Badge';
 import {
+    cancelAutoOrderRun,
     createPurchaseAccount,
     deletePurchaseAccount,
     downloadAutoOrderFile,
@@ -21,7 +22,7 @@ import {
 
 const POLL_MS = 4000;
 const ROW_COLUMNS = ['order_id', 'sku', 'buy_qty', 'vendor', 'vendor_url', 'stock_seen', 'status', 'vendor_order_number', 'error', 'screenshot'];
-const STATUS_VARIANT = { running: 'accent', finished: 'success', rejected: 'warning', failed: 'error' };
+const STATUS_VARIANT = { pending: 'warning', cancelled: 'default', running: 'accent', finished: 'success', rejected: 'warning', failed: 'error' };
 const ROW_VARIANT = { purchased: 'success', ready_for_payment: 'success', failed: 'error', out_of_stock: 'warning', stock_unknown: 'warning' };
 const EMPTY_ACCOUNT = { name: '', vendor: '', chrome_profile: '', email: '', debug_port: '' };
 
@@ -137,12 +138,16 @@ export default function AutoOrderBot() {
     }, [storeId, loadRun]);
 
     const runId = run?.id;
-    const running = run?.status === 'running';
+    const running = run?.status === 'running' || run?.status === 'pending';
     useEffect(() => {
         if (!running) return undefined;
         const t = setInterval(() => { loadRun(runId).catch(() => {}); }, POLL_MS);
         return () => clearInterval(t);
     }, [running, runId, loadRun]);
+
+    const cancelRun = async () => {
+        try { setRun(await cancelAutoOrderRun(storeId, run.id)); } catch (e) { setError(errText(e)); }
+    };
 
     const toggleAutomate = async (value) => {
         setError('');
@@ -284,6 +289,9 @@ export default function AutoOrderBot() {
                                 <ShoppingCart className="mr-1 h-4 w-4" />Place orders
                             </Button>
                         </div>
+                        <p className={`text-sm font-medium ${info.laptop_online ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
+                            {info.laptop_online ? 'Order bot laptop is online.' : 'Order bot laptop is offline. A run waits until run_agent.bat is running on it.'}
+                        </p>
                         <ul className="list-disc space-y-1 pl-5 text-xs text-slate-500 dark:text-slate-400">
                             <li><strong>Dry run</strong> fills the cart and ship-to, then stops before the final click.</li>
                             <li><strong>Place orders</strong> really buys, using the card saved on the vendor account.</li>
@@ -298,11 +306,12 @@ export default function AutoOrderBot() {
                 <section className={card}>
                     <div className="flex flex-wrap items-center gap-3">
                         <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-200">Latest run</h2>
-                        <Badge variant={STATUS_VARIANT[run.status] || 'default'}>{run.status}</Badge>
+                        <Badge variant={STATUS_VARIANT[run.status] || 'default'}>{run.status === 'pending' ? 'waiting for the laptop' : run.status}</Badge>
                         <span className="text-xs text-slate-500">
                             {run.place ? 'Place orders' : 'Dry run'} · {run.marketplace} · {run.account_name} · {new Date(run.started_at).toLocaleString()}
                         </span>
                         {running && <Loader2 className="h-4 w-4 animate-spin" />}
+                        {running && <Button variant="secondary" onClick={cancelRun}>Cancel run</Button>}
                     </div>
                     <p className="text-sm">Bot exit code: <strong>{run.exit_code ?? (running ? 'running…' : '—')}</strong></p>
                     {run.status === 'rejected' && <p className="text-sm text-amber-700 dark:text-amber-400">The bot rejected the files before opening a browser. See the message below.</p>}

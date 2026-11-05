@@ -446,7 +446,9 @@ class PurchaseAccount(models.Model):
 class AutoOrderRun(models.Model):
     """One launch of the external order bot for a store."""
     class Status(models.TextChoices):
+        PENDING = 'pending', 'Waiting for the laptop'
         RUNNING = 'running', 'Running'
+        CANCELLED = 'cancelled', 'Cancelled'
         FINISHED = 'finished', 'Finished'
         REJECTED = 'rejected', 'Rejected'
         FAILED = 'failed', 'Failed'
@@ -466,6 +468,8 @@ class AutoOrderRun(models.Model):
     log_text = models.TextField(blank=True, default='')
     done_rows = models.JSONField(default=list, blank=True)
     remaining_rows = models.JSONField(default=list, blank=True)
+    laptop = models.CharField(max_length=128, blank=True, default='', help_text='Label of the ingest token (laptop) that ran it.')
+    claimed_at = models.DateTimeField(null=True, blank=True)
     started_at = models.DateTimeField(auto_now_add=True)
     finished_at = models.DateTimeField(null=True, blank=True)
 

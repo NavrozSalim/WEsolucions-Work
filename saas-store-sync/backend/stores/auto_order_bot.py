@@ -150,7 +150,38 @@ def execute_run(run_id) -> None:
             connection.close()
 
 
+def runner_mode() -> str:
+    """'laptop' (default): runs wait for a laptop agent. 'local': Django spawns the bot itself."""
+    return getattr(settings, 'AUTO_ORDER_BOT_RUNNER', 'laptop')
+
+
+ACTIVE = (AutoOrderRun.Status.PENDING, AutoOrderRun.Status.RUNNING)
+LAPTOP_SCOPE = 'order-bot'
+ONLINE_SECONDS = 120
+
+
+def laptop_online(user) -> bool:
+    """True when an active order-bot token usable by this user called in during the last two minutes."""
+    from catalog.models import IngestToken
+    since = timezone.now() - timedelta(seconds=ONLINE_SECONDS)
+    qs = IngestToken.objects.filter(is_active=True, last_used_at__gte=since)
+    return any(LAPTOP_SCOPE in (t.scopes or []) and t.created_by_id in (None, user.id) for t in qs)
+
+
+def save_laptop_files(run: AutoOrderRun, files: dict) -> None:
+    """Store done / remaining / log uploaded by the laptop where the page's readers expect them."""
+    paths = output_paths(run)
+    paths['done'].parent.mkdir(parents=True, exist_ok=True)
+    for kind, upload in files.items():
+        if kind in paths and upload:
+            with open(paths[kind], 'wb') as fh:
+                for chunk in upload.chunks():
+                    fh.write(chunk)
+
+
 def launch(run: AutoOrderRun) -> None:
+    if runner_mode() != 'local':
+        return  # a laptop agent claims it through /ingest/order-bot/next-job/
     if getattr(settings, 'AUTO_ORDER_BOT_INLINE', False):
         execute_run(run.pk)
     else:
@@ -161,7 +192,7 @@ def expire_stale(runs) -> None:
     """A server restart kills the watcher thread; do not leave such runs 'running' forever."""
     hours = getattr(settings, 'AUTO_ORDER_BOT_STALE_HOURS', 12)
     cutoff = timezone.now() - timedelta(hours=hours)
-    for r in runs.filter(status=AutoOrderRun.Status.RUNNING, started_at__lt=cutoff):
+    for r in runs.filter(status__in=ACTIVE, started_at__lt=cutoff):
         r.status = AutoOrderRun.Status.FAILED
         r.stdout = (r.stdout or '') + '\nRun was still marked running after the stale limit; assumed interrupted.'
         r.finished_at = timezone.now()
@@ -224,7 +255,7 @@ def saved_files(store) -> dict:
 
 def purge_expired(store) -> bool:
     """Delete the order export once its day is over (never while a run for the store is going)."""
-    if AutoOrderRun.objects.filter(store=store, status=AutoOrderRun.Status.RUNNING).exists():
+    if AutoOrderRun.objects.filter(store=store, status__in=ACTIVE).exists():
         return False
     meta = _read_meta(store)
     entry = meta.get('orders')
@@ -234,7 +265,7 @@ def purge_expired(store) -> bool:
         delete_saved(store, 'orders')
     # Old runs: drop the generated accounts file and screenshots (they can show customer addresses).
     today = timezone.localdate()
-    for run in AutoOrderRun.objects.filter(store=store).exclude(status=AutoOrderRun.Status.RUNNING):
+    for run in AutoOrderRun.objects.filter(store=store).exclude(status__in=ACTIVE):
         if timezone.localtime(run.started_at).date() < today and run.run_dir:
             rd = Path(run.run_dir)
             (rd / 'accounts.json').unlink(missing_ok=True)

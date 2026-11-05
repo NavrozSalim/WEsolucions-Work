@@ -16,6 +16,7 @@ from pathlib import Path
 from django.conf import settings
 from django.http import FileResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -49,7 +50,7 @@ def _truthy(v) -> bool:
     return str(v).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
-def _store_info(store) -> dict:
+def _store_info(store, user=None) -> dict:
     mp = bot.bot_marketplace(store)
     return {
         'store_id': str(store.id),
@@ -63,6 +64,8 @@ def _store_info(store) -> dict:
         'vendors': list(bot.region_vendors(store.region)),
         'message': '' if mp else bot.SUPPORTED_TEXT,
         'files': bot.saved_files(store),
+        'runner': bot.runner_mode(),
+        'laptop_online': bot.laptop_online(user) if user else False,
     }
 
 
@@ -80,7 +83,7 @@ def _run_json(run: AutoOrderRun, detail=False) -> dict:
         'done_count': len(run.done_rows or []), 'remaining_count': len(run.remaining_rows or []),
     }
     if detail:
-        running = run.status == AutoOrderRun.Status.RUNNING
+        running = run.status in bot.ACTIVE
         # The bot rewrites its files after every line, so a running job shows live progress.
         done = bot.read_workbook(bot.output_paths(run)['done']) if running else run.done_rows
         remaining = bot.read_workbook(bot.output_paths(run)['remaining']) if running else run.remaining_rows
@@ -92,7 +95,7 @@ def _run_json(run: AutoOrderRun, detail=False) -> dict:
 
 class SettingsView(_StoreBotView):
     def get(self, request, store_pk):
-        return Response(_store_info(self.get_store(store_pk)))
+        return Response(_store_info(self.get_store(store_pk), request.user))
 
     def patch(self, request, store_pk):
         store = self.get_store(store_pk)
@@ -100,7 +103,7 @@ class SettingsView(_StoreBotView):
             return Response({'detail': 'automate is required.'}, status=status.HTTP_400_BAD_REQUEST)
         store.auto_order_bot_enabled = _truthy(request.data['automate'])
         store.save(update_fields=['auto_order_bot_enabled'])
-        return Response(_store_info(store))
+        return Response(_store_info(store, request.user))
 
 
 class FileView(_StoreBotView):
@@ -114,7 +117,7 @@ class FileView(_StoreBotView):
         up = request.FILES.get('file')
         if not self._kind(kind) or not up or not up.name.lower().endswith('.xlsx'):
             return Response({'detail': 'Send an .xlsx file as "file" to orders or mapping.'}, status=status.HTTP_400_BAD_REQUEST)
-        if AutoOrderRun.objects.filter(store=store, status=AutoOrderRun.Status.RUNNING).exists():
+        if AutoOrderRun.objects.filter(store=store, status__in=bot.ACTIVE).exists():
             return Response({'detail': 'A run for this store is going; wait for it to finish.'}, status=status.HTTP_409_CONFLICT)
         bot.save_upload(store, kind, up)
         return Response(bot.saved_files(store), status=status.HTTP_201_CREATED)
@@ -194,7 +197,7 @@ class RunsView(_StoreBotView):
                 return bad(f'{f.name}: only .xlsx files are accepted.')
         runs = AutoOrderRun.objects.filter(store=store)
         bot.expire_stale(runs)
-        if runs.filter(status=AutoOrderRun.Status.RUNNING).exists():
+        if runs.filter(status__in=bot.ACTIVE).exists():
             return bad('A run for this store is already going.', status.HTTP_409_CONFLICT)
 
         for key in bot.KINDS:
@@ -218,7 +221,8 @@ class RunsView(_StoreBotView):
         import json
         run = AutoOrderRun.objects.create(
             id=run_id, store=store, user=request.user, account_name=acct.name, vendor=acct.vendor,
-            marketplace=marketplace, place=place, command=json.dumps(cmd), run_dir=str(run_dir))
+            marketplace=marketplace, place=place, command=json.dumps(cmd), run_dir=str(run_dir),
+            status=(AutoOrderRun.Status.RUNNING if bot.runner_mode() == 'local' else AutoOrderRun.Status.PENDING))
         bot.launch(run)
         run.refresh_from_db()
         return Response(_run_json(run, detail=True), status=status.HTTP_201_CREATED)
@@ -228,6 +232,20 @@ class RunDetailView(_StoreBotView):
     def get(self, request, store_pk, run_id):
         store = self.get_store(store_pk)
         run = get_object_or_404(AutoOrderRun, pk=run_id, store=store)
+        return Response(_run_json(run, detail=True))
+
+
+class RunCancelView(_StoreBotView):
+    def post(self, request, store_pk, run_id):
+        run = get_object_or_404(AutoOrderRun, pk=run_id, store=self.get_store(store_pk))
+        if run.status not in bot.ACTIVE:
+            return Response({'detail': 'That run is not active.'}, status=status.HTTP_409_CONFLICT)
+        run.status = AutoOrderRun.Status.CANCELLED
+        run.finished_at = timezone.now()
+        run.done_rows = bot.read_workbook(bot.output_paths(run)['done'])
+        run.remaining_rows = bot.read_workbook(bot.output_paths(run)['remaining'])
+        run.log_text = bot.read_log(run)
+        run.save()
         return Response(_run_json(run, detail=True))
 
 

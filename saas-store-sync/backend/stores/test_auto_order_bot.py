@@ -61,7 +61,7 @@ class FakePopen:
         return type(self).stdout, None
 
 
-@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_INLINE=True, AUTO_ORDER_BOT_DIR='C:/bot', AUTO_ORDER_BOT_PYTHON='py')
+@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_INLINE=True, AUTO_ORDER_BOT_RUNNER='local', AUTO_ORDER_BOT_DIR='C:/bot', AUTO_ORDER_BOT_PYTHON='py')
 class AutoOrderBotTests(TestCase):
     def setUp(self):
         FakePopen.calls, FakePopen.exit_code, FakePopen.stdout, FakePopen.write_files = [], 0, 'bot output\n', True
@@ -222,7 +222,7 @@ class AutoOrderBotTests(TestCase):
         self.assertEqual(c2.get(self.url(store)).status_code, 404)
 
 
-@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_INLINE=True, AUTO_ORDER_BOT_DIR='C:/bot', AUTO_ORDER_BOT_PYTHON='py')
+@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_INLINE=True, AUTO_ORDER_BOT_RUNNER='local', AUTO_ORDER_BOT_DIR='C:/bot', AUTO_ORDER_BOT_PYTHON='py')
 class SavedFilesTests(AutoOrderBotTests):  # inherits fixtures; base tests re-run harmlessly
     """Mapping is kept until replaced; the order export lasts one day."""
 
@@ -270,3 +270,102 @@ class SavedFilesTests(AutoOrderBotTests):  # inherits fixtures; base tests re-ru
             files = self.c.get(self.url(store)).data['files']
         self.assertIsNone(files['orders'])
         self.assertFalse(bot.current_path(store, 'orders').exists())
+
+
+@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_RUNNER='laptop')
+class LaptopRunnerTests(TestCase):
+    """Runs wait for the laptop agent, which talks to the ingest endpoints with a bearer token."""
+
+    def setUp(self):
+        import hashlib
+        from catalog.models import IngestToken
+        self.user = User.objects.create_user(username='lp', email='lp@example.com', password='pw12345678')
+        self.other = User.objects.create_user(username='lp2', email='lp2@example.com', password='pw12345678')
+        self.c = APIClient()
+        self.c.force_authenticate(self.user)
+        mp = Marketplace.objects.get_or_create(code='kogan', defaults={'name': 'Kogan'})[0]
+        self.store = Store.objects.create(user=self.user, name='k', region='AU', api_token='t', marketplace=mp,
+                                          auto_order_bot_enabled=True)
+        PurchaseAccount.objects.create(user=self.user, name='au-amazon', vendor='amazon_au', region='AU', chrome_profile='P1')
+        self.token = self.make_token('laptop-1', self.user, hashlib)
+        self.laptop = APIClient()
+        self.laptop.credentials(HTTP_AUTHORIZATION=f'Bearer {self.raw}')
+
+    def make_token(self, label, owner, hashlib, scopes=('order-bot',)):
+        from catalog.models import IngestToken
+        self.raw = f'{label}-' + 'z' * 30
+        return IngestToken.objects.create(label=label, token_hash=hashlib.sha256(self.raw.encode()).hexdigest(),
+                                          token_prefix=self.raw[:8], scopes=list(scopes), created_by=owner)
+
+    def create_run(self, place='false'):
+        data = {'orders': upload('o.xlsx'), 'mapping': upload('m.xlsx'), 'account': 'au-amazon', 'place': place}
+        with mock.patch('stores.auto_order_bot.subprocess.Popen') as popen:
+            r = self.c.post(f'/api/v1/stores/{self.store.id}/auto-order-bot/runs/', data, format='multipart')
+            popen.assert_not_called()     # Django never starts the bot itself in laptop mode
+        return r
+
+    def test_run_waits_pending_until_laptop_claims(self):
+        r = self.create_run(place='true')
+        self.assertEqual((r.status_code, r.data['status']), (201, 'pending'))
+        job = self.laptop.get('/api/v1/ingest/order-bot/next-job/').data
+        self.assertEqual((job['region'], job['marketplace'], job['account'], job['place']), ('au', 'kogan', 'au-amazon', True))
+        self.assertEqual(AutoOrderRun.objects.get().status, 'running')
+        self.assertIsNone(self.laptop.get('/api/v1/ingest/order-bot/next-job/').data['job_id'])
+        for kind in ('orders', 'mapping', 'accounts'):
+            self.assertEqual(self.laptop.get(job['files'][kind]).status_code, 200, kind)
+        acc = json.loads(b''.join(self.laptop.get(job['files']['accounts']).streaming_content))
+        self.assertEqual(acc['au']['amazon_au'][0]['name'], 'au-amazon')
+
+    def test_second_run_blocked_while_pending(self):
+        self.create_run()
+        self.assertEqual(self.create_run().status_code, 409)
+
+    def test_complete_stores_rows_and_exit_code(self):
+        run_id = self.create_run().data['id']
+        job = self.laptop.get('/api/v1/ingest/order-bot/next-job/').data
+        FakePopen.exit_code = 0
+        out = Path(tempfile.mkdtemp(dir=_MEDIA))
+        FakePopen(['x', '--output-dir', str(out), '--marketplace', 'kogan'])
+        files = {k: open(out / f'kogan-{k}.{"txt" if k == "log" else "xlsx"}', 'rb') for k in ('done', 'remaining', 'log')}
+        r = self.laptop.post(job['complete_url'], {'exit_code': 0, 'stdout': 'ok', **files}, format='multipart')
+        self.assertEqual(r.status_code, 200, r.data)
+        d = self.c.get(f'/api/v1/stores/{self.store.id}/auto-order-bot/runs/{run_id}/').data
+        self.assertEqual((d['status'], d['exit_code'], d['done_count'], d['remaining_count']), ('finished', 0, 1, 1))
+        self.assertEqual(d['done_rows'][0]['status'], 'ready_for_payment')
+        self.assertEqual(d['laptop'] if 'laptop' in d else 'laptop-1', 'laptop-1')
+
+    def test_exit_code_2_is_rejected(self):
+        self.create_run()
+        job = self.laptop.get('/api/v1/ingest/order-bot/next-job/').data
+        self.laptop.post(job['complete_url'], {'exit_code': 2, 'stdout': 'REJECTED: wrong file'}, format='multipart')
+        run = AutoOrderRun.objects.get()
+        self.assertEqual((run.status, run.exit_code), ('rejected', 2))
+        self.assertIn('REJECTED', run.stdout)
+
+    def test_cancel_tells_laptop_to_stop(self):
+        run_id = self.create_run().data['id']
+        job = self.laptop.get('/api/v1/ingest/order-bot/next-job/').data
+        r = self.c.post(f'/api/v1/stores/{self.store.id}/auto-order-bot/runs/{run_id}/cancel/')
+        self.assertEqual(r.data['status'], 'cancelled')
+        self.assertEqual(self.laptop.get(job['status_url']).data['status'], 'cancelled')
+
+    def test_token_rules(self):
+        import hashlib
+        self.create_run()
+        anon = APIClient()
+        self.assertIn(anon.get('/api/v1/ingest/order-bot/next-job/').status_code, (401, 403))
+        wrong_scope = APIClient()
+        self.make_token('reverb-laptop', self.user, hashlib, scopes=('reverb',))
+        wrong_scope.credentials(HTTP_AUTHORIZATION=f'Bearer {self.raw}')
+        self.assertEqual(wrong_scope.get('/api/v1/ingest/order-bot/next-job/').status_code, 403)
+        stranger = APIClient()
+        self.make_token('someone-else', self.other, hashlib)
+        stranger.credentials(HTTP_AUTHORIZATION=f'Bearer {self.raw}')
+        self.assertIsNone(stranger.get('/api/v1/ingest/order-bot/next-job/').data['job_id'])
+        self.assertEqual(AutoOrderRun.objects.get().status, 'pending')
+
+    def test_page_sees_laptop_online(self):
+        url = f'/api/v1/stores/{self.store.id}/auto-order-bot/'
+        self.assertFalse(self.c.get(url).data['laptop_online'])
+        self.laptop.get('/api/v1/ingest/order-bot/next-job/')
+        self.assertTrue(self.c.get(url).data['laptop_online'])
