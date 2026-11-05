@@ -1,4 +1,5 @@
 """Auto Order Bot API. The bot subprocess is mocked: no Chrome, no order-bot imports."""
+import atexit
 import json
 import shutil
 import tempfile
@@ -16,6 +17,7 @@ from stores.models import AutoOrderRun, PurchaseAccount, Store
 
 User = get_user_model()
 _MEDIA = tempfile.mkdtemp(prefix='aob-test-')
+atexit.register(shutil.rmtree, _MEDIA, ignore_errors=True)
 
 
 def xlsx_bytes(headers, rows=()):
@@ -61,11 +63,6 @@ class FakePopen:
 
 @override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_INLINE=True, AUTO_ORDER_BOT_DIR='C:/bot', AUTO_ORDER_BOT_PYTHON='py')
 class AutoOrderBotTests(TestCase):
-    @classmethod
-    def tearDownClass(cls):
-        super().tearDownClass()
-        shutil.rmtree(_MEDIA, ignore_errors=True)
-
     def setUp(self):
         FakePopen.calls, FakePopen.exit_code, FakePopen.stdout, FakePopen.write_files = [], 0, 'bot output\n', True
         self.user = User.objects.create_user(username='aob', email='aob@example.com', password='pw12345678')
@@ -223,3 +220,53 @@ class AutoOrderBotTests(TestCase):
         c2 = APIClient()
         c2.force_authenticate(self.other)
         self.assertEqual(c2.get(self.url(store)).status_code, 404)
+
+
+@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_INLINE=True, AUTO_ORDER_BOT_DIR='C:/bot', AUTO_ORDER_BOT_PYTHON='py')
+class SavedFilesTests(AutoOrderBotTests):  # inherits fixtures; base tests re-run harmlessly
+    """Mapping is kept until replaced; the order export lasts one day."""
+
+    def put(self, store, kind, name='f.xlsx'):
+        return self.c.post(f'/api/v1/stores/{store.id}/auto-order-bot/files/{kind}/', {'file': upload(name)}, format='multipart')
+
+    def test_saved_files_reused_without_reupload(self):
+        store = self.store('kogan', 'AU')
+        self.assertEqual(self.put(store, 'orders', 'o.xlsx').status_code, 201)
+        self.put(store, 'mapping', 'm.xlsx')
+        with mock.patch('stores.auto_order_bot.subprocess.Popen', FakePopen):
+            r = self.c.post(self.url(store, 'runs/'), {'account': 'au-amazon'}, format='multipart')
+        self.assertEqual(r.status_code, 201, r.data)
+        cmd = FakePopen.calls[-1][0]
+        self.assertEqual(Path(cmd[cmd.index('--orders') + 1]).parent.name, 'current')
+
+    def test_run_without_files_refused(self):
+        store = self.store('kogan', 'AU')
+        with mock.patch('stores.auto_order_bot.subprocess.Popen', FakePopen):
+            r = self.c.post(self.url(store, 'runs/'), {'account': 'au-amazon'}, format='multipart')
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(FakePopen.calls, [])
+
+    def test_mapping_can_be_replaced_and_survives_days(self):
+        from django.utils import timezone
+        from datetime import timedelta
+        store = self.store('kogan', 'AU')
+        self.put(store, 'mapping', 'old.xlsx')
+        self.put(store, 'mapping', 'new.xlsx')
+        tomorrow = timezone.now() + timedelta(days=1)
+        with mock.patch('django.utils.timezone.now', return_value=tomorrow), \
+                mock.patch('django.utils.timezone.localdate', return_value=tomorrow.date()):
+            files = self.c.get(self.url(store)).data['files']
+        self.assertEqual(files['mapping']['name'], 'new.xlsx')
+
+    def test_order_file_deleted_after_the_day(self):
+        from django.utils import timezone
+        from datetime import timedelta
+        from stores import auto_order_bot as bot
+        store = self.store('kogan', 'AU')
+        self.put(store, 'orders', 'o.xlsx')
+        self.assertTrue(bot.current_path(store, 'orders').exists())
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        with mock.patch('django.utils.timezone.localdate', return_value=tomorrow):
+            files = self.c.get(self.url(store)).data['files']
+        self.assertIsNone(files['orders'])
+        self.assertFalse(bot.current_path(store, 'orders').exists())

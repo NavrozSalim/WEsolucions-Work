@@ -62,6 +62,7 @@ def _store_info(store) -> dict:
         'bot_marketplace': mp,
         'vendors': list(bot.region_vendors(store.region)),
         'message': '' if mp else bot.SUPPORTED_TEXT,
+        'files': bot.saved_files(store),
     }
 
 
@@ -100,6 +101,32 @@ class SettingsView(_StoreBotView):
         store.auto_order_bot_enabled = _truthy(request.data['automate'])
         store.save(update_fields=['auto_order_bot_enabled'])
         return Response(_store_info(store))
+
+
+class FileView(_StoreBotView):
+    """PUT/POST replaces the store's mapping or today's order export; DELETE removes it."""
+
+    def _kind(self, kind):
+        return kind if kind in bot.KINDS else None
+
+    def post(self, request, store_pk, kind):
+        store = self.get_store(store_pk)
+        up = request.FILES.get('file')
+        if not self._kind(kind) or not up or not up.name.lower().endswith('.xlsx'):
+            return Response({'detail': 'Send an .xlsx file as "file" to orders or mapping.'}, status=status.HTTP_400_BAD_REQUEST)
+        if AutoOrderRun.objects.filter(store=store, status=AutoOrderRun.Status.RUNNING).exists():
+            return Response({'detail': 'A run for this store is going; wait for it to finish.'}, status=status.HTTP_409_CONFLICT)
+        bot.save_upload(store, kind, up)
+        return Response(bot.saved_files(store), status=status.HTTP_201_CREATED)
+
+    put = post
+
+    def delete(self, request, store_pk, kind):
+        store = self.get_store(store_pk)
+        if not self._kind(kind):
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        bot.delete_saved(store, kind)
+        return Response(bot.saved_files(store))
 
 
 class AccountsView(_StoreBotView):
@@ -145,6 +172,7 @@ class RunsView(_StoreBotView):
         store = self.get_store(store_pk)
         runs = AutoOrderRun.objects.filter(store=store)
         bot.expire_stale(runs)
+        bot.purge_expired(store)
         return Response({'runs': [_run_json(r) for r in runs[:50]]})
 
     def post(self, request, store_pk):
@@ -160,26 +188,28 @@ class RunsView(_StoreBotView):
             return bad('Choose one of your own purchase accounts.')
         if acct.region != store.region or acct.vendor not in bot.region_vendors(store.region):
             return bad('That purchase account belongs to a different region than this store.')
-        orders, mapping = request.FILES.get('orders'), request.FILES.get('mapping')
-        if not orders or not mapping:
-            return bad('Upload both the order export and the mapping workbook.')
-        for f in (orders, mapping):
-            if not f.name.lower().endswith('.xlsx'):
+        for key in bot.KINDS:  # optional here: an upload replaces the saved file
+            f = request.FILES.get(key)
+            if f and not f.name.lower().endswith('.xlsx'):
                 return bad(f'{f.name}: only .xlsx files are accepted.')
         runs = AutoOrderRun.objects.filter(store=store)
         bot.expire_stale(runs)
         if runs.filter(status=AutoOrderRun.Status.RUNNING).exists():
             return bad('A run for this store is already going.', status.HTTP_409_CONFLICT)
 
+        for key in bot.KINDS:
+            if request.FILES.get(key):
+                bot.save_upload(store, key, request.FILES[key])
+        saved = bot.saved_files(store)
+        if not saved['orders']:
+            return bad("Upload today's order export first (order files are kept for one day).")
+        if not saved['mapping']:
+            return bad('Upload the mapping workbook first.')
+
         run_id = uuid.uuid4()
         run_dir = Path(settings.MEDIA_ROOT) / 'auto_order_bot' / str(store.id) / str(run_id)
         (run_dir / 'output').mkdir(parents=True)
-        files = {}
-        for key, up in (('orders', orders), ('mapping', mapping)):
-            files[key] = run_dir / f'{key}.xlsx'
-            with open(files[key], 'wb') as fh:
-                for chunk in up.chunks():
-                    fh.write(chunk)
+        files = {k: bot.current_path(store, k) for k in bot.KINDS}
         accounts_file = run_dir / 'accounts.json'
         bot.write_accounts_file(request.user, accounts_file)
         place = _truthy(request.data.get('place', False))

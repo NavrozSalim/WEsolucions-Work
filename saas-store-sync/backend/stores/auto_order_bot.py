@@ -5,6 +5,7 @@ The bot lives outside this repo (settings.AUTO_ORDER_BOT_DIR) and is only ever c
 from __future__ import annotations
 
 import json
+import shutil
 import logging
 import os
 import subprocess
@@ -165,3 +166,77 @@ def expire_stale(runs) -> None:
         r.stdout = (r.stdout or '') + '\nRun was still marked running after the stale limit; assumed interrupted.'
         r.finished_at = timezone.now()
         r.save()
+
+
+# ---- saved files: mapping is kept until replaced, the order export is kept for one day -----------------
+KINDS = ('orders', 'mapping')
+
+
+def store_dir(store) -> Path:
+    return Path(settings.MEDIA_ROOT) / 'auto_order_bot' / str(store.id)
+
+
+def current_dir(store) -> Path:
+    return store_dir(store) / 'current'
+
+
+def current_path(store, kind: str) -> Path:
+    return current_dir(store) / f'{kind}.xlsx'
+
+
+def _meta_path(store) -> Path:
+    return current_dir(store) / 'meta.json'
+
+
+def _read_meta(store) -> dict:
+    try:
+        return json.loads(_meta_path(store).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_upload(store, kind: str, upload) -> None:
+    """Store (or replace) the store's mapping / today's order export."""
+    d = current_dir(store)
+    d.mkdir(parents=True, exist_ok=True)
+    with open(current_path(store, kind), 'wb') as fh:
+        for chunk in upload.chunks():
+            fh.write(chunk)
+    meta = _read_meta(store)
+    meta[kind] = {'name': upload.name, 'uploaded_at': timezone.now().isoformat(),
+                  'date': timezone.localdate().isoformat()}
+    _meta_path(store).write_text(json.dumps(meta), encoding='utf-8')
+
+
+def delete_saved(store, kind: str) -> None:
+    current_path(store, kind).unlink(missing_ok=True)
+    meta = _read_meta(store)
+    if meta.pop(kind, None) is not None:
+        _meta_path(store).write_text(json.dumps(meta), encoding='utf-8')
+
+
+def saved_files(store) -> dict:
+    """{'orders': {...}|None, 'mapping': {...}|None} after dropping an order file from a previous day."""
+    purge_expired(store)
+    meta = _read_meta(store)
+    return {k: (meta[k] if k in meta and current_path(store, k).exists() else None) for k in KINDS}
+
+
+def purge_expired(store) -> bool:
+    """Delete the order export once its day is over (never while a run for the store is going)."""
+    if AutoOrderRun.objects.filter(store=store, status=AutoOrderRun.Status.RUNNING).exists():
+        return False
+    meta = _read_meta(store)
+    entry = meta.get('orders')
+    stale = current_path(store, 'orders').exists() and (
+        not entry or entry.get('date') != timezone.localdate().isoformat())
+    if stale:
+        delete_saved(store, 'orders')
+    # Old runs: drop the generated accounts file and screenshots (they can show customer addresses).
+    today = timezone.localdate()
+    for run in AutoOrderRun.objects.filter(store=store).exclude(status=AutoOrderRun.Status.RUNNING):
+        if timezone.localtime(run.started_at).date() < today and run.run_dir:
+            rd = Path(run.run_dir)
+            (rd / 'accounts.json').unlink(missing_ok=True)
+            shutil.rmtree(rd / 'output' / 'screenshots', ignore_errors=True)
+    return stale

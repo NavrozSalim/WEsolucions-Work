@@ -15,10 +15,15 @@ export const deletePurchaseAccount = (storeId, accountId) => api.delete(`${base(
 export const getAutoOrderRuns = (storeId) => api.get(`${base(storeId)}/runs/`).then((r) => r.data);
 export const getAutoOrderRun = (storeId, runId) => api.get(`${base(storeId)}/runs/${runId}/`).then((r) => r.data);
 
-export function startAutoOrderRun(storeId, { orders, mapping, account, place }) {
+/** kind is 'orders' or 'mapping'. Replaces the saved file. */
+export function uploadAutoOrderFile(storeId, kind, file) {
     const body = new FormData();
-    body.append('orders', orders);
-    body.append('mapping', mapping);
+    body.append('file', file);
+    return api.post(`${base(storeId)}/files/${kind}/`, body).then((r) => r.data);
+}
+
+export function startAutoOrderRun(storeId, { account, place }) {
+    const body = new FormData();
     body.append('account', account);
     body.append('place', place ? 'true' : 'false');
     return api.post(`${base(storeId)}/runs/`, body).then((r) => r.data);

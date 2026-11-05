@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, Download, Loader2, Play, Plus, ShoppingCart, Trash2 } from 'lucide-react';
+import { ArrowLeft, Download, Loader2, Play, Plus, ShoppingCart, Trash2, Upload } from 'lucide-react';
 import Button from '../../components/ui/Button';
 import ConfirmModal from '../../components/ui/ConfirmModal';
 import Toggle from '../../components/ui/Toggle';
@@ -16,6 +16,7 @@ import {
     getPurchaseAccounts,
     setAutoOrderAutomate,
     startAutoOrderRun,
+    uploadAutoOrderFile,
 } from '../../services/autoOrderBotService';
 
 const POLL_MS = 4000;
@@ -58,13 +59,35 @@ function RowsTable({ title, rows }) {
     );
 }
 
+function FilePicker({ label, hint, saved, disabled, busy, inputRef, onChange }) {
+    const id = `file-${label}`;
+    return (
+        <div className="space-y-1.5">
+            <span className="block text-sm font-medium text-slate-800 dark:text-slate-200">{label} <span className="font-normal text-slate-500">(.xlsx)</span></span>
+            <input ref={inputRef} id={id} type="file" accept=".xlsx" disabled={disabled || busy} className="sr-only"
+                onChange={(e) => onChange(e.target.files[0] || null)} />
+            <label htmlFor={id}
+                className={`flex items-center gap-3 rounded-lg border border-dashed px-4 py-3 text-sm transition ${disabled
+                    ? 'cursor-not-allowed opacity-50 border-slate-300 dark:border-slate-700'
+                    : 'cursor-pointer border-slate-300 hover:border-accent-500 hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800/60'}`}>
+                {busy ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : <Upload className="h-4 w-4 shrink-0 text-slate-500" />}
+                <span className={`min-w-0 flex-1 truncate ${saved ? 'font-medium text-slate-900 dark:text-slate-100' : 'text-slate-500'}`}>
+                    {saved ? saved.name : 'Click to choose a file'}
+                </span>
+                <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium dark:bg-slate-800">{saved ? 'Replace' : 'Browse'}</span>
+            </label>
+            {saved && <span className="block text-xs text-slate-500">Saved {new Date(saved.uploaded_at).toLocaleString()}</span>}
+            {hint && <span className="block text-xs text-slate-500">{hint}</span>}
+        </div>
+    );
+}
+
 export default function AutoOrderBot() {
     const { storeId } = useParams();
     const [info, setInfo] = useState(null);
     const [accounts, setAccounts] = useState([]);
     const [account, setAccount] = useState('');
-    const [ordersFile, setOrdersFile] = useState(null);
-    const [mappingFile, setMappingFile] = useState(null);
+    const [uploading, setUploading] = useState('');
     const [run, setRun] = useState(null);
     const [error, setError] = useState('');
     const [busy, setBusy] = useState(false);
@@ -72,6 +95,22 @@ export default function AutoOrderBot() {
     const [newAccount, setNewAccount] = useState(null);
     const ordersInput = useRef(null);
     const mappingInput = useRef(null);
+
+    const saveFile = async (kind, file) => {
+        if (!file) return;
+        setUploading(kind);
+        setError('');
+        try {
+            const files = await uploadAutoOrderFile(storeId, kind, file);
+            setInfo((i) => ({ ...i, files }));
+        } catch (e) {
+            setError(errText(e));
+        } finally {
+            setUploading('');
+            const ref = kind === 'orders' ? ordersInput : mappingInput;
+            if (ref.current) ref.current.value = '';
+        }
+    };
 
     const loadRun = useCallback(async (runId) => {
         const detail = await getAutoOrderRun(storeId, runId);
@@ -115,12 +154,9 @@ export default function AutoOrderBot() {
         setBusy(true);
         setError('');
         try {
-            const created = await startAutoOrderRun(storeId, { orders: ordersFile, mapping: mappingFile, account, place });
+            const created = await startAutoOrderRun(storeId, { account, place });
             setRun(created);
-            setOrdersFile(null);
-            setMappingFile(null);
-            if (ordersInput.current) ordersInput.current.value = '';
-            if (mappingInput.current) mappingInput.current.value = '';
+            setInfo((i) => ({ ...i, files: { ...i.files, orders: i.files.orders } }));
         } catch (e) {
             setError(errText(e));
         } finally {
@@ -151,7 +187,7 @@ export default function AutoOrderBot() {
     }
 
     const enabled = info.automate && info.supported;
-    const ready = enabled && account && ordersFile && mappingFile && !busy && !running;
+    const ready = enabled && account && info.files.orders && info.files.mapping && !uploading && !busy && !running;
     const input = 'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100';
     const card = 'rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900 space-y-3';
 
@@ -225,32 +261,34 @@ export default function AutoOrderBot() {
 
                     {/* 4. Files */}
                     <section className={card}>
+                        <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-200">Files</h2>
                         <div className="grid gap-4 sm:grid-cols-2">
-                            <label className="block text-sm">
-                                <span className="mb-1 block font-medium">Marketplace order export (.xlsx)</span>
-                                <input ref={ordersInput} type="file" accept=".xlsx" disabled={!enabled} onChange={(e) => setOrdersFile(e.target.files[0] || null)} />
-                            </label>
-                            <label className="block text-sm">
-                                <span className="mb-1 block font-medium">Mapping workbook (.xlsx)</span>
-                                <input ref={mappingInput} type="file" accept=".xlsx" disabled={!enabled} onChange={(e) => setMappingFile(e.target.files[0] || null)} />
-                                <span className="mt-1 block text-xs text-slate-500">Headers: SKU, Vendor, Vendor URL, Vendor SKU</span>
-                            </label>
+                            <FilePicker label="Marketplace order export" saved={info.files.orders}
+                                hint="Upload a new one every day. It is deleted automatically when the day ends."
+                                disabled={!enabled} busy={uploading === 'orders'} inputRef={ordersInput}
+                                onChange={(f) => saveFile('orders', f)} />
+                            <FilePicker label="Mapping workbook" saved={info.files.mapping}
+                                hint="Kept until you replace it (e.g. after uploading new listings). Headers: SKU, Vendor, Vendor URL, Vendor SKU"
+                                disabled={!enabled} busy={uploading === 'mapping'} inputRef={mappingInput}
+                                onChange={(f) => saveFile('mapping', f)} />
                         </div>
                     </section>
 
                     {/* 5. Actions */}
                     <section className={card}>
                         <div className="flex flex-wrap items-center gap-3">
-                            <Button variant="secondary" disabled={!ready} onClick={() => start(false)}>
+                            <Button variant="secondary" className="min-w-36 justify-center" disabled={!ready} onClick={() => start(false)}>
                                 {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Play className="mr-1 h-4 w-4" />}Dry run
                             </Button>
-                            <Button disabled={!ready} onClick={() => setConfirmPlace(true)}>
+                            <Button className="min-w-36 justify-center" disabled={!ready} onClick={() => setConfirmPlace(true)}>
                                 <ShoppingCart className="mr-1 h-4 w-4" />Place orders
                             </Button>
                         </div>
-                        <p className="text-xs text-slate-500 dark:text-slate-400">
-                            A dry run fills the cart and ship-to, then stops before the final click. Place orders really buys. Before each line the bot empties the cart of the purchase account.
-                        </p>
+                        <ul className="list-disc space-y-1 pl-5 text-xs text-slate-500 dark:text-slate-400">
+                            <li><strong>Dry run</strong> fills the cart and ship-to, then stops before the final click.</li>
+                            <li><strong>Place orders</strong> really buys, using the card saved on the vendor account.</li>
+                            <li>Before each line the bot empties the cart of the purchase account.</li>
+                        </ul>
                     </section>
                 </>
             )}
