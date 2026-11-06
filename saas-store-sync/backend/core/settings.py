@@ -489,13 +489,41 @@ CELERY_TASK_ROUTES = (
 )
 
 # Bunny CDN for listing images (Scraping → Reverb / Etsy listings).
-BUNNY_STORAGE_ZONE = os.getenv('BUNNY_STORAGE_ZONE', '').strip()
-BUNNY_STORAGE_ACCESS_KEY = (
-    os.getenv('BUNNY_STORAGE_ACCESS_KEY', '') or os.getenv('BUNNY_STORAGE_PASSWORD', '')
-).strip()
-BUNNY_STORAGE_HOST = os.getenv('BUNNY_STORAGE_HOST', 'storage.bunnycdn.com').strip()
-BUNNY_CDN_URL = os.getenv('BUNNY_CDN_URL', '').strip()
-BUNNY_STORAGE_FOLDER = os.getenv('BUNNY_STORAGE_FOLDER', 'listings').strip()
+def _first_env(*names: str, default: str = '') -> str:
+    for name in names:
+        value = (os.getenv(name) or '').strip()
+        if value:
+            return value
+    return default
+
+
+# Storage endpoint per Bunny storage region code (BUNNY_STORAGE_REGION).
+_BUNNY_REGION_HOSTS = {
+    'DE': 'storage.bunnycdn.com',
+    'FS': 'storage.bunnycdn.com',
+    'FALKENSTEIN': 'storage.bunnycdn.com',
+    'UK': 'uk.storage.bunnycdn.com',
+    'NY': 'ny.storage.bunnycdn.com',
+    'LA': 'la.storage.bunnycdn.com',
+    'SG': 'sg.storage.bunnycdn.com',
+    'SE': 'se.storage.bunnycdn.com',
+    'BR': 'br.storage.bunnycdn.com',
+    'JH': 'jh.storage.bunnycdn.com',
+    'SYD': 'syd.storage.bunnycdn.com',
+}
+
+BUNNY_STORAGE_ZONE = _first_env('BUNNY_STORAGE_ZONE')
+BUNNY_STORAGE_ACCESS_KEY = _first_env(
+    'BUNNY_STORAGE_ACCESS_KEY', 'BUNNY_STORAGE_API_KEY', 'BUNNY_STORAGE_PASSWORD',
+)
+_bunny_region = _first_env('BUNNY_STORAGE_REGION').upper()
+BUNNY_STORAGE_HOST = _first_env(
+    'BUNNY_STORAGE_HOST',
+    default=_BUNNY_REGION_HOSTS.get(_bunny_region)
+    or (f'{_bunny_region.lower()}.storage.bunnycdn.com' if _bunny_region else 'storage.bunnycdn.com'),
+)
+BUNNY_CDN_URL = _first_env('BUNNY_CDN_URL')
+BUNNY_STORAGE_FOLDER = _first_env('BUNNY_STORAGE_FOLDER', 'BUNNY_FOLDER', default='listings')
 
 try:
     COSTWAY_AU_INGEST_WAIT_SEC = max(
