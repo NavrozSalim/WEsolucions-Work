@@ -9,6 +9,8 @@ from .views import (
     DiscoveryJobDownloadView,
     DiscoveryJobIdsDownloadView,
     DiscoveryJobListCreateView,
+    DiscoveryListingExportDownloadView,
+    DiscoveryListingExportView,
     DiscoveryJobRowsView,
     DiscoveryOptionsView,
     DiscoveryTemplateView,
@@ -26,4 +28,10 @@ urlpatterns = [
     path('discovery/jobs/<uuid:job_id>/ids/', DiscoveryJobIdsDownloadView.as_view(), name='discovery-job-ids'),
     path('discovery/jobs/<uuid:job_id>/rows/', DiscoveryJobRowsView.as_view(), name='discovery-job-rows'),
     path('discovery/jobs/<uuid:job_id>/continue/', DiscoveryJobContinueView.as_view(), name='discovery-job-continue'),
+    path('discovery/jobs/<uuid:job_id>/listings/', DiscoveryListingExportView.as_view(), name='discovery-job-listings'),
+    path(
+        'discovery/listing-exports/<uuid:export_id>/download/',
+        DiscoveryListingExportDownloadView.as_view(),
+        name='discovery-listing-export-download',
+    ),
 ]

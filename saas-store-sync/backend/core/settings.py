@@ -483,8 +483,19 @@ CELERY_TASK_ROUTES = (
         'listings.fetch_all_reverb_orders': {'queue': 'light'},
         'listings.lookup_marketplace_skus': {'queue': 'sync'},
         'vendor.prune_old_vendor_prices': {'queue': 'celery'},
+        # Scraping → Reverb / Etsy listing file: copies images to Bunny.
+        'discovery.build_listing_export': {'queue': 'light'},
     },
 )
+
+# Bunny CDN for listing images (Scraping → Reverb / Etsy listings).
+BUNNY_STORAGE_ZONE = os.getenv('BUNNY_STORAGE_ZONE', '').strip()
+BUNNY_STORAGE_ACCESS_KEY = (
+    os.getenv('BUNNY_STORAGE_ACCESS_KEY', '') or os.getenv('BUNNY_STORAGE_PASSWORD', '')
+).strip()
+BUNNY_STORAGE_HOST = os.getenv('BUNNY_STORAGE_HOST', 'storage.bunnycdn.com').strip()
+BUNNY_CDN_URL = os.getenv('BUNNY_CDN_URL', '').strip()
+BUNNY_STORAGE_FOLDER = os.getenv('BUNNY_STORAGE_FOLDER', 'listings').strip()
 
 try:
     COSTWAY_AU_INGEST_WAIT_SEC = max(

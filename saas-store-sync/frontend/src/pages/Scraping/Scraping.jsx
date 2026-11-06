@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Download, Loader2, Play, ScanSearch, Square, Table2, Trash2 } from 'lucide-react';
+import { Download, FileSpreadsheet, Loader2, Play, ScanSearch, Square, Table2, Trash2 } from 'lucide-react';
 import Button from '../../components/ui/Button';
 import ConfirmModal from '../../components/ui/ConfirmModal';
+import Modal from '../../components/ui/Modal';
 import Select from '../../components/ui/Select';
 import PageHeader from '../../components/design/PageHeader';
 import Badge from '../../components/design/Badge';
@@ -12,14 +13,17 @@ import {
     clearDiscoveryJobs,
     continueDiscoveryJob,
     createDiscoveryJob,
+    createListingExport,
     resumeDiscoveryJob,
     deleteDiscoveryJob,
     downloadDiscoveryIds,
     downloadDiscoveryResult,
     downloadDiscoveryTemplate,
+    downloadListingExport,
     getDiscoveryJobs,
     getDiscoveryOptions,
 } from '../../services/scrapingService';
+import { getStores } from '../../services/storeService';
 
 const EMPTY_CLAUSE = { op: '', value: '', min: '', max: '' };
 
@@ -29,6 +33,40 @@ const ZIP_DEFAULTS = {
     ebay_us: '10001',
     ebay_au: '2000',
 };
+
+const LISTING_TARGETS = [
+    { value: 'reverb', label: 'Reverb' },
+    { value: 'etsy', label: 'Etsy' },
+];
+
+const LISTING_MARKETPLACES = ['amazon_us', 'ebay_us'];
+
+function canBuildListings(job) {
+    return job.mode === 'product'
+        && LISTING_MARKETPLACES.includes(job.marketplace)
+        && (job.status === 'succeeded' || job.status === 'cancelled')
+        && Number(job.stats?.kept) > 0;
+}
+
+function exportActive(item) {
+    return Boolean(item) && (item.status === 'queued' || item.status === 'running');
+}
+
+function exportProgress(item) {
+    const stats = item?.stats || {};
+    if (stats.images_total) return `${stats.images_done || 0}/${stats.images_total} images`;
+    return item?.status === 'queued' ? 'waiting' : 'checking rules';
+}
+
+function exportSummary(label, item) {
+    if (!item || exportActive(item) || item.status === 'failed') return '';
+    const stats = item.stats || {};
+    const reasons = Object.entries(stats.skip_reasons || {})
+        .slice(0, 4)
+        .map(([reason, count]) => `${count} ${reason.toLowerCase()}`)
+        .join(', ');
+    return `${label}: ${stats.listings ?? 0} listings, ${stats.skipped ?? 0} skipped${reasons ? ` (${reasons})` : ''}`;
+}
 
 const STATUS_VARIANT = {
     queued: 'warning',
@@ -143,6 +181,10 @@ export default function Scraping() {
     const [stoppingId, setStoppingId] = useState('');
     const [clearOpen, setClearOpen] = useState(false);
     const [clearing, setClearing] = useState(false);
+    const [startingExport, setStartingExport] = useState('');
+    const [reverbJob, setReverbJob] = useState(null);
+    const [reverbStores, setReverbStores] = useState([]);
+    const [reverbStore, setReverbStore] = useState('');
 
     const availableColumns = options?.columns?.[marketplace]?.[mode] || [];
     const defaultColumns = options?.defaults?.[marketplace]?.[mode] || [];
@@ -176,7 +218,11 @@ export default function Scraping() {
         refreshJobs().catch(() => {});
     }, [refreshJobs]);
 
-    const hasActiveJob = jobs.some((job) => job.status === 'queued' || job.status === 'running');
+    const hasActiveJob = jobs.some((job) => (
+        job.status === 'queued'
+        || job.status === 'running'
+        || Object.values(job.listing_exports || {}).some(exportActive)
+    ));
     useEffect(() => {
         if (!hasActiveJob) return undefined;
         const timer = setInterval(() => {
@@ -348,6 +394,46 @@ export default function Scraping() {
         } finally {
             setSubmitting(false);
         }
+    };
+
+    const startExport = async (job, target, storeName = '') => {
+        setError('');
+        setNotice('');
+        setStartingExport(`${job.id}:${target}`);
+        try {
+            await createListingExport(job.id, { target, storeName });
+            setNotice(`${target === 'reverb' ? 'Reverb' : 'Etsy'} file is being built. Images are copied to Bunny first, so this can take a few minutes.`);
+            await refreshJobs();
+        } catch (err) {
+            setError(err.response?.data?.detail || 'Could not start the listing file.');
+        } finally {
+            setStartingExport('');
+        }
+    };
+
+    const onListings = async (job, target) => {
+        if (target !== 'reverb') {
+            await startExport(job, target);
+            return;
+        }
+        setReverbJob(job);
+        if (reverbStores.length === 0) {
+            try {
+                const res = await getStores();
+                const list = Array.isArray(res.data) ? res.data : res.data?.results || [];
+                setReverbStores(list.filter((store) => (
+                    `${store.marketplace_code || ''} ${store.marketplace_name || ''}`.toLowerCase().includes('reverb')
+                )));
+            } catch {
+                setReverbStores([]);
+            }
+        }
+    };
+
+    const onReverbConfirm = async () => {
+        const job = reverbJob;
+        setReverbJob(null);
+        if (job) await startExport(job, 'reverb', reverbStore);
     };
 
     if (loading) {
@@ -562,6 +648,20 @@ export default function Scraping() {
                                         {stats.warning && (
                                             <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">{stats.warning}</p>
                                         )}
+                                        {LISTING_TARGETS.map(({ value, label }) => {
+                                            const item = job.listing_exports?.[value];
+                                            if (item?.status === 'failed') {
+                                                return (
+                                                    <p key={value} className="mt-1 text-xs text-rose-600 dark:text-rose-400">
+                                                        {label} file: {item.error_message || 'failed.'}
+                                                    </p>
+                                                );
+                                            }
+                                            const summary = exportSummary(label, item);
+                                            return summary ? (
+                                                <p key={value} className="mt-1 text-xs text-slate-500 dark:text-slate-400">{summary}</p>
+                                            ) : null;
+                                        })}
                                     </div>
                                     <div className="flex flex-nowrap items-center gap-2 overflow-x-auto pb-1">
                                         <Link
@@ -639,6 +739,41 @@ export default function Scraping() {
                                                 Product details
                                             </Button>
                                         )}
+                                        {canBuildListings(job) && LISTING_TARGETS.map(({ value, label }) => {
+                                            const item = job.listing_exports?.[value];
+                                            const running = exportActive(item);
+                                            const starting = startingExport === `${job.id}:${value}`;
+                                            return (
+                                                <span key={value} className="inline-flex shrink-0 items-center gap-2">
+                                                    <Button
+                                                        type="button"
+                                                        size="sm"
+                                                        className="shrink-0 whitespace-nowrap"
+                                                        disabled={running || starting}
+                                                        onClick={() => onListings(job, value)}
+                                                    >
+                                                        {running || starting
+                                                            ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                                            : <FileSpreadsheet className="mr-2 h-4 w-4" />}
+                                                        {running
+                                                            ? `${label} · ${exportProgress(item)}`
+                                                            : `Create ${label} listings`}
+                                                    </Button>
+                                                    {item?.status === 'succeeded' && (
+                                                        <Button
+                                                            type="button"
+                                                            size="sm"
+                                                            variant="secondary"
+                                                            className="shrink-0 whitespace-nowrap"
+                                                            onClick={() => downloadListingExport(item.id, value).catch((err) => setError(err.message || `Could not download the ${label} file.`))}
+                                                        >
+                                                            <Download className="mr-2 h-4 w-4" />
+                                                            {label} file
+                                                        </Button>
+                                                    )}
+                                                </span>
+                                            );
+                                        })}
                                         <Button type="button" size="sm" variant="danger" className="shrink-0 whitespace-nowrap" onClick={() => setDeleteTarget(job)}>
                                             <Trash2 className="mr-2 h-4 w-4" />
                                             Delete
@@ -660,6 +795,29 @@ export default function Scraping() {
                 onClose={() => setDeleteTarget(null)}
                 onConfirm={onDelete}
             />
+            <Modal open={Boolean(reverbJob)} onClose={() => setReverbJob(null)} title="Create Reverb listings">
+                <div className="space-y-4">
+                    <Select
+                        label="Store name"
+                        value={reverbStore}
+                        onChange={(e) => setReverbStore(e.target.value)}
+                        options={[
+                            { value: '', label: 'Leave blank' },
+                            ...reverbStores.map((store) => ({ value: store.name, label: store.name })),
+                        ]}
+                    />
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Products that break the Reverb policy are left out and listed on the Skipped sheet. SKU and UPC stay empty for you to fill. Images are copied to Bunny CDN.
+                    </p>
+                    <div className="flex justify-end gap-2">
+                        <Button type="button" variant="secondary" onClick={() => setReverbJob(null)}>Cancel</Button>
+                        <Button type="button" onClick={onReverbConfirm}>
+                            <FileSpreadsheet className="mr-2 h-4 w-4" />
+                            Create file
+                        </Button>
+                    </div>
+                </div>
+            </Modal>
             <ConfirmModal
                 open={clearOpen}
                 title="Start with new data"

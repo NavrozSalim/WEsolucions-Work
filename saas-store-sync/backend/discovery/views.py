@@ -27,8 +27,10 @@ from .files import (
     workbook_bytes,
     write_workbook,
 )
-from . import limits
-from .models import DiscoveryJob
+from . import bunny, limits
+from .listing_export import refusal_for
+from .listing_rules import TARGET_LABELS, TARGETS
+from .models import DiscoveryJob, ListingExport
 from .queue import PENDING_TASK_ID, dispatch_next, positions_for
 from .rules import normalize_rules
 
@@ -74,8 +76,39 @@ def _jobs_for(user):
     )
 
 
-def _job_payload(job: DiscoveryJob, queue_position: int = 0) -> dict:
+def _export_payload(export: ListingExport) -> dict:
     return {
+        'id': str(export.id),
+        'target': export.target,
+        'status': export.status,
+        'store_name': export.store_name,
+        'stats': export.stats or {},
+        'error_message': export.error_message,
+        'created_at': export.created_at,
+        'finished_at': export.finished_at,
+    }
+
+
+def _latest_exports(job_ids) -> dict:
+    """{job id: {target: newest export}} without loading the workbooks."""
+    found: dict = {}
+    exports = (
+        ListingExport.objects.filter(job_id__in=list(job_ids))
+        .defer('result_bytes')
+        .order_by('-created_at')
+    )
+    for export in exports:
+        per_job = found.setdefault(export.job_id, {})
+        if export.target not in per_job:
+            per_job[export.target] = _export_payload(export)
+    return found
+
+
+def _job_payload(job: DiscoveryJob, queue_position: int = 0, exports: dict | None = None) -> dict:
+    if exports is None:
+        exports = _latest_exports([job.id]).get(job.id, {})
+    return {
+        'listing_exports': exports,
         'id': str(job.id),
         'marketplace': job.marketplace,
         'marketplace_label': job.get_marketplace_display(),
@@ -116,7 +149,8 @@ def _parse_json(value, fallback):
 
 def _payloads(user, jobs) -> list[dict]:
     positions = positions_for(user)
-    return [_job_payload(job, positions.get(job.id, 0)) for job in jobs]
+    exports = _latest_exports(job.id for job in jobs)
+    return [_job_payload(job, positions.get(job.id, 0), exports.get(job.id, {})) for job in jobs]
 
 
 def _revoke_task(task_id: str) -> None:
@@ -613,3 +647,75 @@ class DiscoveryJobContinueView(APIView):
         body = _job_payload(child, positions_for(request.user).get(child.id, 0))
         body['parts'] = len(children)
         return Response(body, status=status.HTTP_201_CREATED)
+
+
+class DiscoveryListingExportView(APIView):
+    """Build a Reverb or Etsy listing file from a finished product-details job."""
+
+    permission_classes = [IsAuthenticated, CanUseDiscovery]
+
+    def post(self, request, job_id):
+        job = _jobs_for(request.user).filter(id=job_id).first()
+        if job is None:
+            return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
+        target = str(request.data.get('target') or '').strip().lower()
+        if target not in TARGETS:
+            return Response({'detail': 'Choose Reverb or Etsy.'}, status=status.HTTP_400_BAD_REQUEST)
+        refused = refusal_for(job, target)
+        if refused:
+            return Response({'detail': refused}, status=status.HTTP_400_BAD_REQUEST)
+        if not job.products.exists():
+            return Response({'detail': 'This scrape has no products.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            bunny.config()
+        except bunny.BunnyNotConfigured as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        active = (
+            job.listing_exports.filter(
+                target=target,
+                status__in=(ListingExport.Status.QUEUED, ListingExport.Status.RUNNING),
+            )
+            .defer('result_bytes')
+            .first()
+        )
+        if active is not None:
+            return Response(_export_payload(active), status=status.HTTP_200_OK)
+        store_name = str(request.data.get('store_name') or '').strip()[:255]
+        export = ListingExport.objects.create(
+            job=job,
+            owner=request.user,
+            target=target,
+            store_name=store_name if target == 'reverb' else '',
+        )
+        from .tasks import build_listing_export
+
+        try:
+            result = build_listing_export.delay(str(export.id))
+            ListingExport.objects.filter(pk=export.pk).update(celery_task_id=result.id or '')
+        except Exception as exc:  # broker down
+            export.status = ListingExport.Status.FAILED
+            export.error_message = f'Could not queue the {TARGET_LABELS[target]} file: {exc}'
+            export.finished_at = timezone.now()
+            export.save(update_fields=['status', 'error_message', 'finished_at'])
+        export.refresh_from_db()
+        return Response(_export_payload(export), status=status.HTTP_201_CREATED)
+
+
+class DiscoveryListingExportDownloadView(APIView):
+    permission_classes = [IsAuthenticated, CanUseDiscovery]
+    content_negotiation_class = _SpreadsheetNegotiation
+
+    def get(self, request, export_id):
+        jobs = _jobs_for(request.user).values('id')
+        export = (
+            ListingExport.objects.select_related('job')
+            .filter(id=export_id, job_id__in=jobs)
+            .first()
+        )
+        if export is None:
+            return Response({'detail': 'File not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if export.status != ListingExport.Status.SUCCEEDED or not export.result_bytes:
+            return Response({'detail': 'The listing file is not ready yet.'}, status=status.HTTP_404_NOT_FOUND)
+        stamp = timezone.localtime(export.finished_at or export.created_at).strftime('%Y-%m-%d')
+        filename = f'{export.target}-listings-{export.job.marketplace}-{stamp}.xlsx'
+        return _xlsx_response(io.BytesIO(bytes(export.result_bytes)), filename)

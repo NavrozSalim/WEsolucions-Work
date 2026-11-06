@@ -97,3 +97,19 @@ export async function downloadDiscoveryResult(jobId, format = 'xlsx') {
             : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
 }
+
+export async function createListingExport(jobId, { target, storeName = '' }) {
+    const response = await api.post(`/discovery/jobs/${jobId}/listings/`, {
+        target,
+        store_name: storeName,
+    });
+    return response.data;
+}
+
+export async function downloadListingExport(exportId, target) {
+    return apiDownload(api, `/discovery/listing-exports/${exportId}/download/`, {
+        params: { format: 'xlsx' },
+        fallbackFilename: `${target}-listings.xlsx`,
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+}

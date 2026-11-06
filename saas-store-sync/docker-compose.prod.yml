@@ -108,6 +108,11 @@ services:
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS}
       - DEBUG=False
+      - BUNNY_STORAGE_ZONE=${BUNNY_STORAGE_ZONE:-}
+      - BUNNY_STORAGE_ACCESS_KEY=${BUNNY_STORAGE_ACCESS_KEY:-}
+      - BUNNY_STORAGE_HOST=${BUNNY_STORAGE_HOST:-storage.bunnycdn.com}
+      - BUNNY_CDN_URL=${BUNNY_CDN_URL:-}
+      - BUNNY_STORAGE_FOLDER=${BUNNY_STORAGE_FOLDER:-listings}
       # Nginx terminates TLS; Gunicorn is HTTP-only. Default off so Docker /health/ is not 301.
       - SECURE_SSL_REDIRECT=${SECURE_SSL_REDIRECT:-0}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-https://${DOMAIN_NAME}}
@@ -446,6 +451,11 @@ services:
       - PROXY_SCHEME=${PROXY_SCHEME:-http}
       - COSTCO_AU_MIN_REQUEST_GAP_SEC=${COSTCO_AU_MIN_REQUEST_GAP_SEC:-20}
       - COSTCO_AU_LOCK_WAIT_SEC=${COSTCO_AU_LOCK_WAIT_SEC:-120}
+      - BUNNY_STORAGE_ZONE=${BUNNY_STORAGE_ZONE:-}
+      - BUNNY_STORAGE_ACCESS_KEY=${BUNNY_STORAGE_ACCESS_KEY:-}
+      - BUNNY_STORAGE_HOST=${BUNNY_STORAGE_HOST:-storage.bunnycdn.com}
+      - BUNNY_CDN_URL=${BUNNY_CDN_URL:-}
+      - BUNNY_STORAGE_FOLDER=${BUNNY_STORAGE_FOLDER:-listings}
     volumes:
       - catalog_media:/app/media
     depends_on:

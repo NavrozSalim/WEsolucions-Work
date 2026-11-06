@@ -20,3 +20,10 @@ def run_discovery_job(self, job_id: str):
         execute_job(job_id, lock_owner=owner)
     finally:
         release_discovery_lock(job_id, owner)
+
+
+@shared_task(name='discovery.build_listing_export', ignore_result=True)
+def build_listing_export(export_id: str):
+    from .listing_export import run_export
+
+    run_export(export_id)
