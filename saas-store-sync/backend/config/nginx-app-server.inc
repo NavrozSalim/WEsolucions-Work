@@ -16,6 +16,15 @@ location ^~ /api/ {
     proxy_connect_timeout 300s;
     proxy_read_timeout 300s;
     proxy_send_timeout 300s;
+    # Backend down for a moment (restart, redeploy): answer with short JSON and a
+    # Retry-After instead of nginx's HTML page, so bots wait and try again.
+    error_page 502 503 504 = @backend_unavailable;
+}
+
+location @backend_unavailable {
+    default_type application/json;
+    add_header Retry-After 15 always;
+    return 503 '{"detail":"Server is restarting. Try again in a few seconds.","retry_after":15}';
 }
 
 location ^~ /admin/ {
