@@ -100,6 +100,24 @@ try:
 except ValueError:
     CATALOG_SCRAPE_STOP_IDLE_SECONDS = 120
 
+# A running store-wide scrape with no worker heartbeat for this many minutes
+# is restarted by the ``catalog_scrape_watchdog`` Beat task (worker restarted,
+# crashed or hung). Always kept above CATALOG_SCRAPE_STALL_MINUTES in code.
+try:
+    CATALOG_SCRAPE_WATCHDOG_MINUTES = max(
+        15, min(24 * 60, int(os.getenv('CATALOG_SCRAPE_WATCHDOG_MINUTES', '45'))),
+    )
+except ValueError:
+    CATALOG_SCRAPE_WATCHDOG_MINUTES = 45
+
+# One scrape batch may run this long before it is cut off and its lane moves on.
+try:
+    CATALOG_SCRAPE_CHUNK_SOFT_LIMIT_SEC = max(
+        600, int(os.getenv('CATALOG_SCRAPE_CHUNK_SOFT_LIMIT_SEC', '3600')),
+    )
+except ValueError:
+    CATALOG_SCRAPE_CHUNK_SOFT_LIMIT_SEC = 3600
+
 if DEBUG:
     ALLOWED_HOSTS = _env_list('ALLOWED_HOSTS', 'localhost,127.0.0.1,backend')
 else:
@@ -461,6 +479,7 @@ CELERY_TASK_ROUTES = (
         'catalog.tasks.catalog_sync_task': {'queue': 'ingest'},
         'catalog.tasks.catalog_update_task': {'queue': 'ingest'},
         'catalog.tasks.resume_catalog_scrape_after_stop': {'queue': 'light'},
+        'catalog.tasks.catalog_scrape_watchdog': {'queue': 'light'},
         'catalog.run_vevor_au_ingest': {'queue': 'light'},
         # Costway dropship CSV is AU-IP only. Own queue on the AU VPS so it
         # starts immediately, the same way Vevor uses ``light``.

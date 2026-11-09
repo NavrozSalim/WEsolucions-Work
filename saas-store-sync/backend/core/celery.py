@@ -1,7 +1,11 @@
+import logging
 import os
 
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_ready
+
+logger = logging.getLogger(__name__)
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'core.settings')
 
@@ -23,6 +27,11 @@ app.conf.beat_schedule = {
     'check-store-schedules': {
         'task': 'sync.tasks.check_scheduled_updates',
         'schedule': crontab(minute='*'),
+    },
+    # Restart store-wide vendor scrapes whose worker died or hung mid-run.
+    'catalog-scrape-watchdog': {
+        'task': 'catalog.tasks.catalog_scrape_watchdog',
+        'schedule': crontab(minute='*/5'),
     },
     # Populate daily dashboard trend data from ProductMapping snapshots.
     'aggregate-daily-analytics-metrics': {
@@ -57,6 +66,23 @@ app.conf.beat_schedule = {
         'schedule': crontab(minute=20),
     },
 }
+
+
+@worker_ready.connect
+def _publish_worker_scrape_capabilities(sender=None, **_kwargs):
+    """Tell the main server whether this worker can scrape Costco AU itself.
+
+    Costco proxies are configured on the AU worker only; the main server
+    routes Start Scraping from this shared flag.
+    """
+    try:
+        consumer_app = getattr(sender, 'app', None) or app
+        queue_names = list(consumer_app.amqp.queues.consume_from.keys())
+        from catalog.costco_mode import publish_costco_au_worker_mode
+
+        publish_costco_au_worker_mode(queue_names)
+    except Exception:
+        logger.exception('Could not publish Costco AU scrape mode at worker start')
 
 
 @app.task(bind=True, ignore_result=True)

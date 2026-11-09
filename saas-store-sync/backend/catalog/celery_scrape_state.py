@@ -52,10 +52,12 @@ def set_celery_scrape_state(
     task_id: str,
     scope: str,
     upload: CatalogUpload | None = None,
+    vendor_id: str | None = None,
 ) -> None:
     from catalog.models import StoreCatalogCeleryScrapeState
 
     tid = (task_id or '')[:255]
+    vendor = (str(vendor_id).strip()[:64] if vendor_id else '') or None
     st, created = StoreCatalogCeleryScrapeState.objects.get_or_create(
         store=store,
         defaults={
@@ -65,6 +67,8 @@ def set_celery_scrape_state(
             'cancel_requested': False,
             'cancel_requested_at': None,
             'first_worker_started_at': None,
+            'scrape_vendor_id': vendor,
+            'last_heartbeat_at': None,
         },
     )
     if created:
@@ -78,10 +82,12 @@ def set_celery_scrape_state(
     st.root_task_id = tid
     st.cancel_requested = False
     st.cancel_requested_at = None
+    st.scrape_vendor_id = vendor
     # update_or_create always reapplied None here, so a transient duplicate POST or
     # client retry cleared first_worker_started_at and the UI stuck on "queued".
     if prev_tid != tid:
         st.first_worker_started_at = None
+        st.last_heartbeat_at = None
     st.save(
         update_fields=[
             'scope',
@@ -90,6 +96,8 @@ def set_celery_scrape_state(
             'cancel_requested',
             'cancel_requested_at',
             'first_worker_started_at',
+            'scrape_vendor_id',
+            'last_heartbeat_at',
         ]
     )
     from catalog.scrape_progress import invalidate_scrape_progress_cache
@@ -113,6 +121,29 @@ def mark_celery_scrape_worker_started(store_id: str | None) -> None:
         store_id=store_id,
         first_worker_started_at__isnull=True,
     ).update(first_worker_started_at=timezone.now())
+
+
+def touch_celery_scrape_heartbeat(store_id: str | None, root_task_id: str | None) -> None:
+    """Record that a worker of this run is still moving through listings.
+
+    Only the run that owns the row (same ``root_task_id``) may refresh it, so a
+    leftover worker from a replaced run cannot hide a stalled scrape from the
+    watchdog. Errors are logged and ignored: a missed heartbeat must never stop
+    the scrape itself.
+    """
+    if not store_id or not root_task_id:
+        return
+    from django.utils import timezone
+
+    from catalog.models import StoreCatalogCeleryScrapeState
+
+    try:
+        StoreCatalogCeleryScrapeState.objects.filter(
+            store_id=store_id,
+            root_task_id=root_task_id,
+        ).update(last_heartbeat_at=timezone.now())
+    except Exception:
+        logger.exception('Could not record scrape heartbeat for store %s', store_id)
 
 
 def current_celery_scrape_root_task_id(store_id: str | None) -> str:

@@ -989,11 +989,9 @@ class CatalogScrapeTriggerView(APIView):
         if runner == 'live':
             return True
         if vendor_code == 'costco':
-            try:
-                from scrapers.costco_au_proxies import load_proxy_urls
-                return bool(load_proxy_urls())
-            except Exception:
-                return False
+            from catalog.tasks import _costco_au_runs_on_server
+
+            return _costco_au_runs_on_server()
         return False
 
     @classmethod
@@ -1246,6 +1244,7 @@ class CatalogScrapeTriggerView(APIView):
                     task_id=celery_task_id,
                     scope=StoreCatalogCeleryScrapeState.Scope.STORE,
                     upload=None,
+                    vendor_id=browser_vendor_id,
                 )
                 mark_celery_scrape_worker_started(str(store.id))
             schedule_desktop_jobs_after_commit()

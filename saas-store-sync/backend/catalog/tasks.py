@@ -31,7 +31,14 @@ from .celery_scrape_state import (
     current_celery_scrape_root_task_id,
     mark_celery_scrape_worker_started,
     should_abort_celery_scrape,
+    touch_celery_scrape_heartbeat,
 )
+
+# A lane sends its next batch only when the current one ends. Lanes can run
+# for days on a large store, so the lane counter must outlive the run.
+_SCRAPE_LANE_COUNTER_TTL = 14 * 24 * 3600
+# Write the heartbeat at most this often per worker loop.
+_SCRAPE_HEARTBEAT_EVERY_SEC = 60
 from .models import (
     CatalogUpload,
     CatalogUploadRow,
@@ -52,12 +59,13 @@ def _costco_au_runs_on_server() -> bool:
     accepted fallbacks) is set: residential proxies are mandatory to bypass
     Cloudflare, so without them Costco stays ingest-only.
 
-    Read every call (not cached) so toggling the env on a running worker after
-    a restart immediately changes routing without code redeploys.
+    The proxies live on the AU worker, which publishes them to the shared
+    cache at startup, so the main server routes Costco the same way
+    (see ``catalog.costco_mode``).
     """
     try:
-        from scrapers.costco_au_proxies import load_proxy_urls
-        return bool(load_proxy_urls())
+        from catalog.costco_mode import costco_au_runs_on_server
+        return costco_au_runs_on_server()
     except Exception:  # pragma: no cover - defensive
         logger.exception("Failed to determine Costco AU server-scrape mode; defaulting to ingest-only")
         return False
@@ -91,7 +99,7 @@ def _is_ingest_only_product(product) -> bool:
     if code in ('heb', 'hebus') or code.startswith('heb_'):
         return True
     is_costco = (
-        code in ('costcoau', 'costco_au', 'costco-au')
+        code in ('costcoau', 'costco', 'costco_au', 'costco-au')
         or code.startswith('costco_')
     )
     if is_costco:
@@ -132,7 +140,7 @@ def _ingest_only_vendor_ids() -> list:
         | Q(code__istartswith='heb_')
     )
     if not _costco_au_runs_on_server():
-        codes.extend(['costcoau', 'costco_au', 'costco-au'])
+        codes.extend(['costcoau', 'costco', 'costco_au', 'costco-au'])
         prefix_q = prefix_q | Q(code__istartswith='costco_')
     q = Q(code__in=codes) | prefix_q
     return list(Vendor.objects.filter(q).values_list('id', flat=True))
@@ -216,6 +224,7 @@ def _queue_scrape_continuation(
             task_id=next_tid,
             scope=scope,
             upload=upload,
+            vendor_id=vendor_id,
         )
         mark_celery_scrape_worker_started(str(store.id))
     try:
@@ -1837,8 +1846,20 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
             clear_celery_scrape_state(str(store.id))
 
 
-def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, emit_stall_log: bool):
-    """Inner loop for store-wide scrape (single process or one parallel chunk)."""
+def _process_store_wide_scrape_mappings(
+    mappings,
+    *,
+    store,
+    store_id,
+    session,
+    emit_stall_log: bool,
+    root_task_id: str | None = None,
+):
+    """Inner loop for store-wide scrape (single process or one parallel chunk).
+
+    ``root_task_id`` is the run this batch belongs to. When omitted the loop
+    joins whatever run currently owns the store.
+    """
     from decimal import Decimal
 
     from catalog.activity_log import append_catalog_log
@@ -1869,7 +1890,8 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
     fatal_error = None
 
     mark_celery_scrape_worker_started(str(store.id))
-    scrape_root_id = current_celery_scrape_root_task_id(str(store.id))
+    scrape_root_id = root_task_id or current_celery_scrape_root_task_id(str(store.id))
+    last_heartbeat_mono = None
 
     try:
         price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
@@ -1891,6 +1913,10 @@ def _process_store_wide_scrape_mappings(mappings, *, store, store_id, session, e
             if should_abort_celery_scrape(str(store.id), root_task_id=scrape_root_id):
                 user_cancelled = True
                 break
+            mono = time.monotonic()
+            if last_heartbeat_mono is None or mono - last_heartbeat_mono >= _SCRAPE_HEARTBEAT_EVERY_SEC:
+                touch_celery_scrape_heartbeat(str(store.id), scrape_root_id)
+                last_heartbeat_mono = mono
             product = pm.product
             if not product:
                 continue
@@ -2174,41 +2200,65 @@ def _schedule_store_scrape_lanes(store_id: str, chunks: list, vendor_id: str) ->
     """
     from django.core.cache import cache
 
+    root_task_id = current_celery_scrape_root_task_id(str(store_id))
     lane_total = max(1, int(getattr(settings, 'CATALOG_SCRAPE_LANES', 2) or 2))
     lanes: list[list] = [[] for _ in range(lane_total)]
     for index, chunk in enumerate(chunks):
         lanes[index % lane_total].append([str(x) for x in chunk])
     lanes = [lane for lane in lanes if lane]
-    cache.set(f'catalog:scrape_lanes:{store_id}', 0, timeout=6 * 3600)
+    cache.set(_scrape_lane_counter_key(store_id, root_task_id), 0, timeout=_SCRAPE_LANE_COUNTER_TTL)
     for lane in lanes:
         first, *rest = lane
         catalog_scrape_store_chunk_task.apply_async(
             args=[str(store_id), first, rest, len(lanes), vendor_id or ''],
+            kwargs={'root_task_id': root_task_id},
         )
 
 
-def _advance_store_scrape_lane(store_id, rest, lane_count, vendor_id, stats) -> None:
-    """Send this lane's next batch, or finish the scrape when every lane is done."""
+def _scrape_lane_counter_key(store_id, root_task_id: str | None) -> str:
+    if root_task_id:
+        return f'catalog:scrape_lanes:{store_id}:{root_task_id}'
+    return f'catalog:scrape_lanes:{store_id}'
+
+
+def _scrape_run_replaced(store_id, root_task_id: str | None) -> bool:
+    """True when the store's scrape now belongs to a different run (or none)."""
+    if not root_task_id:
+        return False
+    return current_celery_scrape_root_task_id(str(store_id)) != root_task_id
+
+
+def _advance_store_scrape_lane(store_id, rest, lane_count, vendor_id, stats, root_task_id=None) -> None:
+    """Send this lane's next batch, or finish the scrape when every lane is done.
+
+    A batch from a run that was replaced (watchdog restart, new Start
+    Scraping) does nothing here: counting it would finalize, and clear, the
+    run that replaced it.
+    """
     from django.core.cache import cache
 
+    if _scrape_run_replaced(store_id, root_task_id):
+        return
     rest = list(rest or [])
     if rest and not (stats or {}).get('user_cancelled'):
         nxt, *more = rest
         catalog_scrape_store_chunk_task.apply_async(
             args=[str(store_id), nxt, more, int(lane_count or 1), vendor_id or ''],
+            kwargs={'root_task_id': root_task_id or ''},
         )
         return
-    key = f'catalog:scrape_lanes:{store_id}'
+    key = _scrape_lane_counter_key(store_id, root_task_id)
     try:
         done = cache.incr(key)
     except ValueError:
-        cache.set(key, 1, timeout=6 * 3600)
+        cache.set(key, 1, timeout=_SCRAPE_LANE_COUNTER_TTL)
         done = 1
     if done < max(1, int(lane_count or 1)):
         return
     cache.delete(key)
     catalog_scrape_store_finalize.apply_async(
         args=[[stats or {}], str(store_id), vendor_id or ''],
+        kwargs={'root_task_id': root_task_id or ''},
     )
 
 
@@ -2400,7 +2450,25 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False, vend
     return out
 
 
-@shared_task(bind=True, max_retries=3)
+def _scrape_chunk_soft_limit() -> int:
+    """Seconds one batch may run before it gives up and hands off to the next.
+
+    A browser that hangs inside one listing never reaches the stall check,
+    and its lane would never send the next batch.
+    """
+    try:
+        sec = int(getattr(settings, 'CATALOG_SCRAPE_CHUNK_SOFT_LIMIT_SEC', 3600) or 3600)
+    except (TypeError, ValueError):
+        sec = 3600
+    return max(600, sec)
+
+
+@shared_task(
+    bind=True,
+    max_retries=3,
+    soft_time_limit=_scrape_chunk_soft_limit(),
+    time_limit=_scrape_chunk_soft_limit() + 300,
+)
 def catalog_scrape_store_chunk_task(
     self,
     store_id: str,
@@ -2408,13 +2476,17 @@ def catalog_scrape_store_chunk_task(
     rest=None,
     lane_count=1,
     vendor_id: str = '',
+    root_task_id: str = '',
 ):
+    from celery.exceptions import SoftTimeLimitExceeded
+
     from scrapers import close_amazon_session
     from stores.models import Store
 
     rest = list(rest or [])
     lane_count = max(1, int(lane_count or 1))
     vendor_id = vendor_id or ''
+    root_task_id = root_task_id or ''
     stats = {
         'error': 'store_not_found',
         'rows_processed': 0,
@@ -2431,7 +2503,7 @@ def catalog_scrape_store_chunk_task(
         except Store.DoesNotExist:
             return stats
 
-        if should_abort_celery_scrape(str(store.id)):
+        if should_abort_celery_scrape(str(store.id), root_task_id=root_task_id or None):
             stats = _cancelled_store_chunk_result()
             return stats
 
@@ -2448,7 +2520,25 @@ def catalog_scrape_store_chunk_task(
             store_id=store_id,
             session=session,
             emit_stall_log=False,
+            root_task_id=root_task_id or None,
         )
+        return stats
+    except SoftTimeLimitExceeded:
+        # Treat a hung batch like a stall: the rows it did not reach stay
+        # Pending and the lane moves on instead of ending the whole scrape.
+        logger.warning(
+            'Store scrape batch for store %s ran past %ss; moving to the next batch.',
+            store_id,
+            _scrape_chunk_soft_limit(),
+        )
+        stats = {
+            'rows_processed': 0,
+            'rows_succeeded': 0,
+            'failed': 0,
+            'error_summary': 'batch_time_limit',
+            'stalled': True,
+            'user_cancelled': False,
+        }
         return stats
     except Exception as exc:
         logger.exception('Store scrape chunk failed for store %s: %s', store_id, exc)
@@ -2463,16 +2553,28 @@ def catalog_scrape_store_chunk_task(
         }
         return stats
     finally:
-        close_amazon_session(session)
-        _advance_store_scrape_lane(store_id, rest, lane_count, vendor_id, stats)
+        try:
+            close_amazon_session(session)
+        finally:
+            _advance_store_scrape_lane(
+                store_id, rest, lane_count, vendor_id, stats, root_task_id=root_task_id or None,
+            )
 
 
 @shared_task
-def catalog_scrape_store_finalize(results, store_id: str, vendor_id: str | None = None):
+def catalog_scrape_store_finalize(
+    results,
+    store_id: str,
+    vendor_id: str | None = None,
+    root_task_id: str = '',
+):
     from stores.models import Store
 
     from catalog.activity_log import append_catalog_log
     from catalog.celery_scrape_state import clear_celery_scrape_state
+
+    if _scrape_run_replaced(store_id, root_task_id or None):
+        return {'skipped': True, 'reason': 'run_replaced', 'store_id': str(store_id)}
 
     try:
         store = Store.objects.select_related('marketplace').get(id=store_id)
@@ -2622,18 +2724,163 @@ def catalog_scrape_store_task(self, store_id: str, vendor_id: str | None = None)
     """
     from catalog.celery_scrape_state import clear_celery_scrape_state
 
+    # Every caller enqueues this task with task_id == the state row's run id.
+    # A copy redelivered after the watchdog started a newer run must neither
+    # join that run nor clear it.
+    own_root = getattr(self.request, 'id', None) or None
+    if _scrape_run_replaced(store_id, own_root):
+        return {'skipped': True, 'reason': 'run_replaced', 'store_id': str(store_id)}
+
+    def _clear_if_still_ours():
+        if not _scrape_run_replaced(store_id, own_root):
+            clear_celery_scrape_state(store_id)
+
     mark_celery_scrape_worker_started(str(store_id))
     try:
         out = run_store_wide_catalog_scrape(store_id, parallel=True, vendor_id=vendor_id or None)
     except Exception:
-        clear_celery_scrape_state(store_id)
+        _clear_if_still_ours()
         raise
     if isinstance(out, dict) and out.get('status') == 'running' and (
         out.get('parallel') or out.get('continued')
     ):
         return out
-    clear_celery_scrape_state(store_id)
+    _clear_if_still_ours()
     return out
+
+
+def _scrape_watchdog_idle_timedelta() -> timedelta:
+    """Quiet time after which a running store scrape counts as dead.
+
+    Always longer than the per-batch stall window so a slow but healthy
+    batch is never restarted underneath itself.
+    """
+    try:
+        m = int(getattr(settings, 'CATALOG_SCRAPE_WATCHDOG_MINUTES', 45) or 45)
+    except (TypeError, ValueError):
+        m = 45
+    stall_m = int(_stall_no_pending_timedelta().total_seconds() // 60)
+    m = max(m, stall_m + 10, 15)
+    return timedelta(minutes=min(m, 24 * 60))
+
+
+def revive_stalled_store_scrape(state, *, now=None) -> dict:
+    """Restart one store-wide scrape whose workers have gone quiet.
+
+    A worker restart (deploy, crash, out of memory) loses the batch it was
+    running, and with late acks Redis does not hand that batch out again for
+    up to ``CELERY_VISIBILITY_TIMEOUT`` (48 h). Its lane never sends the next
+    batch, so the banner kept saying "running" while nothing moved. This
+    starts a fresh run for the listings still Pending. Batches of the old run
+    see the new run id and exit without touching it.
+    """
+    from catalog.activity_log import append_catalog_log
+    from catalog.celery_scrape_state import clear_celery_scrape_state
+    from catalog.scrape_progress import invalidate_scrape_progress_cache
+
+    now = now or timezone.now()
+    idle = _scrape_watchdog_idle_timedelta()
+    store_id = str(state.store_id)
+    old_root = state.root_task_id or ''
+    last_alive = max(
+        t for t in (state.last_heartbeat_at, state.first_worker_started_at, state.enqueued_at) if t
+    )
+    if now - last_alive < idle:
+        return {'store_id': store_id, 'action': 'alive'}
+
+    store = state.store
+    vendor_id = state.scrape_vendor_id or None
+    left_n = _count_scrapeable_pending_mappings(store, vendor_id=vendor_id)
+    quiet_min = int((now - last_alive).total_seconds() // 60)
+
+    if left_n <= 0:
+        deleted, _ = StoreCatalogCeleryScrapeState.objects.filter(
+            store_id=store_id, root_task_id=old_root, cancel_requested=False,
+        ).delete()
+        if not deleted:
+            return {'store_id': store_id, 'action': 'changed'}
+        invalidate_scrape_progress_cache(store_id)
+        append_catalog_log(
+            store_id,
+            f'Vendor scrape had no activity for {quiet_min} minutes and no Pending '
+            f'listings are left, so it was marked finished.',
+            action_type='scrape_end',
+            metadata={'scope': 'store', 'watchdog': True, 'previous_task_id': old_root},
+        )
+        return {'store_id': store_id, 'action': 'cleared'}
+
+    new_root = str(uuid.uuid4())
+    # Claim the row only if nobody touched it since we read it (Stop, a new
+    # Start Scraping, or another watchdog tick).
+    claimed = StoreCatalogCeleryScrapeState.objects.filter(
+        store_id=store_id, root_task_id=old_root, cancel_requested=False,
+    ).update(
+        root_task_id=new_root,
+        first_worker_started_at=now,
+        last_heartbeat_at=None,
+    )
+    if not claimed:
+        return {'store_id': store_id, 'action': 'changed'}
+    invalidate_scrape_progress_cache(store_id)
+    task_args = [store_id]
+    if vendor_id:
+        task_args.append(str(vendor_id))
+    try:
+        catalog_scrape_store_task.apply_async(args=task_args, task_id=new_root)
+    except Exception:
+        logger.exception('Watchdog could not restart vendor scrape for store %s', store_id)
+        clear_celery_scrape_state(store_id)
+        return {'store_id': store_id, 'action': 'enqueue_failed'}
+    logger.warning(
+        'Scrape watchdog: store %s quiet for %s min; restarted as %s (%s Pending).',
+        store_id, quiet_min, new_root, left_n,
+    )
+    append_catalog_log(
+        store_id,
+        f'Vendor scrape had no activity for {quiet_min} minutes (a scraper worker was '
+        f'restarted or got stuck). Restarted it automatically for {left_n} remaining '
+        f'Pending listing(s).',
+        action_type='scrape_auto_resume',
+        metadata={
+            'scope': 'store',
+            'watchdog': True,
+            'pending_left': left_n,
+            'previous_task_id': old_root,
+            'vendor_id': vendor_id,
+        },
+    )
+    return {'store_id': store_id, 'action': 'restarted', 'pending_left': left_n}
+
+
+@shared_task(ignore_result=True)
+def catalog_scrape_watchdog():
+    """Beat: restart store-wide scrapes whose workers stopped without finishing."""
+    from django.db.models.functions import Coalesce, Greatest
+
+    now = timezone.now()
+    cutoff = now - _scrape_watchdog_idle_timedelta()
+    states = (
+        StoreCatalogCeleryScrapeState.objects
+        .filter(
+            scope=StoreCatalogCeleryScrapeState.Scope.STORE,
+            cancel_requested=False,
+        )
+        .annotate(
+            last_alive=Greatest(
+                Coalesce('last_heartbeat_at', 'enqueued_at'),
+                Coalesce('first_worker_started_at', 'enqueued_at'),
+            ),
+        )
+        .filter(last_alive__lt=cutoff)
+        .select_related('store')
+    )
+    results = []
+    for state in states:
+        try:
+            results.append(revive_stalled_store_scrape(state, now=now))
+        except Exception:
+            logger.exception('Scrape watchdog failed for store %s', state.store_id)
+    return results
 
 
 def _finalize_vevor_scrape_job(

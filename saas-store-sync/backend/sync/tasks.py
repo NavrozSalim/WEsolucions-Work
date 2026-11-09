@@ -65,15 +65,13 @@ def _is_ingest_only_product(product) -> bool:
     if code in ('heb', 'hebus') or code.startswith('heb_'):
         return True
     is_costco = (
-        code in ('costcoau', 'costco_au', 'costco-au')
+        code in ('costcoau', 'costco', 'costco_au', 'costco-au')
         or code.startswith('costco_')
     )
     if is_costco:
-        try:
-            from scrapers.costco_au_proxies import load_proxy_urls
-            return not bool(load_proxy_urls())
-        except Exception:
-            return True
+        from catalog.tasks import _costco_au_runs_on_server
+
+        return not _costco_au_runs_on_server()
     return False
 
 

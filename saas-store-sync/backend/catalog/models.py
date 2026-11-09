@@ -514,6 +514,20 @@ class StoreCatalogCeleryScrapeState(models.Model):
         ),
     )
     enqueued_at = models.DateTimeField(auto_now_add=True)
+    scrape_vendor_id = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        help_text='Vendor the scrape is limited to; empty means every live-scrape vendor.',
+    )
+    last_heartbeat_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            'Last time a worker reached the next listing. The watchdog restarts '
+            'a scrape that has gone quiet (worker restarted or stuck).'
+        ),
+    )
 
     class Meta:
         db_table = 'catalog_storeceleryscrapestate'

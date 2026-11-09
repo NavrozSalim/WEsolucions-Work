@@ -247,12 +247,10 @@ def build_scrape_progress_payload(store) -> dict[str, Any]:
         # Costco AU dynamically becomes a 'live' server vendor when residential
         # proxies are configured for the AU worker — same UX as Amazon/eBay.
         if vendor_code == 'costco' and runner_kind == 'desktop':
-            try:
-                from scrapers.costco_au_proxies import load_proxy_urls
-                if load_proxy_urls():
-                    runner_kind = 'live'
-            except Exception:
-                pass
+            from catalog.tasks import _costco_au_runs_on_server
+
+            if _costco_au_runs_on_server():
+                runner_kind = 'live'
         if runner_kind == 'live':
             v_job_payload = None
             v_queue_payload = None
