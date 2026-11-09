@@ -52,19 +52,24 @@ from products.models import Product
 from vendor.models import Vendor
 
 
-def _costco_au_runs_on_server() -> bool:
+def _costco_au_runs_on_server(*, here: bool = False) -> bool:
     """Return True when the AU worker is configured to scrape Costco AU directly.
 
     The deciding factor is whether ``COSTCO_AU_PROXY_URLS`` (or one of the
     accepted fallbacks) is set: residential proxies are mandatory to bypass
     Cloudflare, so without them Costco stays ingest-only.
 
-    The proxies live on the AU worker, which publishes them to the shared
-    cache at startup, so the main server routes Costco the same way
-    (see ``catalog.costco_mode``).
+    Routing (main server: Start Scraping, progress strip, watchdog) asks with
+    ``here=False`` and follows the flag the proxy worker publishes (see
+    ``catalog.costco_mode``). A worker deciding whether to scrape a Costco row
+    itself asks with ``here=True``: only its own proxies count. Several
+    workers share ``heavy-au``; one without proxies must leave Costco rows
+    Pending, not fail them from a blocked IP.
     """
     try:
-        from catalog.costco_mode import costco_au_runs_on_server
+        from catalog.costco_mode import costco_au_runs_on_server, costco_au_scrapes_in_this_process
+        if here:
+            return costco_au_scrapes_in_this_process()
         return costco_au_runs_on_server()
     except Exception:  # pragma: no cover - defensive
         logger.exception("Failed to determine Costco AU server-scrape mode; defaulting to ingest-only")
@@ -79,7 +84,7 @@ def _bulk_push_sears_after_scrape_if_needed(store):
     return {'push_ok': 0, 'push_fail': 0, 'skipped': True, 'reason': 'post_scrape_push_disabled'}
 
 
-def _is_ingest_only_product(product) -> bool:
+def _is_ingest_only_product(product, *, here: bool = False) -> bool:
     """True when the vendor has no live server-side scraper for this deployment.
 
     HEB is always ingest-only (Windows desktop runner). Vevor AU is always
@@ -103,7 +108,7 @@ def _is_ingest_only_product(product) -> bool:
         or code.startswith('costco_')
     )
     if is_costco:
-        return not _costco_au_runs_on_server()
+        return not _costco_au_runs_on_server(here=here)
     return False
 
 
@@ -127,11 +132,11 @@ def _load_wallkoala_store_feed(store):
     return feed, vendor_pk
 
 
-def _ingest_only_vendor_ids() -> list:
+def _ingest_only_vendor_ids(*, here: bool = False) -> list:
     """Primary keys for vendors handled by feed/desktop ingest (not browser scrape).
 
     HEB is always desktop-ingest. Costco AU joins this set only when proxies
-    aren't configured (see ``_costco_au_runs_on_server``).
+    aren't configured (see ``_costco_au_runs_on_server``; ``here`` as there).
     """
     codes = ['vevor', 'vevorau', 'costway', 'costwayau', 'heb', 'hebus']
     prefix_q = (
@@ -139,7 +144,7 @@ def _ingest_only_vendor_ids() -> list:
         | Q(code__istartswith='costway')
         | Q(code__istartswith='heb_')
     )
-    if not _costco_au_runs_on_server():
+    if not _costco_au_runs_on_server(here=here):
         codes.extend(['costcoau', 'costco', 'costco_au', 'costco-au'])
         prefix_q = prefix_q | Q(code__istartswith='costco_')
     q = Q(code__in=codes) | prefix_q
@@ -1165,7 +1170,7 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                     run.rows_succeeded = succeeded
                     run.save(update_fields=['rows_processed', 'rows_succeeded'])
 
-            if _is_ingest_only_product(product):
+            if _is_ingest_only_product(product, here=True):
                 logger.info(
                     "Ingest-only row left untouched — awaiting fresh scrape (sku=%s vendor=%s)",
                     getattr(product, 'vendor_sku', '?'),
@@ -1492,7 +1497,7 @@ def run_catalog_scrape(upload_id: str, *, parallel: bool = False) -> dict:
         product_mapping__is_active=True,
         product_mapping__sync_status='pending',
     ).order_by('row_number')
-    ingest_ids = _ingest_only_vendor_ids()
+    ingest_ids = _ingest_only_vendor_ids(here=True)
     if ingest_ids:
         rows_qs = rows_qs.exclude(product_mapping__product__vendor_id__in=ingest_ids)
 
@@ -1922,7 +1927,7 @@ def _process_store_wide_scrape_mappings(
                 continue
             if pm.sync_status != 'pending':
                 continue
-            if _is_ingest_only_product(product):
+            if _is_ingest_only_product(product, here=True):
                 logger.info(
                     "Ingest-only row (store-wide) left untouched — awaiting fresh scrape (sku=%s vendor=%s)",
                     getattr(product, 'vendor_sku', '?'),
@@ -2312,7 +2317,7 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False, vend
     ).order_by('id')
     if vendor_id:
         base_qs = base_qs.filter(product__vendor_id=vendor_id)
-    ingest_ids = _ingest_only_vendor_ids()
+    ingest_ids = _ingest_only_vendor_ids(here=True)
     if ingest_ids:
         base_qs = base_qs.exclude(product__vendor_id__in=ingest_ids)
 

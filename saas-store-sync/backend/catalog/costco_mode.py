@@ -57,32 +57,50 @@ def reset_costco_au_mode_memo() -> None:
 
 
 def costco_au_runs_on_server() -> bool:
-    """True when Costco AU listings go through the server scrape (not the desktop runner)."""
+    """Routing: True when Costco AU listings go through the server scrape (not the desktop runner)."""
     if _local_proxy_count():
         return True
     return _published_by_au_worker()
 
 
-def publish_costco_au_worker_mode(queue_names) -> int | None:
-    """Called when a Celery worker starts. Only the ``heavy-au`` worker publishes.
+def costco_au_scrapes_in_this_process() -> bool:
+    """True when this process has its own Costco AU proxies and may scrape Costco itself.
 
-    Returns the proxy count it published, or ``None`` when this worker does
-    not scrape Costco AU.
+    More than one worker can consume ``heavy-au``. One without proxies must
+    leave Costco rows Pending: from a datacenter IP every row would come back
+    blocked and be marked Failed with stock 0.
+    """
+    return _local_proxy_count() > 0
+
+
+def publish_costco_au_worker_mode(queue_names) -> int | None:
+    """Called when a Celery worker starts. Only a ``heavy-au`` worker with proxies publishes.
+
+    A ``heavy-au`` worker without proxies leaves the flag alone: another AU
+    worker may have the proxies, and clearing it would send Costco back to the
+    desktop runner for everyone. Clear the key by hand if Costco proxies are
+    removed for good.
+
+    Returns the proxy count found, or ``None`` when this worker does not
+    consume ``heavy-au``.
     """
     names = {str(q) for q in (queue_names or ())}
     if COSTCO_AU_WORKER_QUEUE not in names:
         return None
     count = _local_proxy_count()
-    from django.core.cache import cache
-
     if count:
+        from django.core.cache import cache
+
         cache.set(COSTCO_AU_SERVER_CACHE_KEY, count, timeout=None)
+        reset_costco_au_mode_memo()
+        logger.info(
+            'Costco AU scrape mode published by %s worker: server (%s proxies)',
+            COSTCO_AU_WORKER_QUEUE, count,
+        )
     else:
-        cache.delete(COSTCO_AU_SERVER_CACHE_KEY)
-    reset_costco_au_mode_memo()
-    logger.info(
-        'Costco AU scrape mode published by %s worker: %s',
-        COSTCO_AU_WORKER_QUEUE,
-        f'server ({count} proxies)' if count else 'desktop runner (no proxies)',
-    )
+        logger.warning(
+            'This %s worker has no Costco AU proxies (COSTCO_AU_PROXY_URLS). It will '
+            'leave Costco listings Pending; any Costco scrape it picks up does nothing.',
+            COSTCO_AU_WORKER_QUEUE,
+        )
     return count

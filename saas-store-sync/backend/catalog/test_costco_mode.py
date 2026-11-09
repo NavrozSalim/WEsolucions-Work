@@ -49,10 +49,27 @@ class CostcoModeTests(TestCase):
         self.assertTrue(CatalogScrapeTriggerView._vendor_runs_live('costco', {'runner': 'desktop'}))
 
     @patch.dict(os.environ, _NO_PROXY_ENV)
-    def test_au_worker_without_proxies_clears_flag(self):
+    def test_second_au_worker_without_proxies_keeps_flag(self):
         cache.set(COSTCO_AU_SERVER_CACHE_KEY, 10, timeout=None)
         self.assertEqual(publish_costco_au_worker_mode(['heavy-au']), 0)
-        self.assertFalse(costco_au_runs_on_server())
+        self.assertEqual(cache.get(COSTCO_AU_SERVER_CACHE_KEY), 10)
+        self.assertTrue(costco_au_runs_on_server())
+
+    @patch.dict(os.environ, _NO_PROXY_ENV)
+    def test_worker_without_proxies_skips_costco_rows_even_when_flag_set(self):
+        cache.set(COSTCO_AU_SERVER_CACHE_KEY, 10, timeout=None)
+        product = SimpleNamespace(vendor=self.costco)
+        # Routing on the main server says "server"...
+        self.assertFalse(_is_ingest_only_product(product))
+        # ...but a heavy-au worker without its own proxies leaves the row Pending.
+        self.assertTrue(_is_ingest_only_product(product, here=True))
+        self.assertIn(self.costco.id, _ingest_only_vendor_ids(here=True))
+
+    @patch.dict(os.environ, _AU_PROXY_ENV)
+    def test_worker_with_proxies_scrapes_costco_rows(self):
+        product = SimpleNamespace(vendor=self.costco)
+        self.assertFalse(_is_ingest_only_product(product, here=True))
+        self.assertNotIn(self.costco.id, _ingest_only_vendor_ids(here=True))
 
     @patch.dict(os.environ, _NO_PROXY_ENV)
     def test_other_workers_do_not_touch_flag(self):
