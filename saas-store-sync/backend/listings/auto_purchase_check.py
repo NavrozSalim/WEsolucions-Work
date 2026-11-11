@@ -78,27 +78,48 @@ def _money(cents: int | None) -> str:
 
 # --------------------------------------------------------------------------- matching
 
-def find_catalog_mapping(store, sku: str):
-    """The store's catalog listing for a marketplace SKU (exact first, then case-insensitive)."""
-    from catalog.models import ProductMapping
+KOGAN_SKU_PREFIX = 'TFS-'
+
+
+def catalog_sku_candidates(store, sku: str) -> list[str]:
+    """SKUs to look up in the catalog, most exact first.
+
+    Kogan order files carry a leading ``TFS-`` (e.g. TFS-COW-123-New). For Kogan stores the
+    catalog is also searched without it. The order keeps its full SKU; only the lookup ignores the prefix.
+    """
+    from stores.credentials import marketplace_kind
 
     sku = (sku or '').strip()
-    if not sku:
-        return None
+    out = [sku] if sku else []
+    if sku.upper().startswith(KOGAN_SKU_PREFIX) and marketplace_kind(store.marketplace) == 'kogan':
+        rest = sku[len(KOGAN_SKU_PREFIX):].strip()
+        if rest and rest not in out:
+            out.append(rest)
+    return out
+
+
+def find_catalog_mapping(store, sku: str):
+    """The store's catalog listing for a marketplace SKU (exact first, then case-insensitive).
+
+    Kogan stores also match a SKU whose leading ``TFS-`` is ignored.
+    """
+    from catalog.models import ProductMapping
+
     # Active listings first when the same SKU appears more than once.
     qs = (
         ProductMapping.objects.filter(store=store)
         .select_related('product', 'product__vendor')
         .order_by('-is_active', 'id')
     )
-    for lookup in (
-        {'marketplace_child_sku': sku},
-        {'marketplace_child_sku__iexact': sku},
-        {'marketplace_parent_sku__iexact': sku},
-    ):
-        pm = qs.filter(**lookup).first()
-        if pm is not None and pm.product_id:
-            return pm
+    for candidate in catalog_sku_candidates(store, sku):
+        for lookup in (
+            {'marketplace_child_sku': candidate},
+            {'marketplace_child_sku__iexact': candidate},
+            {'marketplace_parent_sku__iexact': candidate},
+        ):
+            pm = qs.filter(**lookup).first()
+            if pm is not None and pm.product_id:
+                return pm
     return None
 
 

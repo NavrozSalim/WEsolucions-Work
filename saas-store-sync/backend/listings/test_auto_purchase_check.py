@@ -317,3 +317,43 @@ class MultiVendorCheckTests(PurchaseCheckTests):
         self.assertTrue(check.reasons[0].startswith('Other vendor: SKU-C'))
         self.assertIn('Amazon AU, eBay AU', check.reasons[0])
         mock_live.assert_not_called()
+
+
+@override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+class KoganSkuPrefixTests(PurchaseCheckTests):
+    """Kogan order SKUs start with TFS-; the catalog lookup ignores it without changing the order's SKU."""
+
+    @mock.patch(LIVE, return_value=live('20.99', 5))
+    def test_catalog_sku_without_tfs_matches_the_order_sku_with_it(self, _live):
+        self._map('COW-18324956-HV10819WH-New')
+        check = check_order(self._order([self.line('TFS-COW-18324956-HV10819WH-New', 7088)]))
+        self.assertEqual(check.status, 'buyable', check.reasons)
+        self.assertEqual(check.lines_json[0]['sku'], 'TFS-COW-18324956-HV10819WH-New')  # order SKU unchanged
+        self.assertEqual(check.lines_json[0]['vendor_id'], 'B0TEST0001')
+
+    @mock.patch(LIVE, return_value=live('20.99', 5))
+    def test_exact_tfs_catalog_sku_still_wins(self, _live):
+        exact = self._map('TFS-COW-1-New', vendor_sku='B0EXACT001')
+        self._map('COW-1-New', vendor_sku='B0OTHER001')
+        check = check_order(self._order([self.line('TFS-COW-1-New', 5000)]))
+        self.assertEqual(check.lines_json[0]['mapping_id'], str(exact.id))
+
+    def test_prefix_is_case_insensitive_and_only_leading(self):
+        from listings.auto_purchase_check import catalog_sku_candidates
+
+        self.assertEqual(catalog_sku_candidates(self.store, 'tfs-COW-1-New'), ['tfs-COW-1-New', 'COW-1-New'])
+        self.assertEqual(catalog_sku_candidates(self.store, 'COW-TFS-1-New'), ['COW-TFS-1-New'])
+        self.assertEqual(catalog_sku_candidates(self.store, 'TFS-'), ['TFS-'])
+
+    @mock.patch(LIVE, return_value=live('20.99', 5))
+    def test_other_marketplaces_do_not_ignore_the_prefix(self, _live):
+        store = Store.objects.create(
+            user=self.user, name='BW', region='AU', api_token='t', marketplace=self.mydeal, auto_buy_vendor='amazon_au',
+        )
+        self._map('COW-1-New', store=store)
+        check = check_order(self._order([self.line('TFS-COW-1-New', 5000)], store=store))
+        self.assertEqual(check.reasons, ['Not mapped: TFS-COW-1-New'])
+
+    def test_still_not_mapped_when_neither_form_exists(self):
+        check = check_order(self._order([self.line('TFS-NOPE-1-New', 5000)]))
+        self.assertEqual(check.reasons, ['Not mapped: TFS-NOPE-1-New'])
