@@ -11,7 +11,7 @@ import LasooConnectionFields from './LasooConnectionFields';
 import BunningsConnectionFields from './BunningsConnectionFields';
 import TemuConnectionFields, { buildTemuPayload, emptyTemuFields } from './TemuConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor, isWallkoalaVendor } from './NoraInventoryUploadField';
-import AutoPurchasingStep, { buildAutoBuyPayload, emptyAutoBuyAccount } from './AutoPurchasingStep';
+import AutoPurchasingStep, { autoBuyRowsFromStore, buildAutoBuyPayload } from './AutoPurchasingStep';
 import ShopifyConnectFields, {
     buildShopifyPayload,
     shopifyFieldsFromStore,
@@ -133,9 +133,7 @@ function storeToForm(store) {
         bunnings_production_shop_key: '',
         ...emptyTemuFields(),
         region: store.region || 'USA',
-        auto_buy_vendor: store.auto_buy_vendor || '',
-        auto_buy_account: store.auto_buy_account ? String(store.auto_buy_account) : '',
-        auto_buy_account_new: emptyAutoBuyAccount(),
+        auto_buy_vendors: autoBuyRowsFromStore(store),
         temu_region: store.region === 'USA' ? 'us' : (store.temu_region || 'au'),
         temu_base_url: store.temu_base_url || '',
         temu_mall_id: store.temu_mall_id || '',
@@ -1162,11 +1160,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                     {step === 4 && (
                         <AutoPurchasingStep
                             region={form.region}
-                            value={form.auto_buy_vendor}
-                            onChange={(v) => setForm((f) => ({ ...f, auto_buy_vendor: v }))}
-                            accountId={form.auto_buy_account}
-                            newAccount={form.auto_buy_account_new}
-                            onAccountChange={(id, acct) => setForm((f) => ({ ...f, auto_buy_account: id, auto_buy_account_new: acct }))}
+                            rows={form.auto_buy_vendors}
+                            onRowsChange={(rows) => setForm((f) => ({ ...f, auto_buy_vendors: rows }))}
                         />
                     )}
                 </div>

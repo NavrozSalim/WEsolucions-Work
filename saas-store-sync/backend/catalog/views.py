@@ -206,6 +206,12 @@ class CatalogStoresView(APIView):
                 st = next(x for x in stores if x.id == sid)
                 mydeal_status_map[str(sid)] = template_status(st)
 
+        from stores.models import StoreAutoBuyVendor
+
+        auto_buy_by_store = {}
+        for sid, vendor in StoreAutoBuyVendor.objects.filter(store_id__in=store_ids).values_list('store_id', 'vendor'):
+            auto_buy_by_store.setdefault(sid, []).append(vendor)
+
         data = []
         for s in stores:
             sch = sched_map.get(str(s.id))
@@ -217,6 +223,7 @@ class CatalogStoresView(APIView):
                 'marketplace_code': (s.marketplace.code or '').strip() if s.marketplace else None,
                 'management_mode': s.management_mode,
                 'auto_buy_vendor': s.auto_buy_vendor or '',
+                'auto_buy_vendors': auto_buy_by_store.get(s.id) or ([s.auto_buy_vendor] if s.auto_buy_vendor else []),
                 'product_count': (
                     int(s.listing_count or 0)
                     if (s.management_mode or '') == 'full_store'

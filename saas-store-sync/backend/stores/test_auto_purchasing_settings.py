@@ -172,3 +172,73 @@ class AutoBuyAccountTests(TestCase):
         self.PA.objects.create(user=self.user, name='Amazon US', vendor='amazon', region='USA', chrome_profile='Profile 7')
         res = self.client.get('/api/v1/purchase-accounts/', {'region': 'AU', 'vendor': 'amazon_au'})
         self.assertEqual([a['name'] for a in res.data['accounts']], ['Amazon AU'])
+
+
+@override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+class AutoBuyVendorListTests(TestCase):
+    """Several Auto buying vendors per store, each with its own purchase account."""
+
+    def setUp(self):
+        from stores.models import PurchaseAccount
+
+        self.PA = PurchaseAccount
+        self.user = User.objects.create_user(username='abl', email='abl@example.com', password='pass12345')
+        mp, _ = Marketplace.objects.get_or_create(code='kogan', defaults={'name': 'Kogan'})
+        self.store = Store.objects.create(user=self.user, name='Kogan-TFS', region='AU', api_token='t', marketplace=mp)
+        self.amazon = self.PA.objects.create(user=self.user, name='Amazon AU', vendor='amazon_au', region='AU',
+                                             chrome_profile='Default')
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def patch(self, rows):
+        return self.client.patch(f'/api/v1/stores/{self.store.id}/', {'auto_buy_vendors': rows}, format='json')
+
+    def get(self):
+        return self.client.get(f'/api/v1/stores/{self.store.id}/').data
+
+    def test_two_vendors_saved_and_shown_again(self):
+        res = self.patch([
+            {'vendor': 'amazon_au', 'account': str(self.amazon.id)},
+            {'vendor': 'costco_au', 'account_new': {'chrome_profile': 'Profile 3', 'email': 'c@example.com'}},
+        ])
+        self.assertEqual(res.status_code, 200, res.data)
+        rows = self.get()['auto_buy_vendors']
+        self.assertEqual([(r['vendor'], r['account']['chrome_profile']) for r in rows],
+                         [('amazon_au', 'Default'), ('costco_au', 'Profile 3')])
+        self.store.refresh_from_db()
+        self.assertEqual((self.store.auto_buy_vendor, self.store.auto_buy_account_id), ('amazon_au', self.amazon.id))
+        self.assertTrue(self.store.is_auto_purchase)
+
+        listed = self.client.get('/api/v1/catalog/stores/').data
+        row = next(r for r in listed if r['name'] == 'Kogan-TFS')
+        self.assertEqual(row['auto_buy_vendors'], ['amazon_au', 'costco_au'])
+
+    def test_removing_a_row_and_clearing_all(self):
+        self.patch([{'vendor': 'amazon_au', 'account': str(self.amazon.id)}, {'vendor': 'ebay_au'}])
+        self.patch([{'vendor': 'ebay_au'}])
+        self.assertEqual([r['vendor'] for r in self.get()['auto_buy_vendors']], ['ebay_au'])
+        self.patch([])
+        self.store.refresh_from_db()
+        self.assertEqual(self.get()['auto_buy_vendors'], [])
+        self.assertFalse(self.store.is_auto_purchase)
+
+    def test_duplicate_or_wrong_region_vendor_refused(self):
+        self.assertEqual(self.patch([{'vendor': 'amazon_au'}, {'vendor': 'amazon_au'}]).status_code, 400)
+        self.assertEqual(self.patch([{'vendor': 'amazon'}]).status_code, 400)
+        self.assertEqual(self.patch([{'vendor': 'costco_au', 'account': str(self.amazon.id)}]).status_code, 400)
+
+    def test_old_single_vendor_save_becomes_one_row(self):
+        res = self.client.patch(f'/api/v1/stores/{self.store.id}/', {'auto_buy_vendor': 'costway_au'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual([r['vendor'] for r in self.get()['auto_buy_vendors']], ['costway_au'])
+
+    def test_process_account_follows_the_vendor(self):
+        from listings.auto_purchase_jobs import purchase_account_for
+
+        self.patch([
+            {'vendor': 'amazon_au', 'account': str(self.amazon.id)},
+            {'vendor': 'costco_au', 'account_new': {'chrome_profile': 'Profile 3'}},
+        ])
+        self.store.refresh_from_db()
+        self.assertEqual(purchase_account_for(self.store, 'amazon_au'), self.amazon)
+        self.assertEqual(purchase_account_for(self.store, 'costco_au').chrome_profile, 'Profile 3')

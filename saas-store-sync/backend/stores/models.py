@@ -481,6 +481,28 @@ class PurchaseAccount(models.Model):
         return f'{self.name} ({self.vendor})'
 
 
+class StoreAutoBuyVendor(models.Model):
+    """Auto Purchasing: one vendor a store buys its orders from, with the purchase account it buys with.
+
+    A store can have several (e.g. Amazon AU and Costco AU). ``Store.auto_buy_vendor`` / ``auto_buy_account``
+    mirror the first one for older code paths.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='auto_buy_entries')
+    vendor = models.CharField(max_length=30, choices=Store.AUTO_BUY_VENDOR_CHOICES)
+    account = models.ForeignKey(
+        PurchaseAccount, on_delete=models.SET_NULL, null=True, blank=True, related_name='auto_buy_entries',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+        constraints = [models.UniqueConstraint(fields=['store', 'vendor'], name='uq_store_auto_buy_vendor')]
+
+    def __str__(self):
+        return f'{self.store_id} buys from {self.vendor}'
+
+
 class AutoOrderRun(models.Model):
     """One launch of the external order bot for a store."""
     class Status(models.TextChoices):

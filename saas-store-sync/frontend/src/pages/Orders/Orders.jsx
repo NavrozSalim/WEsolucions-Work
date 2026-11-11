@@ -25,7 +25,7 @@ import Select from '../../components/ui/Select';
 import PageHeader from '../../components/design/PageHeader';
 import EmptyState from '../../components/design/EmptyState';
 import { getCatalogStores } from '../../services/catalogService';
-import { autoBuyVendorLabel } from '../../components/stores/AutoPurchasingStep';
+import { autoBuyVendorsLabel } from '../../components/stores/AutoPurchasingStep';
 import {
     cancelOrder,
     completeOrderShipping,
@@ -1608,7 +1608,7 @@ export default function Orders() {
                             ...stores.map((s) => ({
                                 value: s.id,
                                 label: `${s.name}${s.marketplace_name ? ` (${s.marketplace_name})` : ''}${
-                                    s.auto_buy_vendor ? ` · Auto buy: ${autoBuyVendorLabel(s.auto_buy_vendor)}` : ''
+                                    s.auto_buy_vendor ? ` · Auto buy: ${autoBuyVendorsLabel(s.auto_buy_vendors?.length ? s.auto_buy_vendors : [s.auto_buy_vendor])}` : ''
                                 }`,
                             })),
                         ]}
@@ -1749,7 +1749,7 @@ export default function Orders() {
                     const c = processOrderRow.purchase_check || {};
                     const cur = (v) => (v == null ? '—' : `A$${(v / 100).toFixed(2)}`);
                     const items = (c.lines || []).map((l) => `${l.quantity} × ${l.sku}`).join(', ');
-                    return `Order ${processOrderRow.invoice_number}: buy ${items} from ${autoBuyVendorLabel(selectedStoreData?.auto_buy_vendor)} `
+                    return `Order ${processOrderRow.invoice_number}: buy ${items} from ${autoBuyVendorsLabel([(c.lines || []).find((l) => l.auto_buy_vendor)?.auto_buy_vendor || selectedStoreData?.auto_buy_vendor])} `
                         + `on the worker laptop and ship to ${customerName(processOrderRow)}. Cost ${cur(c.cost_cents)}, `
                         + `earning ${cur(c.earning_cents)}. The laptop stops if the vendor price went up.`
                         + (c.purchase_error ? ` Last attempt: ${c.purchase_error}` : '');
@@ -1772,7 +1772,7 @@ export default function Orders() {
                         <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">
                             {orders.length === 0
                                 ? isAutoPurchaseOnly
-                                    ? `No orders yet. This is an auto-purchase store (Auto buy: ${autoBuyVendorLabel(selectedStoreData?.auto_buy_vendor)}). Use “Upload orders file” with the marketplace’s orders export; fetching it through the worker laptop is not set up yet.`
+                                    ? `No orders yet. This is an auto-purchase store (Auto buy: ${autoBuyVendorsLabel(selectedStoreData?.auto_buy_vendors?.length ? selectedStoreData.auto_buy_vendors : [selectedStoreData?.auto_buy_vendor])}). Click Fetch to download the orders file with the worker laptop, or use “Upload orders file”.`
                                     : 'No orders yet. Use “Fetch from marketplace” to pull the latest orders.'
                                 : customerSearch.trim() && statusFilter && statusFilter !== 'all'
                                   ? `No orders match “${customerSearch.trim()}” with this status filter.`

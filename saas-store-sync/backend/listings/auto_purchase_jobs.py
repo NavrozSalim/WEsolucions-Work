@@ -138,15 +138,21 @@ def import_fetched_file(run, filename: str, data: bytes) -> dict:
 
 # --------------------------------------------------------------------------- Process
 
-def purchase_account_for(store):
-    """The account chosen on the store's Auto Purchasing step; otherwise the owner's first one for the vendor."""
+def purchase_account_for(store, vendor=None):
+    """The account set for ``vendor`` on the store's Auto Purchasing step; otherwise the owner's first one.
+
+    ``vendor`` defaults to the store's first Auto buying vendor.
+    """
+    from stores.auto_buy import auto_buy_entries
     from stores.models import PurchaseAccount
 
-    linked = store.auto_buy_account
-    if linked is not None and linked.vendor == store.auto_buy_vendor and linked.region == store.region:
-        return linked
+    entries = auto_buy_entries(store)
+    vendor = vendor or (entries[0][0] if entries else store.auto_buy_vendor)
+    for v, linked in entries:
+        if v == vendor and linked is not None and linked.vendor == vendor and linked.region == store.region:
+            return linked
     return (
-        PurchaseAccount.objects.filter(user=store.user, vendor=store.auto_buy_vendor, region=store.region)
+        PurchaseAccount.objects.filter(user=store.user, vendor=vendor, region=store.region)
         .order_by('created_at', 'id')
         .first()
     )
@@ -205,14 +211,6 @@ def start_purchase(order, user):
     if not store.is_auto_purchase:
         raise AutoPurchaseError("Choose an Auto buying vendor on the store's Auto Purchasing step first.")
     marketplace = bot_marketplace_or_error(store)
-    account = purchase_account_for(store)
-    if account is None:
-        from listings.auto_purchase_check import AUTO_BUY_LABELS
-
-        raise AutoPurchaseError(
-            f'Add a purchase account for {AUTO_BUY_LABELS.get(store.auto_buy_vendor, store.auto_buy_vendor)} '
-            f"on the store's Auto Purchasing step first (Store Settings → Edit)."
-        )
     with transaction.atomic():
         check = OrderPurchaseCheck.objects.select_for_update().filter(order=order).first()
         if check is None or check.status != PurchaseCheckStatus.BUYABLE:
@@ -224,6 +222,18 @@ def start_purchase(order, user):
         lines = check.lines_json or []
         if not lines or any(not ln.get('vendor_url') or ln.get('vendor_price_cents') is None for ln in lines):
             raise AutoPurchaseError('A line has no vendor URL or price. Click Recheck.', 409)
+        vendors = {ln.get('auto_buy_vendor') or store.auto_buy_vendor for ln in lines}
+        if len(vendors) != 1:
+            raise AutoPurchaseError('The lines are from different vendors; buy this order by hand.', 409)
+        vendor = vendors.pop()
+        account = purchase_account_for(store, vendor)
+        if account is None:
+            from listings.auto_purchase_check import AUTO_BUY_LABELS
+
+            raise AutoPurchaseError(
+                f'Add a purchase account for {AUTO_BUY_LABELS.get(vendor, vendor)} '
+                f"on the store's Auto Purchasing step first (Store Settings → Edit)."
+            )
 
         run = _new_run(
             store, user, kind=AutoOrderRun.Kind.PURCHASE, marketplace=marketplace,

@@ -177,8 +177,9 @@ class PurchaseCheckTests(TestCase):
 
     @mock.patch(LIVE)
     def test_costway_uses_feed_price(self, mock_live):
-        self.store.auto_buy_vendor = 'costway_au'
-        self.store.save(update_fields=['auto_buy_vendor'])
+        from stores.auto_buy import set_auto_buy_entries
+
+        set_auto_buy_entries(self.store, [('costway_au', None)])
         StoreVendorPriceSettings.objects.create(store=self.store, vendor=self.costway, marketplace_fees_percentage=15)
         pm = self._map('TFS-COW-1-New', vendor=self.costway, vendor_sku='KC59367NA')
         VendorPrice.objects.create(product=pm.product, price=Decimal('150.00'), stock=4)
@@ -280,3 +281,39 @@ class PurchaseCheckTests(TestCase):
         self.assertEqual(checks['1023584140'].status, 'buyable')
         self.assertEqual(checks['1023584140'].earning_cents, 2138)
         self.assertEqual(checks['1023815960'].reasons, ['Not mapped: NPP-525247166740-New'])
+
+
+@override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+class MultiVendorCheckTests(PurchaseCheckTests):
+    """Store buys from Amazon AU and eBay AU: lines from either pass; a mixed order is bought by hand."""
+
+    def setUp(self):
+        super().setUp()
+        from stores.auto_buy import set_auto_buy_entries
+
+        set_auto_buy_entries(self.store, [('amazon_au', None), ('ebay_au', None)])
+        StoreVendorPriceSettings.objects.create(store=self.store, vendor=self.ebay, marketplace_fees_percentage=15)
+
+    @mock.patch(LIVE, return_value=live('10.00', 5))
+    def test_second_vendor_line_is_accepted(self, _live):
+        self._map('SKU-E', vendor=self.ebay, vendor_sku='123456')
+        check = check_order(self._order([self.line('SKU-E', 5000)]))
+        self.assertEqual(check.status, 'buyable')
+        self.assertEqual(check.lines_json[0]['auto_buy_vendor'], 'ebay_au')
+
+    @mock.patch(LIVE, return_value=live('10.00', 5))
+    def test_order_split_across_vendors_is_blocked(self, _live):
+        self._map('SKU-A')
+        self._map('SKU-E', vendor=self.ebay, vendor_sku='123456')
+        check = check_order(self._order([self.line('SKU-A', 5000), self.line('SKU-E', 5000)]))
+        self.assertEqual(check.status, 'blocked')
+        self.assertIn('different vendors (Amazon AU, eBay AU)', check.reasons[0])
+
+    def test_other_vendor_blocks_without_scraping(self):  # Costco is still not one of this store's vendors
+        costco, _ = Vendor.objects.get_or_create(code='costcoau', defaults={'name': 'CostcoAU'})
+        self._map('SKU-C', vendor=costco, vendor_sku='173734')
+        with mock.patch(LIVE) as mock_live:
+            check = check_order(self._order([self.line('SKU-C', 5000)]))
+        self.assertTrue(check.reasons[0].startswith('Other vendor: SKU-C'))
+        self.assertIn('Amazon AU, eBay AU', check.reasons[0])
+        mock_live.assert_not_called()

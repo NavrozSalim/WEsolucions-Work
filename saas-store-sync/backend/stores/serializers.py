@@ -106,6 +106,8 @@ class StoreSerializer(serializers.ModelSerializer):
     )
     auto_buy_account_new = serializers.DictField(required=False, write_only=True)
     auto_buy_account_detail = serializers.SerializerMethodField()
+    # Several vendors per store: [{vendor, account (id or null), account_new {chrome_profile, email}}].
+    auto_buy_vendors = serializers.ListField(child=serializers.DictField(), required=False, write_only=True)
 
     class Meta:
         model = Store
@@ -113,6 +115,7 @@ class StoreSerializer(serializers.ModelSerializer):
             'id', 'name', 'region', 'management_mode', 'api_token', 'marketplace', 'marketplace_id', 'marketplace_name',
             'marketplace_code',
             'auto_buy_vendor', 'auto_buy_account', 'auto_buy_account_new', 'auto_buy_account_detail',
+            'auto_buy_vendors',
             'kogan_service_account_json', 'kogan_sheet_id', 'kogan_tab_name',
             'kogan_sku_column', 'kogan_stock_column', 'kogan_price_column', 'kogan_rrp_column', 'kogan_first_price_column',
             'mydeal_setup_method',
@@ -188,8 +191,57 @@ class StoreSerializer(serializers.ModelSerializer):
                     })
             if 'auto_buy_vendor' in attrs:
                 attrs['auto_buy_vendor'] = vendor
-        self._validate_auto_buy_account(attrs)
+        if 'auto_buy_vendors' in attrs:
+            self._validate_auto_buy_vendors(attrs)
+        else:
+            self._auto_buy_rows = None
+            self._validate_auto_buy_account(attrs)
         return attrs
+
+    def to_representation(self, instance):
+        from stores.auto_buy import entries_payload
+
+        data = super().to_representation(instance)
+        data['auto_buy_vendors'] = entries_payload(instance)
+        return data
+
+    def _validate_auto_buy_vendors(self, attrs):
+        """Every row: a vendor offered for the Region (once), and the owner's account for it or a new one."""
+        rows = attrs.pop('auto_buy_vendors') or []
+        region = attrs.get('region') or getattr(self.instance, 'region', '') or ''
+        allowed = Store.AUTO_BUY_VENDORS_BY_REGION.get(region, ())
+        labels = dict(Store.AUTO_BUY_VENDOR_CHOICES)
+        owner = self._account_owner()
+        clean, seen = [], set()
+        for row in rows:
+            vendor = str(row.get('vendor') or '').strip()
+            if not vendor:
+                continue
+            label = labels.get(vendor, vendor)
+            if vendor not in allowed:
+                raise ValidationError({'auto_buy_vendors': f'{label} is not available for region {region or "?"}.'})
+            if vendor in seen:
+                raise ValidationError({'auto_buy_vendors': f'{label} is listed twice.'})
+            seen.add(vendor)
+            account, new = None, None
+            new_raw = row.get('account_new') or None
+            if new_raw:
+                profile = str(new_raw.get('chrome_profile') or '').strip()
+                if not profile:
+                    raise ValidationError({'auto_buy_vendors': f'{label}: Chrome profile is required for a new purchase account.'})
+                new = {'chrome_profile': profile, 'email': str(new_raw.get('email') or '').strip()}
+            elif row.get('account'):
+                account = PurchaseAccount.objects.filter(pk=row['account']).first()
+                if account is None or owner is None or account.user_id != owner.id:
+                    raise ValidationError({'auto_buy_vendors': f'{label}: choose one of your own purchase accounts.'})
+                if account.vendor != vendor or account.region != region:
+                    raise ValidationError({'auto_buy_vendors': f'{label}: that purchase account is for a different vendor or region.'})
+            clean.append({'vendor': vendor, 'account': account, 'new': new, 'region': region})
+        self._auto_buy_rows = clean
+        self._new_auto_buy_account = None
+        self._auto_buy_legacy_touched = False
+        attrs['auto_buy_vendor'] = clean[0]['vendor'] if clean else ''
+        attrs['auto_buy_account'] = clean[0]['account'] if clean else None
 
     def _account_owner(self):
         req = self.context.get('request')
@@ -202,6 +254,7 @@ class StoreSerializer(serializers.ModelSerializer):
         vendor instead of picking an existing one. Clearing the vendor clears the account.
         """
         touched = any(k in attrs for k in ('auto_buy_vendor', 'region', 'auto_buy_account', 'auto_buy_account_new'))
+        self._auto_buy_legacy_touched = touched
         if not touched:
             return
         vendor = attrs['auto_buy_vendor'] if 'auto_buy_vendor' in attrs else getattr(self.instance, 'auto_buy_vendor', '')
@@ -232,28 +285,51 @@ class StoreSerializer(serializers.ModelSerializer):
                 raise ValidationError({'auto_buy_account': 'That purchase account is for a different vendor or region.'})
             attrs['auto_buy_account'] = None  # vendor changed: the old account no longer fits
 
+    def _get_or_create_account(self, store, vendor, region, profile, email):
+        acct = PurchaseAccount.objects.filter(
+            user=store.user, vendor=vendor, region=region, chrome_profile=profile,
+        ).first()
+        if acct is None:
+            label = dict(Store.AUTO_BUY_VENDOR_CHOICES).get(vendor, vendor)
+            name, n = label, 2
+            while PurchaseAccount.objects.filter(user=store.user, name=name).exists():
+                name, n = f'{label} {n}', n + 1
+            acct = PurchaseAccount.objects.create(
+                user=store.user, name=name, vendor=vendor, region=region, chrome_profile=profile, email=email,
+            )
+        elif email and acct.email != email:
+            acct.email = email
+            acct.save(update_fields=['email'])
+        return acct
+
+    def _apply_auto_buy(self, store):
+        """After save: create new accounts and write the store's vendor rows."""
+        from stores.auto_buy import set_auto_buy_entries
+
+        rows = getattr(self, '_auto_buy_rows', None)
+        if rows is not None:
+            entries = []
+            for r in rows:
+                account = r['account']
+                if r['new'] and store.user_id:
+                    account = self._get_or_create_account(
+                        store, r['vendor'], r['region'], r['new']['chrome_profile'], r['new']['email'],
+                    )
+                entries.append((r['vendor'], account))
+            set_auto_buy_entries(store, entries)
+            return
+        touched = getattr(self, '_auto_buy_legacy_touched', False)
+        self._apply_new_auto_buy_account(store)
+        if touched:
+            store.refresh_from_db(fields=['auto_buy_vendor', 'auto_buy_account'])
+            set_auto_buy_entries(store, [(store.auto_buy_vendor, store.auto_buy_account)] if store.auto_buy_vendor else [])
+
     def _apply_new_auto_buy_account(self, store):
         """Create (or reuse) the owner's purchase account given in the Auto Purchasing step and link it."""
         spec = getattr(self, '_new_auto_buy_account', None)
         if not spec or not store.user_id:
             return
-        from stores.models import PurchaseAccount
-
-        acct = PurchaseAccount.objects.filter(
-            user=store.user, vendor=spec['vendor'], region=spec['region'], chrome_profile=spec['chrome_profile'],
-        ).first()
-        if acct is None:
-            label = dict(Store.AUTO_BUY_VENDOR_CHOICES).get(spec['vendor'], spec['vendor'])
-            name, n = label, 2
-            while PurchaseAccount.objects.filter(user=store.user, name=name).exists():
-                name, n = f'{label} {n}', n + 1
-            acct = PurchaseAccount.objects.create(
-                user=store.user, name=name, vendor=spec['vendor'], region=spec['region'],
-                chrome_profile=spec['chrome_profile'], email=spec['email'],
-            )
-        elif spec['email'] and acct.email != spec['email']:
-            acct.email = spec['email']
-            acct.save(update_fields=['email'])
+        acct = self._get_or_create_account(store, spec['vendor'], spec['region'], spec['chrome_profile'], spec['email'])
         store.auto_buy_account = acct
         store.save(update_fields=['auto_buy_account'])
 
@@ -707,7 +783,7 @@ class StoreSerializer(serializers.ModelSerializer):
                     field: err_msg or 'Marketplace rejected these credentials.',
                 })
 
-        self._apply_new_auto_buy_account(store)
+        self._apply_auto_buy(store)
         return store
 
     def update(self, instance, validated_data):
@@ -956,7 +1032,7 @@ class StoreSerializer(serializers.ModelSerializer):
         else:
             _persist_store_changes()
 
-        self._apply_new_auto_buy_account(instance)
+        self._apply_auto_buy(instance)
         return instance
 
     @staticmethod

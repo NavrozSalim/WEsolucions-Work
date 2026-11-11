@@ -209,15 +209,20 @@ def _check_line(store, item: dict, session: dict, *, scrape: bool) -> dict:
     if not url:
         line.update(result=LINE_NOT_MAPPED, message='Mapped product has no vendor URL. Fix the mapping, then Recheck.')
         return line
-    if not vendor_matches_auto_buy(line['vendor_code'], store.auto_buy_vendor):
+    from stores.auto_buy import auto_buy_vendor_codes, entry_for_vendor_code
+
+    entry = entry_for_vendor_code(store, line['vendor_code'])
+    if entry is None:
+        buys_from = ', '.join(AUTO_BUY_LABELS.get(v, v) for v in auto_buy_vendor_codes(store)) or 'no vendor'
         line.update(
             result=LINE_OTHER_VENDOR,
             message=(
                 f"Sold by {line['vendor_name'] or line['vendor_code'] or 'another vendor'}; this store buys from "
-                f"{AUTO_BUY_LABELS.get(store.auto_buy_vendor, store.auto_buy_vendor)}."
+                f"{buys_from}."
             ),
         )
         return line
+    line['auto_buy_vendor'] = entry[0]
     if not scrape:
         return line
 
@@ -274,6 +279,13 @@ def evaluate_order(order, *, session: dict | None = None, scrape: bool = True) -
         )
     after_fees = None if sale is None or fee is None else sale - fee
     earning = None if after_fees is None or cost is None else after_fees - cost
+    # The laptop buys one vendor per job: an order split across vendors is bought by hand.
+    split = sorted({ln.get('auto_buy_vendor') for ln in lines if ln.get('auto_buy_vendor')})
+    if len(split) > 1:
+        reasons.append(
+            'Lines are from different vendors (' + ', '.join(AUTO_BUY_LABELS.get(v, v) for v in split)
+            + '); buy this order by hand.'
+        )
     if earning is not None and earning <= 0:
         reasons.append(f'Loss: earning {_money(earning)}')
 
