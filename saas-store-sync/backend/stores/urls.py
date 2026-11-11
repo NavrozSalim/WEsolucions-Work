@@ -23,6 +23,7 @@ urlpatterns = [
     path('ingest/order-bot/jobs/<uuid:run_id>/', aoi.JobStatusView.as_view(), name='order-bot-job-status'),
     path('ingest/order-bot/jobs/<uuid:run_id>/file/<str:kind>/', aoi.JobFileView.as_view(), name='order-bot-job-file'),
     path('ingest/order-bot/jobs/<uuid:run_id>/progress/', aoi.JobProgressView.as_view(), name='order-bot-job-progress'),
+    path('ingest/order-bot/jobs/<uuid:run_id>/orders-file/', aoi.JobOrdersFileView.as_view(), name='order-bot-job-orders-file'),
     path('ingest/order-bot/jobs/<uuid:run_id>/complete/', aoi.JobCompleteView.as_view(), name='order-bot-job-complete'),
     path('', include(router.urls)),
 ]

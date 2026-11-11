@@ -56,6 +56,8 @@ _FINALIZE = frozenset(
     }
 )
 _LISTING_SCRAPE = "listings.scrape_store_listings"
+# Auto Purchasing order check: scrapes vendor pages, first argument is the store id.
+_AUTO_PURCHASE_CHECK = "listings.check_auto_purchase_orders"
 
 
 def heavy_queue_for_region(region: str | None) -> str:
@@ -85,6 +87,17 @@ class CatalogScrapeTaskRouter:
         kwargs = kwargs or {}
         if name in _FINALIZE:
             return {"queue": QUEUE_SCRAPE_FINALIZE}
+
+        if name == _AUTO_PURCHASE_CHECK:
+            store_id = self._first_positional(args, kwargs, ("store_id",))
+            try:
+                from stores.models import Store
+
+                region = Store.objects.values_list("region", flat=True).get(id=store_id)
+            except Exception as exc:
+                logger.exception("auto purchase check route: no region for %s: %s", store_id, exc)
+                return {"queue": QUEUE_HEAVY_US}
+            return {"queue": heavy_queue_for_region(region)}
 
         if name == _LISTING_SCRAPE:
             store_id = None

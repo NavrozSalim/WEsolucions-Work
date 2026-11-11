@@ -100,6 +100,16 @@ try:
 except ValueError:
     CATALOG_SCRAPE_STOP_IDLE_SECONDS = 120
 
+# Auto Order Bot page: the old "upload today's order export + mapping, then Dry run / Place orders"
+# flow. Off by default: orders are fetched, checked and bought one at a time from the Orders page
+# (Auto Purchasing). Set to 1 only to bring the old whole-file runs back.
+AUTO_ORDER_BOT_LEGACY_RUNS = _env_bool('AUTO_ORDER_BOT_LEGACY_RUNS', False)
+# Auto Purchasing: Process needs a stock / profit check younger than this.
+try:
+    AUTO_PURCHASE_MAX_CHECK_AGE_MINUTES = max(5, int(os.getenv('AUTO_PURCHASE_MAX_CHECK_AGE_MINUTES', '120')))
+except ValueError:
+    AUTO_PURCHASE_MAX_CHECK_AGE_MINUTES = 120
+
 # A running store-wide scrape with no worker heartbeat for this many minutes
 # is restarted by the ``catalog_scrape_watchdog`` Beat task (worker restarted,
 # crashed or hung). Always kept above CATALOG_SCRAPE_STALL_MINUTES in code.

@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
     BadgePercent,
@@ -16,6 +16,7 @@ import {
     RefreshCw,
     Store as StoreIcon,
     Truck,
+    Upload,
     X,
 } from 'lucide-react';
 import Button from '../../components/ui/Button';
@@ -24,6 +25,7 @@ import Select from '../../components/ui/Select';
 import PageHeader from '../../components/design/PageHeader';
 import EmptyState from '../../components/design/EmptyState';
 import { getCatalogStores } from '../../services/catalogService';
+import { autoBuyVendorLabel } from '../../components/stores/AutoPurchasingStep';
 import {
     cancelOrder,
     completeOrderShipping,
@@ -33,8 +35,15 @@ import {
     getBunningsCarriers,
     getOrderCancelReasons,
     getOrders,
+    getOrdersFetch,
+    importOrdersFile,
+    processOrderPurchase,
+    recheckOrderPurchase,
+    startOrdersFetch,
     submitOrderShipping,
 } from '../../services/listingService';
+import ConfirmModal from '../../components/ui/ConfirmModal';
+import { PurchaseCheckBadge, PurchaseCheckPanel } from './PurchaseCheck';
 
 const STATUS_STYLES = {
     new: 'bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300',
@@ -117,8 +126,21 @@ function mydealCarrier(value) {
     return MYDEAL_CARRIERS.find((c) => c.value === value) || null;
 }
 
+/** Order imported from a Kogan / BigW orders file: no marketplace API to ship, refund or cancel through. */
+function isFileOrder(o) {
+    return o?.raw_response_json?.source === 'order_file';
+}
+
 function formatDate(value, timeZone) {
     if (!value) return '—';
+    // Order files (Kogan / BigW) give a day only: show that day, not midnight UTC in local time.
+    const dayOnly = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.exec(value);
+    if (dayOnly) {
+        const [y, m, day] = value.split('-').map(Number);
+        return new Date(y, m - 1, day).toLocaleDateString(timeZone ? 'en-AU' : undefined, {
+            year: 'numeric', month: 'short', day: 'numeric',
+        });
+    }
     const d = new Date(value);
     if (Number.isNaN(d.getTime())) return String(value);
     const opts = {
@@ -837,7 +859,7 @@ function InfoRow({ label, children }) {
     );
 }
 
-function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone }) {
+function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone, onRecheck, recheckingId, onProcess, processingId }) {
     const d = orderDetails(order);
     const customer = d.customer || {};
     const shippingAddr = formatAddress(d.shippingAddress);
@@ -851,6 +873,15 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateT
 
     return (
         <div className="space-y-6">
+            {(order.purchase_check || isFileOrder(order)) && onRecheck && (
+                <PurchaseCheckPanel
+                    check={order.purchase_check}
+                    onRecheck={() => onRecheck(order)}
+                    rechecking={recheckingId === order.id}
+                    onProcess={onProcess ? () => onProcess(order) : null}
+                    processing={processingId === order.id}
+                />
+            )}
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                 <InfoCard title="Customer">
                     <p className="font-medium text-slate-900 dark:text-slate-100">{customerName(order)}</p>
@@ -1150,6 +1181,8 @@ export default function Orders() {
     const [refundOrderRow, setRefundOrderRow] = useState(null);
     const [refundLoading, setRefundLoading] = useState(false);
     const [exporting, setExporting] = useState(false);
+    const [importingFile, setImportingFile] = useState(false);
+    const orderFileInputRef = useRef(null);
     const [statusFilter, setStatusFilter] = useState(() => {
         if (initialStatus === 'open' || initialStatus === 'all') return initialStatus === 'open' ? 'open' : 'all';
         if (Object.prototype.hasOwnProperty.call(STATUS_LABELS, initialStatus)) return initialStatus;
@@ -1160,8 +1193,9 @@ export default function Orders() {
     useEffect(() => {
         getCatalogStores()
             .then((res) => {
+                // Managed (full_store) stores plus auto-purchase stores (Auto buying vendor chosen).
                 const managed = (Array.isArray(res.data) ? res.data : []).filter(
-                    (s) => s.management_mode === 'full_store'
+                    (s) => s.management_mode === 'full_store' || !!s.auto_buy_vendor
                 );
                 setStores(managed);
                 if (initialStore && managed.some((s) => s.id === initialStore)) {
@@ -1222,6 +1256,64 @@ export default function Orders() {
             loadOrders(false);
         }
     }, [selectedStore, loadOrders, setSearchParams]);
+
+    // Auto Purchasing: while any order is still being checked, refresh quietly every 5s.
+    const anyChecking = orders.some((o) => o.purchase_check?.status === 'checking'
+        || ['queued', 'purchasing'].includes(o.purchase_check?.purchase_status));
+    useEffect(() => {
+        if (!anyChecking || !selectedStore) return undefined;
+        const storeAtStart = selectedStore;
+        const timer = setInterval(() => {
+            getOrders(storeAtStart)
+                .then((res) => {
+                    if (Array.isArray(res.data?.orders)) setOrders(res.data.orders);
+                })
+                .catch(() => {});
+        }, 5000);
+        return () => clearInterval(timer);
+    }, [anyChecking, selectedStore]);
+
+    const [recheckingId, setRecheckingId] = useState(null);
+    const handleRecheck = (order = null) => {
+        if (!selectedStore) return;
+        setRecheckingId(order ? order.id : 'all');
+        recheckOrderPurchase(selectedStore, order ? order.id : null)
+            .then((res) => {
+                if (!order) setMessage({ text: res.data?.message || 'Checking orders.', variant: 'success' });
+                return getOrders(selectedStore);
+            })
+            .then((res) => {
+                if (Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
+            })
+            .catch((err) => {
+                setMessage({ text: err.response?.data?.detail || 'Could not start the check.', variant: 'error' });
+            })
+            .finally(() => setRecheckingId(null));
+    };
+
+    // Auto Purchasing: Process (buy one order) after the user confirms.
+    const [processOrderRow, setProcessOrderRow] = useState(null);
+    const [processingId, setProcessingId] = useState(null);
+    const confirmProcess = () => {
+        const order = processOrderRow;
+        if (!order || !selectedStore) return;
+        setProcessingId(order.id);
+        processOrderPurchase(selectedStore, order.id)
+            .then((res) => {
+                setMessage({ text: res.data?.message || 'Order sent to the laptop to buy.', variant: 'success' });
+                return getOrders(selectedStore);
+            })
+            .then((res) => {
+                if (Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
+            })
+            .catch((err) => {
+                setMessage({ text: err.response?.data?.detail || 'Could not send the order to buy.', variant: 'error' });
+            })
+            .finally(() => {
+                setProcessingId(null);
+                setProcessOrderRow(null);
+            });
+    };
 
     const openTicket = (ticketId) => {
         if (!selectedStore || !ticketId) return;
@@ -1333,6 +1425,67 @@ export default function Orders() {
     );
 
     const marketplaceCode = (selectedStoreData?.marketplace_code || '').toLowerCase();
+    // Auto-purchase store whose orders do not come from a marketplace API (e.g. Kogan-TFS):
+    // its orders are fetched by the worker laptop, so the API fetch button is replaced.
+    const isAutoPurchaseOnly = !!selectedStoreData?.auto_buy_vendor
+        && selectedStoreData?.management_mode !== 'full_store';
+
+    // Auto Purchasing: Fetch (laptop downloads the marketplace orders file).
+    const [fetchJob, setFetchJob] = useState(null);
+    const [laptopOnline, setLaptopOnline] = useState(null);
+    const [startingFetch, setStartingFetch] = useState(false);
+    const fetchActive = ['pending', 'running'].includes(fetchJob?.status);
+    useEffect(() => {
+        setFetchJob(null);
+        setLaptopOnline(null);
+        if (!selectedStore || !isAutoPurchaseOnly) return;
+        getOrdersFetch(selectedStore)
+            .then((res) => {
+                setFetchJob(res.data?.fetch || null);
+                setLaptopOnline(!!res.data?.laptop_online);
+            })
+            .catch(() => {});
+    }, [selectedStore, isAutoPurchaseOnly]);
+    useEffect(() => {
+        if (!fetchActive || !selectedStore) return undefined;
+        const storeAtStart = selectedStore;
+        const timer = setInterval(() => {
+            getOrdersFetch(storeAtStart)
+                .then((res) => {
+                    const job = res.data?.fetch || null;
+                    setLaptopOnline(!!res.data?.laptop_online);
+                    setFetchJob(job);
+                    if (job && !['pending', 'running'].includes(job.status)) {
+                        setMessage({
+                            text: job.status === 'finished'
+                                ? (job.message || 'Orders file fetched.')
+                                : `Fetch ${job.status}: ${job.message || job.error || 'see the laptop agent window.'}`,
+                            variant: job.status === 'finished' ? 'success' : 'error',
+                        });
+                        getOrders(storeAtStart).then((r) => {
+                            if (Array.isArray(r.data?.orders)) setOrders(r.data.orders);
+                        }).catch(() => {});
+                    }
+                })
+                .catch(() => {});
+        }, 5000);
+        return () => clearInterval(timer);
+    }, [fetchActive, selectedStore]);
+    const handleStartFetch = () => {
+        if (!selectedStore) return;
+        setStartingFetch(true);
+        startOrdersFetch(selectedStore)
+            .then((res) => {
+                setFetchJob(res.data?.fetch || null);
+                setLaptopOnline(!!res.data?.laptop_online);
+                setMessage({ text: res.data?.message || 'Fetch sent to the worker laptop.', variant: res.data?.laptop_online ? 'success' : 'warning' });
+            })
+            .catch((err) => {
+                setMessage({ text: err.response?.data?.detail || 'Could not start the fetch.', variant: 'error' });
+            })
+            .finally(() => setStartingFetch(false));
+    };
+
     const isReverb = marketplaceCode === 'reverb';
     const isMydeal = marketplaceCode === 'mydeal';
     const isBunnings = marketplaceCode === 'bunnings';
@@ -1398,6 +1551,27 @@ export default function Orders() {
             .finally(() => setExporting(false));
     };
 
+    const handleOrderFileChosen = (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file || !selectedStore) return;
+        setImportingFile(true);
+        setMessage(null);
+        importOrdersFile(selectedStore, file)
+            .then((res) => {
+                const r = res.data || {};
+                setMessage({ text: r.message || 'Orders file imported.', variant: 'success' });
+                loadOrders(false);
+            })
+            .catch((err) => {
+                setMessage({
+                    text: err.response?.data?.detail || 'Failed to import the orders file.',
+                    variant: 'error',
+                });
+            })
+            .finally(() => setImportingFile(false));
+    };
+
     return (
         <div className="space-y-4">
             <PageHeader
@@ -1433,7 +1607,9 @@ export default function Orders() {
                             { value: '', label: storesLoading ? 'Loading stores…' : 'Select a store' },
                             ...stores.map((s) => ({
                                 value: s.id,
-                                label: `${s.name}${s.marketplace_name ? ` (${s.marketplace_name})` : ''}`,
+                                label: `${s.name}${s.marketplace_name ? ` (${s.marketplace_name})` : ''}${
+                                    s.auto_buy_vendor ? ` · Auto buy: ${autoBuyVendorLabel(s.auto_buy_vendor)}` : ''
+                                }`,
                             })),
                         ]}
                     />
@@ -1461,16 +1637,63 @@ export default function Orders() {
                 )}
                 {selectedStore && (
                     <div className="grid w-full grid-cols-1 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:pb-0.5">
-                        <Button
-                            variant="primary"
-                            size="sm"
-                            className="w-full justify-center sm:w-auto"
-                            onClick={() => loadOrders(true)}
-                            disabled={refreshing}
-                        >
-                            <RefreshCw className={`mr-1.5 h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
-                            {refreshing ? 'Fetching…' : 'Fetch from marketplace'}
-                        </Button>
+                        {isAutoPurchaseOnly ? (
+                            <Button
+                                variant="primary"
+                                size="sm"
+                                className="w-full justify-center sm:w-auto"
+                                onClick={handleStartFetch}
+                                disabled={startingFetch || fetchActive}
+                                title="The worker laptop downloads the open orders file from the seller portal"
+                            >
+                                <RefreshCw className={`mr-1.5 h-4 w-4 ${startingFetch || fetchActive ? 'animate-spin' : ''}`} />
+                                {fetchActive ? (fetchJob?.status === 'running' ? 'Fetching…' : 'Waiting for laptop…') : 'Fetch'}
+                            </Button>
+                        ) : (
+                            <Button
+                                variant="primary"
+                                size="sm"
+                                className="w-full justify-center sm:w-auto"
+                                onClick={() => loadOrders(true)}
+                                disabled={refreshing}
+                            >
+                                <RefreshCw className={`mr-1.5 h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+                                {refreshing ? 'Fetching…' : 'Fetch from marketplace'}
+                            </Button>
+                        )}
+                        {selectedStoreData?.auto_buy_vendor && (
+                            <>
+                                <input
+                                    ref={orderFileInputRef}
+                                    type="file"
+                                    accept=".xlsx,.csv"
+                                    className="hidden"
+                                    onChange={handleOrderFileChosen}
+                                />
+                                <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    className="w-full justify-center sm:w-auto"
+                                    onClick={() => orderFileInputRef.current?.click()}
+                                    disabled={importingFile}
+                                    title="Kogan open orders (.xlsx) or BigW pending orders (.csv) export"
+                                >
+                                    <Upload className={`mr-1.5 h-4 w-4 ${importingFile ? 'animate-pulse' : ''}`} />
+                                    {importingFile ? 'Importing…' : 'Upload orders file'}
+                                </Button>
+                                <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    className="w-full justify-center sm:w-auto"
+                                    onClick={() => handleRecheck(null)}
+                                    disabled={recheckingId === 'all' || orders.length === 0}
+                                    title="Find catalog mappings again and re-read vendor price and stock for every open order"
+                                >
+                                    <RefreshCw className={`mr-1.5 h-4 w-4 ${recheckingId === 'all' ? 'animate-spin' : ''}`} />
+                                    Recheck all
+                                </Button>
+                            </>
+                        )}
                         <Button
                             variant="secondary"
                             size="sm"
@@ -1497,11 +1720,47 @@ export default function Orders() {
                 )}
             </div>
 
+            {selectedStore && isAutoPurchaseOnly && (fetchJob || laptopOnline !== null) && (
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                    <span className={`mr-1 inline-block h-2 w-2 rounded-full ${laptopOnline ? 'bg-emerald-500' : 'bg-slate-400'}`} />
+                    {laptopOnline ? 'Worker laptop online.' : 'No worker laptop online.'}
+                    {fetchJob && (
+                        <>
+                            {' '}Last fetch: {fetchJob.status === 'pending' ? 'waiting for the laptop'
+                                : fetchJob.status === 'running' ? `running${fetchJob.laptop ? ` on ${fetchJob.laptop}` : ''}`
+                                    : fetchJob.status}
+                            {fetchJob.finished_at ? ` · ${new Date(fetchJob.finished_at).toLocaleString()}` : ''}
+                            {fetchJob.status !== 'finished' && (fetchJob.message || fetchJob.error) && !fetchActive
+                                ? ` · ${fetchJob.message || fetchJob.error}` : ''}
+                        </>
+                    )}
+                </p>
+            )}
+
+            <ConfirmModal
+                open={!!processOrderRow}
+                onClose={() => setProcessOrderRow(null)}
+                onConfirm={confirmProcess}
+                loading={!!processingId}
+                variant="primary"
+                title="Buy this order?"
+                confirmLabel="Process"
+                message={processOrderRow ? (() => {
+                    const c = processOrderRow.purchase_check || {};
+                    const cur = (v) => (v == null ? '—' : `A$${(v / 100).toFixed(2)}`);
+                    const items = (c.lines || []).map((l) => `${l.quantity} × ${l.sku}`).join(', ');
+                    return `Order ${processOrderRow.invoice_number}: buy ${items} from ${autoBuyVendorLabel(selectedStoreData?.auto_buy_vendor)} `
+                        + `on the worker laptop and ship to ${customerName(processOrderRow)}. Cost ${cur(c.cost_cents)}, `
+                        + `earning ${cur(c.earning_cents)}. The laptop stops if the vendor price went up.`
+                        + (c.purchase_error ? ` Last attempt: ${c.purchase_error}` : '');
+                })() : ''}
+            />
+
             {!storesLoading && stores.length === 0 && (
                 <EmptyState
                     icon={StoreIcon}
                     title="No managed stores yet"
-                    description='Create a store with the "Managed store" option to manage orders here.'
+                    description='Create a store with the "Managed store" option, or choose an Auto buying vendor on a store’s Auto Purchasing step, to see its orders here.'
                 />
             )}
 
@@ -1512,7 +1771,9 @@ export default function Orders() {
                     ) : filteredOrders.length === 0 ? (
                         <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">
                             {orders.length === 0
-                                ? 'No orders yet. Use “Fetch from marketplace” to pull the latest orders.'
+                                ? isAutoPurchaseOnly
+                                    ? `No orders yet. This is an auto-purchase store (Auto buy: ${autoBuyVendorLabel(selectedStoreData?.auto_buy_vendor)}). Use “Upload orders file” with the marketplace’s orders export; fetching it through the worker laptop is not set up yet.`
+                                    : 'No orders yet. Use “Fetch from marketplace” to pull the latest orders.'
                                 : customerSearch.trim() && statusFilter && statusFilter !== 'all'
                                   ? `No orders match “${customerSearch.trim()}” with this status filter.`
                                   : customerSearch.trim()
@@ -1561,6 +1822,7 @@ export default function Orders() {
                                                     <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[o.status] || STATUS_STYLES.new}`}>
                                                         {STATUS_LABELS[o.status] || o.status}
                                                     </span>
+                                                    {o.purchase_check && <div><PurchaseCheckBadge check={o.purchase_check} /></div>}
                                                     {Number(o.refunded_amount_cents) > 0 && (
                                                         <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
                                                             {money(o.refunded_amount_cents, currency)} refunded
@@ -1579,6 +1841,7 @@ export default function Orders() {
                                                         Ticket
                                                     </button>
                                                 ) : null}
+                                                {!isFileOrder(o) && (<>
                                                 <button
                                                     type="button"
                                                     className="inline-flex min-h-10 items-center gap-1 rounded-md border border-slate-200 px-3 text-xs font-medium text-slate-600 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300"
@@ -1617,6 +1880,7 @@ export default function Orders() {
                                                     <Ban className="h-3.5 w-3.5" />
                                                     Cancel
                                                 </button>
+                                                </>)}
                                                 <button
                                                     type="button"
                                                     className="inline-flex min-h-10 flex-1 items-center justify-center gap-1 rounded-md bg-slate-100 px-3 text-xs font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-200"
@@ -1628,7 +1892,7 @@ export default function Orders() {
                                             </div>
                                             {expandedId === o.id && (
                                                 <div className="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} />
+                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? setProcessOrderRow : null} processingId={processingId} />
                                                 </div>
                                             )}
                                         </li>
@@ -1693,6 +1957,7 @@ export default function Orders() {
                                                             <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[o.status] || STATUS_STYLES.new}`}>
                                                                 {STATUS_LABELS[o.status] || o.status}
                                                             </span>
+                                                            {o.purchase_check && <div><PurchaseCheckBadge check={o.purchase_check} /></div>}
                                                             {Number(o.refunded_amount_cents) > 0 && (
                                                                 <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
                                                                     {money(o.refunded_amount_cents, currency)} refunded
@@ -1724,6 +1989,7 @@ export default function Orders() {
                                                         </td>
                                                         <td className="px-4 py-2.5">
                                                             <div className="flex items-center justify-end gap-1">
+                                                                {!isFileOrder(o) && (<>
                                                                 <button
                                                                     type="button"
                                                                     title="Submit shipping / tracking"
@@ -1762,6 +2028,7 @@ export default function Orders() {
                                                                 >
                                                                     <Ban className="h-4 w-4" />
                                                                 </button>
+                                                                </>)}
                                                                 <button
                                                                     type="button"
                                                                     title="Show full order details"
@@ -1776,7 +2043,7 @@ export default function Orders() {
                                                     {expandedId === o.id && (
                                                         <tr className="border-t border-slate-100 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/40">
                                                             <td colSpan={9} className="px-4 py-4">
-                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} />
+                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? setProcessOrderRow : null} processingId={processingId} />
                                                             </td>
                                                         </tr>
                                                     )}

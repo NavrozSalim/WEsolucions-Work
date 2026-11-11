@@ -129,6 +129,10 @@ def finish_run(run: AutoOrderRun, exit_code: int | None, stdout: str) -> None:
     run.log_text = read_log(run)
     run.finished_at = timezone.now()
     run.save()
+    if run.kind == AutoOrderRun.Kind.PURCHASE:
+        from listings.auto_purchase_jobs import apply_purchase_result
+
+        apply_purchase_result(run)
 
 
 def execute_run(run_id) -> None:
@@ -197,6 +201,10 @@ def expire_stale(runs) -> None:
         r.stdout = (r.stdout or '') + '\nRun was still marked running after the stale limit; assumed interrupted.'
         r.finished_at = timezone.now()
         r.save()
+        if r.kind == AutoOrderRun.Kind.PURCHASE:
+            from listings.auto_purchase_jobs import mark_stale_purchase
+
+            mark_stale_purchase(r)
 
 
 # ---- saved files: mapping is kept until replaced, the order export is kept for one day -----------------

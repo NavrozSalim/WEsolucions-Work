@@ -397,6 +397,7 @@ class MarketplaceOrderSerializer(serializers.ModelSerializer):
     details = serializers.SerializerMethodField()
     related_tickets = serializers.SerializerMethodField()
     shopify_admin_url = serializers.SerializerMethodField()
+    purchase_check = serializers.SerializerMethodField()
 
     class Meta:
         model = MarketplaceOrder
@@ -409,7 +410,19 @@ class MarketplaceOrderSerializer(serializers.ModelSerializer):
             'details', 'related_tickets', 'created_at', 'updated_at',
             'shopify_order_id', 'shopify_order_name', 'shopify_synced_at',
             'shopify_sync_error', 'shopify_admin_url',
+            'purchase_check',
         ]
+
+    def get_purchase_check(self, obj):
+        """Auto Purchasing stock / profit check for this order (None when never checked)."""
+        from django.core.exceptions import ObjectDoesNotExist
+
+        from .auto_purchase_check import check_payload
+
+        try:
+            return check_payload(obj.purchase_check)
+        except ObjectDoesNotExist:
+            return None
 
     def get_details(self, obj):
         from .order_service import build_order_details, enrich_order_line_items

@@ -1356,6 +1356,132 @@ class StoreListingInventoryExportView(APIView):
         return resp
 
 
+class StoreOrderFileImportView(APIView):
+    """Auto Purchasing: import a Kogan / BigW orders file (``file``) into this store's orders."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        from .order_file_import import OrderFileError, import_order_file
+
+        store = _get_store(request, store_pk)
+        if not store.is_auto_purchase:
+            return Response(
+                {'detail': 'Choose an Auto buying vendor on the store\'s Auto Purchasing step first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        upload = request.FILES.get('file')
+        if not upload:
+            return Response({'detail': 'Choose the orders file to upload.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            result = import_order_file(store, request.user, upload.name, upload.read())
+        except OrderFileError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        from .auto_purchase_check import queue_purchase_checks
+
+        queued = queue_purchase_checks(store, result.get('order_ids') or [])
+        if queued.get('queued'):
+            result['message'] += f" Checking stock and profit for {queued['queued']} order(s)."
+        logger.info(
+            'Order file import store=%s file=%s: %s',
+            store.id, upload.name, result.get('message'),
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class StoreOrderFetchView(APIView):
+    """Auto Purchasing Fetch: the worker laptop downloads the Kogan / BigW orders file.
+
+    GET  -> latest fetch job and whether a laptop is online.
+    POST -> queue a fetch (returns the running one if a fetch is already waiting).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        from stores.auto_order_bot import laptop_online
+
+        from .auto_purchase_jobs import latest_fetch, run_payload
+
+        store = _get_store(request, store_pk)
+        return Response({'fetch': run_payload(latest_fetch(store)), 'laptop_online': laptop_online(store.user or request.user)})
+
+    def post(self, request, store_pk):
+        from stores.auto_order_bot import laptop_online
+
+        from .auto_purchase_jobs import AutoPurchaseError, run_payload, start_fetch
+
+        store = _get_store(request, store_pk)
+        try:
+            run, created = start_fetch(store, request.user)
+        except AutoPurchaseError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        online = laptop_online(store.user or request.user)
+        msg = 'Fetch sent to the worker laptop.' if created else 'A fetch is already waiting for the laptop.'
+        if not online:
+            msg += ' No laptop is online right now; it starts when the laptop agent is running.'
+        return Response({'fetch': run_payload(run), 'laptop_online': online, 'message': msg},
+                        status=status.HTTP_202_ACCEPTED if created else status.HTTP_200_OK)
+
+
+class StoreOrderProcessView(APIView):
+    """Auto Purchasing Process: buy this order through the store's Auto buying vendor (user click only)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk, pk):
+        from stores.auto_order_bot import laptop_online
+
+        from .auto_purchase_check import check_payload
+        from .auto_purchase_jobs import AutoPurchaseError, run_payload, start_purchase
+
+        store = _get_store(request, store_pk)
+        order = MarketplaceOrder.objects.filter(store=store, id=pk).first()
+        if order is None:
+            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            run = start_purchase(order, request.user)
+        except AutoPurchaseError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        order.refresh_from_db()
+        msg = f'Order {order.invoice_number} sent to the laptop to buy.'
+        if not laptop_online(store.user or request.user):
+            msg += ' No laptop is online right now; it is bought when the laptop agent is running.'
+        return Response({
+            'message': msg,
+            'run': run_payload(run),
+            'purchase_check': check_payload(order.purchase_check),
+        }, status=status.HTTP_202_ACCEPTED)
+
+
+class StoreOrderPurchaseCheckView(APIView):
+    """Auto Purchasing: Recheck one order (``pk``) or every open order of the store.
+
+    Re-reads the catalog mapping for each line, so a product mapped after the first
+    check is found now, then scrapes the vendor price and stock again.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk, pk=None):
+        from .auto_purchase_check import queue_purchase_checks
+
+        store = _get_store(request, store_pk)
+        if not store.is_auto_purchase:
+            return Response(
+                {'detail': 'Choose an Auto buying vendor on the store\'s Auto Purchasing step first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        orders = MarketplaceOrder.objects.filter(store=store)
+        if pk is not None:
+            orders = orders.filter(id=pk)
+            if not orders.exists():
+                return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            orders = orders.exclude(status__in=['cancelled', 'refunded', 'shipping_complete'])
+        queued = queue_purchase_checks(store, list(orders.values_list('id', flat=True)))
+        return Response({
+            'queued': queued.get('queued', 0),
+            'message': f"Checking stock and profit for {queued.get('queued', 0)} order(s).",
+        })
+
+
 class StoreOrdersView(APIView):
     """List orders for a store. ``?refresh=1`` pulls fresh orders from the marketplace first."""
     permission_classes = [IsAuthenticated]
@@ -1370,6 +1496,7 @@ class StoreOrdersView(APIView):
                 refresh_result = {'ok': False, 'message': str(exc), 'fetched': 0}
         orders = list(
             MarketplaceOrder.objects.filter(store=store)
+            .select_related('purchase_check')
             .prefetch_related('shipments')
         )
         tickets_by_order_key: dict[str, list] = {}

@@ -409,3 +409,13 @@ def sync_bunnings_catalog_errors(store_id):
         logger.exception("Bunnings invalid-data sync failed store=%s", store_id)
     finally:
         cache.delete(bunnings_products.catalog_invalid_lock_key(store_id))
+
+
+@shared_task(name="listings.check_auto_purchase_orders", ignore_result=True, soft_time_limit=3 * 3600)
+def check_auto_purchase_orders(store_id: str, order_ids: list):
+    """Auto Purchasing: match, scrape and price each order (heavy-au / heavy-us by store region)."""
+    from .auto_purchase_check import run_purchase_checks
+
+    counts = run_purchase_checks(store_id, order_ids)
+    logger.info("Auto purchase check store=%s: %s", store_id, counts)
+    return counts

@@ -50,6 +50,22 @@ def _truthy(v) -> bool:
     return str(v).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+LEGACY_GONE = (
+    'Orders are now fetched, checked for stock and profit, and bought one at a time from the Orders page '
+    "(choose an Auto buying vendor on the store's Auto Purchasing step)."
+)
+
+
+def _legacy_runs() -> bool:
+    from django.conf import settings as dj_settings
+
+    return bool(getattr(dj_settings, 'AUTO_ORDER_BOT_LEGACY_RUNS', False))
+
+
+def _legacy_gone():
+    return Response({'detail': LEGACY_GONE}, status=status.HTTP_410_GONE)
+
+
 def _store_info(store, user=None) -> dict:
     mp = bot.bot_marketplace(store)
     return {
@@ -66,6 +82,9 @@ def _store_info(store, user=None) -> dict:
         'files': bot.saved_files(store),
         'runner': bot.runner_mode(),
         'laptop_online': bot.laptop_online(user) if user else False,
+        'legacy_runs': _legacy_runs(),
+        'auto_buy_vendor': store.auto_buy_vendor or '',
+        'auto_buy_label': dict(store.AUTO_BUY_VENDOR_CHOICES).get(store.auto_buy_vendor, ''),
     }
 
 
@@ -81,6 +100,8 @@ def _run_json(run: AutoOrderRun, detail=False) -> dict:
         'account_name': run.account_name, 'vendor': run.vendor, 'exit_code': run.exit_code,
         'started_at': run.started_at.isoformat(), 'finished_at': run.finished_at.isoformat() if run.finished_at else None,
         'done_count': len(run.done_rows or []), 'remaining_count': len(run.remaining_rows or []),
+        'kind': run.kind, 'message': run.message or '', 'laptop': run.laptop or '',
+        'order_id': str(run.marketplace_order_id) if run.marketplace_order_id else None,
     }
     if detail:
         running = run.status in bot.ACTIVE
@@ -113,6 +134,8 @@ class FileView(_StoreBotView):
         return kind if kind in bot.KINDS else None
 
     def post(self, request, store_pk, kind):
+        if not _legacy_runs():
+            return _legacy_gone()
         store = self.get_store(store_pk)
         up = request.FILES.get('file')
         if not self._kind(kind) or not up or not up.name.lower().endswith('.xlsx'):
@@ -179,6 +202,8 @@ class RunsView(_StoreBotView):
         return Response({'runs': [_run_json(r) for r in runs[:50]]})
 
     def post(self, request, store_pk):
+        if not _legacy_runs():
+            return _legacy_gone()
         store = self.get_store(store_pk)
         bad = lambda msg, code=status.HTTP_400_BAD_REQUEST: Response({'detail': msg}, status=code)  # noqa: E731
         if not store.auto_order_bot_enabled:

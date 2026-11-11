@@ -106,6 +106,7 @@ class StoreSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'region', 'management_mode', 'api_token', 'marketplace', 'marketplace_id', 'marketplace_name',
             'marketplace_code',
+            'auto_buy_vendor',
             'kogan_service_account_json', 'kogan_sheet_id', 'kogan_tab_name',
             'kogan_sku_column', 'kogan_stock_column', 'kogan_price_column', 'kogan_rrp_column', 'kogan_first_price_column',
             'mydeal_setup_method',
@@ -157,6 +158,31 @@ class StoreSerializer(serializers.ModelSerializer):
             'connection_status': {'read_only': True},
             'last_validated_at': {'read_only': True},
         }
+
+    def validate(self, attrs):
+        """Auto buying vendor must be one offered for the store's Region (blank clears it)."""
+        attrs = super().validate(attrs)
+        if 'auto_buy_vendor' in attrs or 'region' in attrs:
+            vendor = (
+                attrs['auto_buy_vendor'] if 'auto_buy_vendor' in attrs
+                else getattr(self.instance, 'auto_buy_vendor', '')
+            ) or ''
+            vendor = vendor.strip()
+            region = attrs.get('region') or getattr(self.instance, 'region', '') or ''
+            if vendor:
+                allowed = Store.AUTO_BUY_VENDORS_BY_REGION.get(region, ())
+                if vendor not in allowed:
+                    labels = dict(Store.AUTO_BUY_VENDOR_CHOICES)
+                    names = ', '.join(labels[v] for v in allowed) or 'none'
+                    raise ValidationError({
+                        'auto_buy_vendor': (
+                            f'{labels.get(vendor, vendor)} is not available for region {region or "?"}. '
+                            f'Choose one of: {names}.'
+                        ),
+                    })
+            if 'auto_buy_vendor' in attrs:
+                attrs['auto_buy_vendor'] = vendor
+        return attrs
 
     def get_shopify_connected(self, obj):
         return bool(
@@ -473,6 +499,7 @@ class StoreSerializer(serializers.ModelSerializer):
             if k in (
                 'name',
                 'region',
+                'auto_buy_vendor',
                 'management_mode',
                 'api_token',
                 'marketplace',
@@ -636,6 +663,7 @@ class StoreSerializer(serializers.ModelSerializer):
             if attr in (
                 'name',
                 'region',
+                'auto_buy_vendor',
                 'management_mode',
                 'api_token',
                 'marketplace',

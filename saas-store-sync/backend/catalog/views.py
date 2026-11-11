@@ -216,6 +216,7 @@ class CatalogStoresView(APIView):
                 'marketplace_name': s.marketplace.name if s.marketplace else None,
                 'marketplace_code': (s.marketplace.code or '').strip() if s.marketplace else None,
                 'management_mode': s.management_mode,
+                'auto_buy_vendor': s.auto_buy_vendor or '',
                 'product_count': (
                     int(s.listing_count or 0)
                     if (s.management_mode or '') == 'full_store'

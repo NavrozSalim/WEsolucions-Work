@@ -11,6 +11,7 @@ import LasooConnectionFields from './LasooConnectionFields';
 import BunningsConnectionFields from './BunningsConnectionFields';
 import TemuConnectionFields, { buildTemuPayload, emptyTemuFields } from './TemuConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor, isWallkoalaVendor } from './NoraInventoryUploadField';
+import AutoPurchasingStep, { sanitizeAutoBuyVendor } from './AutoPurchasingStep';
 import ShopifyConnectFields, {
     buildShopifyPayload,
     shopifyFieldsFromStore,
@@ -132,6 +133,7 @@ function storeToForm(store) {
         bunnings_production_shop_key: '',
         ...emptyTemuFields(),
         region: store.region || 'USA',
+        auto_buy_vendor: store.auto_buy_vendor || '',
         temu_region: store.region === 'USA' ? 'us' : (store.temu_region || 'au'),
         temu_base_url: store.temu_base_url || '',
         temu_mall_id: store.temu_mall_id || '',
@@ -367,7 +369,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const showShopifyConnect = isManaged && ['reverb', 'lasoo', 'mydeal', 'etsy', 'bunnings', 'temu'].includes(marketplaceCode);
     const showRrpDiscount = isMydeal || isSears || isKogan;
     // Same Store / Price / Inventory flow as inventory-only stores (including managed).
-    const maxStep = 3;
+    const maxStep = 4;
     // Lasoo managed: vendors optional (same as create). Reverb managed: required.
     const vendorsOptional = isManaged && (isLasoo || isBunnings || isTemu);
     const credentialsLabel = isSears
@@ -391,6 +393,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
         const cron = frequencyToCrontab(form.schedule_frequency, form.schedule_hour, form.schedule_minute);
         const payload = {
             name: form.name.trim(),
+            auto_buy_vendor: sanitizeAutoBuyVendor(form.region, form.auto_buy_vendor),
             sync_schedule: form.schedule_enabled ? {
                 enabled: true,
                 schedule_type: 'crontab',
@@ -577,6 +580,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
 
         if (errs.length) {
             setError(errs.join('. '));
+            // Saving from Auto Purchasing still checks Inventory: show the step that needs fixing.
+            if (step === 4) setStep(3);
             return;
         }
         if (step < maxStep) {
@@ -643,6 +648,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                             { num: 1, label: 'Store' },
                             { num: 2, label: 'Price' },
                             { num: 3, label: 'Inventory' },
+                            { num: 4, label: 'Auto Purchasing' },
                         ].map((t) => (
                             <button
                                 key={t.num}
@@ -1150,6 +1156,13 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                 </div>
                             ))}
                         </div>
+                    )}
+                    {step === 4 && (
+                        <AutoPurchasingStep
+                            region={form.region}
+                            value={form.auto_buy_vendor}
+                            onChange={(v) => setForm((f) => ({ ...f, auto_buy_vendor: v }))}
+                        />
                     )}
                 </div>
                 <div className="shrink-0 flex justify-between items-center border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-8 py-5">

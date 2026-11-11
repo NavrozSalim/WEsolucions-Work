@@ -61,7 +61,7 @@ class FakePopen:
         return type(self).stdout, None
 
 
-@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_INLINE=True, AUTO_ORDER_BOT_RUNNER='local', AUTO_ORDER_BOT_DIR='C:/bot', AUTO_ORDER_BOT_PYTHON='py')
+@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_INLINE=True, AUTO_ORDER_BOT_RUNNER='local', AUTO_ORDER_BOT_DIR='C:/bot', AUTO_ORDER_BOT_PYTHON='py', AUTO_ORDER_BOT_LEGACY_RUNS=True)
 class AutoOrderBotTests(TestCase):
     def setUp(self):
         FakePopen.calls, FakePopen.exit_code, FakePopen.stdout, FakePopen.write_files = [], 0, 'bot output\n', True
@@ -222,7 +222,7 @@ class AutoOrderBotTests(TestCase):
         self.assertEqual(c2.get(self.url(store)).status_code, 404)
 
 
-@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_INLINE=True, AUTO_ORDER_BOT_RUNNER='local', AUTO_ORDER_BOT_DIR='C:/bot', AUTO_ORDER_BOT_PYTHON='py')
+@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_INLINE=True, AUTO_ORDER_BOT_RUNNER='local', AUTO_ORDER_BOT_DIR='C:/bot', AUTO_ORDER_BOT_PYTHON='py', AUTO_ORDER_BOT_LEGACY_RUNS=True)
 class SavedFilesTests(AutoOrderBotTests):  # inherits fixtures; base tests re-run harmlessly
     """Mapping is kept until replaced; the order export lasts one day."""
 
@@ -272,7 +272,7 @@ class SavedFilesTests(AutoOrderBotTests):  # inherits fixtures; base tests re-ru
         self.assertFalse(bot.current_path(store, 'orders').exists())
 
 
-@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_RUNNER='laptop')
+@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_RUNNER='laptop', AUTO_ORDER_BOT_LEGACY_RUNS=True)
 class LaptopRunnerTests(TestCase):
     """Runs wait for the laptop agent, which talks to the ingest endpoints with a bearer token."""
 

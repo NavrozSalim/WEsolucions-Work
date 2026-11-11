@@ -94,6 +94,7 @@ export default function AutoOrderBot() {
     const [busy, setBusy] = useState(false);
     const [confirmPlace, setConfirmPlace] = useState(false);
     const [newAccount, setNewAccount] = useState(null);
+    const [jobs, setJobs] = useState([]);
     const ordersInput = useRef(null);
     const mappingInput = useRef(null);
 
@@ -129,7 +130,9 @@ export default function AutoOrderBot() {
                 if (!alive) return;
                 setInfo(s);
                 setAccounts(a.accounts);
-                if (runs.runs.length) await loadRun(runs.runs[0].id);
+                setJobs(runs.runs || []);
+                const fileRuns = (runs.runs || []).filter((r) => !r.kind || r.kind === 'run');
+                if (s.legacy_runs && fileRuns.length) await loadRun(fileRuns[0].id);
             } catch (e) {
                 if (alive) setError(errText(e));
             }
@@ -213,7 +216,23 @@ export default function AutoOrderBot() {
                 </dl>
             </section>
 
-            {/* 2. Automate */}
+            {/* 2. Auto Purchasing (orders are bought from the Orders page) */}
+            <section className={card}>
+                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-200">Auto Purchasing</h2>
+                <p className="text-sm text-slate-600 dark:text-slate-300">
+                    {info.auto_buy_vendor
+                        ? <>This store buys its orders from <strong>{info.auto_buy_label}</strong>. </>
+                        : <>No Auto buying vendor is set: choose one on the store&apos;s Auto Purchasing step (Store Settings → Edit). </>}
+                    Orders are fetched, checked for stock and profit, and bought one at a time on the{' '}
+                    <Link to={`/orders?store=${info.store_id}`} className="font-medium text-accent-600 hover:underline">Orders page</Link>.
+                    This page keeps the purchase accounts the worker laptop buys with.
+                </p>
+                <p className={`text-sm font-medium ${info.laptop_online ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
+                    {info.laptop_online ? 'Order bot laptop is online.' : 'Order bot laptop is offline. Fetch and Process wait until run_agent.bat is running on it.'}
+                </p>
+            </section>
+
+            {info.legacy_runs && (
             <section className={card}>
                 <label className="flex items-center gap-3 text-sm font-medium text-slate-900 dark:text-slate-100">
                     <Toggle checked={info.automate} onChange={toggleAutomate} />
@@ -223,6 +242,7 @@ export default function AutoOrderBot() {
                     <p className="text-sm text-amber-700 dark:text-amber-400">{info.message} Runs are disabled for this store.</p>
                 )}
             </section>
+            )}
 
             {info.supported && (
                 <>
@@ -237,7 +257,7 @@ export default function AutoOrderBot() {
                             {accounts.map((a) => (
                                 <li key={a.id} className="flex items-center gap-3 text-sm">
                                     <label className="flex flex-1 items-center gap-2">
-                                        <input type="radio" name="account" disabled={!enabled} checked={account === a.name} onChange={() => setAccount(a.name)} />
+                                        {info.legacy_runs && <input type="radio" name="account" disabled={!enabled} checked={account === a.name} onChange={() => setAccount(a.name)} />}
                                         <span className="font-medium">{a.name}</span>
                                         <span className="text-slate-500">{a.vendor} · {a.chrome_profile || a.user_data_dir}</span>
                                     </label>
@@ -264,6 +284,7 @@ export default function AutoOrderBot() {
                         )}
                     </section>
 
+                    {info.legacy_runs && (<>
                     {/* 4. Files */}
                     <section className={card}>
                         <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-200">Files</h2>
@@ -298,11 +319,37 @@ export default function AutoOrderBot() {
                             <li>Before each line the bot empties the cart of the purchase account.</li>
                         </ul>
                     </section>
+                    </>)}
                 </>
             )}
 
+            {/* Laptop jobs: Fetch and Process from the Orders page */}
+            {jobs.some((j) => j.kind && j.kind !== 'run') && (
+                <section className={card}>
+                    <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-200">Recent laptop jobs</h2>
+                    <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
+                        <table className="table-base text-xs">
+                            <thead>
+                                <tr><th>Started</th><th>Job</th><th>Status</th><th>Laptop</th><th>Result</th></tr>
+                            </thead>
+                            <tbody>
+                                {jobs.filter((j) => j.kind && j.kind !== 'run').slice(0, 20).map((j) => (
+                                    <tr key={j.id}>
+                                        <td className="whitespace-nowrap">{new Date(j.started_at).toLocaleString()}</td>
+                                        <td>{j.kind === 'fetch_orders' ? 'Fetch orders file' : `Buy order (${j.account_name})`}</td>
+                                        <td><Badge variant={STATUS_VARIANT[j.status] || 'default'}>{j.status === 'pending' ? 'waiting for the laptop' : j.status}</Badge></td>
+                                        <td>{j.laptop || '—'}</td>
+                                        <td className="max-w-[28rem] truncate" title={j.message}>{j.message || '—'}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            )}
+
             {/* 6. Latest run */}
-            {run && (
+            {info.legacy_runs && run && (
                 <section className={card}>
                     <div className="flex flex-wrap items-center gap-3">
                         <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-200">Latest run</h2>

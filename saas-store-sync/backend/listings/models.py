@@ -278,6 +278,68 @@ class OrderShipment(models.Model):
         return f"Shipment {self.tracking_number} for order {self.order_id}"
 
 
+class PurchaseCheckStatus(models.TextChoices):
+    CHECKING = 'checking', 'Checking'
+    BUYABLE = 'buyable', 'Ready to buy'
+    BLOCKED = 'blocked', 'Blocked'
+
+
+class PurchaseStatus(models.TextChoices):
+    QUEUED = 'queued', 'Waiting for the laptop'
+    PURCHASING = 'purchasing', 'Buying'
+    PURCHASED = 'purchased', 'Purchased'
+    FAILED = 'failed', 'Purchase failed'
+
+
+# A purchase in these states must not be started again or re-checked.
+PURCHASE_LOCKED = (PurchaseStatus.QUEUED, PurchaseStatus.PURCHASING, PurchaseStatus.PURCHASED)
+
+
+class OrderPurchaseCheck(models.Model):
+    """Auto Purchasing: can this order be bought from the store's Auto buying vendor?
+
+    Each line's SKU is matched to the catalog (ProductMapping) to get the Vendor ID and
+    vendor URL, the vendor page is scraped for price and stock, and the order's profit is
+    worked out. ``buyable`` only when every line has stock for its quantity and the
+    order's earning is above zero; otherwise ``blocked`` with the reasons.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    order = models.OneToOneField(MarketplaceOrder, on_delete=models.CASCADE, related_name='purchase_check')
+    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='order_purchase_checks', db_index=True)
+    status = models.CharField(
+        max_length=20, choices=PurchaseCheckStatus.choices, default=PurchaseCheckStatus.CHECKING, db_index=True,
+    )
+    reasons = models.JSONField(blank=True, default=list, help_text='Why the order cannot be bought (empty when buyable).')
+    lines_json = models.JSONField(blank=True, default=list, help_text='Per-line match, vendor price/stock and result.')
+    total_sale_cents = models.IntegerField(null=True, blank=True)
+    fee_cents = models.IntegerField(null=True, blank=True)
+    after_fees_cents = models.IntegerField(null=True, blank=True)
+    cost_cents = models.IntegerField(null=True, blank=True)
+    earning_cents = models.IntegerField(null=True, blank=True)
+    requested_at = models.DateTimeField(null=True, blank=True)
+    checked_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # Buying (only after the user clicks Process).
+    purchase_status = models.CharField(
+        max_length=20, choices=PurchaseStatus.choices, blank=True, default='', db_index=True,
+    )
+    purchase_run_id = models.UUIDField(null=True, blank=True, help_text='stores.AutoOrderRun that buys this order.')
+    purchase_requested_at = models.DateTimeField(null=True, blank=True)
+    purchased_at = models.DateTimeField(null=True, blank=True)
+    vendor_order_number = models.CharField(max_length=255, blank=True, default='')
+    purchase_error = models.TextField(blank=True, default='')
+    purchase_requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        db_table = 'listings_orderpurchasecheck'
+
+    def __str__(self):
+        return f"Purchase check {self.status} for order {self.order_id}"
+
+
 class TicketStatus(models.TextChoices):
     OPEN = 'open', 'Open'
     PENDING = 'pending', 'Pending'

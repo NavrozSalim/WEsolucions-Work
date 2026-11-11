@@ -15,6 +15,7 @@ import TemuConnectionFields, {
     validateTemuFields,
 } from './TemuConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor, isWallkoalaVendor } from './NoraInventoryUploadField';
+import AutoPurchasingStep, { sanitizeAutoBuyVendor } from './AutoPurchasingStep';
 import ShopifyConnectFields, {
     buildShopifyPayload,
     emptyShopifyFields,
@@ -126,6 +127,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         ...emptyTemuFields(),
         ...emptyShopifyFields(),
         region: 'USA',
+        auto_buy_vendor: '',
         vendor_price_settings: [],
         vendor_inventory_settings: [],
         schedule_frequency: 'daily',
@@ -165,6 +167,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 ...emptyTemuFields(),
                 ...emptyShopifyFields(),
                 region,
+                auto_buy_vendor: '',
                 vendor_price_settings: [],
                 vendor_inventory_settings: [],
                 schedule_frequency: 'daily',
@@ -705,6 +708,11 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 }));
             }
             setStep(3);
+        } else if (step === 3) {
+            const errs = validateStep3();
+            if (errs.length) { setError(errs.join('. ')); return; }
+            setError('');
+            setStep(4);
         }
     };
 
@@ -824,13 +832,14 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             return;
         }
 
-        if (step < 3) {
+        if (step < 4) {
             handleNext();
             return;
         }
 
         const errs = validateStep3();
-        if (errs.length) { setError(errs.join('. ')); return; }
+        // Creating from Auto Purchasing still checks Inventory: show the step that needs fixing.
+        if (errs.length) { setError(errs.join('. ')); setStep(3); return; }
         setLoading(true);
         setError('');
         const payload = {
@@ -855,6 +864,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     ? buildTemuPayload(form)
                 : { api_token: form.api_token }),
             region: form.region,
+            auto_buy_vendor: sanitizeAutoBuyVendor(form.region, form.auto_buy_vendor),
             ...buildShopifyPayload(form),
             ...buildSettingsPayload(),
             sync_schedule: buildSchedulePayload(),
@@ -902,7 +912,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
     if (!open) return null;
 
     const showSteps = !isDuplicate;
-    const maxStep = showSteps ? 3 : 1;
+    const maxStep = showSteps ? 4 : 1;
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -933,6 +943,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                 { num: 1, label: 'Store' },
                                 { num: 2, label: 'Price' },
                                 { num: 3, label: 'Inventory' },
+                                { num: 4, label: 'Auto Purchasing' },
                             ].map((t) => (
                                 <button
                                     key={t.num}
@@ -1594,6 +1605,15 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                 ))}
                             </div>
                         )}
+
+                        {/* Step 4: Auto Purchasing (create only) */}
+                        {showSteps && step === 4 && (
+                            <AutoPurchasingStep
+                                region={form.region}
+                                value={form.auto_buy_vendor}
+                                onChange={(v) => setForm((f) => ({ ...f, auto_buy_vendor: v }))}
+                            />
+                        )}
                     </div>
                 </div>
 
@@ -1610,7 +1630,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                         disabled={loading || (step === 2 && !(form.vendor_price_settings || []).some((vp) => vp.vendor_id)) || (step === 3 && !(form.vendor_inventory_settings || []).some((vi) => vi.vendor_id))}
                         onClick={handleSubmit}
                     >
-                        {loading ? 'Creating…' : isDuplicate ? 'Duplicate Store' : step < 3 ? 'Continue' : 'Create Store'}
+                        {loading ? 'Creating…' : isDuplicate ? 'Duplicate Store' : step < 4 ? 'Continue' : 'Create Store'}
                     </Button>
                 </div>
             </div>

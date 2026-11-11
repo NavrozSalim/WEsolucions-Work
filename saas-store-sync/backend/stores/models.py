@@ -43,8 +43,33 @@ class Store(models.Model):
         related_name='stores',
         help_text='Null while orphaned after the owning user was deleted (retention window).',
     )
+    # Auto Purchasing: vendors a store can buy its orders from, by Region.
+    # Codes match PurchaseAccount.vendor and the order bot.
+    AUTO_BUY_VENDOR_CHOICES = [
+        ('amazon', 'Amazon US'),
+        ('ebay', 'eBay US'),
+        ('amazon_au', 'Amazon AU'),
+        ('ebay_au', 'eBay AU'),
+        ('costco_au', 'Costco AU'),
+        ('costway_au', 'Costway AU'),
+    ]
+    AUTO_BUY_VENDORS_BY_REGION = {
+        'USA': ('amazon', 'ebay'),
+        'AU': ('amazon_au', 'ebay_au', 'costco_au', 'costway_au'),
+    }
+
     name = models.CharField(max_length=255)
     region = models.CharField(max_length=10, choices=[('USA', 'USA'), ('AU', 'Australia')])
+    auto_buy_vendor = models.CharField(
+        max_length=30,
+        choices=AUTO_BUY_VENDOR_CHOICES,
+        blank=True,
+        default='',
+        help_text=(
+            'Auto Purchasing: vendor that marketplace orders are bought from. '
+            'Blank means this is not an auto-purchase store.'
+        ),
+    )
     auto_order_bot_enabled = models.BooleanField(
         default=False,
         help_text='Auto Order Bot page: allow uploads and runs for this store.',
@@ -236,6 +261,11 @@ class Store(models.Model):
 
     def __str__(self):
         return self.name
+
+    @property
+    def is_auto_purchase(self) -> bool:
+        """True when Auto Purchasing has a vendor chosen (shows on the Orders page)."""
+        return bool((self.auto_buy_vendor or '').strip())
 
     class Meta:
         constraints = [
@@ -472,6 +502,20 @@ class AutoOrderRun(models.Model):
     claimed_at = models.DateTimeField(null=True, blank=True)
     started_at = models.DateTimeField(auto_now_add=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Kind(models.TextChoices):
+        RUN = 'run', 'Order file run'
+        FETCH_ORDERS = 'fetch_orders', 'Fetch orders file'
+        PURCHASE = 'purchase', 'Buy one order'
+
+    kind = models.CharField(
+        max_length=20, choices=Kind.choices, default=Kind.RUN, db_index=True,
+        help_text='Auto Purchasing: fetch_orders downloads the marketplace orders file; purchase buys one order.',
+    )
+    marketplace_order_id = models.UUIDField(
+        null=True, blank=True, db_index=True, help_text='The order a purchase job buys (listings.MarketplaceOrder).',
+    )
+    message = models.TextField(blank=True, default='', help_text='Result shown to the user (e.g. import summary).')
 
     class Meta:
         ordering = ['-started_at']
