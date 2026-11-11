@@ -20,7 +20,6 @@ import PlatformAdmin from './pages/Platform/PlatformAdmin';
 
 const Catalog = lazy(() => import('./pages/Catalog/Catalog'));
 const Scraping = lazy(() => import('./pages/Scraping/Scraping'));
-const AutoOrderBot = lazy(() => import('./pages/AutoOrderBot/AutoOrderBot'));
 const AutoBot = lazy(() => import('./pages/AutoBot/AutoBot'));
 const ScrapingProducts = lazy(() => import('./pages/Scraping/ScrapingProducts'));
 const Orders = lazy(() => import('./pages/Orders/Orders'));
@@ -56,14 +55,8 @@ function App() {
                                     </Route>
                                     <Route element={<PermissionRoute permission="stores" />}>
                                         <Route path="/store-settings" element={<StoreSettings />} />
-                                        <Route
-                                            path="/store-settings/:storeId/auto-order-bot"
-                                            element={
-                                                <Suspense fallback={<div className="p-8 text-slate-600 dark:text-slate-400">Loading Auto Order Bot…</div>}>
-                                                    <AutoOrderBot />
-                                                </Suspense>
-                                            }
-                                        />
+                                        {/* The Auto Order Bot page was folded into the store's Auto Purchasing step. */}
+                                        <Route path="/store-settings/:storeId/auto-order-bot" element={<Navigate to="/store-settings" replace />} />
                                     </Route>
                                     <Route element={<PermissionRoute permission="catalog" />}>
                                         <Route

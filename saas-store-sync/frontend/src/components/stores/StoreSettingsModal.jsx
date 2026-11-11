@@ -11,7 +11,7 @@ import LasooConnectionFields from './LasooConnectionFields';
 import BunningsConnectionFields from './BunningsConnectionFields';
 import TemuConnectionFields, { buildTemuPayload, emptyTemuFields } from './TemuConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor, isWallkoalaVendor } from './NoraInventoryUploadField';
-import AutoPurchasingStep, { sanitizeAutoBuyVendor } from './AutoPurchasingStep';
+import AutoPurchasingStep, { buildAutoBuyPayload, emptyAutoBuyAccount } from './AutoPurchasingStep';
 import ShopifyConnectFields, {
     buildShopifyPayload,
     shopifyFieldsFromStore,
@@ -134,6 +134,8 @@ function storeToForm(store) {
         ...emptyTemuFields(),
         region: store.region || 'USA',
         auto_buy_vendor: store.auto_buy_vendor || '',
+        auto_buy_account: store.auto_buy_account ? String(store.auto_buy_account) : '',
+        auto_buy_account_new: emptyAutoBuyAccount(),
         temu_region: store.region === 'USA' ? 'us' : (store.temu_region || 'au'),
         temu_base_url: store.temu_base_url || '',
         temu_mall_id: store.temu_mall_id || '',
@@ -393,7 +395,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
         const cron = frequencyToCrontab(form.schedule_frequency, form.schedule_hour, form.schedule_minute);
         const payload = {
             name: form.name.trim(),
-            auto_buy_vendor: sanitizeAutoBuyVendor(form.region, form.auto_buy_vendor),
+            ...buildAutoBuyPayload(form),
             sync_schedule: form.schedule_enabled ? {
                 enabled: true,
                 schedule_type: 'crontab',
@@ -1162,6 +1164,9 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                             region={form.region}
                             value={form.auto_buy_vendor}
                             onChange={(v) => setForm((f) => ({ ...f, auto_buy_vendor: v }))}
+                            accountId={form.auto_buy_account}
+                            newAccount={form.auto_buy_account_new}
+                            onAccountChange={(id, acct) => setForm((f) => ({ ...f, auto_buy_account: id, auto_buy_account_new: acct }))}
                         />
                     )}
                 </div>

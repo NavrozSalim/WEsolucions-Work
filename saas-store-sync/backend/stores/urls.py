@@ -10,6 +10,7 @@ router.register(r'stores', StoreViewSet, basename='store')
 _AOB = 'stores/<uuid:store_pk>/auto-order-bot/'
 
 urlpatterns = [
+    path('purchase-accounts/', aob.MyPurchaseAccountsView.as_view(), name='my-purchase-accounts'),
     path(_AOB, aob.SettingsView.as_view(), name='auto-order-bot-settings'),
     path(_AOB + 'files/<str:kind>/', aob.FileView.as_view(), name='auto-order-bot-file'),
     path(_AOB + 'accounts/', aob.AccountsView.as_view(), name='auto-order-bot-accounts'),

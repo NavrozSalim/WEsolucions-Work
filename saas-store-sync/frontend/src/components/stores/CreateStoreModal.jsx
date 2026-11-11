@@ -15,7 +15,7 @@ import TemuConnectionFields, {
     validateTemuFields,
 } from './TemuConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor, isWallkoalaVendor } from './NoraInventoryUploadField';
-import AutoPurchasingStep, { sanitizeAutoBuyVendor } from './AutoPurchasingStep';
+import AutoPurchasingStep, { buildAutoBuyPayload, emptyAutoBuyAccount } from './AutoPurchasingStep';
 import ShopifyConnectFields, {
     buildShopifyPayload,
     emptyShopifyFields,
@@ -128,6 +128,8 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         ...emptyShopifyFields(),
         region: 'USA',
         auto_buy_vendor: '',
+        auto_buy_account: '',
+        auto_buy_account_new: emptyAutoBuyAccount(),
         vendor_price_settings: [],
         vendor_inventory_settings: [],
         schedule_frequency: 'daily',
@@ -168,6 +170,8 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 ...emptyShopifyFields(),
                 region,
                 auto_buy_vendor: '',
+                auto_buy_account: '',
+                auto_buy_account_new: emptyAutoBuyAccount(),
                 vendor_price_settings: [],
                 vendor_inventory_settings: [],
                 schedule_frequency: 'daily',
@@ -864,7 +868,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                     ? buildTemuPayload(form)
                 : { api_token: form.api_token }),
             region: form.region,
-            auto_buy_vendor: sanitizeAutoBuyVendor(form.region, form.auto_buy_vendor),
+            ...buildAutoBuyPayload(form),
             ...buildShopifyPayload(form),
             ...buildSettingsPayload(),
             sync_schedule: buildSchedulePayload(),
@@ -1612,6 +1616,9 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                 region={form.region}
                                 value={form.auto_buy_vendor}
                                 onChange={(v) => setForm((f) => ({ ...f, auto_buy_vendor: v }))}
+                                accountId={form.auto_buy_account}
+                                newAccount={form.auto_buy_account_new}
+                                onAccountChange={(id, acct) => setForm((f) => ({ ...f, auto_buy_account: id, auto_buy_account_new: acct }))}
                             />
                         )}
                     </div>

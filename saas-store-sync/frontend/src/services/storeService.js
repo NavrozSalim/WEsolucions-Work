@@ -6,6 +6,9 @@ export const getMarketplaces = () => api.get('/marketplaces/');
 export const getVendors = () => api.get('/vendors/');
 export const getStore = (id) => api.get(`/stores/${id}/`);
 export const updateStore = (id, data) => api.patch(`/stores/${id}/`, data);
+/** Auto Purchasing step: your purchase accounts (Chrome profiles on the laptop) for a region / vendor. */
+export const getMyPurchaseAccounts = (region, vendor) =>
+    api.get('/purchase-accounts/', { params: { region, vendor } }).then((r) => r.data.accounts || []);
 export const updateStoreActive = (id, isActive) => api.patch(`/stores/${id}/`, { is_active: isActive });
 export const deleteStore = (id) => api.delete(`/stores/${id}/`);
 

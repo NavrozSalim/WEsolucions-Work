@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { useNavigate } from 'react-router-dom';
 import { AnimatePresence } from 'framer-motion';
-import { Search, Plus, Pencil, Trash2, Copy, Store, Wifi, WifiOff, Clock, RefreshCw, MoreVertical, Square, ShoppingCart } from 'lucide-react';
+import { Search, Plus, Pencil, Trash2, Copy, Store, Wifi, WifiOff, Clock, RefreshCw, MoreVertical, Square } from 'lucide-react';
 import {
     getStores,
     getStore,
@@ -24,7 +23,7 @@ import CreateStoreModal from '../../components/stores/CreateStoreModal';
 import StoreSettingsModal from '../../components/stores/StoreSettingsModal';
 import { placeFixedMenu } from '../../utils/fixedMenuPosition';
 
-function ActionsDropdown({ store, conn, validatingId, updatingId, stoppingId, onValidate, onUpdate, onStopScrape, onEdit, onDuplicate, onAutoOrderBot, onDelete }) {
+function ActionsDropdown({ store, conn, validatingId, updatingId, stoppingId, onValidate, onUpdate, onStopScrape, onEdit, onDuplicate, onDelete }) {
     const [open, setOpen] = useState(false);
     const [menuPos, setMenuPos] = useState({ top: 0, right: 0 });
     const triggerRef = useRef(null);
@@ -91,12 +90,6 @@ function ActionsDropdown({ store, conn, validatingId, updatingId, stoppingId, on
             icon: <Pencil className="h-4 w-4 shrink-0" />,
             onClick: () => onEdit(store),
             className: 'text-accent-700 dark:text-accent-400',
-        },
-        {
-            label: 'Auto Order Bot',
-            icon: <ShoppingCart className="h-4 w-4 shrink-0" />,
-            onClick: () => onAutoOrderBot(store),
-            className: 'text-slate-700 dark:text-slate-300',
         },
         {
             label: 'Duplicate',
@@ -170,7 +163,6 @@ function ActionsDropdown({ store, conn, validatingId, updatingId, stoppingId, on
 }
 
 export default function StoreSettings() {
-    const navigate = useNavigate();
     const [stores, setStores] = useState([]);
     const [marketplaces, setMarketplaces] = useState([]);
     const [search, setSearch] = useState('');
@@ -480,7 +472,6 @@ export default function StoreSettings() {
                                                     onStopScrape={handleStopScrape}
                                                     onEdit={handleOpenSettings}
                                                     onDuplicate={handleDuplicate}
-                                                    onAutoOrderBot={(s) => navigate(`/store-settings/${s.id}/auto-order-bot`)}
                                                     onDelete={(s) => setDeleteConfirm(s)}
                                                 />
                                             </td>

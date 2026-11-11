@@ -185,6 +185,21 @@ class AccountsView(_StoreBotView):
         return Response(_account_json(acct), status=status.HTTP_201_CREATED)
 
 
+class MyPurchaseAccountsView(APIView):
+    """Store wizard (Auto Purchasing step): the signed-in user's purchase accounts, filtered by region/vendor."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = PurchaseAccount.objects.filter(user=request.user)
+        region = (request.query_params.get('region') or '').strip()
+        vendor = (request.query_params.get('vendor') or '').strip()
+        if region:
+            qs = qs.filter(region=region)
+        if vendor:
+            qs = qs.filter(vendor=vendor)
+        return Response({'accounts': [_account_json(a) for a in qs]})
+
+
 class AccountDetailView(_StoreBotView):
     def delete(self, request, store_pk, account_id):
         self.get_store(store_pk)

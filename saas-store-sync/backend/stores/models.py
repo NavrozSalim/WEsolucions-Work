@@ -70,6 +70,14 @@ class Store(models.Model):
             'Blank means this is not an auto-purchase store.'
         ),
     )
+    auto_buy_account = models.ForeignKey(
+        'PurchaseAccount',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='auto_buy_stores',
+        help_text='Auto Purchasing: purchase account (Chrome profile on the laptop) Process buys with.',
+    )
     auto_order_bot_enabled = models.BooleanField(
         default=False,
         help_text='Auto Order Bot page: allow uploads and runs for this store.',

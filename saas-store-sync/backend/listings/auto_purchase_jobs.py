@@ -139,8 +139,12 @@ def import_fetched_file(run, filename: str, data: bytes) -> dict:
 # --------------------------------------------------------------------------- Process
 
 def purchase_account_for(store):
+    """The account chosen on the store's Auto Purchasing step; otherwise the owner's first one for the vendor."""
     from stores.models import PurchaseAccount
 
+    linked = store.auto_buy_account
+    if linked is not None and linked.vendor == store.auto_buy_vendor and linked.region == store.region:
+        return linked
     return (
         PurchaseAccount.objects.filter(user=store.user, vendor=store.auto_buy_vendor, region=store.region)
         .order_by('created_at', 'id')
@@ -207,7 +211,7 @@ def start_purchase(order, user):
 
         raise AutoPurchaseError(
             f'Add a purchase account for {AUTO_BUY_LABELS.get(store.auto_buy_vendor, store.auto_buy_vendor)} '
-            f'on the Auto Order Bot page first.'
+            f"on the store's Auto Purchasing step first (Store Settings → Edit)."
         )
     with transaction.atomic():
         check = OrderPurchaseCheck.objects.select_for_update().filter(order=order).first()
