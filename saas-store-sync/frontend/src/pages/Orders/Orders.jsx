@@ -1657,7 +1657,7 @@ export default function Orders() {
                             ...stores.map((s) => ({
                                 value: s.id,
                                 label: `${s.name}${s.marketplace_name ? ` (${s.marketplace_name})` : ''}${
-                                    s.auto_buy_vendor ? ` · Auto buy: ${autoBuyVendorsLabel(s.auto_buy_vendors?.length ? s.auto_buy_vendors : [s.auto_buy_vendor])}` : ''
+                                    s.auto_buy_vendor ? ' · Auto buy' : ''
                                 }`,
                             })),
                         ]}
