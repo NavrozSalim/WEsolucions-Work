@@ -49,6 +49,10 @@ class ScrapeResult:
         out = {"price": self.price, "stock": self.stock}
         if self.title:
             out["title"] = self.title
+        # Delivery cost read from the page (Auto Purchasing check); absent for most scrapes.
+        for key in ("shipping", "shipping_status", "shipping_postcode", "shipping_text"):
+            if self.metadata.get(key) is not None:
+                out[key] = self.metadata[key]
         if not self.success and self.error_code:
             out["error_code"] = self.error_code
             out["error_message"] = (self.error_message or "")[:500]

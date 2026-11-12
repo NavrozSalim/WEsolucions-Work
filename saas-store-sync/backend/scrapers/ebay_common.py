@@ -4,6 +4,7 @@ Shared eBay scraping implementation (US and AU market modules import from here).
 See `ebay_us_scraper` and `ebay_au_scraper` for public entry points.
 """
 
+import contextvars
 import os
 import re
 import json
@@ -2191,6 +2192,11 @@ def _parse_html_to_result(html: str, url: str) -> Optional[dict]:
     }
 
 
+# The catalog scrape adds the page's postage to the eBay AU price. The Auto Purchasing check turns
+# this off and asks eBay for the postage to the order's postcode instead (scrapers.shipping_quote).
+ADD_POSTAGE_TO_PRICE = contextvars.ContextVar("ebay_au_add_postage_to_price", default=True)
+
+
 def _parse_html_to_result_au(html: str, url: str) -> Optional[dict]:
     """AU-only wrapper around :func:`_parse_html_to_result`.
 
@@ -2211,11 +2217,13 @@ def _parse_html_to_result_au(html: str, url: str) -> Optional[dict]:
         return parsed
 
     shipping = EbayParser.extract_au_shipping_amount(soup, html)
-    if shipping is not None and shipping > 0:
+    if shipping is not None:
+        parsed = dict(parsed)
+        parsed["shipping"] = float(shipping)
+        parsed["shipping_status"] = "page"
+    if shipping is not None and shipping > 0 and ADD_POSTAGE_TO_PRICE.get():
         try:
-            new_price = round(float(parsed["price"]) + float(shipping), 2)
-            parsed = dict(parsed)
-            parsed["price"] = new_price
+            parsed["price"] = round(float(parsed["price"]) + float(shipping), 2)
         except (TypeError, ValueError):
             pass
 

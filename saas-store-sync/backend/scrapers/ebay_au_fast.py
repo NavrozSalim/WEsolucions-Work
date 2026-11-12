@@ -415,19 +415,25 @@ def _parse_fast_html(html: str, url: str) -> Optional[dict]:
     if price is None:
         return None
 
+    from .ebay_common import ADD_POSTAGE_TO_PRICE
+
     final_price = float(price)
     shipping = EbayParser.extract_au_shipping_amount(soup, html)
-    if shipping is not None and shipping > 0:
+    if shipping is not None and shipping > 0 and ADD_POSTAGE_TO_PRICE.get():
         try:
             final_price = round(final_price + float(shipping), 2)
         except (TypeError, ValueError):
             pass
 
-    return {
+    out = {
         "price": final_price,
         "stock": int(stock) if stock is not None else None,
         "title": title,
     }
+    if shipping is not None:
+        out["shipping"] = float(shipping)
+        out["shipping_status"] = "page"
+    return out
 
 
 def scrape_ebay_au_fast(vendor_url: str, region: str, session: dict | None = None) -> Optional[dict]:

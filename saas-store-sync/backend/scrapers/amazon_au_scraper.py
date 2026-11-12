@@ -38,14 +38,25 @@ RETRY_LIMIT = max(1, _env_int("AMAZON_AU_HTTP_RETRIES", 2) + 1)
 FETCH_TIMEOUT = max(5, _env_int("AMAZON_AU_HTTP_TIMEOUT_SEC", 15))
 SELENIUM_ATTEMPTS = max(1, _env_int("AMAZON_AU_SELENIUM_ATTEMPTS", 1))
 _SESSION_PROXY_KEY = "amazon_au_http_proxy"
+_ZIP_VALUE_KEY = "amazon_au_http_zip_value"
 
 # Default to Tallawong NSW so shipping-coverage errors match typical AU customer locations.
 # Override with AMAZON_AU_POSTCODE in the AU worker .env.prod.
 _DEFAULT_AU_POSTCODE = "2762"
 
 
-def amazon_au_postcode() -> str:
-    """AU delivery postcode for Amazon.com.au pricing / coverage checks."""
+# Session key: deliver-to postcode for this scrape (Auto Purchasing check: the order's postcode).
+SESSION_POSTCODE_KEY = "amazon_au_postcode"
+
+
+def amazon_au_postcode(session: dict | None = None) -> str:
+    """AU delivery postcode for Amazon.com.au pricing / coverage checks.
+
+    ``session[SESSION_POSTCODE_KEY]`` (4 digits) wins over ``AMAZON_AU_POSTCODE``.
+    """
+    override = re.sub(r"\D", "", str((session or {}).get(SESSION_POSTCODE_KEY) or ""))
+    if len(override) == 4:
+        return override
     raw = (os.environ.get("AMAZON_AU_POSTCODE") or _DEFAULT_AU_POSTCODE).strip()
     digits = re.sub(r"\D", "", raw)
     if len(digits) == 4:
@@ -234,6 +245,40 @@ def au_currently_unavailable_result(soup: BeautifulSoup, url: str = ""):
     return None
 
 
+_MONEY_RE = re.compile(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)")
+
+
+def parse_au_delivery(soup) -> dict:
+    """Delivery cost from the buy box for the page's deliver-to postcode.
+
+    Amazon puts it on ``data-csa-c-delivery-price`` in the primary delivery message:
+    ``FREE`` or ``$16.34``. Returns ``{"shipping_status": ..., "shipping": float|None, "shipping_text": str}``:
+
+    * ``free`` / ``paid``: the price for this postcode.
+    * ``first_order_only``: "FREE delivery ... on your first order" (the buying account may pay).
+    * ``none``: no delivery message on the page.
+    """
+    el = soup.select_one(
+        "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE [data-csa-c-delivery-price]"
+    ) or soup.select_one("#mir-layout-DELIVERY_BLOCK [data-csa-c-delivery-price]")
+    if el is None:
+        return {"shipping_status": "none", "shipping": None, "shipping_text": ""}
+    raw = (el.get("data-csa-c-delivery-price") or "").strip()
+    block = el.find_parent(id="mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE") or el
+    text = " ".join(block.get_text(" ", strip=True).split())[:200]
+    if raw.upper() == "FREE":
+        if "first order" in text.lower():
+            return {"shipping_status": "first_order_only", "shipping": None, "shipping_text": text}
+        return {"shipping_status": "free", "shipping": 0.0, "shipping_text": text}
+    m = _MONEY_RE.search(raw)
+    if m:
+        try:
+            return {"shipping_status": "paid", "shipping": float(m.group(1).replace(",", "")), "shipping_text": text}
+        except ValueError:
+            pass
+    return {"shipping_status": "none", "shipping": None, "shipping_text": text}
+
+
 def au_parsed_offer_result(soup, html: str, url: str, *, no_price_message: str):
     """Price and stock for one Amazon AU page, or a terminal failure."""
     unavailable = au_currently_unavailable_result(soup, url)
@@ -255,7 +300,7 @@ def au_parsed_offer_result(soup, html: str, url: str, *, no_price_message: str):
     if stock is None:
         stock = 2
 
-    return ScrapeResult.ok(price=price, stock=stock, title=title)
+    return ScrapeResult.ok(price=price, stock=stock, title=title, **parse_au_delivery(soup))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -311,9 +356,10 @@ class AmazonAUHTTP:
         product: that added two extra requests to each scrape.
         """
         zip_key = "amazon_au_http_zip_set"
-        if session_dict is not None and zip_key in session_dict:
+        zip_code = amazon_au_postcode(session_dict) if is_au else "10001"
+        # Set once per session and postcode (a new order postcode sets it again).
+        if session_dict is not None and zip_key in session_dict and session_dict.get(_ZIP_VALUE_KEY) == zip_code:
             return
-        zip_code = amazon_au_postcode() if is_au else "10001"
         endpoint = cls._ZIP_CHANGE_URLS.get(is_au, cls._ZIP_CHANGE_URLS[False])
         try:
             s.get(seed_url, timeout=FETCH_TIMEOUT)
@@ -341,6 +387,7 @@ class AmazonAUHTTP:
             ok = False
         if session_dict is not None:
             session_dict[zip_key] = ok
+            session_dict[_ZIP_VALUE_KEY] = zip_code
 
     @classmethod
     def fetch(cls, url: str, session_dict: dict = None, is_au: bool = False) -> ScrapeResult:
@@ -373,12 +420,16 @@ class AmazonAUHTTP:
         if mismatch is not None:
             return mismatch
 
-        return au_parsed_offer_result(
+        result = au_parsed_offer_result(
             soup,
             html,
             url,
             no_price_message="Price not found via HTTP",
         )
+        # The delivery price belongs to the postcode set on this session (only when that worked).
+        if result.success and is_au and session_dict is not None and session_dict.get("amazon_au_http_zip_set"):
+            result.metadata["shipping_postcode"] = session_dict.get(_ZIP_VALUE_KEY) or ""
+        return result
 
     @classmethod
     def scrape_with_retry(cls, url: str, session_dict: dict = None, is_au: bool = False) -> ScrapeResult:

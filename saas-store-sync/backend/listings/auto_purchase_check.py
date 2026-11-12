@@ -12,7 +12,10 @@ Then for the order (the sheet in the Auto Purchasing prompt):
                BigW:  the Commission Fee from the orders file
   After Fees = Total Sale - Fee
   Cost       = vendor price x quantity
-  Shipping   = vendor shipping to the customer's postcode (0 when the vendor gives none)
+  Shipping   = vendor delivery to the order's postcode (0 when the vendor shows none):
+               Amazon AU: delivery price on the page after setting the postcode
+               eBay AU:   the item's postage calculator for the postcode and quantity
+               Costco AU: prices include delivery (0); Costway AU: feed price (0)
   Earning    = After Fees - Cost - Shipping
 
 Shipping the customer paid is not added: the marketplace price already includes it.
@@ -37,6 +40,7 @@ LINE_OTHER_VENDOR = 'other_vendor'
 LINE_OUT_OF_STOCK = 'out_of_stock'
 LINE_STOCK_UNKNOWN = 'stock_unknown'
 LINE_SCRAPE_FAILED = 'scrape_failed'
+LINE_NO_DELIVERY = 'no_delivery'
 
 AUTO_BUY_LABELS = {
     'amazon': 'Amazon US', 'ebay': 'eBay US', 'amazon_au': 'Amazon AU',
@@ -164,6 +168,9 @@ def _live_price_stock(url: str, store, vendor_code: str, session: dict) -> dict:
     return {
         'price': result.get('price'),
         'shipping': result.get('shipping'),
+        'shipping_status': result.get('shipping_status'),
+        'shipping_postcode': result.get('shipping_postcode'),
+        'shipping_text': result.get('shipping_text'),
         'inventory': _inventory_from_scrape_result(result),
         'error_code': result.get('error_code'),
         'error_message': result.get('error_message'),
@@ -171,17 +178,68 @@ def _live_price_stock(url: str, store, vendor_code: str, session: dict) -> dict:
     }
 
 
-def _vendor_price_stock(product, url: str, store, session: dict) -> dict:
+def _vendor_price_stock(product, url: str, store, session: dict, *, auto_buy: str = '', postcode: str = '') -> dict:
     from scrapers.costway_au_ingest import is_costway_vendor_code
 
     vendor_code = (product.vendor.code if product.vendor else '') or ''
     if is_costway_vendor_code(vendor_code.lower()):
         return _feed_price_stock(product)
+    token = None
+    if auto_buy == 'amazon_au' and postcode:
+        from scrapers.amazon_au_scraper import SESSION_POSTCODE_KEY
+
+        session[SESSION_POSTCODE_KEY] = postcode  # deliver-to = the order's postcode
+    if auto_buy == 'ebay_au':
+        from scrapers.ebay_common import ADD_POSTAGE_TO_PRICE
+
+        token = ADD_POSTAGE_TO_PRICE.set(False)  # item price only; postage is quoted for the postcode
     try:
         return _live_price_stock(url, store, vendor_code, session)
     except Exception as exc:  # scraper crashed: report it on the line, keep checking others
         logger.exception('Auto purchase check: scrape failed for %s', url[:120])
         return {'error_code': 'scrape_exception', 'error_message': str(exc)[:300]}
+    finally:
+        if token is not None:
+            from scrapers.ebay_common import ADD_POSTAGE_TO_PRICE
+
+            ADD_POSTAGE_TO_PRICE.reset(token)
+
+
+def _vendor_shipping(auto_buy: str, got: dict, url: str, postcode: str, qty: int, session: dict) -> dict:
+    """Delivery cost of one line to the order's postcode.
+
+    Returns ``{"cents", "source", "text"}``; ``source == 'no_delivery'`` when the vendor
+    does not deliver there. A vendor that shows no delivery price counts as 0.
+    """
+    page_cents = _cents(got.get('shipping')) if got.get('shipping') is not None else None
+    if auto_buy == 'costco_au':
+        return {'cents': 0, 'source': 'included', 'text': 'Costco price includes delivery'}
+    if auto_buy == 'costway_au':
+        return {'cents': 0, 'source': 'feed', 'text': 'Costway feed price; delivery not quoted'}
+    if auto_buy == 'ebay_au':
+        from scrapers import shipping_quote as sq
+
+        q = sq.quote_ebay_au(url, postcode, qty, session) if postcode else {'status': sq.UNAVAILABLE, 'text': ''}
+        if q['status'] in (sq.FREE, sq.PAID):
+            return {'cents': _cents(q['amount']), 'source': 'quoted', 'text': q.get('text') or ''}
+        if q['status'] == sq.NO_DELIVERY:
+            return {'cents': None, 'source': 'no_delivery', 'text': q.get('text') or 'Item does not post there'}
+        if page_cents is not None:
+            return {'cents': page_cents, 'source': 'page',
+                    'text': 'Postage shown on the item page (postcode quote unavailable)'}
+        return {'cents': 0, 'source': 'none', 'text': q.get('text') or 'eBay showed no postage'}
+    if auto_buy == 'amazon_au':
+        status = got.get('shipping_status')
+        matched = bool(postcode) and (got.get('shipping_postcode') or '') == postcode
+        if matched and status in ('free', 'paid') and page_cents is not None:
+            return {'cents': page_cents, 'source': 'quoted', 'text': got.get('shipping_text') or ''}
+        if matched and status == 'first_order_only':
+            return {'cents': 0, 'source': 'none', 'text': 'Amazon shows free delivery on a first order only'}
+        return {'cents': 0, 'source': 'none',
+                'text': f'Amazon showed no delivery price for {postcode}' if postcode else 'No postcode on the order'}
+    if page_cents is not None:
+        return {'cents': page_cents, 'source': 'page', 'text': 'Shipping shown on the vendor page'}
+    return {'cents': 0, 'source': 'none', 'text': ''}
 
 
 # --------------------------------------------------------------------------- one order
@@ -209,7 +267,7 @@ def _check_line(store, item: dict, session: dict, *, scrape: bool, postcode: str
         'mapping_id': None, 'vendor_code': '', 'vendor_name': '', 'vendor_id': '', 'vendor_url': '',
         'vendor_price_cents': None, 'vendor_stock': None, 'price_source': '',
         'cost_cents': None, 'fee_cents': None, 'fee_percent': None,
-        'postcode': postcode, 'shipping_cents': None, 'shipping_source': '',
+        'postcode': postcode, 'shipping_cents': None, 'shipping_source': '', 'shipping_text': '',
         'result': LINE_OK, 'message': '',
     }
 
@@ -259,17 +317,19 @@ def _check_line(store, item: dict, session: dict, *, scrape: bool, postcode: str
     if not scrape:
         return line
 
-    got = _vendor_price_stock(product, url, store, session)
+    got = _vendor_price_stock(product, url, store, session, auto_buy=entry[0], postcode=postcode)
     price, stock = got.get('price'), got.get('inventory')
     line['price_source'] = got.get('source') or ''
     line['vendor_stock'] = stock
     line['vendor_price_cents'] = _cents(price) if price is not None else None
     if line['vendor_price_cents'] is not None:
         line['cost_cents'] = line['vendor_price_cents'] * qty
-    # Vendor shipping to the order postcode; a vendor that shows none counts as free (0).
-    shipping = got.get('shipping')
-    line['shipping_cents'] = _cents(shipping) if shipping is not None else 0
-    line['shipping_source'] = 'vendor' if shipping is not None else 'none'
+    # Vendor delivery to the order's postcode; a vendor that shows none counts as 0.
+    if not got.get('error_code') and price is not None:
+        ship = _vendor_shipping(entry[0], got, url, postcode, qty, session)
+        line['shipping_cents'] = ship['cents']
+        line['shipping_source'] = ship['source']
+        line['shipping_text'] = (ship['text'] or '')[:200]
 
     if got.get('error_code'):
         line.update(result=LINE_SCRAPE_FAILED, message=got.get('error_message') or got['error_code'])
@@ -279,6 +339,9 @@ def _check_line(store, item: dict, session: dict, *, scrape: bool, postcode: str
         line.update(result=LINE_SCRAPE_FAILED, message='Vendor page showed no price.')
     elif stock is None:
         line.update(result=LINE_STOCK_UNKNOWN, message='Vendor page did not show a stock level.')
+    elif line['shipping_source'] == 'no_delivery':
+        line.update(result=LINE_NO_DELIVERY,
+                    message=f"Vendor does not deliver to {postcode}: {line['shipping_text']}")
     return line
 
 
@@ -290,6 +353,7 @@ def _line_reason(line: dict) -> str:
         LINE_OUT_OF_STOCK: f'Out of stock: {sku} ({line["message"]})',
         LINE_STOCK_UNKNOWN: f'Stock unknown: {sku}',
         LINE_SCRAPE_FAILED: f'Scrape failed: {sku} ({line["message"]})',
+        LINE_NO_DELIVERY: f'No delivery: {sku} ({line["message"]})',
     }.get(line['result'], f'{sku}: {line["message"]}')
 
 

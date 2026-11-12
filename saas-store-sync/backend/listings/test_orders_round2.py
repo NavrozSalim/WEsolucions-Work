@@ -8,7 +8,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
-from listings.auto_purchase_check import check_order
+from listings.auto_purchase_check import check_order, check_payload
 from listings.models import MarketplaceOrder, OrderPurchaseCheck
 from listings.order_retention import detach_store_orders, purge_expired_detached_orders
 from listings import test_auto_purchase_check as _apc
@@ -30,14 +30,27 @@ class ShippingTests(TestCase):
             raw_response_json={'source': 'order_file'},
         )
 
-    @mock.patch(_apc.LIVE, return_value=_apc.live('20.99', 5, shipping='6.50'))
-    def test_vendor_shipping_is_taken_off_the_earning(self, _live):
+    def _amazon(self, price, shipping, postcode='2603', status='paid'):
+        return _apc.live(price, 5, shipping=shipping, shipping_status=status, shipping_postcode=postcode,
+                         shipping_text=f'${shipping} delivery')
+
+    def test_amazon_delivery_for_the_order_postcode_is_taken_off_the_earning(self):
         self._map('SKU-A')
-        check = check_order(self._order([self.line('SKU-A', 3848)]))
+        with mock.patch(_apc.LIVE, return_value=self._amazon('20.99', 6.5)) as live:
+            check = check_order(self._order([self.line('SKU-A', 3848)]))
         # 3848 - 577 fee - 2099 cost - 650 shipping
         self.assertEqual((check.shipping_cents, check.earning_cents), (650, 522))
         ln = check.lines_json[0]
-        self.assertEqual((ln['postcode'], ln['shipping_cents'], ln['shipping_source']), ('2603', 650, 'vendor'))
+        self.assertEqual((ln['postcode'], ln['shipping_cents'], ln['shipping_source']), ('2603', 650, 'quoted'))
+        session = live.call_args[0][3]
+        self.assertEqual(session['amazon_au_postcode'], '2603')
+
+    def test_amazon_price_for_another_postcode_is_not_used(self):
+        self._map('SKU-A')
+        with mock.patch(_apc.LIVE, return_value=self._amazon('20.99', 6.5, postcode='2762')):
+            check = check_order(self._order([self.line('SKU-A', 3848)]))
+        self.assertEqual((check.shipping_cents, check.earning_cents), (0, 1172))
+        self.assertEqual(check.lines_json[0]['shipping_source'], 'none')
 
     @mock.patch(_apc.LIVE, return_value=_apc.live('20.99', 5))
     def test_no_vendor_shipping_counts_as_zero(self, _live):
@@ -46,13 +59,124 @@ class ShippingTests(TestCase):
         self.assertEqual((check.shipping_cents, check.earning_cents), (0, 1172))
         self.assertEqual(check.lines_json[0]['shipping_source'], 'none')
 
-    @mock.patch(_apc.LIVE, return_value=_apc.live('20.99', 5, shipping='15.00'))
-    def test_shipping_can_turn_the_order_into_a_loss(self, _live):
+    def test_shipping_can_turn_the_order_into_a_loss(self):
         self._map('SKU-A')
-        check = check_order(self._order([self.line('SKU-A', 3848)]))
+        with mock.patch(_apc.LIVE, return_value=self._amazon('20.99', 15.0)):
+            check = check_order(self._order([self.line('SKU-A', 3848)]))
         self.assertEqual(check.status, 'blocked')
         self.assertEqual(check.earning_cents, -328)
         self.assertTrue(check.reasons[0].startswith('Loss:'))
+
+    # ---------------------------------------------------------------- eBay AU / Costco AU
+    def _ebay_store(self):
+        from stores.auto_buy import set_auto_buy_entries
+        from stores.models import StoreVendorPriceSettings
+
+        set_auto_buy_entries(self.store, [('ebay_au', None)])
+        StoreVendorPriceSettings.objects.create(store=self.store, vendor=self.ebay, marketplace_fees_percentage=15)
+        self._map('SKU-E', vendor=self.ebay, vendor_sku='355118777694')
+
+    def test_ebay_postage_is_quoted_for_postcode_and_quantity(self):
+        self._ebay_store()
+        with mock.patch(_apc.LIVE, return_value=_apc.live('20.00', 5, shipping=9.0, shipping_status='page')), \
+                mock.patch('scrapers.shipping_quote.quote_ebay_au',
+                           return_value={'status': 'paid', 'amount': 5.99, 'text': 'AU $5.99 delivery'}) as quote:
+            check = check_order(self._order([self.line('SKU-E', 5000, qty=2)]))
+        self.assertEqual(quote.call_args[0][1:3], ('2603', 2))
+        ln = check.lines_json[0]
+        self.assertEqual((ln['shipping_cents'], ln['shipping_source']), (599, 'quoted'))
+        # 10000 - 1500 fee - 4000 cost - 599 postage
+        self.assertEqual(check.earning_cents, 3901)
+
+    def test_ebay_item_price_is_scraped_without_postage(self):
+        from scrapers.ebay_common import ADD_POSTAGE_TO_PRICE
+
+        self._ebay_store()
+        seen = []
+
+        def fake_live(*args, **kwargs):
+            seen.append(ADD_POSTAGE_TO_PRICE.get())
+            return _apc.live('20.00', 5)
+
+        with mock.patch(_apc.LIVE, side_effect=fake_live), \
+                mock.patch('scrapers.shipping_quote.quote_ebay_au',
+                           return_value={'status': 'free', 'amount': 0.0, 'text': 'Free'}):
+            check_order(self._order([self.line('SKU-E', 5000)]))
+        self.assertEqual(seen, [False])
+        self.assertTrue(ADD_POSTAGE_TO_PRICE.get())  # catalog scrapes still add postage
+
+    def test_ebay_not_posting_to_the_postcode_blocks_the_order(self):
+        self._ebay_store()
+        with mock.patch(_apc.LIVE, return_value=_apc.live('20.00', 5)), \
+                mock.patch('scrapers.shipping_quote.quote_ebay_au',
+                           return_value={'status': 'no_delivery', 'amount': None, 'text': 'Item does not post to you'}):
+            check = check_order(self._order([self.line('SKU-E', 5000)], postcode='0870'))
+        self.assertEqual(check.status, 'blocked')
+        self.assertEqual(check.lines_json[0]['result'], 'no_delivery')
+        self.assertTrue(check.reasons[0].startswith('No delivery: SKU-E'))
+        self.assertFalse(check_payload(check)['can_force'])
+
+    def test_ebay_quote_unavailable_falls_back_to_page_postage(self):
+        self._ebay_store()
+        with mock.patch(_apc.LIVE, return_value=_apc.live('20.00', 5, shipping=9.0, shipping_status='page')), \
+                mock.patch('scrapers.shipping_quote.quote_ebay_au',
+                           return_value={'status': 'unavailable', 'amount': None, 'text': 'x'}):
+            check = check_order(self._order([self.line('SKU-E', 5000)]))
+        ln = check.lines_json[0]
+        self.assertEqual((ln['shipping_cents'], ln['shipping_source']), (900, 'page'))
+
+    def test_costco_price_includes_delivery(self):
+        from stores.auto_buy import set_auto_buy_entries
+        from stores.models import StoreVendorPriceSettings
+        from vendor.models import Vendor
+
+        costco, _ = Vendor.objects.get_or_create(code='costcoau', defaults={'name': 'CostcoAU'})
+        set_auto_buy_entries(self.store, [('costco_au', None)])
+        StoreVendorPriceSettings.objects.create(store=self.store, vendor=costco, marketplace_fees_percentage=15)
+        self._map('SKU-C', vendor=costco, vendor_sku='212132')
+        with mock.patch(_apc.LIVE, return_value=_apc.live('20.00', 5, shipping=12.0)):
+            check = check_order(self._order([self.line('SKU-C', 5000)]))
+        ln = check.lines_json[0]
+        self.assertEqual((ln['shipping_cents'], ln['shipping_source']), (0, 'included'))
+
+
+class ShippingParserTests(TestCase):
+    def test_ebay_rates_json(self):
+        from scrapers.shipping_quote import parse_ebay_rates
+
+        def model(*lines):
+            return {'states': [{'state': {'model': {'SHIPPING_SECTION_MODULE': {'sections': [{'dataItems': {
+                'deliveryto': {'values': [{'textSpans': [{'text': t}]} for t in lines]}}}]}}}}]}
+
+        free = parse_ebay_rates(model('Free delivery in 2-4 days', 'Standard Parcel Delivery',
+                                      'AU $5.99 delivery in 2-3 days'))
+        self.assertEqual((free['status'], free['amount']), ('free', 0.0))
+        paid = parse_ebay_rates(model('AU $12.50 delivery in 2-3 days', 'Australia Post Parcel Post'))
+        self.assertEqual((paid['status'], paid['amount']), ('paid', 12.5))
+        self.assertEqual(parse_ebay_rates(model("Item doesn't post to you"))['status'], 'no_delivery')
+        self.assertEqual(parse_ebay_rates({'states': []})['status'], 'unavailable')
+
+    def test_ebay_item_id(self):
+        from scrapers.shipping_quote import ebay_item_id
+
+        self.assertEqual(ebay_item_id('https://www.ebay.com.au/itm/355118777694?var=1'), '355118777694')
+        self.assertEqual(ebay_item_id('https://www.ebay.com.au/itm/Kids-Tent/355118777694'), '355118777694')
+
+    def test_amazon_delivery_block(self):
+        from bs4 import BeautifulSoup
+
+        from scrapers.amazon_au_scraper import parse_au_delivery
+
+        def page(price, text):
+            return BeautifulSoup(
+                '<div id="mir-layout-DELIVERY_BLOCK"><div id="mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE">'
+                f'<span data-csa-c-delivery-price="{price}">{text}</span></div></div>', 'html.parser')
+
+        self.assertEqual(parse_au_delivery(page('$16.34', '$16.34 delivery Wednesday'))['shipping'], 16.34)
+        self.assertEqual(parse_au_delivery(page('FREE', 'FREE delivery Thursday'))['shipping_status'], 'free')
+        self.assertEqual(parse_au_delivery(page('FREE', 'FREE delivery Sunday on your first order'))['shipping_status'],
+                         'first_order_only')
+        self.assertEqual(parse_au_delivery(BeautifulSoup('<div></div>', 'html.parser'))['shipping_status'], 'none')
 
 
 class ForceAndProcessAllTests(TestCase):

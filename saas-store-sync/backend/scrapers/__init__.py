@@ -341,6 +341,10 @@ def _normalize_scrape_payload(result: dict | None) -> dict:
         payload["error_code"] = result["error_code"]
     if result.get("error_message"):
         payload["error_message"] = result["error_message"]
+    # Delivery cost to a postcode (Auto Purchasing check), when the scraper read one.
+    for key in ("shipping", "shipping_status", "shipping_postcode", "shipping_text"):
+        if result.get(key) is not None:
+            payload[key] = result[key]
     return payload
 
 

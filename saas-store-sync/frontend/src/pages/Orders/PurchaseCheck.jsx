@@ -15,6 +15,16 @@ const LINE_RESULT = {
     out_of_stock: { label: 'Out of stock', cls: 'text-rose-600 dark:text-rose-400' },
     stock_unknown: { label: 'Stock unknown', cls: 'text-amber-700 dark:text-amber-300' },
     scrape_failed: { label: 'Scrape failed', cls: 'text-amber-700 dark:text-amber-300' },
+    no_delivery: { label: 'No delivery', cls: 'text-rose-600 dark:text-rose-400' },
+};
+
+/** Where a line's shipping came from (hover the amount for the vendor's own wording). */
+const SHIPPING_SOURCE = {
+    quoted: 'vendor quote',
+    page: 'item page (not postcode)',
+    included: 'in price',
+    feed: 'feed price',
+    none: 'none shown',
 };
 
 /** True while the order is being bought or was bought: no Recheck, no second Process. */
@@ -228,9 +238,12 @@ export function PurchaseCheckPanel({ check, onRecheck, rechecking, onProcess, on
                                             </td>
                                             <td className="px-2.5 py-2 text-right tabular-nums">{ln.vendor_stock ?? '—'}</td>
                                             <td className="px-2.5 py-2 text-right tabular-nums">{money(ln.cost_cents)}</td>
-                                            <td className="px-2.5 py-2 text-right tabular-nums">
+                                            <td className="px-2.5 py-2 text-right tabular-nums" title={ln.shipping_text || undefined}>
                                                 {ln.shipping_cents == null ? '—' : ln.shipping_cents === 0 ? 'Free' : money(ln.shipping_cents)}
                                                 {ln.postcode && <span className="block text-[10px] text-slate-500">to {ln.postcode}</span>}
+                                                {SHIPPING_SOURCE[ln.shipping_source] && (
+                                                    <span className="block text-[10px] text-slate-500">{SHIPPING_SOURCE[ln.shipping_source]}</span>
+                                                )}
                                             </td>
                                             <td className={`px-2.5 py-2 ${res.cls}`}>
                                                 <span className="font-medium">{res.label}</span>
