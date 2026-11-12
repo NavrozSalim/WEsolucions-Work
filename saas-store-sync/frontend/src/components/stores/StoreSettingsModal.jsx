@@ -1162,6 +1162,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                             region={form.region}
                             rows={form.auto_buy_vendors}
                             onRowsChange={(rows) => setForm((f) => ({ ...f, auto_buy_vendors: rows }))}
+                            storeId={store?.auto_buy_vendor ? store?.id : null}
                         />
                     )}
                 </div>

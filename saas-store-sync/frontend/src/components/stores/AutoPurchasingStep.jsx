@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Plus, ShoppingCart, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { History, Plus, ShoppingCart, Trash2, Upload } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
 import { getMyPurchaseAccounts } from '../../services/storeService';
+import { getDetachedOrders, importOrdersFile, linkDetachedOrders } from '../../services/listingService';
 
 /** Auto buying vendors per store Region. Codes match the backend (Store.AUTO_BUY_VENDORS_BY_REGION). */
 export const AUTO_BUY_VENDORS_BY_REGION = {
@@ -60,6 +61,106 @@ export function buildAutoBuyPayload(form) {
 
 const REGION_LABELS = { USA: 'USA', AU: 'Australia' };
 
+/**
+ * Old orders for the record: a Kogan (.xlsx) or BigW (.csv) orders export. They show on the Orders
+ * page but are never checked or bought. Settings: uploads now (and offers orders kept from a deleted
+ * store). Create: the file is held and uploaded right after the store is created.
+ */
+function OldOrdersSection({ storeId, historyFile, onHistoryFileChange }) {
+    const inputRef = useRef(null);
+    const [busy, setBusy] = useState(false);
+    const [note, setNote] = useState(null);
+    const [groups, setGroups] = useState([]);
+    const [linking, setLinking] = useState('');
+
+    const loadGroups = () => {
+        if (!storeId) return;
+        getDetachedOrders(storeId)
+            .then((res) => setGroups(res.data?.groups || []))
+            .catch(() => setGroups([]));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useEffect(loadGroups, [storeId]);
+
+    const chosen = (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file) return;
+        if (!storeId) {
+            onHistoryFileChange?.(file);
+            return;
+        }
+        setBusy(true);
+        setNote(null);
+        importOrdersFile(storeId, file, { history: true })
+            .then((res) => setNote({ ok: true, text: res.data?.message || 'Old orders uploaded.' }))
+            .catch((err) => setNote({ ok: false, text: err.response?.data?.detail || 'Could not upload the orders file.' }))
+            .finally(() => setBusy(false));
+    };
+
+    const link = (g) => {
+        setLinking(g.store_name);
+        setNote(null);
+        linkDetachedOrders(storeId, g.store_name, g.marketplace)
+            .then((res) => { setNote({ ok: true, text: res.data?.message || 'Orders linked.' }); loadGroups(); })
+            .catch((err) => setNote({ ok: false, text: err.response?.data?.detail || 'Could not link the orders.' }))
+            .finally(() => setLinking(''));
+    };
+
+    return (
+        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900/60">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                    <p className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                        <History className="h-4 w-4 text-accent-600 dark:text-accent-400" aria-hidden /> Old orders
+                    </p>
+                    <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
+                        Upload your previous orders (Kogan .xlsx or BigW .csv export, same format as the portal file) to see them
+                        on the Orders page. They are kept for the record only and never bought.
+                    </p>
+                </div>
+                <input ref={inputRef} type="file" accept=".xlsx,.csv" className="hidden" onChange={chosen} />
+                <Button type="button" variant="secondary" size="sm" onClick={() => inputRef.current?.click()} disabled={busy}>
+                    <Upload className={`mr-1.5 inline h-4 w-4 ${busy ? 'animate-pulse' : ''}`} aria-hidden />
+                    {busy ? 'Uploading…' : 'Upload old orders'}
+                </Button>
+            </div>
+            {!storeId && historyFile && (
+                <p className="mt-3 flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-700 dark:bg-slate-800/50 dark:text-slate-300">
+                    <span className="truncate">{historyFile.name} · uploaded when the store is created</span>
+                    <button type="button" className="text-rose-600 hover:underline" onClick={() => onHistoryFileChange?.(null)}>Remove</button>
+                </p>
+            )}
+            {note && (
+                <p className={`mt-3 rounded-lg px-3 py-2 text-xs ${note.ok
+                    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300'
+                    : 'bg-rose-50 text-rose-700 dark:bg-rose-900/20 dark:text-rose-300'}`}
+                >
+                    {note.text}
+                </p>
+            )}
+            {storeId && groups.length > 0 && (
+                <div className="mt-3 space-y-2 border-t border-slate-100 pt-3 dark:border-slate-800">
+                    <p className="text-xs font-medium text-slate-700 dark:text-slate-300">Orders kept from deleted stores</p>
+                    {groups.map((g) => (
+                        <div key={`${g.store_name}-${g.marketplace}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-800/50">
+                            <span className="text-slate-700 dark:text-slate-300">
+                                <span className="font-medium">{g.store_name || 'Deleted store'}</span>
+                                {g.marketplace ? ` (${g.marketplace})` : ''} · {g.count} order{g.count === 1 ? '' : 's'}
+                                {g.removed_at && <span className="text-slate-500"> · removed {new Date(g.removed_at).toLocaleDateString()}</span>}
+                            </span>
+                            <Button type="button" variant="secondary" size="sm" onClick={() => link(g)} disabled={!!linking}>
+                                {linking === g.store_name ? 'Linking…' : 'Link to this store'}
+                            </Button>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
+
+
 function accountLabel(a) {
     const where = a.chrome_profile || a.user_data_dir;
     return `${a.name} · profile "${where}"${a.email ? ` · ${a.email}` : ''}`;
@@ -69,7 +170,7 @@ function accountLabel(a) {
  * Step 4 of the store wizard: the vendors this store buys its orders from, each with the purchase
  * account (Chrome profile on the worker laptop, signed in to that vendor) it buys with.
  */
-export default function AutoPurchasingStep({ region, rows, onRowsChange }) {
+export default function AutoPurchasingStep({ region, rows, onRowsChange, storeId = null, historyFile = null, onHistoryFileChange = null }) {
     const vendorOptions = autoBuyVendorsForRegion(region);
     const allowed = vendorOptions.map((v) => v.value);
     const visibleRows = (rows || []).filter((r) => !r.vendor || allowed.includes(r.vendor));
@@ -194,6 +295,10 @@ export default function AutoPurchasingStep({ region, rows, onRowsChange }) {
                         </Button>
                     )}
                 </div>
+            )}
+
+            {visibleRows.length > 0 && (
+                <OldOrdersSection storeId={storeId} historyFile={historyFile} onHistoryFileChange={onHistoryFileChange} />
             )}
 
             <p className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-800/40 dark:text-slate-400">

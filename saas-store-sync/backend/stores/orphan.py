@@ -270,6 +270,9 @@ def purge_expired_orphaned_stores() -> dict:
     for store in qs.iterator():
         store_id = store.id
         name = store.name
+        from listings.order_retention import detach_store_orders
+
+        detach_store_orders(store)
         store.delete()
         deleted += 1
         logger.info('Purged orphaned store %s (%s) past retention', store_id, name)

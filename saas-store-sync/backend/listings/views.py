@@ -1357,7 +1357,11 @@ class StoreListingInventoryExportView(APIView):
 
 
 class StoreOrderFileImportView(APIView):
-    """Auto Purchasing: import a Kogan / BigW orders file (``file``) into this store's orders."""
+    """Auto Purchasing: import a Kogan / BigW orders file (``file``) into this store's orders.
+
+    ``history=1`` (the store wizard's "Upload old orders"): the orders are kept for the record
+    only. They are not checked or bought, and BigW rows in every status are kept.
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request, store_pk):
@@ -1372,15 +1376,21 @@ class StoreOrderFileImportView(APIView):
         upload = request.FILES.get('file')
         if not upload:
             return Response({'detail': 'Choose the orders file to upload.'}, status=status.HTTP_400_BAD_REQUEST)
+        history = str(request.data.get('history') or request.query_params.get('history') or '').lower() in (
+            '1', 'true', 'yes',
+        )
         try:
-            result = import_order_file(store, request.user, upload.name, upload.read())
+            result = import_order_file(store, request.user, upload.name, upload.read(), history=history)
         except OrderFileError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        from .auto_purchase_check import queue_purchase_checks
+        if history:
+            result['message'] += ' Old orders are kept for the record and are not bought.'
+        else:
+            from .auto_purchase_check import queue_purchase_checks
 
-        queued = queue_purchase_checks(store, result.get('order_ids') or [])
-        if queued.get('queued'):
-            result['message'] += f" Checking stock and profit for {queued['queued']} order(s)."
+            queued = queue_purchase_checks(store, result.get('order_ids') or [])
+            if queued.get('queued'):
+                result['message'] += f" Checking stock and profit for {queued['queued']} order(s)."
         logger.info(
             'Order file import store=%s file=%s: %s',
             store.id, upload.name, result.get('message'),
@@ -1436,12 +1446,13 @@ class StoreOrderProcessView(APIView):
         order = MarketplaceOrder.objects.filter(store=store, id=pk).first()
         if order is None:
             return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        force = str(request.data.get('force') or '').lower() in ('1', 'true', 'yes')
         try:
-            run = start_purchase(order, request.user)
+            run = start_purchase(order, request.user, force=force)
         except AutoPurchaseError as exc:
             return Response({'detail': str(exc)}, status=exc.status_code)
         order.refresh_from_db()
-        msg = f'Order {order.invoice_number} sent to the laptop to buy.'
+        msg = f'Order {order.invoice_number} sent to the laptop to buy' + (' (forced at a loss).' if force else '.')
         if not laptop_online(store.user or request.user):
             msg += ' No laptop is online right now; it is bought when the laptop agent is running.'
         return Response({
@@ -1449,6 +1460,51 @@ class StoreOrderProcessView(APIView):
             'run': run_payload(run),
             'purchase_check': check_payload(order.purchase_check),
         }, status=status.HTTP_202_ACCEPTED)
+
+
+class StoreOrderProcessAllView(APIView):
+    """Process all orders: buy every order that is in profit with no errors (one confirm on the page)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        from stores.auto_order_bot import laptop_online
+
+        from .auto_purchase_jobs import AutoPurchaseError, process_all
+
+        store = _get_store(request, store_pk)
+        try:
+            result = process_all(store, request.user)
+        except AutoPurchaseError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        if result['queued'] and not laptop_online(store.user or request.user):
+            result['message'] += ' No laptop is online right now; they are bought when the laptop agent is running.'
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class StoreDetachedOrdersView(APIView):
+    """Orders of the user's deleted stores (kept 7 days).
+
+    GET  -> deleted stores whose orders can still be linked.
+    POST {store_name, marketplace} -> link those orders to this store.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        from .order_retention import detached_groups, retention_days
+
+        _get_store(request, store_pk)
+        return Response({'groups': detached_groups(request.user), 'retention_days': retention_days()})
+
+    def post(self, request, store_pk):
+        from .order_retention import link_detached_orders
+
+        store = _get_store(request, store_pk)
+        name = str(request.data.get('store_name') or '').strip()
+        if not name:
+            return Response({'detail': 'Choose the deleted store whose orders to link.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        result = link_detached_orders(request.user, store, name, str(request.data.get('marketplace') or ''))
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class StoreOrderPurchaseCheckView(APIView):
@@ -1474,7 +1530,7 @@ class StoreOrderPurchaseCheckView(APIView):
             if not orders.exists():
                 return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
         else:
-            orders = orders.exclude(status__in=['cancelled', 'refunded', 'shipping_complete'])
+            orders = orders.exclude(status__in=['cancelled', 'refunded', 'shipping_complete']).filter(is_history=False)
         queued = queue_purchase_checks(store, list(orders.values_list('id', flat=True)))
         return Response({
             'queued': queued.get('queued', 0),

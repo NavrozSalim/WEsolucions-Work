@@ -326,17 +326,24 @@ export const startOrdersFetch = (storeId) => api.post(`/stores/${storeId}/orders
 /** Auto Purchasing: latest Fetch job and whether a laptop is online. */
 export const getOrdersFetch = (storeId) => api.get(`/stores/${storeId}/orders/fetch-file/`);
 /** Auto Purchasing: buy this order through the store's Auto buying vendor (Process). */
-export const processOrderPurchase = (storeId, orderId) =>
-    api.post(`/stores/${storeId}/orders/${orderId}/process/`);
+export const processOrderPurchase = (storeId, orderId, { force = false } = {}) =>
+    api.post(`/stores/${storeId}/orders/${orderId}/process/`, force ? { force: true } : {});
+/** Auto Purchasing: buy every order that is in profit with no errors. */
+export const processAllOrders = (storeId) => api.post(`/stores/${storeId}/orders/process-all/`);
+/** Orders of the user's deleted stores (kept 7 days) and linking them to this store. */
+export const getDetachedOrders = (storeId) => api.get(`/stores/${storeId}/orders/detached/`);
+export const linkDetachedOrders = (storeId, storeName, marketplace = '') =>
+    api.post(`/stores/${storeId}/orders/detached/`, { store_name: storeName, marketplace });
 /** Auto Purchasing: re-run the stock / profit check for one order, or every open order when orderId is omitted. */
 export const recheckOrderPurchase = (storeId, orderId = null) =>
     api.post(orderId
         ? `/stores/${storeId}/orders/${orderId}/purchase-check/`
         : `/stores/${storeId}/orders/purchase-check/`);
 /** Auto Purchasing: upload a Kogan (.xlsx) or BigW (.csv) orders file into this store's orders. */
-export const importOrdersFile = (storeId, file) => {
+export const importOrdersFile = (storeId, file, { history = false } = {}) => {
     const fd = new FormData();
     fd.append('file', file);
+    if (history) fd.append('history', '1');
     return api.post(`/stores/${storeId}/orders/import-file/`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
     });

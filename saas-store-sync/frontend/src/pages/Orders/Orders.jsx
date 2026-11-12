@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
     BadgePercent,
@@ -16,7 +16,7 @@ import {
     RefreshCw,
     Store as StoreIcon,
     Truck,
-    Upload,
+    ShoppingCart,
     X,
 } from 'lucide-react';
 import Button from '../../components/ui/Button';
@@ -36,14 +36,14 @@ import {
     getOrderCancelReasons,
     getOrders,
     getOrdersFetch,
-    importOrdersFile,
+    processAllOrders,
     processOrderPurchase,
     recheckOrderPurchase,
     startOrdersFetch,
     submitOrderShipping,
 } from '../../services/listingService';
 import ConfirmModal from '../../components/ui/ConfirmModal';
-import { PurchaseCheckBadge, PurchaseCheckPanel } from './PurchaseCheck';
+import { PurchaseCheckBadge, PurchaseCheckPanel, purchaseLocked } from './PurchaseCheck';
 
 const STATUS_STYLES = {
     new: 'bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300',
@@ -161,6 +161,13 @@ function orderSortTime(order) {
     return Number.isNaN(t) ? 0 : t;
 }
 
+/** Newest order date first; the same date falls back to the newest import. */
+function compareOrdersNewestFirst(a, b) {
+    const diff = orderSortTime(b) - orderSortTime(a);
+    if (diff !== 0) return diff;
+    return (new Date(b?.created_at).getTime() || 0) - (new Date(a?.created_at).getTime() || 0);
+}
+
 function orderDetails(order) {
     return order?.details || {};
 }
@@ -184,6 +191,9 @@ function sourceLinks(order) {
     if (Array.isArray(fromDetails) && fromDetails.length > 0) {
         return fromDetails.filter(Boolean);
     }
+    // Auto Purchasing orders: the vendor page of each line, from the catalog mapping found by the check.
+    const checkLinks = [...new Set((order?.purchase_check?.lines || []).map((l) => (l?.vendor_url || '').trim()).filter(Boolean))];
+    if (checkLinks.length > 0) return checkLinks;
     const items = orderDetails(order).lineItems || [];
     const seen = new Set();
     const links = [];
@@ -197,10 +207,36 @@ function sourceLinks(order) {
     return links;
 }
 
+/** Vendor name for a source link (from the Auto Purchasing check), else "Source". */
+function sourceLabel(order, url) {
+    const line = (order?.purchase_check?.lines || []).find((l) => (l?.vendor_url || '').trim() === url);
+    return line?.vendor_name || line?.vendor_code || 'Source';
+}
+
 function SourceLinkCell({ order }) {
     const links = sourceLinks(order);
     if (links.length === 0) {
         return <span className="text-slate-400">—</span>;
+    }
+    if (order?.purchase_check?.lines?.length) {
+        return (
+            <span className="inline-flex flex-col gap-0.5">
+                {links.slice(0, 3).map((url) => (
+                    <a
+                        key={url}
+                        href={url}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={url}
+                        className="inline-flex items-center gap-1 text-accent-600 hover:underline dark:text-accent-400"
+                    >
+                        <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                        <span className="max-w-[140px] truncate">{sourceLabel(order, url)}</span>
+                    </a>
+                ))}
+                {links.length > 3 && <span className="text-[11px] text-slate-500 dark:text-slate-400">+{links.length - 3} more</span>}
+            </span>
+        );
     }
     if (links.length === 1) {
         return (
@@ -859,7 +895,7 @@ function InfoRow({ label, children }) {
     );
 }
 
-function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone, onRecheck, recheckingId, onProcess, processingId }) {
+function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone, onRecheck, recheckingId, onProcess, onForce, processingId }) {
     const d = orderDetails(order);
     const customer = d.customer || {};
     const shippingAddr = formatAddress(d.shippingAddress);
@@ -873,12 +909,18 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateT
 
     return (
         <div className="space-y-6">
-            {(order.purchase_check || isFileOrder(order)) && onRecheck && (
+            {order.is_history && (
+                <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-800/40 dark:text-slate-300">
+                    Old order uploaded on the store wizard. Kept for the record; it is not checked or bought.
+                </p>
+            )}
+            {!order.is_history && (order.purchase_check || isFileOrder(order)) && onRecheck && (
                 <PurchaseCheckPanel
                     check={order.purchase_check}
                     onRecheck={() => onRecheck(order)}
                     rechecking={recheckingId === order.id}
                     onProcess={onProcess ? () => onProcess(order) : null}
+                    onForce={onForce ? () => onForce(order) : null}
                     processing={processingId === order.id}
                 />
             )}
@@ -1181,8 +1223,6 @@ export default function Orders() {
     const [refundOrderRow, setRefundOrderRow] = useState(null);
     const [refundLoading, setRefundLoading] = useState(false);
     const [exporting, setExporting] = useState(false);
-    const [importingFile, setImportingFile] = useState(false);
-    const orderFileInputRef = useRef(null);
     const [statusFilter, setStatusFilter] = useState(() => {
         if (initialStatus === 'open' || initialStatus === 'all') return initialStatus === 'open' ? 'open' : 'all';
         if (Object.prototype.hasOwnProperty.call(STATUS_LABELS, initialStatus)) return initialStatus;
@@ -1293,12 +1333,15 @@ export default function Orders() {
 
     // Auto Purchasing: Process (buy one order) after the user confirms.
     const [processOrderRow, setProcessOrderRow] = useState(null);
+    const [processForce, setProcessForce] = useState(false);
     const [processingId, setProcessingId] = useState(null);
+    const askProcess = (order) => { setProcessForce(false); setProcessOrderRow(order); };
+    const askForce = (order) => { setProcessForce(true); setProcessOrderRow(order); };
     const confirmProcess = () => {
         const order = processOrderRow;
         if (!order || !selectedStore) return;
         setProcessingId(order.id);
-        processOrderPurchase(selectedStore, order.id)
+        processOrderPurchase(selectedStore, order.id, { force: processForce })
             .then((res) => {
                 setMessage({ text: res.data?.message || 'Order sent to the laptop to buy.', variant: 'success' });
                 return getOrders(selectedStore);
@@ -1312,6 +1355,33 @@ export default function Orders() {
             .finally(() => {
                 setProcessingId(null);
                 setProcessOrderRow(null);
+            });
+    };
+
+    // Process all: every order that is ready to buy (in profit, no errors, not bought yet).
+    const readyToBuy = orders.filter((o) => !o.is_history && o.purchase_check?.status === 'buyable'
+        && !purchaseLocked(o.purchase_check));
+    const readyEarning = readyToBuy.reduce((sum, o) => sum + (Number(o.purchase_check?.earning_cents) || 0), 0);
+    const [processAllOpen, setProcessAllOpen] = useState(false);
+    const [processingAll, setProcessingAll] = useState(false);
+    const confirmProcessAll = () => {
+        if (!selectedStore) return;
+        setProcessingAll(true);
+        processAllOrders(selectedStore)
+            .then((res) => {
+                const r = res.data || {};
+                setMessage({ text: r.message || 'Orders sent to the laptop to buy.', variant: r.not_sent?.length ? 'warning' : 'success' });
+                return getOrders(selectedStore);
+            })
+            .then((res) => {
+                if (Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
+            })
+            .catch((err) => {
+                setMessage({ text: err.response?.data?.detail || 'Could not send the orders to buy.', variant: 'error' });
+            })
+            .finally(() => {
+                setProcessingAll(false);
+                setProcessAllOpen(false);
             });
     };
 
@@ -1507,7 +1577,7 @@ export default function Orders() {
             list = list.filter((o) => orderMatchesCustomerSearch(o, query));
         }
         // Newest purchase date first; same date ordered by later time first.
-        return [...list].sort((a, b) => orderSortTime(b) - orderSortTime(a));
+        return [...list].sort(compareOrdersNewestFirst);
     }, [orders, statusFilter, customerSearch]);
 
     const statusFilterOptions = useMemo(() => {
@@ -1549,27 +1619,6 @@ export default function Orders() {
                 });
             })
             .finally(() => setExporting(false));
-    };
-
-    const handleOrderFileChosen = (e) => {
-        const file = e.target.files?.[0];
-        e.target.value = '';
-        if (!file || !selectedStore) return;
-        setImportingFile(true);
-        setMessage(null);
-        importOrdersFile(selectedStore, file)
-            .then((res) => {
-                const r = res.data || {};
-                setMessage({ text: r.message || 'Orders file imported.', variant: 'success' });
-                loadOrders(false);
-            })
-            .catch((err) => {
-                setMessage({
-                    text: err.response?.data?.detail || 'Failed to import the orders file.',
-                    variant: 'error',
-                });
-            })
-            .finally(() => setImportingFile(false));
     };
 
     return (
@@ -1663,23 +1712,16 @@ export default function Orders() {
                         )}
                         {selectedStoreData?.auto_buy_vendor && (
                             <>
-                                <input
-                                    ref={orderFileInputRef}
-                                    type="file"
-                                    accept=".xlsx,.csv"
-                                    className="hidden"
-                                    onChange={handleOrderFileChosen}
-                                />
                                 <Button
-                                    variant="secondary"
+                                    variant="primary"
                                     size="sm"
-                                    className="w-full justify-center sm:w-auto"
-                                    onClick={() => orderFileInputRef.current?.click()}
-                                    disabled={importingFile}
-                                    title="Kogan open orders (.xlsx) or BigW pending orders (.csv) export"
+                                    className="w-full justify-center !bg-emerald-600 hover:!bg-emerald-700 sm:w-auto"
+                                    onClick={() => setProcessAllOpen(true)}
+                                    disabled={processingAll || readyToBuy.length === 0}
+                                    title="Buy every order that is in profit with no errors, one at a time on the worker laptop"
                                 >
-                                    <Upload className={`mr-1.5 h-4 w-4 ${importingFile ? 'animate-pulse' : ''}`} />
-                                    {importingFile ? 'Importing…' : 'Upload orders file'}
+                                    <ShoppingCart className="mr-1.5 h-4 w-4" />
+                                    {processingAll ? 'Sending…' : `Process all${readyToBuy.length ? ` (${readyToBuy.length})` : ''}`}
                                 </Button>
                                 <Button
                                     variant="secondary"
@@ -1742,18 +1784,32 @@ export default function Orders() {
                 onClose={() => setProcessOrderRow(null)}
                 onConfirm={confirmProcess}
                 loading={!!processingId}
-                variant="primary"
-                title="Buy this order?"
-                confirmLabel="Process"
+                variant={processForce ? 'danger' : 'primary'}
+                title={processForce ? 'Buy this order at a loss?' : 'Buy this order?'}
+                confirmLabel={processForce ? 'Force process' : 'Process'}
                 message={processOrderRow ? (() => {
                     const c = processOrderRow.purchase_check || {};
-                    const cur = (v) => (v == null ? '—' : `A$${(v / 100).toFixed(2)}`);
+                    const cur = (v) => (v == null ? '—' : `${v < 0 ? '-' : ''}A$${(Math.abs(v) / 100).toFixed(2)}`);
                     const items = (c.lines || []).map((l) => `${l.quantity} × ${l.sku}`).join(', ');
-                    return `Order ${processOrderRow.invoice_number}: buy ${items} from ${autoBuyVendorsLabel([(c.lines || []).find((l) => l.auto_buy_vendor)?.auto_buy_vendor || selectedStoreData?.auto_buy_vendor])} `
+                    return (processForce ? `This order LOSES ${cur(Math.abs(c.earning_cents || 0))}. ` : '')
+                        + `Order ${processOrderRow.invoice_number}: buy ${items} from ${autoBuyVendorsLabel([(c.lines || []).find((l) => l.auto_buy_vendor)?.auto_buy_vendor || selectedStoreData?.auto_buy_vendor])} `
                         + `on the worker laptop and ship to ${customerName(processOrderRow)}. Cost ${cur(c.cost_cents)}, `
-                        + `earning ${cur(c.earning_cents)}. The laptop stops if the vendor price went up.`
+                        + `shipping ${cur(c.shipping_cents ?? 0)}, earning ${cur(c.earning_cents)}. The laptop stops if the vendor price went up.`
                         + (c.purchase_error ? ` Last attempt: ${c.purchase_error}` : '');
                 })() : ''}
+            />
+
+            <ConfirmModal
+                open={processAllOpen}
+                onClose={() => setProcessAllOpen(false)}
+                onConfirm={confirmProcessAll}
+                loading={processingAll}
+                variant="primary"
+                title="Process all orders?"
+                confirmLabel={`Process ${readyToBuy.length} order${readyToBuy.length === 1 ? '' : 's'}`}
+                message={`Buy ${readyToBuy.length} order${readyToBuy.length === 1 ? '' : 's'} that ${readyToBuy.length === 1 ? 'is' : 'are'} in profit with no errors `
+                    + `(total earning A$${(readyEarning / 100).toFixed(2)}). The worker laptop buys them one at a time and stops on any `
+                    + 'order whose vendor price went up. Orders at a loss or with errors are skipped.'}
             />
 
             {!storesLoading && stores.length === 0 && (
@@ -1772,7 +1828,7 @@ export default function Orders() {
                         <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">
                             {orders.length === 0
                                 ? isAutoPurchaseOnly
-                                    ? `No orders yet. This is an auto-purchase store (Auto buy: ${autoBuyVendorsLabel(selectedStoreData?.auto_buy_vendors?.length ? selectedStoreData.auto_buy_vendors : [selectedStoreData?.auto_buy_vendor])}). Click Fetch to download the orders file with the worker laptop, or use “Upload orders file”.`
+                                    ? `No orders yet. This is an auto-purchase store (Auto buy: ${autoBuyVendorsLabel(selectedStoreData?.auto_buy_vendors?.length ? selectedStoreData.auto_buy_vendors : [selectedStoreData?.auto_buy_vendor])}). Click Fetch to download the orders file with the worker laptop. Old orders can be uploaded on the store's Auto Purchasing step.`
                                     : 'No orders yet. Use “Fetch from marketplace” to pull the latest orders.'
                                 : customerSearch.trim() && statusFilter && statusFilter !== 'all'
                                   ? `No orders match “${customerSearch.trim()}” with this status filter.`
@@ -1892,7 +1948,7 @@ export default function Orders() {
                                             </div>
                                             {expandedId === o.id && (
                                                 <div className="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? setProcessOrderRow : null} processingId={processingId} />
+                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} />
                                                 </div>
                                             )}
                                         </li>
@@ -1905,6 +1961,7 @@ export default function Orders() {
                                 <table className="w-full text-left text-sm">
                                     <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-400">
                                         <tr>
+                                            <th className="px-4 py-2.5">Ordered</th>
                                             <th className="px-4 py-2.5">{orderIdLabel}</th>
                                             <th className="px-4 py-2.5">Customer</th>
                                             <th className="px-4 py-2.5">Items</th>
@@ -1912,7 +1969,6 @@ export default function Orders() {
                                             <th className="px-4 py-2.5">Total</th>
                                             <th className="px-4 py-2.5">Status</th>
                                             <th className="px-4 py-2.5">Ticket</th>
-                                            <th className="px-4 py-2.5">Ordered</th>
                                             <th className="px-4 py-2.5 text-right">Actions</th>
                                         </tr>
                                     </thead>
@@ -1925,6 +1981,10 @@ export default function Orders() {
                                             return (
                                                 <Fragment key={o.id}>
                                                     <tr className="border-t border-slate-100 dark:border-slate-800">
+                                                        <td className="whitespace-nowrap px-4 py-2.5 text-xs text-slate-600 dark:text-slate-300">
+                                                            {formatDate(orderedAt, orderDateTz)}
+                                                            {o.is_history && <p className="text-[10px] text-slate-400">Old order</p>}
+                                                        </td>
                                                         <td className="px-4 py-2.5 font-medium text-slate-900 dark:text-slate-100">
                                                             {o.invoice_number || o.external_order_key || '—'}
                                                             <p className="text-[11px] font-normal capitalize text-slate-400">{o.environment}</p>
@@ -1984,9 +2044,6 @@ export default function Orders() {
                                                                 <span className="text-xs text-slate-400">—</span>
                                                             )}
                                                         </td>
-                                                        <td className="whitespace-nowrap px-4 py-2.5 text-xs text-slate-500 dark:text-slate-400">
-                                                            {formatDate(orderedAt, orderDateTz)}
-                                                        </td>
                                                         <td className="px-4 py-2.5">
                                                             <div className="flex items-center justify-end gap-1">
                                                                 {!isFileOrder(o) && (<>
@@ -2043,7 +2100,7 @@ export default function Orders() {
                                                     {expandedId === o.id && (
                                                         <tr className="border-t border-slate-100 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/40">
                                                             <td colSpan={9} className="px-4 py-4">
-                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? setProcessOrderRow : null} processingId={processingId} />
+                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} />
                                                             </td>
                                                         </tr>
                                                     )}

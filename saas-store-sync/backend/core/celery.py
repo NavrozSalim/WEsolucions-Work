@@ -48,6 +48,11 @@ app.conf.beat_schedule = {
         'task': 'stores.purge_orphaned_stores',
         'schedule': crontab(minute=45, hour=3),
     },
+    # Orders of deleted stores are kept ORDER_DETACHED_RETENTION_DAYS (to link to another store), then removed.
+    'purge-detached-orders': {
+        'task': 'stores.purge_detached_orders',
+        'schedule': crontab(minute=50, hour=3),
+    },
     # Orders / tickets: region-split queues (US VPS → orders-us, AU VPS → orders-au).
     'fetch-marketplace-tickets-us-hourly': {
         'task': 'listings.fetch_us_store_tickets',

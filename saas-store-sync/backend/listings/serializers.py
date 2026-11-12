@@ -410,7 +410,7 @@ class MarketplaceOrderSerializer(serializers.ModelSerializer):
             'details', 'related_tickets', 'created_at', 'updated_at',
             'shopify_order_id', 'shopify_order_name', 'shopify_synced_at',
             'shopify_sync_error', 'shopify_admin_url',
-            'purchase_check',
+            'purchase_check', 'is_history',
         ]
 
     def get_purchase_check(self, obj):

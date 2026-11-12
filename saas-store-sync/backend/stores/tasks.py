@@ -16,3 +16,11 @@ def purge_orphaned_stores_task():
     result = purge_expired_orphaned_stores()
     logger.info('purge_orphaned_stores: %s', result)
     return result
+
+
+@shared_task(name='stores.purge_detached_orders', ignore_result=True)
+def purge_detached_orders_task():
+    """Delete orders of deleted stores once ORDER_DETACHED_RETENTION_DAYS have passed."""
+    from listings.order_retention import purge_expired_detached_orders
+
+    return purge_expired_detached_orders()

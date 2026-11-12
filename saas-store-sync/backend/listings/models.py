@@ -219,7 +219,17 @@ class MarketplaceOrder(models.Model):
         blank=True,
         related_name='marketplace_orders',
     )
-    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='marketplace_orders', db_index=True)
+    # Null only after the store was deleted: the orders are kept for ORDER_DETACHED_RETENTION_DAYS so
+    # they can be linked to another store (see ``detached_*``), then purged.
+    store = models.ForeignKey(
+        Store, on_delete=models.SET_NULL, null=True, blank=True, related_name='marketplace_orders', db_index=True,
+    )
+    detached_at = models.DateTimeField(null=True, blank=True, db_index=True,
+                                       help_text='When the store this order belonged to was deleted.')
+    detached_store_name = models.CharField(max_length=255, blank=True, default='')
+    detached_store_marketplace = models.CharField(max_length=100, blank=True, default='')
+    # Old orders uploaded on the store wizard: shown for the record, never checked or bought.
+    is_history = models.BooleanField(default=False, db_index=True)
 
     external_order_key = models.CharField(max_length=255, blank=True, default='', db_index=True)
     invoice_number = models.CharField(max_length=255, blank=True, default='')
@@ -305,7 +315,9 @@ class OrderPurchaseCheck(models.Model):
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     order = models.OneToOneField(MarketplaceOrder, on_delete=models.CASCADE, related_name='purchase_check')
-    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='order_purchase_checks', db_index=True)
+    store = models.ForeignKey(
+        Store, on_delete=models.SET_NULL, null=True, blank=True, related_name='order_purchase_checks', db_index=True,
+    )
     status = models.CharField(
         max_length=20, choices=PurchaseCheckStatus.choices, default=PurchaseCheckStatus.CHECKING, db_index=True,
     )
@@ -315,6 +327,7 @@ class OrderPurchaseCheck(models.Model):
     fee_cents = models.IntegerField(null=True, blank=True)
     after_fees_cents = models.IntegerField(null=True, blank=True)
     cost_cents = models.IntegerField(null=True, blank=True)
+    shipping_cents = models.IntegerField(null=True, blank=True, help_text='Vendor shipping to the customer postcode.')
     earning_cents = models.IntegerField(null=True, blank=True)
     requested_at = models.DateTimeField(null=True, blank=True)
     checked_at = models.DateTimeField(null=True, blank=True)
@@ -332,6 +345,9 @@ class OrderPurchaseCheck(models.Model):
     purchase_requested_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
     )
+    # Force process: bought although the check showed a loss (recorded with the loss at that time).
+    forced_at = models.DateTimeField(null=True, blank=True)
+    forced_loss_cents = models.IntegerField(null=True, blank=True)
 
     class Meta:
         db_table = 'listings_orderpurchasecheck'

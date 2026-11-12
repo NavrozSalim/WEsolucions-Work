@@ -3,6 +3,7 @@ import { X, Plus, Clock, Trash2 } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
+import { importOrdersFile } from '../../services/listingService';
 import { createStore, getMarketplaces, getVendors, testEtsyConnection, testSearsConnection, testTemuConnection, testWalmartConnection, uploadNoraInventory, uploadWallkoalaInventory } from '../../services/storeService';
 import { validateVendorPriceSettings } from '../../utils/priceRangeValidation';
 import MydealSetupFields from './MydealSetupFields';
@@ -80,6 +81,8 @@ function frequencyToCrontab(freq, hour, minute) {
 }
 
 export default function CreateStoreModal({ open, onClose, onSuccess, copyFromStore = null, marketplaces: extMarketplaces = [] }) {
+    // Old orders file picked on the Auto Purchasing step: uploaded right after the store is created.
+    const [historyFile, setHistoryFile] = useState(null);
     const isDuplicate = !!copyFromStore;
     const [step, setStep] = useState(1);
     const [marketplaces, setMarketplaces] = useState([]);
@@ -795,6 +798,13 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 .then(async (res) => {
                     onSuccess();
                     const id = res.data?.id;
+                    if (id && historyFile && (payload.auto_buy_vendors || []).length) {
+                        try {
+                            await importOrdersFile(id, historyFile, { history: true });
+                        } catch {
+                            /* non-fatal: the file can be uploaded again from Store Settings */
+                        }
+                    }
                     const pending = Object.entries(noraPendingByVendorId).filter(([, f]) => f);
                     if (id && pending.length) {
                         for (const [vendorId, file] of pending) {
@@ -873,6 +883,13 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             .then(async (res) => {
                 onSuccess();
                 const id = res.data?.id;
+                if (id && historyFile && (payload.auto_buy_vendors || []).length) {
+                    try {
+                        await importOrdersFile(id, historyFile, { history: true });
+                    } catch {
+                        /* non-fatal: the file can be uploaded again from Store Settings */
+                    }
+                }
                 const pending = Object.entries(noraPendingByVendorId).filter(([, f]) => f);
                 if (id && pending.length) {
                     for (const [vendorId, file] of pending) {
@@ -1612,6 +1629,8 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                 region={form.region}
                                 rows={form.auto_buy_vendors}
                                 onRowsChange={(rows) => setForm((f) => ({ ...f, auto_buy_vendors: rows }))}
+                                historyFile={historyFile}
+                                onHistoryFileChange={setHistoryFile}
                             />
                         )}
                     </div>

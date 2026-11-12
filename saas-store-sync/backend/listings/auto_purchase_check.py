@@ -12,7 +12,10 @@ Then for the order (the sheet in the Auto Purchasing prompt):
                BigW:  the Commission Fee from the orders file
   After Fees = Total Sale - Fee
   Cost       = vendor price x quantity
-  Earning    = After Fees - Cost
+  Shipping   = vendor shipping to the customer's postcode (0 when the vendor gives none)
+  Earning    = After Fees - Cost - Shipping
+
+Shipping the customer paid is not added: the marketplace price already includes it.
 
 The order is ``buyable`` only when every line is mapped to the store's Auto buying
 vendor, has vendor stock >= its quantity, and the order's Earning is above 0.
@@ -160,6 +163,7 @@ def _live_price_stock(url: str, store, vendor_code: str, session: dict) -> dict:
     result = get_price_and_stock(url, store.region or '', session, vendor_code=vendor_code or None) or {}
     return {
         'price': result.get('price'),
+        'shipping': result.get('shipping'),
         'inventory': _inventory_from_scrape_result(result),
         'error_code': result.get('error_code'),
         'error_message': result.get('error_message'),
@@ -182,7 +186,14 @@ def _vendor_price_stock(product, url: str, store, session: dict) -> dict:
 
 # --------------------------------------------------------------------------- one order
 
-def _check_line(store, item: dict, session: dict, *, scrape: bool) -> dict:
+def order_postcode(order) -> str:
+    """Postcode of the order's shipping address ('' when the file has none)."""
+    cust = order.customer_info_json if isinstance(order.customer_info_json, dict) else {}
+    addr = cust.get('shippingAddress') if isinstance(cust.get('shippingAddress'), dict) else {}
+    return str(addr.get('postcode') or '').strip()
+
+
+def _check_line(store, item: dict, session: dict, *, scrape: bool, postcode: str = '') -> dict:
     from sync.tasks import resolve_vendor_scrape_url
 
     sku = (item.get('sku') or '').strip()
@@ -198,6 +209,7 @@ def _check_line(store, item: dict, session: dict, *, scrape: bool) -> dict:
         'mapping_id': None, 'vendor_code': '', 'vendor_name': '', 'vendor_id': '', 'vendor_url': '',
         'vendor_price_cents': None, 'vendor_stock': None, 'price_source': '',
         'cost_cents': None, 'fee_cents': None, 'fee_percent': None,
+        'postcode': postcode, 'shipping_cents': None, 'shipping_source': '',
         'result': LINE_OK, 'message': '',
     }
 
@@ -254,6 +266,10 @@ def _check_line(store, item: dict, session: dict, *, scrape: bool) -> dict:
     line['vendor_price_cents'] = _cents(price) if price is not None else None
     if line['vendor_price_cents'] is not None:
         line['cost_cents'] = line['vendor_price_cents'] * qty
+    # Vendor shipping to the order postcode; a vendor that shows none counts as free (0).
+    shipping = got.get('shipping')
+    line['shipping_cents'] = _cents(shipping) if shipping is not None else 0
+    line['shipping_source'] = 'vendor' if shipping is not None else 'none'
 
     if got.get('error_code'):
         line.update(result=LINE_SCRAPE_FAILED, message=got.get('error_message') or got['error_code'])
@@ -282,7 +298,10 @@ def evaluate_order(order, *, session: dict | None = None, scrape: bool = True) -
     store = order.store
     session = session if session is not None else {}
     items = order.line_items_json if isinstance(order.line_items_json, list) else []
-    lines = [_check_line(store, it, session, scrape=scrape) for it in items if isinstance(it, dict)]
+    postcode = order_postcode(order)
+    lines = [
+        _check_line(store, it, session, scrape=scrape, postcode=postcode) for it in items if isinstance(it, dict)
+    ]
 
     reasons = [_line_reason(ln) for ln in lines if ln['result'] != LINE_OK]
     if not lines:
@@ -298,8 +317,9 @@ def evaluate_order(order, *, session: dict | None = None, scrape: bool = True) -
         reasons.append(
             'No marketplace fee: set Marketplace Fees (%) on the Price step for ' + ', '.join(missing or ['the vendor'])
         )
+    shipping = sum(ln.get('shipping_cents') or 0 for ln in lines)
     after_fees = None if sale is None or fee is None else sale - fee
-    earning = None if after_fees is None or cost is None else after_fees - cost
+    earning = None if after_fees is None or cost is None else after_fees - cost - shipping
     # The laptop buys one vendor per job: an order split across vendors is bought by hand.
     split = sorted({ln.get('auto_buy_vendor') for ln in lines if ln.get('auto_buy_vendor')})
     if len(split) > 1:
@@ -318,6 +338,7 @@ def evaluate_order(order, *, session: dict | None = None, scrape: bool = True) -
         'fee_cents': fee,
         'after_fees_cents': after_fees,
         'cost_cents': cost,
+        'shipping_cents': shipping,
         'earning_cents': earning,
         'buyable': buyable,
     }
@@ -347,7 +368,7 @@ def mark_checking(store, order_ids) -> list:
     now = timezone.now()
     # Orders being bought or already bought keep their check as it was.
     ids = [
-        str(i) for i in MarketplaceOrder.objects.filter(store=store, id__in=list(order_ids))
+        str(i) for i in MarketplaceOrder.objects.filter(store=store, id__in=list(order_ids), is_history=False)
         .exclude(purchase_check__purchase_status__in=PURCHASE_LOCKED)
         .values_list('id', flat=True)
     ]
@@ -436,6 +457,24 @@ def _save_failure(order, message: str) -> None:
     )
 
 
+def is_loss_only(check) -> bool:
+    """Blocked only because the order loses money: every line is OK, the earning is known and <= 0."""
+    reasons = check.reasons or []
+    lines = check.lines_json or []
+    return (
+        check.status == 'blocked' and bool(reasons) and bool(lines)
+        and all(str(r).startswith('Loss:') for r in reasons)
+        and all(ln.get('result') == LINE_OK for ln in lines)
+        and check.earning_cents is not None and check.earning_cents <= 0
+    )
+
+
+def can_force(check) -> bool:
+    from .models import PURCHASE_LOCKED
+
+    return is_loss_only(check) and check.purchase_status not in PURCHASE_LOCKED
+
+
 def check_payload(check) -> dict | None:
     """What the Orders page shows for an order's check."""
     if check is None:
@@ -448,7 +487,11 @@ def check_payload(check) -> dict | None:
         'fee_cents': check.fee_cents,
         'after_fees_cents': check.after_fees_cents,
         'cost_cents': check.cost_cents,
+        'shipping_cents': check.shipping_cents,
         'earning_cents': check.earning_cents,
+        'can_force': can_force(check),
+        'forced_at': check.forced_at.isoformat() if check.forced_at else None,
+        'forced_loss_cents': check.forced_loss_cents,
         'requested_at': check.requested_at.isoformat() if check.requested_at else None,
         'checked_at': check.checked_at.isoformat() if check.checked_at else None,
         'purchase_status': check.purchase_status or '',

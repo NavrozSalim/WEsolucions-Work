@@ -179,7 +179,8 @@ def detect_format(headers) -> str | None:
     return None
 
 
-def parse_order_file(filename: str, data: bytes) -> ParsedFile:
+def parse_order_file(filename: str, data: bytes, *, all_statuses: bool = False) -> ParsedFile:
+    """``all_statuses``: keep BigW rows in every status (old orders uploaded for the record)."""
     if len(data) > MAX_FILE_BYTES:
         raise OrderFileError('The file is larger than 10 MB.')
     headers, rows = _read_rows(filename, data)
@@ -204,7 +205,10 @@ def parse_order_file(filename: str, data: bytes) -> ParsedFile:
             i = index.get(col.casefold())
             return _row[i].strip() if i is not None and i < len(_row) else ''
 
-        parsed = (_kogan_row if fmt == 'kogan' else _bigw_row)(g, rownum, skipped)
+        if fmt == 'kogan':
+            parsed = _kogan_row(g, rownum, skipped)
+        else:
+            parsed = _bigw_row(g, rownum, skipped, all_statuses=all_statuses)
         if parsed is None:
             continue
         order_id, base, line = parsed
@@ -251,12 +255,12 @@ def _kogan_row(g, rownum, skipped):
     return order_id, base, line
 
 
-def _bigw_row(g, rownum, skipped):
+def _bigw_row(g, rownum, skipped, *, all_statuses=False):
     order_id, sku = g('Order No'), g('SKU')
     if not order_id or not sku:
         raise OrderFileError(f'Row {rownum}: Order No or SKU is blank.')
     status = g('Status')
-    if status.casefold() != BIGW_OPEN_STATUS:
+    if status.casefold() != BIGW_OPEN_STATUS and not all_statuses:
         skipped.append((rownum, f'Order {order_id} status is "{status or "blank"}", not Purchased'))
         return None
     name = g('Name')
@@ -362,13 +366,17 @@ def check_file_fits_store(fmt: str, store) -> None:
         )
 
 
-def import_order_file(store, user, filename: str, data: bytes) -> dict:
-    """Parse the file and upsert one MarketplaceOrder per order ID. Returns counts for the UI."""
+def import_order_file(store, user, filename: str, data: bytes, *, history: bool = False) -> dict:
+    """Parse the file and upsert one MarketplaceOrder per order ID. Returns counts for the UI.
+
+    ``history``: old orders uploaded on the store wizard. New rows are marked history (shown,
+    never checked or bought). Orders already on the store keep how they came in. Nothing is deleted.
+    """
     from django.db import transaction
 
     from .models import Environment, MarketplaceOrder, OrderStatus
 
-    parsed = parse_order_file(filename, data)
+    parsed = parse_order_file(filename, data, all_statuses=history)
     check_file_fits_store(parsed.file_format, store)
 
     created = updated = 0
@@ -399,6 +407,7 @@ def import_order_file(store, user, filename: str, data: bytes) -> dict:
                     environment=Environment.PRODUCTION,
                     # Customer has paid; the order waits to be bought and shipped.
                     status=OrderStatus.PAID,
+                    is_history=history,
                     **fields,
                 )
                 created += 1

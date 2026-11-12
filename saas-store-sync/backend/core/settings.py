@@ -104,6 +104,8 @@ except ValueError:
 # flow. Off by default: orders are fetched, checked and bought one at a time from the Orders page
 # (Auto Purchasing). Set to 1 only to bring the old whole-file runs back.
 AUTO_ORDER_BOT_LEGACY_RUNS = _env_bool('AUTO_ORDER_BOT_LEGACY_RUNS', False)
+# Orders of a deleted store are kept this many days so they can be linked to another store.
+ORDER_DETACHED_RETENTION_DAYS = int(os.getenv('ORDER_DETACHED_RETENTION_DAYS', '7') or 7)
 # Auto Purchasing: Process needs a stock / profit check younger than this.
 try:
     AUTO_PURCHASE_MAX_CHECK_AGE_MINUTES = max(5, int(os.getenv('AUTO_PURCHASE_MAX_CHECK_AGE_MINUTES', '120')))

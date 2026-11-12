@@ -201,19 +201,33 @@ def write_mapping_file(check, vendor: str, path: Path) -> None:
     wb.save(path)
 
 
-def start_purchase(order, user):
-    """User clicked Process: validate, lock the order and queue the purchase for the laptop."""
+def start_purchase(order, user, *, force=False):
+    """User clicked Process: validate, lock the order and queue the purchase for the laptop.
+
+    ``force`` (Force process) also buys an order whose only problem is a loss.
+    """
     from stores.models import AutoOrderRun
 
+    from .auto_purchase_check import is_loss_only
     from .models import OrderPurchaseCheck, PurchaseCheckStatus, PurchaseStatus, PURCHASE_LOCKED
 
     store = order.store
+    if order.is_history:
+        raise AutoPurchaseError('This is an old order uploaded for the record; it is not bought.', 409)
     if not store.is_auto_purchase:
         raise AutoPurchaseError("Choose an Auto buying vendor on the store's Auto Purchasing step first.")
     marketplace = bot_marketplace_or_error(store)
     with transaction.atomic():
         check = OrderPurchaseCheck.objects.select_for_update().filter(order=order).first()
-        if check is None or check.status != PurchaseCheckStatus.BUYABLE:
+        forced = False
+        if check is not None and force and check.status != PurchaseCheckStatus.BUYABLE:
+            if not is_loss_only(check):
+                raise AutoPurchaseError(
+                    'Force process only buys an order whose only problem is a loss. Fix the other problems first.',
+                    409,
+                )
+            forced = True
+        elif check is None or check.status != PurchaseCheckStatus.BUYABLE:
             raise AutoPurchaseError('This order has not passed the stock and profit check.', 409)
         if check.purchase_status in PURCHASE_LOCKED:
             raise AutoPurchaseError('This order is already being bought or was bought.', 409)
@@ -256,12 +270,48 @@ def start_purchase(order, user):
         check.purchase_error = ''
         check.vendor_order_number = ''
         check.purchased_at = None
+        check.forced_at = timezone.now() if forced else None
+        check.forced_loss_cents = check.earning_cents if forced else None
         check.save(update_fields=[
             'purchase_status', 'purchase_run_id', 'purchase_requested_at', 'purchase_requested_by',
-            'purchase_error', 'vendor_order_number', 'purchased_at', 'updated_at',
+            'purchase_error', 'vendor_order_number', 'purchased_at', 'forced_at', 'forced_loss_cents',
+            'updated_at',
         ])
     logger.info('Auto purchase queued: order %s run %s account %s', order.id, run.id, account.name)
     return run
+
+
+def process_all(store, user) -> dict:
+    """Process all orders: queue every order that is ready to buy (in profit, no errors, check fresh).
+
+    Loss orders, blocked orders, old (history) orders and orders already queued or bought are skipped.
+    The laptop buys the queued orders one at a time.
+    """
+    from .models import PURCHASE_LOCKED, MarketplaceOrder, PurchaseCheckStatus
+
+    if not store.is_auto_purchase:
+        raise AutoPurchaseError("Choose an Auto buying vendor on the store's Auto Purchasing step first.")
+    bot_marketplace_or_error(store)
+    candidates = list(
+        MarketplaceOrder.objects.filter(
+            store=store, is_history=False, purchase_check__status=PurchaseCheckStatus.BUYABLE,
+        )
+        .exclude(purchase_check__purchase_status__in=PURCHASE_LOCKED)
+        .exclude(status__in=['cancelled', 'refunded', 'shipping_complete'])
+        .select_related('purchase_check')
+        .order_by('created_at')
+    )
+    queued, failed = [], []
+    for order in candidates:
+        try:
+            start_purchase(order, user)
+            queued.append(order.invoice_number or str(order.id))
+        except AutoPurchaseError as exc:
+            failed.append(f'{order.invoice_number or order.id}: {exc}')
+    msg = f'{len(queued)} order(s) sent to the laptop to buy.'
+    if failed:
+        msg += f' {len(failed)} not sent: ' + '; '.join(failed[:5]) + (' ...' if len(failed) > 5 else '')
+    return {'queued': len(queued), 'not_sent': failed, 'message': msg}
 
 
 def mark_purchasing(run) -> None:

@@ -61,7 +61,8 @@ class StoreViewSet(viewsets.ModelViewSet):
             self.perform_destroy(instance)
             return Response(status=status.HTTP_204_NO_CONTENT)
         except Exception as e:
-            from django.db import IntegrityError, ProtectedError
+            from django.db import IntegrityError
+            from django.db.models import ProtectedError
             err_msg = str(e)
             if isinstance(e, (ProtectedError, IntegrityError)):
                 err_msg = f"Cannot delete store: {err_msg}"
@@ -118,7 +119,10 @@ class StoreViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         from django.db import transaction
         oid, name = str(instance.id), instance.name
+        from listings.order_retention import detach_store_orders
+
         with transaction.atomic():
+            detach_store_orders(instance)
             instance.delete()
         try:
             log_action(self.request.user, 'store_deleted', 'store', oid, {'name': name}, self.request)
