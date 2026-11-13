@@ -319,3 +319,51 @@ class AmazonAUCurrentlyUnavailableTests(SimpleTestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.price, 21.0)
         self.assertEqual(result.stock, 99)
+
+
+class AmazonAUNoFeaturedOfferTests(SimpleTestCase):
+    def test_see_all_buying_options_only_fails_instead_of_blank_success(self):
+        # Design Toscano Vampire Bat: no buy box, only "1 option from $41.49".
+        html = """
+        <html><body>
+          <span id="productTitle">Design Toscano Vampire Bat Key Holder Wall Sculpture</span>
+          <div id="twister">
+            <span class="a-size-mini">1 option from</span>
+            <span class="a-price"><span class="a-offscreen">$41.49</span></span>
+          </div>
+          <div id="desktop_buybox">
+            <span id="buybox-see-all-buying-options">
+              <a id="buybox-see-all-buying-options-announce">See All Buying Options</a>
+            </span>
+            <input id="add-to-wishlist-button" value="Add to Wish List">
+          </div>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        result = au_parsed_offer_result(
+            soup,
+            html,
+            "https://www.amazon.com.au/dp/B002T0ITW0",
+            no_price_message="Price not found via HTTP",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "no_featured_offer")
+        self.assertIsNone(result.price)
+        legacy = result.to_legacy()
+        self.assertEqual(legacy["error_code"], "no_featured_offer")
+        self.assertIsNone(legacy["price"])
+
+    def test_no_featured_offers_text_fails(self):
+        html = """
+        <html><body>
+          <span id="productTitle">Some product</span>
+          <div id="desktop_buybox"><span>No featured offers available</span></div>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        result = au_parsed_offer_result(
+            soup, html, "https://www.amazon.com.au/dp/B000000001",
+            no_price_message="Price not found via HTTP",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "no_featured_offer")

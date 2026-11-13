@@ -285,9 +285,18 @@ def au_parsed_offer_result(soup, html: str, url: str, *, no_price_message: str):
     if unavailable is not None:
         return unavailable
 
-    oos = AmazonParser.oos_without_offer_result(soup)
-    if oos is not None:
-        return oos
+    # No buy box ("See All Buying Options" / "No featured offers available").
+    # Fail it rather than returning a blank-price success, so the row shows
+    # as failed instead of scraped with an empty price. The "1 option from"
+    # price belongs to another seller and is not used.
+    if AmazonParser.has_no_featured_offer(soup):
+        return ScrapeResult.fail(
+            "no_featured_offer",
+            "Amazon AU has no buy box for this product (See All Buying Options only).",
+            "",
+            "amazon_au",
+            url,
+        )
 
     price = AmazonParser.extract_price(soup, html, market="AU")
     stock = AmazonParser.extract_stock(soup)
@@ -446,6 +455,7 @@ class AmazonAUHTTP:
             last_result = result
             if result.error_code in (
                 "http_404", "asin_mismatch", "no_price", "currently_unavailable",
+                "no_featured_offer",
             ):
                 break
             if attempt + 1 >= RETRY_LIMIT:
@@ -622,7 +632,7 @@ def scrape_amazon_au(vendor_url: str, region: str, session: dict = None) -> dict
     if http_result.success:
         logger.info("HTTP scrape OK for %s (price=%s)", vendor_url[:60], http_result.price)
         return http_result.to_legacy()
-    if http_result.error_code in ("asin_mismatch", "currently_unavailable"):
+    if http_result.error_code in ("asin_mismatch", "currently_unavailable", "no_featured_offer"):
         logger.info(
             "Amazon AU %s is final for %s; not trying the browser",
             http_result.error_code,
@@ -678,6 +688,7 @@ def scrape_amazon_au(vendor_url: str, region: str, session: dict = None) -> dict
             last_result = result
             if result.error_code in (
                 "captcha", "dog_page", "asin_mismatch", "currently_unavailable",
+                "no_featured_offer",
             ):
                 break
 
