@@ -344,6 +344,111 @@ def set_vendor_order_number(order, number: str):
     return check
 
 
+LOOKUP_NOTE = 'Order ID recheck'
+
+
+def needs_order_number(check) -> bool:
+    """A processed order (bought, or failed/stopped after it was sent) with no real vendor order number."""
+    from .models import PurchaseStatus
+
+    if check is None or not check.purchase_run_id:
+        return False
+    if check.purchase_status not in (PurchaseStatus.PURCHASED, PurchaseStatus.FAILED):
+        return False
+    number = (check.vendor_order_number or '').strip()
+    return not number or 'UNREAD' in number.upper()
+
+
+def active_lookup(order_id):
+    from stores.auto_order_bot import ACTIVE
+    from stores.models import AutoOrderRun
+
+    return AutoOrderRun.objects.filter(
+        kind=AutoOrderRun.Kind.LOOKUP_ORDER, marketplace_order_id=order_id, status__in=ACTIVE,
+    ).order_by('-started_at').first()
+
+
+def _set_lookup_note(check, text):
+    parts = [p for p in (check.purchase_error or '').split('; ') if p and not p.startswith(LOOKUP_NOTE)]
+    check.purchase_error = '; '.join(parts + ([f'{LOOKUP_NOTE}: {text}'] if text else []))[:1000]
+
+
+def start_order_lookup(order, user):
+    """Recheck order ID: the laptop opens the vendor's order list in the purchase account and finds this
+    order's number (by product title and customer name). Nothing is bought."""
+    from stores.models import AutoOrderRun
+
+    from .models import OrderPurchaseCheck
+
+    store = order.store
+    check = OrderPurchaseCheck.objects.filter(order=order).first()
+    if not needs_order_number(check):
+        raise AutoPurchaseError('Recheck order ID is for processed orders that have no vendor order number.', 409)
+    if active_lookup(order.id) is not None:
+        raise AutoPurchaseError('The laptop is already looking up this order ID.', 409)
+    marketplace = bot_marketplace_or_error(store)
+    lines = check.lines_json or []
+    vendors = {ln.get('auto_buy_vendor') or store.auto_buy_vendor for ln in lines} or {store.auto_buy_vendor}
+    vendor = sorted(v for v in vendors if v)[0] if any(vendors) else ''
+    account = purchase_account_for(store, vendor) if vendor else None
+    if account is None:
+        raise AutoPurchaseError("No purchase account for this order's vendor on the store's Auto Purchasing step.")
+    run = _new_run(store, user, kind=AutoOrderRun.Kind.LOOKUP_ORDER, marketplace=marketplace,
+                   account_name=account.name, vendor=account.vendor, order_id=order.id, place=False)
+    run_dir = Path(run.run_dir)
+    write_order_file(order, marketplace, run_dir / 'orders.xlsx')
+    write_mapping_file(check, account.vendor, run_dir / 'mapping.xlsx')
+    _bot().write_accounts_file(store.user, run_dir / 'accounts.json')
+    run.command = json.dumps(_bot().build_command(
+        store, marketplace, account.name, run_dir / 'orders.xlsx', run_dir / 'mapping.xlsx',
+        run_dir / 'accounts.json', run_dir / 'output', False,
+    ) + ['--lookup-orders'])
+    run.save(update_fields=['command'])
+    _set_lookup_note(check, f"sent to the laptop {timezone.localtime().strftime('%d/%m/%Y %H:%M')}")
+    check.save(update_fields=['purchase_error', 'updated_at'])
+    logger.info('Order ID lookup queued: order %s run %s account %s', order.id, run.id, account.name)
+    return run
+
+
+def apply_lookup_result(run) -> None:
+    """Laptop finished Recheck order ID: save the order number it found (the order was placed), or say not found."""
+    from .models import MarketplaceOrder, OrderPurchaseCheck, PurchaseStatus
+
+    order = MarketplaceOrder.objects.filter(id=run.marketplace_order_id).first()
+    check = OrderPurchaseCheck.objects.filter(order=order).first() if order else None
+    if check is None:
+        return
+    invoice = (order.invoice_number or '').strip()
+    rows = [r for r in (run.done_rows or []) + (run.remaining_rows or [])
+            if str(r.get('order_id') or '').strip() == invoice]
+    numbers = []
+    for r in rows:
+        n = str(r.get('vendor_order_number') or '').strip()
+        if r.get('status') == 'order_found' and n and n not in numbers:
+            numbers.append(n)
+    now = timezone.localtime().strftime('%d/%m/%Y %H:%M')
+    if numbers:
+        was_failed = check.purchase_status == PurchaseStatus.FAILED
+        check.vendor_order_number = ', '.join(numbers)[:255]
+        check.purchase_status = PurchaseStatus.PURCHASED
+        check.purchased_at = check.purchased_at or timezone.now()
+        keep = [p for p in (check.purchase_error or '').split('; ')
+                if p and UNREAD_NOTE not in p and not p.startswith(LOOKUP_NOTE)
+                and not p.startswith(STOPPED_PREFIX)]
+        check.purchase_error = '; '.join(keep)
+        _set_lookup_note(check, f"found {check.vendor_order_number} in the vendor's orders ({now})"
+                         + ('; the order had been placed before it was stopped' if was_failed else ''))
+    else:
+        why = '; '.join(str(r.get('error') or r.get('status') or '') for r in rows if r.get('error'))
+        if not rows:
+            tail = ' / '.join((run.stdout or '').strip().splitlines()[-2:])
+            why = f'the laptop job {run.status}' + (f' ({tail[:200]})' if tail else '')
+        why = why or "no matching order in the vendor's order list"
+        _set_lookup_note(check, f'not found ({now}): {why}')
+    check.save(update_fields=['vendor_order_number', 'purchase_status', 'purchased_at', 'purchase_error',
+                              'updated_at'])
+
+
 STOPPED_PREFIX = 'Stopped by you'
 
 

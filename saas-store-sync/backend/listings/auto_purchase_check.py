@@ -563,4 +563,14 @@ def check_payload(check) -> dict | None:
         'purchase_error': check.purchase_error or '',
         'purchase_requested_at': check.purchase_requested_at.isoformat() if check.purchase_requested_at else None,
         'purchased_at': check.purchased_at.isoformat() if check.purchased_at else None,
+        **_order_id_lookup(check),
     }
+
+
+def _order_id_lookup(check) -> dict:
+    """Recheck order ID button: shown for a processed order without a vendor order number."""
+    from .auto_purchase_jobs import active_lookup, needs_order_number
+
+    can = needs_order_number(check)
+    return {'can_recheck_order_id': can,
+            'order_id_lookup_pending': bool(can and active_lookup(check.order_id) is not None)}

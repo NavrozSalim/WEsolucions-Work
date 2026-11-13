@@ -1482,6 +1482,32 @@ class StoreOrderVendorNumberView(APIView):
                          'purchase_check': check_payload(check)})
 
 
+class StoreOrderRecheckOrderIdView(APIView):
+    """Recheck order ID: the laptop finds this processed order's vendor order number. Nothing is bought."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk, pk):
+        from stores.auto_order_bot import laptop_online
+
+        from .auto_purchase_check import check_payload
+        from .auto_purchase_jobs import AutoPurchaseError, start_order_lookup
+
+        store = _get_store(request, store_pk)
+        order = MarketplaceOrder.objects.filter(store=store, id=pk).first()
+        if order is None:
+            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            start_order_lookup(order, request.user)
+        except AutoPurchaseError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        order.refresh_from_db()
+        msg = f'Looking up the vendor order number of {order.invoice_number} on the laptop.'
+        if not laptop_online(store.user or request.user):
+            msg += ' No laptop is online right now; it runs when the laptop agent is running.'
+        return Response({'message': msg, 'purchase_check': check_payload(order.purchase_check)},
+                        status=status.HTTP_202_ACCEPTED)
+
+
 class StoreOrderStopView(APIView):
     """Auto Purchasing Stop: cancel the laptop run that is buying this order (the laptop kills the bot)."""
     permission_classes = [IsAuthenticated]

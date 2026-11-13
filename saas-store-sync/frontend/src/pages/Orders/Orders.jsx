@@ -40,6 +40,7 @@ import {
     processOrderPurchase,
     stopOrderPurchase,
     setVendorOrderNumber,
+    recheckOrderId,
     recheckOrderPurchase,
     startOrdersFetch,
     submitOrderShipping,
@@ -897,7 +898,7 @@ function InfoRow({ label, children }) {
     );
 }
 
-function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone, onRecheck, recheckingId, onProcess, onForce, processingId, onStop, stoppingId, onSaveVendorNumber, savingVendorNumberId }) {
+function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone, onRecheck, recheckingId, onProcess, onForce, processingId, onStop, stoppingId, onSaveVendorNumber, savingVendorNumberId, onRecheckOrderId, recheckingOrderIdId }) {
     const d = orderDetails(order);
     const customer = d.customer || {};
     const shippingAddr = formatAddress(d.shippingAddress);
@@ -928,6 +929,8 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateT
                     stopping={stoppingId === order.id}
                     onSaveVendorNumber={onSaveVendorNumber ? (n) => onSaveVendorNumber(order, n) : null}
                     savingVendorNumber={savingVendorNumberId === order.id}
+                    onRecheckOrderId={onRecheckOrderId ? () => onRecheckOrderId(order) : null}
+                    recheckingOrderId={recheckingOrderIdId === order.id}
                 />
             )}
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -1305,7 +1308,8 @@ export default function Orders() {
 
     // Auto Purchasing: while any order is still being checked, refresh quietly every 5s.
     const anyChecking = orders.some((o) => o.purchase_check?.status === 'checking'
-        || ['queued', 'purchasing'].includes(o.purchase_check?.purchase_status));
+        || ['queued', 'purchasing'].includes(o.purchase_check?.purchase_status)
+        || o.purchase_check?.order_id_lookup_pending);
     useEffect(() => {
         if (!anyChecking || !selectedStore) return undefined;
         const storeAtStart = selectedStore;
@@ -1405,6 +1409,23 @@ export default function Orders() {
                 return false;
             })
             .finally(() => setSavingVendorNumberId(null));
+    };
+
+    // Recheck order ID: the laptop finds the vendor order number of a processed order that has none.
+    const [recheckingOrderIdId, setRecheckingOrderIdId] = useState(null);
+    const handleRecheckOrderId = (order) => {
+        if (!selectedStore) return;
+        setRecheckingOrderIdId(order.id);
+        recheckOrderId(selectedStore, order.id)
+            .then((res) => {
+                setMessage({ text: res.data?.message || 'Looking up the vendor order number.', variant: 'success' });
+                const pc = res.data?.purchase_check;
+                if (pc) setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, purchase_check: pc } : o)));
+            })
+            .catch((err) => {
+                setMessage({ text: err.response?.data?.detail || 'Could not start Recheck order ID.', variant: 'error' });
+            })
+            .finally(() => setRecheckingOrderIdId(null));
     };
 
     // Process all: every order that is ready to buy (in profit, no errors, not bought yet).
@@ -2012,7 +2033,7 @@ export default function Orders() {
                                             </div>
                                             {expandedId === o.id && (
                                                 <div className="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} />
+                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} onRecheckOrderId={selectedStoreData?.auto_buy_vendor ? handleRecheckOrderId : null} recheckingOrderIdId={recheckingOrderIdId} />
                                                 </div>
                                             )}
                                         </li>
@@ -2164,7 +2185,7 @@ export default function Orders() {
                                                     {expandedId === o.id && (
                                                         <tr className="border-t border-slate-100 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/40">
                                                             <td colSpan={9} className="px-4 py-4">
-                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} />
+                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} onRecheckOrderId={selectedStoreData?.auto_buy_vendor ? handleRecheckOrderId : null} recheckingOrderIdId={recheckingOrderIdId} />
                                                             </td>
                                                         </tr>
                                                     )}

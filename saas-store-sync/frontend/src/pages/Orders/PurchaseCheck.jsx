@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { AlertTriangle, ExternalLink, Loader2, Pencil, RefreshCw, ShoppingCart, Square } from 'lucide-react';
+import { AlertTriangle, ExternalLink, Loader2, Pencil, RefreshCw, ScanSearch, ShoppingCart, Square } from 'lucide-react';
 
 /** Auto Purchasing: stock / profit check for one order, with Process and Force process. */
 
@@ -144,7 +144,29 @@ function VendorOrderNumberEdit({ check, onSave, saving }) {
     );
 }
 
-function PurchaseStatusNote({ check, onStop, stopping, onSaveVendorNumber, savingVendorNumber }) {
+function RecheckOrderIdButton({ check, onRecheckOrderId, busy }) {
+    if (!onRecheckOrderId || !check?.can_recheck_order_id) return null;
+    if (check.order_id_lookup_pending) {
+        return (
+            <p className="mt-2 flex items-center gap-1.5 text-xs text-sky-700 dark:text-sky-300">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> The laptop is looking up the vendor order number…
+            </p>
+        );
+    }
+    return (
+        <button
+            type="button"
+            onClick={onRecheckOrderId}
+            disabled={busy}
+            className="mt-2 inline-flex min-h-8 items-center gap-1 rounded-md border border-sky-300 bg-white px-2.5 text-xs font-medium text-sky-700 hover:bg-sky-50 disabled:opacity-60 dark:border-sky-700 dark:bg-slate-900 dark:text-sky-300"
+            title="The laptop opens the vendor's order list in the purchase account and finds this order's number. Nothing is bought."
+        >
+            <ScanSearch className="h-3.5 w-3.5" /> {busy ? 'Sending…' : 'Recheck order ID'}
+        </button>
+    );
+}
+
+function PurchaseStatusNote({ check, onStop, stopping, onSaveVendorNumber, savingVendorNumber, onRecheckOrderId, recheckingOrderId }) {
     const ps = check?.purchase_status;
     if (!ps) return null;
     const when = (iso) => (iso ? new Date(iso).toLocaleString() : '');
@@ -179,18 +201,20 @@ function PurchaseStatusNote({ check, onStop, stopping, onSaveVendorNumber, savin
                 </p>
                 <VendorOrderNumberEdit check={check} onSave={onSaveVendorNumber} saving={savingVendorNumber} />
                 {check.purchase_error && <p className="mt-1 text-amber-700 dark:text-amber-300">{check.purchase_error}</p>}
+                <RecheckOrderIdButton check={check} onRecheckOrderId={onRecheckOrderId} busy={recheckingOrderId} />
             </div>
         );
     }
     return (
-        <p className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-300">
-            <span className="font-semibold">Purchase failed.</span> {check.purchase_error}
-        </p>
+        <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-300">
+            <p><span className="font-semibold">Purchase failed.</span> {check.purchase_error}</p>
+            <RecheckOrderIdButton check={check} onRecheckOrderId={onRecheckOrderId} busy={recheckingOrderId} />
+        </div>
     );
 }
 
 export function PurchaseCheckPanel({ check, onRecheck, rechecking, onProcess, onForce, processing, onStop, stopping,
-    onSaveVendorNumber, savingVendorNumber }) {
+    onSaveVendorNumber, savingVendorNumber, onRecheckOrderId, recheckingOrderId }) {
     const lines = check?.lines || [];
     const checking = check?.status === 'checking';
     const buyable = check?.status === 'buyable';
@@ -252,7 +276,8 @@ export function PurchaseCheckPanel({ check, onRecheck, rechecking, onProcess, on
             ) : (
                 <div className="space-y-3">
                     <PurchaseStatusNote check={check} onStop={onStop} stopping={stopping}
-                        onSaveVendorNumber={onSaveVendorNumber} savingVendorNumber={savingVendorNumber} />
+                        onSaveVendorNumber={onSaveVendorNumber} savingVendorNumber={savingVendorNumber}
+                        onRecheckOrderId={onRecheckOrderId} recheckingOrderId={recheckingOrderId} />
                     {check.forced_at && (
                         <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200">
                             Force processed at a loss of {money(Math.abs(check.forced_loss_cents || 0))} on {new Date(check.forced_at).toLocaleString()}.

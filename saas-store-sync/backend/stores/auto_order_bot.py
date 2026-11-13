@@ -133,6 +133,10 @@ def finish_run(run: AutoOrderRun, exit_code: int | None, stdout: str) -> None:
         from listings.auto_purchase_jobs import apply_purchase_result
 
         apply_purchase_result(run)
+    elif run.kind == AutoOrderRun.Kind.LOOKUP_ORDER:
+        from listings.auto_purchase_jobs import apply_lookup_result
+
+        apply_lookup_result(run)
 
 
 def execute_run(run_id) -> None:

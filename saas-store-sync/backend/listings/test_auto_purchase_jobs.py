@@ -330,6 +330,76 @@ class AutoPurchaseJobTests(TestCase):
         res = self.c.post(self.url(f'{order.id}/vendor-order-number/'), {'vendor_order_number': '1'}, format='json')
         self.assertEqual(res.status_code, 409)
 
+    LOOKUP = {'kinds': 'run,fetch_orders,purchase,lookup_order'}
+
+    def _bought_unread(self, order=None):
+        order = order or self.buyable_order()
+        self.c.post(self.url(f'{order.id}/process/'))
+        self.complete(self.claim(), 0, done=[
+            {'order_id': 'TJPQ6RDG', 'sku': s, 'status': 'purchased', 'vendor_order_number': 'UNREAD',
+             'error': 'order placed but number not read; check the vendor account'}
+            for s in ('TFS-KAZ-1-New', 'TFS-KAZ-2-New')], remaining=[])
+        return order
+
+    def test_recheck_order_id_finds_number(self):
+        order = self._bought_unread()
+        listed = {o['invoice_number']: o for o in self.c.get(self.url()).data['orders']}
+        self.assertTrue(listed['TJPQ6RDG']['purchase_check']['can_recheck_order_id'])
+        res = self.c.post(self.url(f'{order.id}/recheck-order-id/'))
+        self.assertEqual(res.status_code, 202)
+        self.assertTrue(res.data['purchase_check']['order_id_lookup_pending'])
+        self.assertEqual(self.c.post(self.url(f'{order.id}/recheck-order-id/')).status_code, 409)  # already sent
+        self.assertFalse(self.claim().get('job_id'))  # an old laptop agent does not get it
+        job = self.claim(self.LOOKUP)
+        self.assertEqual(job['kind'], 'lookup_order')
+        self.assertEqual(self.laptop.get(job['files']['orders']).status_code, 200)
+        self.complete(job, 0, done=[
+            {'order_id': 'TJPQ6RDG', 'sku': s, 'status': 'order_found', 'vendor_order_number': '503-7159982-8255043'}
+            for s in ('TFS-KAZ-1-New', 'TFS-KAZ-2-New')], remaining=[])
+        c = self.check(order)
+        self.assertEqual((c.purchase_status, c.vendor_order_number), ('purchased', '503-7159982-8255043'))
+        self.assertNotIn('not read', c.purchase_error)
+        self.assertIn('found 503-7159982-8255043', c.purchase_error)
+        listed = {o['invoice_number']: o for o in self.c.get(self.url()).data['orders']}
+        self.assertFalse(listed['TJPQ6RDG']['purchase_check']['can_recheck_order_id'])
+
+    def test_recheck_order_id_on_stopped_order_that_was_placed(self):
+        order = self.buyable_order()
+        self.c.post(self.url(f'{order.id}/process/'))
+        job = self.claim()
+        self.c.post(self.url(f'{order.id}/stop/'))
+        self.complete(job, 1, done=[], remaining=[
+            {'order_id': 'TJPQ6RDG', 'sku': s, 'status': ''} for s in ('TFS-KAZ-1-New', 'TFS-KAZ-2-New')])
+        self.assertEqual(self.check(order).purchase_status, 'failed')
+        self.assertEqual(self.c.post(self.url(f'{order.id}/recheck-order-id/')).status_code, 202)
+        self.complete(self.claim(self.LOOKUP), 0, done=[
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-1-New', 'status': 'order_found', 'vendor_order_number': '503-1'},
+        ], remaining=[
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-2-New', 'status': 'order_not_found', 'error': 'no match'}])
+        c = self.check(order)
+        self.assertEqual((c.purchase_status, c.vendor_order_number), ('purchased', '503-1'))
+        self.assertIn('placed before it was stopped', c.purchase_error)
+        self.assertNotIn('Stopped by you', c.purchase_error)
+
+    def test_recheck_order_id_not_found_keeps_status(self):
+        order = self._bought_unread()
+        self.c.post(self.url(f'{order.id}/recheck-order-id/'))
+        self.complete(self.claim(self.LOOKUP), 0, done=[], remaining=[
+            {'order_id': 'TJPQ6RDG', 'sku': s, 'status': 'order_not_found',
+             'error': "no matching order (product title and customer name) in the vendor's order list"}
+            for s in ('TFS-KAZ-1-New', 'TFS-KAZ-2-New')])
+        c = self.check(order)
+        self.assertEqual((c.purchase_status, c.vendor_order_number), ('purchased', 'UNREAD'))
+        self.assertIn('Order ID recheck: not found', c.purchase_error)
+        self.assertEqual(self.c.post(self.url(f'{order.id}/recheck-order-id/')).status_code, 202)  # can try again
+
+    def test_recheck_order_id_refused_when_not_needed(self):
+        order = self.buyable_order()
+        self.assertEqual(self.c.post(self.url(f'{order.id}/recheck-order-id/')).status_code, 409)  # never processed
+        order = self._bought_unread(order)
+        self.c.post(self.url(f'{order.id}/vendor-order-number/'), {'vendor_order_number': '503-9'}, format='json')
+        self.assertEqual(self.c.post(self.url(f'{order.id}/recheck-order-id/')).status_code, 409)  # has a number
+
     def test_stop_refused_when_not_buying(self):
         order = self.buyable_order()
         self.assertEqual(self.c.post(self.url(f'{order.id}/stop/')).status_code, 409)
