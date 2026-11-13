@@ -2212,6 +2212,7 @@ def _schedule_store_scrape_lanes(store_id: str, chunks: list, vendor_id: str) ->
         lanes[index % lane_total].append([str(x) for x in chunk])
     lanes = [lane for lane in lanes if lane]
     cache.set(_scrape_lane_counter_key(store_id, root_task_id), 0, timeout=_SCRAPE_LANE_COUNTER_TTL)
+    _pop_scrape_run_totals(store_id, root_task_id)
     for lane in lanes:
         first, *rest = lane
         catalog_scrape_store_chunk_task.apply_async(
@@ -2224,6 +2225,68 @@ def _scrape_lane_counter_key(store_id, root_task_id: str | None) -> str:
     if root_task_id:
         return f'catalog:scrape_lanes:{store_id}:{root_task_id}'
     return f'catalog:scrape_lanes:{store_id}'
+
+
+_SCRAPE_TOTAL_COUNTS = ('rows_processed', 'rows_succeeded', 'failed')
+_SCRAPE_TOTAL_FLAGS = ('stalled', 'user_cancelled')
+_SCRAPE_TOTAL_TEXTS = ('fatal_error', 'error_summary', 'error')
+
+
+def _scrape_total_key(store_id, root_task_id: str | None, field: str) -> str:
+    return f'{_scrape_lane_counter_key(store_id, root_task_id)}:total:{field}'
+
+
+def _add_scrape_run_totals(store_id, root_task_id: str | None, stats: dict | None) -> None:
+    """Add one batch's counts to the run's totals.
+
+    The finish step used to see only the batch that happened to end last. When
+    that batch hit its time limit it reported 0 updated / 0 failed, so the run
+    ended with listings still Pending and no follow-up pass.
+    """
+    from django.core.cache import cache
+
+    stats = stats or {}
+    for field in _SCRAPE_TOTAL_COUNTS:
+        n = int(stats.get(field) or 0)
+        if n <= 0:
+            continue
+        key = _scrape_total_key(store_id, root_task_id, field)
+        cache.add(key, 0, timeout=_SCRAPE_LANE_COUNTER_TTL)
+        try:
+            cache.incr(key, n)
+        except ValueError:
+            cache.set(key, n, timeout=_SCRAPE_LANE_COUNTER_TTL)
+    for field in _SCRAPE_TOTAL_FLAGS:
+        if stats.get(field):
+            cache.set(_scrape_total_key(store_id, root_task_id, field), True, timeout=_SCRAPE_LANE_COUNTER_TTL)
+    for field in _SCRAPE_TOTAL_TEXTS:
+        if stats.get(field):
+            # First message wins; later batches usually repeat it.
+            cache.add(
+                _scrape_total_key(store_id, root_task_id, field),
+                str(stats[field])[:500],
+                timeout=_SCRAPE_LANE_COUNTER_TTL,
+            )
+
+
+def _pop_scrape_run_totals(store_id, root_task_id: str | None) -> dict:
+    """Return the run's totals (every batch, every lane) and clear them."""
+    from django.core.cache import cache
+
+    keys = {
+        field: _scrape_total_key(store_id, root_task_id, field)
+        for field in (*_SCRAPE_TOTAL_COUNTS, *_SCRAPE_TOTAL_FLAGS, *_SCRAPE_TOTAL_TEXTS)
+    }
+    found = cache.get_many(list(keys.values()))
+    cache.delete_many(list(keys.values()))
+    out: dict = {}
+    for field in _SCRAPE_TOTAL_COUNTS:
+        out[field] = int(found.get(keys[field]) or 0)
+    for field in _SCRAPE_TOTAL_FLAGS:
+        out[field] = bool(found.get(keys[field]))
+    for field in _SCRAPE_TOTAL_TEXTS:
+        out[field] = found.get(keys[field]) or None
+    return out
 
 
 def _scrape_run_replaced(store_id, root_task_id: str | None) -> bool:
@@ -2244,6 +2307,7 @@ def _advance_store_scrape_lane(store_id, rest, lane_count, vendor_id, stats, roo
 
     if _scrape_run_replaced(store_id, root_task_id):
         return
+    _add_scrape_run_totals(store_id, root_task_id, stats)
     rest = list(rest or [])
     if rest and not (stats or {}).get('user_cancelled'):
         nxt, *more = rest
@@ -2262,7 +2326,7 @@ def _advance_store_scrape_lane(store_id, rest, lane_count, vendor_id, stats, roo
         return
     cache.delete(key)
     catalog_scrape_store_finalize.apply_async(
-        args=[[stats or {}], str(store_id), vendor_id or ''],
+        args=[[_pop_scrape_run_totals(store_id, root_task_id)], str(store_id), vendor_id or ''],
         kwargs={'root_task_id': root_task_id or ''},
     )
 
@@ -2468,6 +2532,25 @@ def _scrape_chunk_soft_limit() -> int:
     return max(600, sec)
 
 
+def _batch_rows_off_pending(store_id, mapping_ids) -> tuple[int, int]:
+    """(rows no longer Pending, of those Scraped) for a batch that hit its time limit.
+
+    The scrape loop's own counters are lost when the limit interrupts it, but
+    every listing it finished was already saved. Reporting 0/0 instead made a
+    slow batch look like no progress at all.
+    """
+    try:
+        _refresh_db_connection()
+        rows = ProductMapping.objects.filter(id__in=list(mapping_ids or []), store_id=store_id).exclude(
+            sync_status='pending',
+        )
+        done = rows.count()
+        return done, rows.filter(sync_status='scraped').count()
+    except Exception:
+        logger.exception('Could not count finished rows for timed-out batch (store %s)', store_id)
+        return 0, 0
+
+
 @shared_task(
     bind=True,
     max_retries=3,
@@ -2536,10 +2619,11 @@ def catalog_scrape_store_chunk_task(
             store_id,
             _scrape_chunk_soft_limit(),
         )
+        done, done_ok = _batch_rows_off_pending(store_id, mapping_ids)
         stats = {
-            'rows_processed': 0,
-            'rows_succeeded': 0,
-            'failed': 0,
+            'rows_processed': done,
+            'rows_succeeded': done_ok,
+            'failed': done - done_ok,
             'error_summary': 'batch_time_limit',
             'stalled': True,
             'user_cancelled': False,
@@ -2668,12 +2752,16 @@ def catalog_scrape_store_finalize(
                 metadata=sears_push,
             )
         continued = False
+        # The totals cover every batch. One batch that crashed (a dropped DB
+        # connection, say) left its rows Pending; if the run as a whole moved
+        # listings, the next pass picks them up. A run that moved nothing stops.
+        moved_any = (succeeded or 0) > 0 or (failed or 0) > 0
         if (
             _queue_scrape_continuation(
                 store,
                 left_n=left_n,
                 user_cancelled=bool(user_cancelled),
-                fatal=fatal_parts,
+                fatal=None if moved_any else fatal_parts,
                 succeeded=succeeded,
                 failed=failed,
                 vendor_id=vendor_id,

@@ -945,8 +945,13 @@ class AmazonHTTP:
 
     @classmethod
     def _ensure_zip(cls, s: requests.Session, seed_url: str, session_dict: dict):
-        """Set delivery location to US ZIP 10001 via Amazon's address-change API."""
-        if session_dict is not None and session_dict.get("amazon_http_zip_set"):
+        """Set delivery location to US ZIP 10001 via Amazon's address-change API.
+
+        Tried once per HTTP session (a proxy rotation starts a new session). A
+        failed attempt used to be repeated before every product: two extra
+        requests, one of them a second load of the product page.
+        """
+        if session_dict is not None and "amazon_http_zip_set" in session_dict:
             return
         try:
             s.get(seed_url, timeout=FETCH_TIMEOUT)

@@ -80,6 +80,17 @@ class AmazonUSProxyHttpTests(_ResetPools):
         self.assertNotEqual(first.proxies["https"], second.proxies["https"])
         self.assertNotIn("amazon_http_zip_set", session)
 
+    def test_failed_zip_is_not_retried_for_every_product(self):
+        from scrapers.amazon_us_scraper import AmazonHTTP
+
+        session = {}
+        s = MagicMock()
+        s.post.side_effect = Exception("boom")
+        AmazonHTTP._ensure_zip(s, "https://www.amazon.com/dp/B000000001", session)
+        AmazonHTTP._ensure_zip(s, "https://www.amazon.com/dp/B000000002", session)
+        self.assertEqual(s.post.call_count, 1)
+        self.assertEqual(s.get.call_count, 1)
+
     def test_block_rotates_proxy_without_backoff(self):
         from scrapers import amazon_us_scraper
         from scrapers.core import ScrapeResult

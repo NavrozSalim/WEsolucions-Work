@@ -152,6 +152,78 @@ class ScrapeWatchdogTests(TestCase):
         mock_final.assert_called_once()
         self.assertEqual(mock_final.call_args.kwargs['kwargs'], {'root_task_id': 'root-new'})
 
+    @patch('catalog.tasks.catalog_scrape_store_finalize.apply_async')
+    def test_finalize_gets_totals_of_every_batch(self, mock_final):
+        """A last batch that timed out with 0/0 must not hide the run's progress."""
+        self._running(root='root-new')
+        sid = str(self.store.id)
+        _advance_store_scrape_lane(
+            sid, [], 2, '', {'rows_processed': 20, 'rows_succeeded': 18, 'failed': 2},
+            root_task_id='root-new',
+        )
+        mock_final.assert_not_called()
+        _advance_store_scrape_lane(
+            sid, [], 2, '',
+            {'rows_processed': 0, 'rows_succeeded': 0, 'failed': 0, 'stalled': True,
+             'error_summary': 'batch_time_limit'},
+            root_task_id='root-new',
+        )
+        totals = mock_final.call_args.kwargs['args'][0][0]
+        self.assertEqual(totals['rows_succeeded'], 18)
+        self.assertEqual(totals['failed'], 2)
+        self.assertEqual(totals['rows_processed'], 20)
+        self.assertTrue(totals['stalled'])
+        self.assertEqual(totals['error_summary'], 'batch_time_limit')
+
+    @patch('catalog.tasks.catalog_scrape_store_finalize.apply_async')
+    def test_totals_start_fresh_for_next_run(self, mock_final):
+        self._running(root='root-new')
+        sid = str(self.store.id)
+        _advance_store_scrape_lane(sid, [], 1, '', {'rows_succeeded': 5}, root_task_id='root-new')
+        _advance_store_scrape_lane(sid, [], 1, '', {'rows_succeeded': 1}, root_task_id='root-new')
+        second = mock_final.call_args_list[1].kwargs['args'][0][0]
+        self.assertEqual(second['rows_succeeded'], 1)
+
+    @patch('catalog.tasks.catalog_scrape_store_task.apply_async')
+    def test_finalize_continues_when_one_batch_crashed(self, mock_start):
+        self._mapping('E1', self.ebay)
+        self._running(root='root-new')
+        out = catalog_scrape_store_finalize.run(
+            [{'rows_succeeded': 10, 'failed': 1, 'rows_processed': 11, 'fatal_error': 'db gone'}],
+            str(self.store.id), '', root_task_id='root-new',
+        )
+        self.assertTrue(out['continued'])
+        mock_start.assert_called_once()
+
+    @patch('catalog.tasks.catalog_scrape_store_task.apply_async')
+    def test_finalize_stops_when_nothing_moved(self, mock_start):
+        self._mapping('E1', self.ebay)
+        self._running(root='root-new')
+        out = catalog_scrape_store_finalize.run(
+            [{'rows_succeeded': 0, 'failed': 0, 'fatal_error': 'db gone'}],
+            str(self.store.id), '', root_task_id='root-new',
+        )
+        self.assertFalse(out['continued'])
+        mock_start.assert_not_called()
+
+    @patch('catalog.tasks._advance_store_scrape_lane')
+    @patch('catalog.tasks._process_store_wide_scrape_mappings')
+    def test_timed_out_batch_reports_rows_it_finished(self, mock_process, mock_advance):
+        from celery.exceptions import SoftTimeLimitExceeded
+
+        done = self._mapping('E1', self.ebay, status='scraped')
+        bad = self._mapping('E2', self.ebay, status='failed')
+        left = self._mapping('E3', self.ebay)
+        self._running(root='root-new')
+        mock_process.side_effect = SoftTimeLimitExceeded()
+        out = catalog_scrape_store_chunk_task.run(
+            str(self.store.id), [done.id, bad.id, left.id], [], 1, '', root_task_id='root-new',
+        )
+        self.assertEqual(out['rows_processed'], 2)
+        self.assertEqual(out['rows_succeeded'], 1)
+        self.assertEqual(out['failed'], 1)
+        self.assertTrue(out['stalled'])
+
     def test_old_finalize_does_not_clear_new_run(self):
         self._running(root='root-new')
         out = catalog_scrape_store_finalize.run([{}], str(self.store.id), '', root_task_id='root-old')
