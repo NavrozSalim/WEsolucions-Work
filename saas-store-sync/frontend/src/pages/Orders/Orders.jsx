@@ -39,6 +39,7 @@ import {
     processAllOrders,
     processOrderPurchase,
     stopOrderPurchase,
+    setVendorOrderNumber,
     recheckOrderPurchase,
     startOrdersFetch,
     submitOrderShipping,
@@ -896,7 +897,7 @@ function InfoRow({ label, children }) {
     );
 }
 
-function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone, onRecheck, recheckingId, onProcess, onForce, processingId, onStop, stoppingId }) {
+function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone, onRecheck, recheckingId, onProcess, onForce, processingId, onStop, stoppingId, onSaveVendorNumber, savingVendorNumberId }) {
     const d = orderDetails(order);
     const customer = d.customer || {};
     const shippingAddr = formatAddress(d.shippingAddress);
@@ -925,6 +926,8 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateT
                     processing={processingId === order.id}
                     onStop={onStop ? () => onStop(order) : null}
                     stopping={stoppingId === order.id}
+                    onSaveVendorNumber={onSaveVendorNumber ? (n) => onSaveVendorNumber(order, n) : null}
+                    savingVendorNumber={savingVendorNumberId === order.id}
                 />
             )}
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -1383,6 +1386,25 @@ export default function Orders() {
                 setStoppingId(null);
                 setStopOrderRow(null);
             });
+    };
+
+    // Vendor order number typed by the user (the bot could not read it: UNREAD).
+    const [savingVendorNumberId, setSavingVendorNumberId] = useState(null);
+    const saveVendorNumber = (order, number) => {
+        if (!selectedStore) return false;
+        setSavingVendorNumberId(order.id);
+        return setVendorOrderNumber(selectedStore, order.id, number)
+            .then((res) => {
+                setMessage({ text: res.data?.message || 'Vendor order number saved.', variant: 'success' });
+                const pc = res.data?.purchase_check;
+                if (pc) setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, purchase_check: pc } : o)));
+                return true;
+            })
+            .catch((err) => {
+                setMessage({ text: err.response?.data?.detail || 'Could not save the vendor order number.', variant: 'error' });
+                return false;
+            })
+            .finally(() => setSavingVendorNumberId(null));
     };
 
     // Process all: every order that is ready to buy (in profit, no errors, not bought yet).
@@ -1990,7 +2012,7 @@ export default function Orders() {
                                             </div>
                                             {expandedId === o.id && (
                                                 <div className="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} />
+                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} />
                                                 </div>
                                             )}
                                         </li>
@@ -2142,7 +2164,7 @@ export default function Orders() {
                                                     {expandedId === o.id && (
                                                         <tr className="border-t border-slate-100 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/40">
                                                             <td colSpan={9} className="px-4 py-4">
-                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} />
+                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} />
                                                             </td>
                                                         </tr>
                                                     )}

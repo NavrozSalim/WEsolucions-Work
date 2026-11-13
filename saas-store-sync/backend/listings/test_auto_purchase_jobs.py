@@ -305,6 +305,31 @@ class AutoPurchaseJobTests(TestCase):
         self.assertEqual((c.purchase_status, c.vendor_order_number), ('purchased', '249-7'))
         self.assertEqual(self.c.post(self.url(f'{order.id}/process/')).status_code, 409)
 
+    def test_type_vendor_order_number_on_unread_order(self):
+        order = self.buyable_order()
+        self.c.post(self.url(f'{order.id}/process/'))
+        self.complete(self.claim(), 0, done=[
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-1-New', 'status': 'purchased', 'vendor_order_number': 'UNREAD',
+             'error': 'order placed but number not read; check the vendor account'},
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-2-New', 'status': 'purchased', 'vendor_order_number': 'UNREAD',
+             'error': 'order placed but number not read; check the vendor account'},
+        ], remaining=[])
+        self.assertEqual(self.check(order).vendor_order_number, 'UNREAD')
+        res = self.c.post(self.url(f'{order.id}/vendor-order-number/'), {'vendor_order_number': ' 503-7159982-8255043 '},
+                          format='json')
+        self.assertEqual(res.status_code, 200)
+        c = self.check(order)
+        self.assertEqual((c.vendor_order_number, c.purchase_status), ('503-7159982-8255043', 'purchased'))
+        self.assertNotIn('not read', c.purchase_error)
+        self.assertEqual(res.data['purchase_check']['vendor_order_number'], '503-7159982-8255043')
+        blank = self.c.post(self.url(f'{order.id}/vendor-order-number/'), {'vendor_order_number': ' '}, format='json')
+        self.assertEqual(blank.status_code, 400)
+
+    def test_vendor_order_number_only_on_purchased_orders(self):
+        order = self.buyable_order()
+        res = self.c.post(self.url(f'{order.id}/vendor-order-number/'), {'vendor_order_number': '1'}, format='json')
+        self.assertEqual(res.status_code, 409)
+
     def test_stop_refused_when_not_buying(self):
         order = self.buyable_order()
         self.assertEqual(self.c.post(self.url(f'{order.id}/stop/')).status_code, 409)

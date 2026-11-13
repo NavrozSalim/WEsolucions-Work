@@ -1462,6 +1462,26 @@ class StoreOrderProcessView(APIView):
         }, status=status.HTTP_202_ACCEPTED)
 
 
+class StoreOrderVendorNumberView(APIView):
+    """Save the vendor's order number typed by the user on a purchased order (e.g. when the bot read UNREAD)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk, pk):
+        from .auto_purchase_check import check_payload
+        from .auto_purchase_jobs import AutoPurchaseError, set_vendor_order_number
+
+        store = _get_store(request, store_pk)
+        order = MarketplaceOrder.objects.filter(store=store, id=pk).first()
+        if order is None:
+            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            check = set_vendor_order_number(order, request.data.get('vendor_order_number'))
+        except AutoPurchaseError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        return Response({'message': f'Vendor order {check.vendor_order_number} saved for {order.invoice_number}.',
+                         'purchase_check': check_payload(check)})
+
+
 class StoreOrderStopView(APIView):
     """Auto Purchasing Stop: cancel the laptop run that is buying this order (the laptop kills the bot)."""
     permission_classes = [IsAuthenticated]

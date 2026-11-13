@@ -1,4 +1,5 @@
-import { AlertTriangle, ExternalLink, Loader2, RefreshCw, ShoppingCart, Square } from 'lucide-react';
+import { useState } from 'react';
+import { AlertTriangle, ExternalLink, Loader2, Pencil, RefreshCw, ShoppingCart, Square } from 'lucide-react';
 
 /** Auto Purchasing: stock / profit check for one order, with Process and Force process. */
 
@@ -93,7 +94,57 @@ function SumRow({ label, value, strong, tone }) {
     );
 }
 
-function PurchaseStatusNote({ check, onStop, stopping }) {
+function VendorOrderNumberEdit({ check, onSave, saving }) {
+    const unread = !check.vendor_order_number || /UNREAD/i.test(check.vendor_order_number);
+    const [open, setOpen] = useState(false);
+    const [value, setValue] = useState('');
+    if (!onSave) return null;
+    if (!open && !unread) {
+        return (
+            <button
+                type="button"
+                onClick={() => { setValue(check.vendor_order_number || ''); setOpen(true); }}
+                className="mt-1 inline-flex items-center gap-0.5 text-[11px] font-normal text-emerald-700 underline-offset-2 hover:underline dark:text-emerald-300"
+                title="Change the vendor order number"
+            >
+                <Pencil className="h-3 w-3" /> Edit vendor order number
+            </button>
+        );
+    }
+    const save = (e) => {
+        e.preventDefault();
+        if (!value.trim()) return;
+        Promise.resolve(onSave(value.trim())).then((ok) => { if (ok !== false) setOpen(false); });
+    };
+    return (
+        <form onSubmit={save} className="mt-2 flex flex-wrap items-center gap-2">
+            <label className="text-[11px] font-medium text-emerald-900 dark:text-emerald-100" htmlFor={`von-${check.order_id || ''}`}>
+                Vendor order number
+            </label>
+            <input
+                id={`von-${check.order_id || ''}`}
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                placeholder="e.g. 503-7159982-8255043"
+                className="min-h-8 w-56 rounded-md border border-emerald-300 bg-white px-2 text-xs text-slate-900 dark:border-emerald-700 dark:bg-slate-900 dark:text-slate-100"
+            />
+            <button
+                type="submit"
+                disabled={saving || !value.trim()}
+                className="inline-flex min-h-8 items-center rounded-md bg-emerald-600 px-2.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
+            >
+                {saving ? 'Saving…' : 'Save'}
+            </button>
+            {!unread && (
+                <button type="button" onClick={() => setOpen(false)} className="text-xs text-slate-600 dark:text-slate-300">
+                    Cancel
+                </button>
+            )}
+        </form>
+    );
+}
+
+function PurchaseStatusNote({ check, onStop, stopping, onSaveVendorNumber, savingVendorNumber }) {
     const ps = check?.purchase_status;
     if (!ps) return null;
     const when = (iso) => (iso ? new Date(iso).toLocaleString() : '');
@@ -126,6 +177,7 @@ function PurchaseStatusNote({ check, onStop, stopping }) {
                     Purchased{check.vendor_order_number ? ` · vendor order ${check.vendor_order_number}` : ''}
                     {check.purchased_at && <span className="font-normal opacity-75"> · {when(check.purchased_at)}</span>}
                 </p>
+                <VendorOrderNumberEdit check={check} onSave={onSaveVendorNumber} saving={savingVendorNumber} />
                 {check.purchase_error && <p className="mt-1 text-amber-700 dark:text-amber-300">{check.purchase_error}</p>}
             </div>
         );
@@ -137,7 +189,8 @@ function PurchaseStatusNote({ check, onStop, stopping }) {
     );
 }
 
-export function PurchaseCheckPanel({ check, onRecheck, rechecking, onProcess, onForce, processing, onStop, stopping }) {
+export function PurchaseCheckPanel({ check, onRecheck, rechecking, onProcess, onForce, processing, onStop, stopping,
+    onSaveVendorNumber, savingVendorNumber }) {
     const lines = check?.lines || [];
     const checking = check?.status === 'checking';
     const buyable = check?.status === 'buyable';
@@ -198,7 +251,8 @@ export function PurchaseCheckPanel({ check, onRecheck, rechecking, onProcess, on
                 <p className="text-sm text-slate-500 dark:text-slate-400">Checking catalog mapping, vendor price and stock…</p>
             ) : (
                 <div className="space-y-3">
-                    <PurchaseStatusNote check={check} onStop={onStop} stopping={stopping} />
+                    <PurchaseStatusNote check={check} onStop={onStop} stopping={stopping}
+                        onSaveVendorNumber={onSaveVendorNumber} savingVendorNumber={savingVendorNumber} />
                     {check.forced_at && (
                         <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200">
                             Force processed at a loss of {money(Math.abs(check.forced_loss_cents || 0))} on {new Date(check.forced_at).toLocaleString()}.

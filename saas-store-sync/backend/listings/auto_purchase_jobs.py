@@ -323,6 +323,27 @@ def mark_purchasing(run) -> None:
     )
 
 
+UNREAD_NOTE = 'order placed but number not read'
+
+
+def set_vendor_order_number(order, number: str):
+    """User typed the vendor's order number on a purchased order (the bot could not read it)."""
+    from .models import OrderPurchaseCheck, PurchaseStatus
+
+    number = ' '.join(str(number or '').split())[:255]
+    if not number:
+        raise AutoPurchaseError('Enter the vendor order number.')
+    check = OrderPurchaseCheck.objects.filter(order=order).first()
+    if check is None or check.purchase_status != PurchaseStatus.PURCHASED:
+        raise AutoPurchaseError('Only a purchased order has a vendor order number.', status_code=409)
+    check.vendor_order_number = number
+    # Drop the bot's "number not read" notes; keep anything else (e.g. only some items bought).
+    parts = [p for p in (check.purchase_error or '').split('; ') if p and UNREAD_NOTE not in p]
+    check.purchase_error = '; '.join(parts)
+    check.save(update_fields=['vendor_order_number', 'purchase_error', 'updated_at'])
+    return check
+
+
 STOPPED_PREFIX = 'Stopped by you'
 
 
