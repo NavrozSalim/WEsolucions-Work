@@ -263,6 +263,52 @@ class AutoPurchaseJobTests(TestCase):
         self.assertIn('stopped before finishing', c.purchase_error)
         self.assertIn('Target page has been closed', c.purchase_error)
 
+    def test_stop_before_the_laptop_starts(self):
+        order = self.buyable_order()
+        self.c.post(self.url(f'{order.id}/process/'))
+        res = self.c.post(self.url(f'{order.id}/stop/'))
+        self.assertEqual(res.status_code, 200)
+        c = self.check(order)
+        self.assertEqual(c.purchase_status, 'failed')
+        self.assertIn('Stopped by you', c.purchase_error)
+        self.assertIn('not started', c.purchase_error)
+        self.assertEqual(AutoOrderRun.objects.get(id=c.purchase_run_id).status, 'cancelled')
+        self.assertFalse(self.claim().get('job_id'))  # the laptop does not get the stopped job
+        # it can be processed again
+        self.assertEqual(self.c.post(self.url(f'{order.id}/process/')).status_code, 202)
+
+    def test_stop_while_buying_then_laptop_reports_nothing_bought(self):
+        order = self.buyable_order()
+        self.c.post(self.url(f'{order.id}/process/'))
+        job = self.claim()
+        self.assertEqual(self.c.post(self.url(f'{order.id}/stop/')).status_code, 200)
+        self.assertIn('being stopped', self.check(order).purchase_error)
+        self.complete(job, 1, done=[], remaining=[
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-1-New', 'status': ''},
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-2-New', 'status': ''},
+        ], stdout='terminated')
+        c = self.check(order)
+        self.assertEqual(c.purchase_status, 'failed')
+        self.assertTrue(c.purchase_error.startswith('Stopped by you'))
+        self.assertIn('Bot:', c.purchase_error)
+
+    def test_stop_after_it_already_paid_keeps_it_purchased(self):
+        order = self.buyable_order()
+        self.c.post(self.url(f'{order.id}/process/'))
+        job = self.claim()
+        self.c.post(self.url(f'{order.id}/stop/'))
+        self.complete(job, 0, done=[
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-1-New', 'status': 'purchased', 'vendor_order_number': '249-7'},
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-2-New', 'status': 'purchased', 'vendor_order_number': '249-7'},
+        ], remaining=[])
+        c = self.check(order)
+        self.assertEqual((c.purchase_status, c.vendor_order_number), ('purchased', '249-7'))
+        self.assertEqual(self.c.post(self.url(f'{order.id}/process/')).status_code, 409)
+
+    def test_stop_refused_when_not_buying(self):
+        order = self.buyable_order()
+        self.assertEqual(self.c.post(self.url(f'{order.id}/stop/')).status_code, 409)
+
     def test_order_cannot_be_sent_to_buy_twice(self):
         order = self.buyable_order()
         self.assertEqual(self.c.post(self.url(f'{order.id}/process/')).status_code, 202)

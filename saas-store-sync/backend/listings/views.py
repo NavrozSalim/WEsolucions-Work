@@ -1462,6 +1462,25 @@ class StoreOrderProcessView(APIView):
         }, status=status.HTTP_202_ACCEPTED)
 
 
+class StoreOrderStopView(APIView):
+    """Auto Purchasing Stop: cancel the laptop run that is buying this order (the laptop kills the bot)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk, pk):
+        from .auto_purchase_check import check_payload
+        from .auto_purchase_jobs import AutoPurchaseError, stop_purchase
+
+        store = _get_store(request, store_pk)
+        order = MarketplaceOrder.objects.filter(store=store, id=pk).first()
+        if order is None:
+            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            check = stop_purchase(order, request.user)
+        except AutoPurchaseError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        return Response({'message': f'Stopping order {order.invoice_number}.', 'purchase_check': check_payload(check)})
+
+
 class StoreOrderProcessAllView(APIView):
     """Process all orders: buy every order that is in profit with no errors (one confirm on the page)."""
     permission_classes = [IsAuthenticated]

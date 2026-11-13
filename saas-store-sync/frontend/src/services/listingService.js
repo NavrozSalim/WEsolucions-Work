@@ -328,6 +328,8 @@ export const getOrdersFetch = (storeId) => api.get(`/stores/${storeId}/orders/fe
 /** Auto Purchasing: buy this order through the store's Auto buying vendor (Process). */
 export const processOrderPurchase = (storeId, orderId, { force = false } = {}) =>
     api.post(`/stores/${storeId}/orders/${orderId}/process/`, force ? { force: true } : {});
+/** Auto Purchasing: stop the laptop run that is buying this order (the bot is killed). */
+export const stopOrderPurchase = (storeId, orderId) => api.post(`/stores/${storeId}/orders/${orderId}/stop/`);
 /** Auto Purchasing: buy every order that is in profit with no errors. */
 export const processAllOrders = (storeId) => api.post(`/stores/${storeId}/orders/process-all/`);
 /** Orders of the user's deleted stores (kept 7 days) and linking them to this store. */

@@ -323,6 +323,41 @@ def mark_purchasing(run) -> None:
     )
 
 
+STOPPED_PREFIX = 'Stopped by you'
+
+
+def stop_purchase(order, user):
+    """User clicked Stop: cancel this order's laptop run. The laptop kills the bot within a few seconds.
+
+    Anything the bot finished before it stopped is still recorded when the laptop reports back
+    (a line already paid for stays Purchased, so it cannot be bought twice).
+    """
+    from stores.auto_order_bot import ACTIVE
+    from stores.models import AutoOrderRun
+
+    from .models import OrderPurchaseCheck, PurchaseStatus
+
+    check = OrderPurchaseCheck.objects.filter(order=order).first()
+    if check is None or check.purchase_status not in (PurchaseStatus.QUEUED, PurchaseStatus.PURCHASING):
+        raise AutoPurchaseError('This order is not being bought.', status_code=409)
+    run = AutoOrderRun.objects.filter(id=check.purchase_run_id).first() if check.purchase_run_id else None
+    was_running = bool(run and run.status == AutoOrderRun.Status.RUNNING)
+    if run is not None and run.status in ACTIVE:
+        run.status = AutoOrderRun.Status.CANCELLED
+        run.finished_at = timezone.now()
+        run.save(update_fields=['status', 'finished_at'])
+    who = (getattr(user, 'get_full_name', lambda: '')() or getattr(user, 'email', '') or '').strip()
+    check.purchase_status = PurchaseStatus.FAILED
+    check.purchase_error = (
+        f"{STOPPED_PREFIX}{' (' + who + ')' if who else ''} at {timezone.localtime().strftime('%d/%m/%Y %H:%M')}. "
+        + ('The laptop bot is being stopped; if it had already paid, the order shows as Purchased in a moment '
+           'and is not bought again. Check the vendor account before processing again.'
+           if was_running else 'It had not started on the laptop yet.')
+    )[:1000]
+    check.save(update_fields=['purchase_status', 'purchase_error', 'updated_at'])
+    return check
+
+
 def apply_purchase_result(run) -> None:
     """Called when a purchase job finishes: copy the bot's per-line result onto the order."""
     from .models import MarketplaceOrder, OrderPurchaseCheck, PurchaseStatus
@@ -373,8 +408,13 @@ def apply_purchase_result(run) -> None:
         check.purchased_at = timezone.now()
         check.purchase_error = 'Only some items were bought; buy the rest by hand. ' + '; '.join(problems)
     else:
+        stopped = (check.purchase_error or '').startswith(STOPPED_PREFIX)
         check.purchase_status = PurchaseStatus.FAILED
-        check.purchase_error = '; '.join(problems) or 'The laptop did not buy this order.'
+        if stopped:  # keep the user's Stop message; add what the bot reported
+            check.purchase_error = (check.purchase_error.split(' Bot: ')[0] + ' Bot: '
+                                    + ('; '.join(problems) or 'nothing bought.'))[:1000]
+        else:
+            check.purchase_error = '; '.join(problems) or 'The laptop did not buy this order.'
     check.save(update_fields=['purchase_status', 'purchased_at', 'purchase_error', 'vendor_order_number', 'updated_at'])
     logger.info('Auto purchase result order %s: %s %s', run.marketplace_order_id, check.purchase_status,
                 check.vendor_order_number)

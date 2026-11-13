@@ -1,4 +1,4 @@
-import { AlertTriangle, ExternalLink, Loader2, RefreshCw, ShoppingCart } from 'lucide-react';
+import { AlertTriangle, ExternalLink, Loader2, RefreshCw, ShoppingCart, Square } from 'lucide-react';
 
 /** Auto Purchasing: stock / profit check for one order, with Process and Force process. */
 
@@ -93,17 +93,30 @@ function SumRow({ label, value, strong, tone }) {
     );
 }
 
-function PurchaseStatusNote({ check }) {
+function PurchaseStatusNote({ check, onStop, stopping }) {
     const ps = check?.purchase_status;
     if (!ps) return null;
     const when = (iso) => (iso ? new Date(iso).toLocaleString() : '');
     if (ps === 'queued' || ps === 'purchasing') {
         return (
-            <p className="flex items-center gap-1.5 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-700 dark:border-sky-800 dark:bg-sky-900/20 dark:text-sky-300">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                {ps === 'queued' ? 'Waiting for the worker laptop to buy this order.' : 'The worker laptop is buying this order.'}
-                {check.purchase_requested_at && <span className="opacity-75">Sent {when(check.purchase_requested_at)}.</span>}
-            </p>
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-700 dark:border-sky-800 dark:bg-sky-900/20 dark:text-sky-300">
+                <p className="flex items-center gap-1.5">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    {ps === 'queued' ? 'Waiting for the worker laptop to buy this order.' : 'The worker laptop is buying this order.'}
+                    {check.purchase_requested_at && <span className="opacity-75">Sent {when(check.purchase_requested_at)}.</span>}
+                </p>
+                {onStop && (
+                    <button
+                        type="button"
+                        onClick={onStop}
+                        disabled={stopping}
+                        className="inline-flex min-h-8 items-center gap-1 rounded-md bg-rose-600 px-2.5 text-xs font-medium text-white hover:bg-rose-700 disabled:opacity-60"
+                        title="Stop buying this order: the laptop closes the bot within a few seconds"
+                    >
+                        <Square className="h-3 w-3 fill-current" /> {stopping ? 'Stopping…' : 'Stop'}
+                    </button>
+                )}
+            </div>
         );
     }
     if (ps === 'purchased') {
@@ -124,7 +137,7 @@ function PurchaseStatusNote({ check }) {
     );
 }
 
-export function PurchaseCheckPanel({ check, onRecheck, rechecking, onProcess, onForce, processing }) {
+export function PurchaseCheckPanel({ check, onRecheck, rechecking, onProcess, onForce, processing, onStop, stopping }) {
     const lines = check?.lines || [];
     const checking = check?.status === 'checking';
     const buyable = check?.status === 'buyable';
@@ -185,7 +198,7 @@ export function PurchaseCheckPanel({ check, onRecheck, rechecking, onProcess, on
                 <p className="text-sm text-slate-500 dark:text-slate-400">Checking catalog mapping, vendor price and stock…</p>
             ) : (
                 <div className="space-y-3">
-                    <PurchaseStatusNote check={check} />
+                    <PurchaseStatusNote check={check} onStop={onStop} stopping={stopping} />
                     {check.forced_at && (
                         <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200">
                             Force processed at a loss of {money(Math.abs(check.forced_loss_cents || 0))} on {new Date(check.forced_at).toLocaleString()}.

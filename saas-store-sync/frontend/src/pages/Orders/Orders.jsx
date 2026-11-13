@@ -38,6 +38,7 @@ import {
     getOrdersFetch,
     processAllOrders,
     processOrderPurchase,
+    stopOrderPurchase,
     recheckOrderPurchase,
     startOrdersFetch,
     submitOrderShipping,
@@ -895,7 +896,7 @@ function InfoRow({ label, children }) {
     );
 }
 
-function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone, onRecheck, recheckingId, onProcess, onForce, processingId }) {
+function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone, onRecheck, recheckingId, onProcess, onForce, processingId, onStop, stoppingId }) {
     const d = orderDetails(order);
     const customer = d.customer || {};
     const shippingAddr = formatAddress(d.shippingAddress);
@@ -922,6 +923,8 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateT
                     onProcess={onProcess ? () => onProcess(order) : null}
                     onForce={onForce ? () => onForce(order) : null}
                     processing={processingId === order.id}
+                    onStop={onStop ? () => onStop(order) : null}
+                    stopping={stoppingId === order.id}
                 />
             )}
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -1355,6 +1358,30 @@ export default function Orders() {
             .finally(() => {
                 setProcessingId(null);
                 setProcessOrderRow(null);
+            });
+    };
+
+    // Stop: cancel the laptop run buying this order (the laptop kills the bot).
+    const [stopOrderRow, setStopOrderRow] = useState(null);
+    const [stoppingId, setStoppingId] = useState(null);
+    const confirmStop = () => {
+        const order = stopOrderRow;
+        if (!order || !selectedStore) return;
+        setStoppingId(order.id);
+        stopOrderPurchase(selectedStore, order.id)
+            .then((res) => {
+                setMessage({ text: res.data?.message || 'Stopping.', variant: 'success' });
+                return getOrders(selectedStore);
+            })
+            .then((res) => {
+                if (Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
+            })
+            .catch((err) => {
+                setMessage({ text: err.response?.data?.detail || 'Could not stop this order.', variant: 'error' });
+            })
+            .finally(() => {
+                setStoppingId(null);
+                setStopOrderRow(null);
             });
     };
 
@@ -1800,6 +1827,21 @@ export default function Orders() {
             />
 
             <ConfirmModal
+                open={!!stopOrderRow}
+                onClose={() => setStopOrderRow(null)}
+                onConfirm={confirmStop}
+                loading={!!stoppingId}
+                variant="danger"
+                title="Stop buying this order?"
+                confirmLabel="Stop"
+                message={stopOrderRow
+                    ? `Order ${stopOrderRow.invoice_number}: the worker laptop closes the bot within a few seconds. `
+                      + 'If it already paid or placed the order, it still shows as Purchased and is not bought again. '
+                      + 'Check the vendor account before you process it again.'
+                    : ''}
+            />
+
+            <ConfirmModal
                 open={processAllOpen}
                 onClose={() => setProcessAllOpen(false)}
                 onConfirm={confirmProcessAll}
@@ -1948,7 +1990,7 @@ export default function Orders() {
                                             </div>
                                             {expandedId === o.id && (
                                                 <div className="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} />
+                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} />
                                                 </div>
                                             )}
                                         </li>
@@ -2100,7 +2142,7 @@ export default function Orders() {
                                                     {expandedId === o.id && (
                                                         <tr className="border-t border-slate-100 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/40">
                                                             <td colSpan={9} className="px-4 py-4">
-                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} />
+                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} />
                                                             </td>
                                                         </tr>
                                                     )}
