@@ -345,10 +345,15 @@ def apply_purchase_result(run) -> None:
         if n and n not in numbers:
             numbers.append(n)
     problems = []
+    tail = ' / '.join((run.stdout or '').strip().splitlines()[-3:])
     for s in wanted:
         r = by_sku.get(s)
         if r is None:
             problems.append(f'{s}: no result from the laptop')
+        elif not str(r.get('status') or '').strip():
+            # The bot stopped in the middle of this line (crash, closed browser): say so with its last log lines.
+            problems.append(f'{s}: the laptop bot stopped before finishing this item'
+                            + (f' ({tail[:400]})' if tail else ''))
         elif r.get('status') != 'purchased':
             problems.append(f"{s}: {r.get('status')}" + (f" ({r.get('error')})" if r.get('error') else ''))
         elif r.get('error'):

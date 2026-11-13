@@ -251,6 +251,18 @@ class AutoPurchaseJobTests(TestCase):
         self.assertEqual(c.purchase_status, 'failed')
         self.assertIn('Chrome did not open', c.purchase_error)
 
+    def test_line_the_bot_never_finished_says_so_with_its_log(self):
+        order = self.buyable_order()
+        self.c.post(self.url(f'{order.id}/process/'))
+        self.complete(self.claim(), 1, done=[], remaining=[
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-1-New', 'status': ''},
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-2-New', 'status': ''},
+        ], stdout='order TJPQ6RDG sku TFS-KAZ-1-New\nTargetClosedError: Target page has been closed')
+        c = self.check(order)
+        self.assertEqual(c.purchase_status, 'failed')
+        self.assertIn('stopped before finishing', c.purchase_error)
+        self.assertIn('Target page has been closed', c.purchase_error)
+
     def test_order_cannot_be_sent_to_buy_twice(self):
         order = self.buyable_order()
         self.assertEqual(self.c.post(self.url(f'{order.id}/process/')).status_code, 202)
