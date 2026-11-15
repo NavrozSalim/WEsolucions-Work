@@ -2,7 +2,7 @@ import { AlertTriangle, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import Select from '../ui/Select';
 
 /**
- * Auto Scraping (store wizard, under Scheduled Updates).
+ * Auto Scraping (store wizard, above Scheduled Updates). Scrape only; no marketplace push.
  *
  * At each run time the server sets all active listings to Pending and scrapes,
  * then up to N times resets only Failed listings to Pending and scrapes again.
@@ -31,7 +31,6 @@ export function emptyAutoScrapeFields(timezone = 'America/New_York') {
         auto_scrape_times: ['06:00'],
         auto_scrape_timezone: timezone,
         auto_scrape_retry_cycles: 2,
-        auto_scrape_push_after: false,
     };
 }
 
@@ -44,7 +43,6 @@ export function autoScrapeFieldsFromStore(store, fallbackTimezone) {
         auto_scrape_times: a.run_times?.length ? a.run_times : base.auto_scrape_times,
         auto_scrape_timezone: a.timezone || base.auto_scrape_timezone,
         auto_scrape_retry_cycles: a.retry_failed_cycles ?? base.auto_scrape_retry_cycles,
-        auto_scrape_push_after: !!a.push_after,
     };
 }
 
@@ -68,7 +66,8 @@ export function buildAutoScrapePayload(form) {
             run_times: [...new Set(form.auto_scrape_times || [])].sort(),
             timezone: form.auto_scrape_timezone,
             retry_failed_cycles: Number(form.auto_scrape_retry_cycles) || 0,
-            push_after: !!form.auto_scrape_push_after,
+            // Pushing is left to each vendor's Continuous update / Scheduled Updates.
+            push_after: false,
         },
     };
 }
@@ -220,21 +219,6 @@ export default function AutoScrapeCard({ form, setForm, timezoneOptions, lastRun
                         At each run time all active listings are set to Pending and scraped. Then, up to this many times,
                         Failed listings are set back to Pending and scraped again. It stops early when nothing is Failed.
                     </p>
-
-                    <label className="flex items-start gap-3 cursor-pointer select-none">
-                        <input
-                            type="checkbox"
-                            checked={!!form.auto_scrape_push_after}
-                            onChange={(e) => set({ auto_scrape_push_after: e.target.checked })}
-                            className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 dark:border-slate-600 text-accent-600 focus:ring-accent-500"
-                        />
-                        <span>
-                            <span className="text-sm text-slate-700 dark:text-slate-300">Push after the last cycle</span>
-                            <span className="block text-xs text-slate-500 dark:text-slate-400">
-                                Send price/stock to the marketplace when the run ends. Off = pushes follow each vendor&apos;s Continuous update.
-                            </span>
-                        </span>
-                    </label>
                 </div>
             )}
 

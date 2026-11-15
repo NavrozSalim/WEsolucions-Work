@@ -1335,8 +1335,15 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                     <ShopifyConnectFields form={form} setForm={setForm} mode="create" />
                                 )}
 
+                                <AutoScrapeCard
+                                    form={form}
+                                    setForm={setForm}
+                                    timezoneOptions={regionTimezones}
+                                    className="mt-6"
+                                />
+
                                 {/* Schedule section */}
-                                <div className="mt-6 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-5 space-y-4">
+                                <div className="mt-4 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-5 space-y-4">
                                     <div className="flex items-center gap-3">
                                         <Clock className="h-5 w-5 text-slate-500 dark:text-slate-400" />
                                         <div className="flex-1">
@@ -1390,13 +1397,6 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                         )}
                                     </div>
                                 </div>
-
-                                <AutoScrapeCard
-                                    form={form}
-                                    setForm={setForm}
-                                    timezoneOptions={regionTimezones}
-                                    className="mt-4"
-                                />
                             </div>
                         )}
 

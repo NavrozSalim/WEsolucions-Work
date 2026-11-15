@@ -823,6 +823,14 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                 />
                             )}
 
+                            <AutoScrapeCard
+                                form={form}
+                                setForm={setForm}
+                                timezoneOptions={regionTimezones}
+                                lastRun={store?.auto_scrape}
+                                storeActive={store?.is_active !== false}
+                            />
+
                             <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-5 space-y-4">
                                 <div className="flex items-center gap-3">
                                     <Clock className="h-5 w-5 text-slate-500 dark:text-slate-400" />
@@ -889,14 +897,6 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                     </div>
                                 )}
                             </div>
-
-                            <AutoScrapeCard
-                                form={form}
-                                setForm={setForm}
-                                timezoneOptions={regionTimezones}
-                                lastRun={store?.auto_scrape}
-                                storeActive={store?.is_active !== false}
-                            />
                         </div>
                     )}
 
