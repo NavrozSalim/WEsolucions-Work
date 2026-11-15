@@ -128,6 +128,7 @@ def finish_run(run: AutoOrderRun, exit_code: int | None, stdout: str) -> None:
     run.remaining_rows = read_workbook(paths['remaining'])
     run.log_text = read_log(run)
     run.finished_at = timezone.now()
+    run.attention = ''
     run.save()
     if run.kind == AutoOrderRun.Kind.PURCHASE:
         from listings.auto_purchase_jobs import apply_purchase_result

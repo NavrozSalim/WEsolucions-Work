@@ -144,13 +144,24 @@ function VendorOrderNumberEdit({ check, onSave, saving }) {
     );
 }
 
+export function AttentionNote({ text }) {
+    return (
+        <p className="mt-2 flex w-full items-start gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-800 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> Action needed on the laptop: {text}
+        </p>
+    );
+}
+
 function RecheckOrderIdButton({ check, onRecheckOrderId, busy }) {
     if (!onRecheckOrderId || !check?.can_recheck_order_id) return null;
     if (check.order_id_lookup_pending) {
         return (
-            <p className="mt-2 flex items-center gap-1.5 text-xs text-sky-700 dark:text-sky-300">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> The laptop is looking up the vendor order number…
-            </p>
+            <>
+                <p className="mt-2 flex items-center gap-1.5 text-xs text-sky-700 dark:text-sky-300">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> The laptop is looking up the vendor order number…
+                </p>
+                {check.attention && <AttentionNote text={check.attention} />}
+            </>
         );
     }
     return (
@@ -178,6 +189,7 @@ function PurchaseStatusNote({ check, onStop, stopping, onSaveVendorNumber, savin
                     {ps === 'queued' ? 'Waiting for the worker laptop to buy this order.' : 'The worker laptop is buying this order.'}
                     {check.purchase_requested_at && <span className="opacity-75">Sent {when(check.purchase_requested_at)}.</span>}
                 </p>
+                {check.attention && <AttentionNote text={check.attention} />}
                 {onStop && (
                     <button
                         type="button"

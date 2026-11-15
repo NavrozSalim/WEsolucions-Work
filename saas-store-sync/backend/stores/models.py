@@ -547,6 +547,10 @@ class AutoOrderRun(models.Model):
         null=True, blank=True, db_index=True, help_text='The order a purchase job buys (listings.MarketplaceOrder).',
     )
     message = models.TextField(blank=True, default='', help_text='Result shown to the user (e.g. import summary).')
+    attention = models.CharField(
+        max_length=300, blank=True, default='',
+        help_text='Set while the bot waits for the person at the laptop (sign-in, captcha, 2-step code).',
+    )
 
     class Meta:
         ordering = ['-started_at']

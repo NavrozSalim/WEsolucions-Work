@@ -155,6 +155,29 @@ class AutoPurchaseJobTests(TestCase):
         self.assertIn('Fetched OpenOrders.xlsx', status['message'])
         self.assertIn('Checking stock and profit for 3 order(s)', status['message'])
 
+    def test_fetch_shows_action_needed_while_bot_waits(self):
+        self.c.post(self.url('fetch-file/'))
+        job = self.claim()
+        msg = "Sign-in needed for the BigW seller portal ('Profile 5' profile). Solve it in the bot's Chrome window"
+        self.assertEqual(self.laptop.post(job['progress_url'], {'attention': msg}, format='multipart').status_code, 200)
+        self.assertEqual(self.c.get(self.url('fetch-file/')).data['fetch']['attention'], msg)
+        self.laptop.post(job['progress_url'], {'attention': ''}, format='multipart')  # solved
+        self.assertEqual(self.c.get(self.url('fetch-file/')).data['fetch']['attention'], '')
+        self.laptop.post(job['progress_url'], {'attention': msg}, format='multipart')
+        self.complete(job, 1, stdout='Sign-in needed')
+        self.assertEqual(self.c.get(self.url('fetch-file/')).data['fetch']['attention'], '')  # cleared when done
+
+    def test_purchase_shows_action_needed_while_bot_waits(self):
+        order = self.buyable_order()
+        self.c.post(self.url(f'{order.id}/process/'))
+        job = self.claim()
+        self.laptop.post(job['progress_url'], {'attention': 'Captcha on AMAZON AU (Default profile)'}, format='multipart')
+        listed = {o['invoice_number']: o for o in self.c.get(self.url()).data['orders']}
+        self.assertEqual(listed['TJPQ6RDG']['purchase_check']['attention'], 'Captcha on AMAZON AU (Default profile)')
+        self.laptop.post(job['progress_url'], {}, format='multipart')  # plain progress keeps it
+        listed = {o['invoice_number']: o for o in self.c.get(self.url()).data['orders']}
+        self.assertTrue(listed['TJPQ6RDG']['purchase_check']['attention'])
+
     def test_fetch_upload_of_wrong_file_is_refused(self):
         self.c.post(self.url('fetch-file/'))
         job = self.claim()

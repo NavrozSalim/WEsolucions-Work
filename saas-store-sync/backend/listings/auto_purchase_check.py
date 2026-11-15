@@ -572,5 +572,17 @@ def _order_id_lookup(check) -> dict:
     from .auto_purchase_jobs import active_lookup, needs_order_number
 
     can = needs_order_number(check)
+    lookup = active_lookup(check.order_id) if can else None
     return {'can_recheck_order_id': can,
-            'order_id_lookup_pending': bool(can and active_lookup(check.order_id) is not None)}
+            'order_id_lookup_pending': lookup is not None,
+            'attention': _attention(check, lookup)}
+
+
+def _attention(check, lookup) -> str:
+    """What the bot is waiting for on the laptop (sign-in, captcha) while it buys or looks up this order."""
+    from stores.models import AutoOrderRun
+
+    run = lookup
+    if run is None and check.purchase_status in ('queued', 'purchasing') and check.purchase_run_id:
+        run = AutoOrderRun.objects.filter(id=check.purchase_run_id).only('status', 'attention').first()
+    return (run.attention or '') if run is not None and run.status == 'running' else ''

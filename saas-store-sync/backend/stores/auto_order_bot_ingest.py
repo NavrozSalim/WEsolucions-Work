@@ -163,6 +163,9 @@ class JobProgressView(_Base):
             return _not_found()
         if run.status in (AutoOrderRun.Status.RUNNING, AutoOrderRun.Status.CANCELLED):
             bot.save_laptop_files(run, _files(request))
+            if 'attention' in request.data:  # the bot is waiting for the person at the laptop ('' = done)
+                run.attention = str(request.data.get('attention') or '').strip()[:300]
+                run.save(update_fields=['attention'])
         return Response({'status': run.status})
 
 

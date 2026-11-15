@@ -46,7 +46,7 @@ import {
     submitOrderShipping,
 } from '../../services/listingService';
 import ConfirmModal from '../../components/ui/ConfirmModal';
-import { PurchaseCheckBadge, PurchaseCheckPanel, purchaseLocked } from './PurchaseCheck';
+import { AttentionNote, PurchaseCheckBadge, PurchaseCheckPanel, purchaseLocked } from './PurchaseCheck';
 
 const STATUS_STYLES = {
     new: 'bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300',
@@ -1847,6 +1847,9 @@ export default function Orders() {
                         </>
                     )}
                 </p>
+            )}
+            {selectedStore && isAutoPurchaseOnly && fetchActive && fetchJob?.attention && (
+                <AttentionNote text={fetchJob.attention} />
             )}
 
             <ConfirmModal

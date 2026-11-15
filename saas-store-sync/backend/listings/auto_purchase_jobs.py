@@ -91,6 +91,7 @@ def run_payload(run) -> dict | None:
         'claimed_at': run.claimed_at.isoformat() if run.claimed_at else None,
         'finished_at': run.finished_at.isoformat() if run.finished_at else None,
         'error': (run.stdout or '')[-600:] if run.status in ('failed', 'rejected') else '',
+        'attention': (run.attention or '') if run.status == 'running' else '',
     }
 
 
