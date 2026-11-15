@@ -895,6 +895,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                 setForm={setForm}
                                 timezoneOptions={regionTimezones}
                                 lastRun={store?.auto_scrape}
+                                storeActive={store?.is_active !== false}
                             />
                         </div>
                     )}

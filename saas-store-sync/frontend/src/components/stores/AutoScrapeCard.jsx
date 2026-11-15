@@ -1,4 +1,4 @@
-import { Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { AlertTriangle, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import Select from '../ui/Select';
 
 /**
@@ -94,7 +94,7 @@ function formatLastRun(a) {
     ].filter(Boolean).join(' · ');
 }
 
-export default function AutoScrapeCard({ form, setForm, timezoneOptions, lastRun = null, className = '' }) {
+export default function AutoScrapeCard({ form, setForm, timezoneOptions, lastRun = null, storeActive = true, className = '' }) {
     const times = form.auto_scrape_times || [];
     const set = (patch) => setForm((f) => ({ ...f, ...patch }));
     const setTime = (idx, part, value) => {
@@ -140,6 +140,16 @@ export default function AutoScrapeCard({ form, setForm, timezoneOptions, lastRun
                     <div className="w-9 h-5 bg-slate-300 dark:bg-slate-600 peer-focus:ring-2 peer-focus:ring-accent-400 rounded-full peer peer-checked:after:translate-x-full peer-checked:rtl:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:inset-s-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-accent-500"></div>
                 </label>
             </div>
+
+            {form.auto_scrape_enabled && !storeActive && (
+                <div role="alert" className="flex items-start gap-2 rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+                    <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                    <span>
+                        This store is inactive, so Auto Scraping won&apos;t run until you turn the store on
+                        (Store Settings → Active).
+                    </span>
+                </div>
+            )}
 
             {form.auto_scrape_enabled && (
                 <div className="space-y-4 pt-2">
