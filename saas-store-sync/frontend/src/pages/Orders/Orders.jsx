@@ -1431,23 +1431,8 @@ export default function Orders() {
     // Process all: every order that is ready to buy (in profit, no errors, not bought yet).
     const readyToBuy = orders.filter((o) => !o.is_history && o.purchase_check?.status === 'buyable'
         && !purchaseLocked(o.purchase_check));
-    // The vendor an order is bought from (same rule as the server): its lines' vendor, else the store's.
-    const orderVendor = (o) => {
-        const vs = [...new Set((o.purchase_check?.lines || []).map((l) => l.auto_buy_vendor).filter(Boolean))];
-        if (vs.length === 1) return vs[0];
-        return vs.length ? '' : (selectedStoreData?.auto_buy_vendor || '');
-    };
-    const readyByVendor = readyToBuy.reduce((acc, o) => {
-        const v = orderVendor(o);
-        if (v) acc[v] = (acc[v] || 0) + 1;
-        return acc;
-    }, {});
-    const storeVendors = (selectedStoreData?.auto_buy_vendors || []).map((r) => r?.vendor || r).filter((v) => typeof v === 'string' && v);
-    const vendorChoices = [...new Set([...storeVendors, ...Object.keys(readyByVendor)])];
     const [processAllMenu, setProcessAllMenu] = useState(false);
     const [processAllVendor, setProcessAllVendor] = useState('');
-    const processAllList = processAllVendor ? readyToBuy.filter((o) => orderVendor(o) === processAllVendor) : readyToBuy;
-    const readyEarning = processAllList.reduce((sum, o) => sum + (Number(o.purchase_check?.earning_cents) || 0), 0);
     const [processAllOpen, setProcessAllOpen] = useState(false);
     const [processingAll, setProcessingAll] = useState(false);
     const askProcessAll = (vendor) => {
@@ -1584,6 +1569,23 @@ export default function Orders() {
         () => stores.find((s) => s.id === selectedStore),
         [stores, selectedStore]
     );
+
+    // Process all by vendor. The vendor an order is bought from (same rule as the server):
+    // its lines' vendor, else the store's.
+    const orderVendor = (o) => {
+        const vs = [...new Set((o.purchase_check?.lines || []).map((l) => l.auto_buy_vendor).filter(Boolean))];
+        if (vs.length === 1) return vs[0];
+        return vs.length ? '' : (selectedStoreData?.auto_buy_vendor || '');
+    };
+    const readyByVendor = readyToBuy.reduce((acc, o) => {
+        const v = orderVendor(o);
+        if (v) acc[v] = (acc[v] || 0) + 1;
+        return acc;
+    }, {});
+    const storeVendors = (selectedStoreData?.auto_buy_vendors || []).map((r) => r?.vendor || r).filter((v) => typeof v === 'string' && v);
+    const vendorChoices = [...new Set([...storeVendors, ...Object.keys(readyByVendor)])];
+    const processAllList = processAllVendor ? readyToBuy.filter((o) => orderVendor(o) === processAllVendor) : readyToBuy;
+    const readyEarning = processAllList.reduce((sum, o) => sum + (Number(o.purchase_check?.earning_cents) || 0), 0);
 
     const marketplaceCode = (selectedStoreData?.marketplace_code || '').toLowerCase();
     // Auto-purchase store whose orders do not come from a marketplace API (e.g. Kogan-TFS):
