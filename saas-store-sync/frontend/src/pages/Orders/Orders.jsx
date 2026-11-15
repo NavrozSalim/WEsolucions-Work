@@ -25,7 +25,7 @@ import Select from '../../components/ui/Select';
 import PageHeader from '../../components/design/PageHeader';
 import EmptyState from '../../components/design/EmptyState';
 import { getCatalogStores } from '../../services/catalogService';
-import { autoBuyVendorsLabel } from '../../components/stores/AutoPurchasingStep';
+import { autoBuyVendorLabel, autoBuyVendorsLabel } from '../../components/stores/AutoPurchasingStep';
 import {
     cancelOrder,
     completeOrderShipping,
@@ -1431,13 +1431,34 @@ export default function Orders() {
     // Process all: every order that is ready to buy (in profit, no errors, not bought yet).
     const readyToBuy = orders.filter((o) => !o.is_history && o.purchase_check?.status === 'buyable'
         && !purchaseLocked(o.purchase_check));
-    const readyEarning = readyToBuy.reduce((sum, o) => sum + (Number(o.purchase_check?.earning_cents) || 0), 0);
+    // The vendor an order is bought from (same rule as the server): its lines' vendor, else the store's.
+    const orderVendor = (o) => {
+        const vs = [...new Set((o.purchase_check?.lines || []).map((l) => l.auto_buy_vendor).filter(Boolean))];
+        if (vs.length === 1) return vs[0];
+        return vs.length ? '' : (selectedStoreData?.auto_buy_vendor || '');
+    };
+    const readyByVendor = readyToBuy.reduce((acc, o) => {
+        const v = orderVendor(o);
+        if (v) acc[v] = (acc[v] || 0) + 1;
+        return acc;
+    }, {});
+    const storeVendors = (selectedStoreData?.auto_buy_vendors || []).map((r) => r?.vendor || r).filter((v) => typeof v === 'string' && v);
+    const vendorChoices = [...new Set([...storeVendors, ...Object.keys(readyByVendor)])];
+    const [processAllMenu, setProcessAllMenu] = useState(false);
+    const [processAllVendor, setProcessAllVendor] = useState('');
+    const processAllList = processAllVendor ? readyToBuy.filter((o) => orderVendor(o) === processAllVendor) : readyToBuy;
+    const readyEarning = processAllList.reduce((sum, o) => sum + (Number(o.purchase_check?.earning_cents) || 0), 0);
     const [processAllOpen, setProcessAllOpen] = useState(false);
     const [processingAll, setProcessingAll] = useState(false);
+    const askProcessAll = (vendor) => {
+        setProcessAllMenu(false);
+        setProcessAllVendor(vendor);
+        setProcessAllOpen(true);
+    };
     const confirmProcessAll = () => {
         if (!selectedStore) return;
         setProcessingAll(true);
-        processAllOrders(selectedStore)
+        processAllOrders(selectedStore, processAllVendor)
             .then((res) => {
                 const r = res.data || {};
                 setMessage({ text: r.message || 'Orders sent to the laptop to buy.', variant: r.not_sent?.length ? 'warning' : 'success' });
@@ -1782,17 +1803,62 @@ export default function Orders() {
                         )}
                         {selectedStoreData?.auto_buy_vendor && (
                             <>
-                                <Button
-                                    variant="primary"
-                                    size="sm"
-                                    className="w-full justify-center !bg-emerald-600 hover:!bg-emerald-700 sm:w-auto"
-                                    onClick={() => setProcessAllOpen(true)}
-                                    disabled={processingAll || readyToBuy.length === 0}
-                                    title="Buy every order that is in profit with no errors, one at a time on the worker laptop"
-                                >
-                                    <ShoppingCart className="mr-1.5 h-4 w-4" />
-                                    {processingAll ? 'Sending…' : `Process all${readyToBuy.length ? ` (${readyToBuy.length})` : ''}`}
-                                </Button>
+                                <div className="relative flex w-full sm:w-auto">
+                                    <Button
+                                        variant="primary"
+                                        size="sm"
+                                        className="flex-1 justify-center rounded-r-none !bg-emerald-600 hover:!bg-emerald-700 sm:flex-none"
+                                        onClick={() => askProcessAll('')}
+                                        disabled={processingAll || readyToBuy.length === 0}
+                                        title="Buy every order that is in profit with no errors, one at a time on the worker laptop"
+                                    >
+                                        <ShoppingCart className="mr-1.5 h-4 w-4" />
+                                        {processingAll ? 'Sending…' : `Process all${readyToBuy.length ? ` (${readyToBuy.length})` : ''}`}
+                                    </Button>
+                                    <Button
+                                        variant="primary"
+                                        size="sm"
+                                        className="rounded-l-none border-l border-emerald-800/40 !bg-emerald-600 !px-2 hover:!bg-emerald-700"
+                                        onClick={() => setProcessAllMenu((v) => !v)}
+                                        disabled={processingAll || readyToBuy.length === 0}
+                                        title="Process the orders of one vendor"
+                                        aria-label="Process all by vendor"
+                                        aria-expanded={processAllMenu}
+                                    >
+                                        <ChevronDown className="h-4 w-4" />
+                                    </Button>
+                                    {processAllMenu && (
+                                        <>
+                                            <div className="fixed inset-0 z-30" onClick={() => setProcessAllMenu(false)} />
+                                            <div className="absolute right-0 top-full z-40 mt-1 w-60 overflow-hidden rounded-md border border-slate-200 bg-white py-1 text-sm shadow-lg dark:border-slate-700 dark:bg-slate-800">
+                                                <button
+                                                    type="button"
+                                                    className="flex w-full items-center justify-between px-3 py-2 text-left text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
+                                                    onClick={() => askProcessAll('')}
+                                                >
+                                                    <span>All vendors</span>
+                                                    <span className="text-xs text-slate-500 dark:text-slate-400">{readyToBuy.length}</span>
+                                                </button>
+                                                <div className="my-1 border-t border-slate-200 dark:border-slate-700" />
+                                                {vendorChoices.map((v) => {
+                                                    const n = readyByVendor[v] || 0;
+                                                    return (
+                                                        <button
+                                                            key={v}
+                                                            type="button"
+                                                            disabled={n === 0}
+                                                            className="flex w-full items-center justify-between px-3 py-2 text-left text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:text-slate-200 dark:hover:bg-slate-700"
+                                                            onClick={() => askProcessAll(v)}
+                                                        >
+                                                            <span>Only {autoBuyVendorLabel(v) || v}</span>
+                                                            <span className="text-xs text-slate-500 dark:text-slate-400">{n}</span>
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
                                 <Button
                                     variant="secondary"
                                     size="sm"
@@ -1893,9 +1959,9 @@ export default function Orders() {
                 onConfirm={confirmProcessAll}
                 loading={processingAll}
                 variant="primary"
-                title="Process all orders?"
-                confirmLabel={`Process ${readyToBuy.length} order${readyToBuy.length === 1 ? '' : 's'}`}
-                message={`Buy ${readyToBuy.length} order${readyToBuy.length === 1 ? '' : 's'} that ${readyToBuy.length === 1 ? 'is' : 'are'} in profit with no errors `
+                title={processAllVendor ? `Process all ${autoBuyVendorLabel(processAllVendor) || processAllVendor} orders?` : 'Process all orders?'}
+                confirmLabel={`Process ${processAllList.length} order${processAllList.length === 1 ? '' : 's'}`}
+                message={`Buy ${processAllList.length} ${processAllVendor ? `${autoBuyVendorLabel(processAllVendor) || processAllVendor} ` : ''}order${processAllList.length === 1 ? '' : 's'} that ${processAllList.length === 1 ? 'is' : 'are'} in profit with no errors `
                     + `(total earning A$${(readyEarning / 100).toFixed(2)}). The worker laptop buys them one at a time and stops on any `
                     + 'order whose vendor price went up. Orders at a loss or with errors are skipped.'}
             />

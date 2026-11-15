@@ -282,13 +282,25 @@ def start_purchase(order, user, *, force=False):
     return run
 
 
-def process_all(store, user) -> dict:
+def order_vendor(store, check) -> str:
+    """The Auto buying vendor an order is bought from (its lines' vendor, else the store's)."""
+    vendors = {ln.get('auto_buy_vendor') for ln in (check.lines_json or []) if ln.get('auto_buy_vendor')}
+    if len(vendors) == 1:
+        return vendors.pop()
+    return '' if vendors else (store.auto_buy_vendor or '')
+
+
+def process_all(store, user, vendor: str = '') -> dict:
     """Process all orders: queue every order that is ready to buy (in profit, no errors, check fresh).
 
+    ``vendor`` (e.g. 'amazon_au') limits it to the orders bought from that vendor; '' = every vendor.
     Loss orders, blocked orders, old (history) orders and orders already queued or bought are skipped.
     The laptop buys the queued orders one at a time.
     """
+    from .auto_purchase_check import AUTO_BUY_LABELS
     from .models import PURCHASE_LOCKED, MarketplaceOrder, PurchaseCheckStatus
+
+    vendor = (vendor or '').strip().lower()
 
     if not store.is_auto_purchase:
         raise AutoPurchaseError("Choose an Auto buying vendor on the store's Auto Purchasing step first.")
@@ -302,6 +314,8 @@ def process_all(store, user) -> dict:
         .select_related('purchase_check')
         .order_by('created_at')
     )
+    if vendor:
+        candidates = [o for o in candidates if order_vendor(store, o.purchase_check) == vendor]
     queued, failed = [], []
     for order in candidates:
         try:
@@ -309,7 +323,8 @@ def process_all(store, user) -> dict:
             queued.append(order.invoice_number or str(order.id))
         except AutoPurchaseError as exc:
             failed.append(f'{order.invoice_number or order.id}: {exc}')
-    msg = f'{len(queued)} order(s) sent to the laptop to buy.'
+    where = ' from ' + AUTO_BUY_LABELS.get(vendor, vendor) if vendor else ''
+    msg = f'{len(queued)} order(s){where} sent to the laptop to buy.'
     if failed:
         msg += f' {len(failed)} not sent: ' + '; '.join(failed[:5]) + (' ...' if len(failed) > 5 else '')
     return {'queued': len(queued), 'not_sent': failed, 'message': msg}

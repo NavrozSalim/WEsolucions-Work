@@ -336,7 +336,7 @@ export const setVendorOrderNumber = (storeId, orderId, vendorOrderNumber) =>
 /** Auto Purchasing: the laptop finds a processed order's vendor order number in the vendor's order list. */
 export const recheckOrderId = (storeId, orderId) => api.post(`/stores/${storeId}/orders/${orderId}/recheck-order-id/`);
 /** Auto Purchasing: buy every order that is in profit with no errors. */
-export const processAllOrders = (storeId) => api.post(`/stores/${storeId}/orders/process-all/`);
+export const processAllOrders = (storeId, vendor = '') => api.post(`/stores/${storeId}/orders/process-all/`, vendor ? { vendor } : {});
 /** Orders of the user's deleted stores (kept 7 days) and linking them to this store. */
 export const getDetachedOrders = (storeId) => api.get(`/stores/${storeId}/orders/detached/`);
 export const linkDetachedOrders = (storeId, storeName, marketplace = '') =>

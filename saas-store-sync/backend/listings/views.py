@@ -1538,7 +1538,7 @@ class StoreOrderProcessAllView(APIView):
 
         store = _get_store(request, store_pk)
         try:
-            result = process_all(store, request.user)
+            result = process_all(store, request.user, vendor=str(request.data.get('vendor') or ''))
         except AutoPurchaseError as exc:
             return Response({'detail': str(exc)}, status=exc.status_code)
         if result['queued'] and not laptop_online(store.user or request.user):

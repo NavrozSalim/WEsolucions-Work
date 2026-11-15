@@ -236,6 +236,23 @@ class ForceAndProcessAllTests(TestCase):
         # A second click does not buy anything twice.
         self.assertEqual(self.c.post(self.url('process-all/'), {}, format='json').data['queued'], 0)
 
+    def test_process_all_for_one_vendor_only(self):
+        a = self.buyable_order(key='A1')
+        c = self.buyable_order(key='C1')
+        check = OrderPurchaseCheck.objects.get(order=c)
+        check.lines_json = [{**ln, 'auto_buy_vendor': 'costway_au'} for ln in check.lines_json]
+        check.save(update_fields=['lines_json'])
+        r = self.c.post(self.url('process-all/'), {'vendor': 'costway_au'}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data['queued'], 0)  # no Costway AU purchase account: not sent
+        self.assertEqual(len(r.data['not_sent']), 1)
+        self.assertIn('Costway AU', r.data['message'])
+        self.assertEqual(OrderPurchaseCheck.objects.get(order=a).purchase_status, '')
+        r = self.c.post(self.url('process-all/'), {'vendor': 'amazon_au'}, format='json')
+        self.assertEqual(r.data['queued'], 1)
+        self.assertEqual(OrderPurchaseCheck.objects.get(order=a).purchase_status, 'queued')
+        self.assertEqual(OrderPurchaseCheck.objects.get(order=c).purchase_status, '')
+
 
 class HistoryUploadTests(TestCase):
     setUp = _apj.AutoPurchaseJobTests.setUp
