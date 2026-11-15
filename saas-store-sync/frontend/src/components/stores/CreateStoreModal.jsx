@@ -17,6 +17,12 @@ import TemuConnectionFields, {
 } from './TemuConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor, isWallkoalaVendor } from './NoraInventoryUploadField';
 import AutoPurchasingStep, { buildAutoBuyPayload } from './AutoPurchasingStep';
+import AutoScrapeCard, {
+    autoScrapeFieldsFromStore,
+    buildAutoScrapePayload,
+    emptyAutoScrapeFields,
+    validateAutoScrapeFields,
+} from './AutoScrapeCard';
 import ShopifyConnectFields, {
     buildShopifyPayload,
     emptyShopifyFields,
@@ -137,6 +143,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         schedule_hour: '10',
         schedule_minute: '00',
         schedule_timezone: 'America/New_York',
+        ...emptyAutoScrapeFields('America/New_York'),
     });
 
     useEffect(() => {
@@ -177,6 +184,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 schedule_hour: '10',
                 schedule_minute: '00',
                 schedule_timezone: DEFAULT_TZ[region] || 'America/New_York',
+                ...emptyAutoScrapeFields(DEFAULT_TZ[region] || 'America/New_York'),
             });
             setSelectedVendorPrice('');
             setSelectedVendorInventory('');
@@ -512,6 +520,8 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
         if (showShopifyConnect) {
             errs.push(...validateShopifyFields(form, { requireSecrets: true }));
         }
+        const autoScrapeErr = validateAutoScrapeFields(form);
+        if (autoScrapeErr) errs.push(autoScrapeErr);
         if (isLasoo) {
             const env = form.lasoo_environment || 'staging';
             if (env === 'production') {
@@ -762,6 +772,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                 region: form.region,
                 ...buildShopifyPayload(form),
                 sync_schedule: buildSchedulePayload(),
+                ...buildAutoScrapePayload(form),
             };
             if (copyFromStore?.vendor_price_settings?.length || copyFromStore?.vendor_inventory_settings?.length) {
                 payload.vendor_price_settings = (copyFromStore.vendor_price_settings || []).map((vp) => ({
@@ -878,6 +889,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
             ...buildShopifyPayload(form),
             ...buildSettingsPayload(),
             sync_schedule: buildSchedulePayload(),
+            ...buildAutoScrapePayload(form),
         };
         createStore(payload)
             .then(async (res) => {
@@ -1069,6 +1081,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                     if (sel && marketplaceCode(sel) === 'bunnings') {
                                                         next.region = 'AU';
                                                         next.schedule_timezone = DEFAULT_TZ.AU;
+                                                        next.auto_scrape_timezone = DEFAULT_TZ.AU;
                                                     }
                                                     return next;
                                                 });
@@ -1309,6 +1322,7 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                                 ...f,
                                                 region: newRegion,
                                                 schedule_timezone: DEFAULT_TZ[newRegion] || f.schedule_timezone,
+                                                auto_scrape_timezone: DEFAULT_TZ[newRegion] || f.auto_scrape_timezone,
                                             }));
                                         }}
                                         options={[{ value: 'USA', label: 'USA' }, { value: 'AU', label: 'Australia' }]}
@@ -1376,6 +1390,13 @@ export default function CreateStoreModal({ open, onClose, onSuccess, copyFromSto
                                         )}
                                     </div>
                                 </div>
+
+                                <AutoScrapeCard
+                                    form={form}
+                                    setForm={setForm}
+                                    timezoneOptions={regionTimezones}
+                                    className="mt-4"
+                                />
                             </div>
                         )}
 

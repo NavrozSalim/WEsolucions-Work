@@ -1605,6 +1605,26 @@ def check_scheduled_updates():
             )
 
 
+@shared_task
+def check_auto_scrape_schedules():
+    """Celery Beat, every minute: queue ``run_store_auto_scrape`` for due Auto Scraping slots."""
+    from sync.auto_scrape import check_due_schedules
+
+    store_ids = check_due_schedules()
+    for store_id in store_ids:
+        logger.info("Enqueuing Auto Scraping for store %s", store_id)
+        run_store_auto_scrape.apply_async(args=[store_id])
+    return {'queued': store_ids}
+
+
+@shared_task(bind=True)
+def run_store_auto_scrape(self, store_id):
+    """Auto Scraping run: full scrape, then up to N "reset Failed to Pending, scrape again" cycles."""
+    from sync.auto_scrape import run_auto_scrape
+
+    return run_auto_scrape(str(store_id))
+
+
 def _crontab_matches(sched, now_local):
     """Check if the current local time matches the crontab fields."""
     def _field_matches(field_val, current_val):

@@ -98,6 +98,7 @@ class StoreSerializer(serializers.ModelSerializer):
     vendor_price_settings = StoreVendorPriceSettingsReadSerializer(many=True, read_only=True)
     vendor_inventory_settings = StoreVendorInventorySettingsReadSerializer(many=True, read_only=True)
     sync_schedule = serializers.SerializerMethodField()
+    auto_scrape = serializers.SerializerMethodField()
     shopify_connected = serializers.SerializerMethodField()
     shopify_has_credentials = serializers.SerializerMethodField()
     temu_connected = serializers.SerializerMethodField()
@@ -138,7 +139,7 @@ class StoreSerializer(serializers.ModelSerializer):
             'connection_status', 'last_validated_at',
             'is_active', 'created_at', 'updated_at',
             'vendor_price_settings', 'vendor_inventory_settings',
-            'sync_schedule',
+            'sync_schedule', 'auto_scrape',
         ]
         extra_kwargs = {
             # Keep token hidden in responses; accept blank/missing at serializer layer.
@@ -467,6 +468,23 @@ class StoreSerializer(serializers.ModelSerializer):
             'last_run': sched.last_run.isoformat() if sched.last_run else None,
         }
 
+    def get_auto_scrape(self, obj):
+        try:
+            sched = obj.auto_scrape_schedule
+        except Exception:
+            return None
+        return {
+            'enabled': sched.is_active,
+            'run_times': list(sched.run_times or []),
+            'timezone': sched.timezone,
+            'retry_failed_cycles': sched.retry_failed_cycles,
+            'push_after': sched.push_after,
+            'last_run_at': sched.last_run_at.isoformat() if sched.last_run_at else None,
+            'last_finished_at': sched.last_finished_at.isoformat() if sched.last_finished_at else None,
+            'last_status': sched.last_status or '',
+            'last_summary': sched.last_summary or {},
+        }
+
     def create(self, validated_data):
         from vendor.models import Vendor
         from marketplace.models import Marketplace
@@ -733,6 +751,7 @@ class StoreSerializer(serializers.ModelSerializer):
             self._save_vendor_price_settings(store, price_settings_data, Vendor)
             self._save_vendor_inventory_settings(store, inventory_settings_data, Vendor)
             self._save_sync_schedule(store, req.get('sync_schedule'), SyncSchedule)
+            self._save_auto_scrape(store, req.get('auto_scrape'))
             if is_structured or (is_mydeal and store.mydeal_setup_method == 'api') or is_lasoo or is_bunnings or is_temu:
                 ok, err_msg = verify_store_connection(store)
                 if not ok:
@@ -764,6 +783,7 @@ class StoreSerializer(serializers.ModelSerializer):
         self._save_vendor_price_settings(store, price_settings_data, Vendor)
         self._save_vendor_inventory_settings(store, inventory_settings_data, Vendor)
         self._save_sync_schedule(store, req.get('sync_schedule'), SyncSchedule)
+        self._save_auto_scrape(store, req.get('auto_scrape'))
 
         if is_structured or (is_mydeal and store.mydeal_setup_method == 'api') or is_lasoo or is_bunnings or is_temu:
             ok, err_msg = verify_store_connection(store)
@@ -1011,6 +1031,8 @@ class StoreSerializer(serializers.ModelSerializer):
                 self._save_vendor_inventory_settings(instance, req['vendor_inventory_settings'], Vendor)
             if 'sync_schedule' in req:
                 self._save_sync_schedule(instance, req['sync_schedule'], SyncSchedule)
+            if 'auto_scrape' in req:
+                self._save_auto_scrape(instance, req['auto_scrape'])
 
         if verify_new_credentials:
             from django.db import transaction
@@ -1293,3 +1315,24 @@ class StoreSerializer(serializers.ModelSerializer):
             'is_active': True,
         }
         SyncSchedule.objects.update_or_create(store=store, defaults=defaults)
+
+    def _save_auto_scrape(self, store, data):
+        """Save Auto Scraping settings. Off keeps the row (and its last-run info) but deactivates it."""
+        from sync.auto_scrape import normalize_auto_scrape_payload
+        from sync.models import AutoScrapeSchedule
+
+        if data is None:
+            return
+        if not isinstance(data, dict):
+            raise ValidationError({'auto_scrape': 'Must be an object.'})
+        if not data.get('enabled', False):
+            AutoScrapeSchedule.objects.filter(store=store).update(is_active=False)
+            return
+        try:
+            clean = normalize_auto_scrape_payload(data)
+        except ValueError as exc:
+            raise ValidationError({'auto_scrape': str(exc)}) from None
+        AutoScrapeSchedule.objects.update_or_create(
+            store=store,
+            defaults={**clean, 'is_active': True},
+        )

@@ -25,6 +25,42 @@ class SyncSchedule(models.Model):
         return f"Schedule for {self.store.name} ({self.schedule_type})"
 
 
+def _default_auto_scrape_times():
+    return ['06:00']
+
+
+class AutoScrapeSchedule(models.Model):
+    """Per-store Auto Scraping: scrape at set local times, then retry Failed rows.
+
+    Separate from ``SyncSchedule`` (which is deleted when Scheduled Updates is
+    turned off). Each run: all active rows to Pending, scrape, then up to
+    ``retry_failed_cycles`` times reset only Failed rows to Pending and scrape again.
+    """
+    MAX_RUN_TIMES = 6
+    MAX_RETRY_CYCLES = 10
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    store = models.OneToOneField(Store, on_delete=models.CASCADE, related_name='auto_scrape_schedule')
+    is_active = models.BooleanField(default=False)
+    run_times = models.JSONField(default=_default_auto_scrape_times, help_text='Local "HH:MM" times, max 6.')
+    timezone = models.CharField(max_length=64, default='UTC')
+    retry_failed_cycles = models.PositiveSmallIntegerField(default=2)
+    push_after = models.BooleanField(default=False)
+    last_triggered_at = models.DateTimeField(null=True, blank=True)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    last_finished_at = models.DateTimeField(null=True, blank=True)
+    last_status = models.CharField(max_length=20, blank=True, default='')
+    last_summary = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'sync_autoscrapeschedule'
+
+    def __str__(self):
+        return f"Auto scrape for {self.store.name} ({', '.join(self.run_times or [])})"
+
+
 class StoreSyncRun(models.Model):
     """Execution history for sync jobs."""
     STATUS_CHOICES = [

@@ -12,6 +12,12 @@ import BunningsConnectionFields from './BunningsConnectionFields';
 import TemuConnectionFields, { buildTemuPayload, emptyTemuFields } from './TemuConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor, isWallkoalaVendor } from './NoraInventoryUploadField';
 import AutoPurchasingStep, { autoBuyRowsFromStore, buildAutoBuyPayload } from './AutoPurchasingStep';
+import AutoScrapeCard, {
+    autoScrapeFieldsFromStore,
+    buildAutoScrapePayload,
+    emptyAutoScrapeFields,
+    validateAutoScrapeFields,
+} from './AutoScrapeCard';
 import ShopifyConnectFields, {
     buildShopifyPayload,
     shopifyFieldsFromStore,
@@ -100,6 +106,7 @@ function storeToForm(store) {
         schedule_hour: '10',
         schedule_minute: '00',
         schedule_timezone: 'America/New_York',
+        ...emptyAutoScrapeFields('America/New_York'),
     };
     const sched = store.sync_schedule;
     return {
@@ -171,6 +178,10 @@ function storeToForm(store) {
         schedule_hour: sched?.crontab_hour?.replace('*/', '') || '10',
         schedule_minute: sched?.crontab_minute || '00',
         schedule_timezone: sched?.timezone || (store.region === 'AU' ? 'Australia/Sydney' : 'America/New_York'),
+        ...autoScrapeFieldsFromStore(
+            store,
+            sched?.timezone || (store.region === 'AU' ? 'Australia/Sydney' : 'America/New_York'),
+        ),
     };
 }
 
@@ -402,6 +413,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                 crontab_day_of_week: '*',
                 timezone: form.schedule_timezone,
             } : { enabled: false },
+            ...buildAutoScrapePayload(form),
         };
 
         if (isLasoo) {
@@ -534,6 +546,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                 requireSecrets: !store?.shopify_has_credentials,
             }));
         }
+        const autoScrapeErr = validateAutoScrapeFields(form);
+        if (autoScrapeErr) errs.push(autoScrapeErr);
         return errs;
     };
     const validateStep2 = () => {
@@ -875,6 +889,13 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                     </div>
                                 )}
                             </div>
+
+                            <AutoScrapeCard
+                                form={form}
+                                setForm={setForm}
+                                timezoneOptions={regionTimezones}
+                                lastRun={store?.auto_scrape}
+                            />
                         </div>
                     )}
 

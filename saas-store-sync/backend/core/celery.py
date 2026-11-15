@@ -28,6 +28,11 @@ app.conf.beat_schedule = {
         'task': 'sync.tasks.check_scheduled_updates',
         'schedule': crontab(minute='*'),
     },
+    # Auto Scraping (store wizard): scrape at user run times + retry Failed cycles.
+    'check-auto-scrape-schedules': {
+        'task': 'sync.tasks.check_auto_scrape_schedules',
+        'schedule': crontab(minute='*'),
+    },
     # Restart store-wide vendor scrapes whose worker died or hung mid-run.
     'catalog-scrape-watchdog': {
         'task': 'catalog.tasks.catalog_scrape_watchdog',

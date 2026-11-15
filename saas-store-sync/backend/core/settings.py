@@ -504,6 +504,9 @@ CELERY_TASK_ROUTES = (
         'sync.tasks.run_store_failed_zero_inventory': {'queue': 'sync'},
         # Minute tick enqueues ``run_store_update`` → ``sync`` queue.
         'sync.tasks.check_scheduled_updates': {'queue': 'light'},
+        # Auto Scraping: minute tick on ``light``; the long scrape + retry loop on ``sync``.
+        'sync.tasks.check_auto_scrape_schedules': {'queue': 'light'},
+        'sync.tasks.run_store_auto_scrape': {'queue': 'sync'},
         # Orders + tickets: dedicated regional workers (not main ``light``).
         'listings.fetch_us_store_tickets': {'queue': 'orders-us'},
         'listings.fetch_au_store_tickets': {'queue': 'orders-au'},
