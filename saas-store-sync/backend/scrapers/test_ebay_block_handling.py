@@ -111,6 +111,14 @@ class UsBrowserFirstTests(SimpleTestCase):
             scrape_ebay_for_market("https://www.ebay.com/itm/182391181967", "USA", {}, market=EBAY_MARKET_US)
         self.assertEqual(browser.call_args_list[0].args[0].split("/")[2], "www.ebay.com")
 
+    def test_no_handoff_while_chrome_is_on_a_proxy(self):
+        session = {ebay_common._ebay_sk(EBAY_MARKET_US, "selenium_proxy_url"): "http://u:p@a:1"}
+        with patch.object(ebay_common.EbayHTTP, "fetch") as http, \
+                patch.object(ebay_common.EbayBrowserSession, "warm_and_fetch",
+                             return_value=(_AKAMAI_403, "browser_blocked")):
+            scrape_ebay_for_market("https://www.ebay.com/itm/1", "USA", session, market=EBAY_MARKET_US)
+        http.assert_not_called()
+
     def test_chrome_uses_a_random_windows_name_unless_native_is_on(self):
         self.assertFalse(ebay_common.ebay_us_chrome_native_ua())
         with patch.dict(os.environ, {"EBAY_US_CHROME_NATIVE_UA": "1"}):
@@ -261,6 +269,26 @@ class UsChromeProxyRefusedTests(SimpleTestCase):
         self.assertEqual(len(visited), 2)  # home page, then the item
         self.assertIn("ebay.com", visited[0])
         self.assertEqual(session[ebay_common._ebay_sk(EBAY_MARKET_US, "browser_warmed")], "www.ebay.com")
+
+    def test_page_with_a_price_is_not_marked_blocked(self):
+        page = "<html>splashui/challenge item page</html>"
+        driver = type("D", (), {"page_source": page, "current_url": "https://www.ebay.com/itm/1",
+                                "get": lambda self, u: None})()
+        session = {ebay_common._ebay_sk(EBAY_MARKET_US, "browser_warmed"): "www.ebay.com"}
+        with patch.object(ebay_common.EbayDriver, "get_or_create", return_value=driver), \
+                patch.object(ebay_common.EbayBrowserSession, "_apply_region_browser_profile"), \
+                patch.object(ebay_common.EbayBrowserSession, "_wait_until_product_or_stable_challenge",
+                             return_value=page), \
+                patch.object(ebay_common.EbayHTTP, "import_cookies_from_selenium"), \
+                patch.object(ebay_common, "_browser_page_not_loaded", return_value=False), \
+                patch.object(ebay_common, "_parse_html_to_result",
+                             return_value={"price": 9.99, "stock": 20, "title": "T"}), \
+                patch.object(ebay_common.EbayDriver, "mark_us_browser_proxy_blocked") as mark:
+            html, err = ebay_common.EbayBrowserSession.warm_and_fetch(
+                "https://www.ebay.com/itm/1", "USA", session, EBAY_MARKET_US)
+        self.assertEqual(err, "")
+        self.assertEqual(html, page)
+        mark.assert_not_called()
 
     def test_stub_without_proxy_is_empty_not_proxy_error(self):
         (html, err), _ = self._fetch_stub({})

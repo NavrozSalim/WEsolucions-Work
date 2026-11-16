@@ -2401,6 +2401,13 @@ class EbayBrowserSession:
             if us_on_proxy:
                 _note_us_browser_proxy_result(True)
 
+            # A page that gives a price got through, even when its scripts still
+            # mention eBay's check page; don't cool down the proxy that worked.
+            if market == EBAY_MARKET_US and ebay_us_browser_first():
+                parsed_ok = _parse_html_to_result(html, url)
+                if parsed_ok is not None and parsed_ok.get("price") is not None:
+                    return html, ""
+
             blocked, reason = _is_challenge_or_blocked(html)
             if blocked:
                 if market == EBAY_MARKET_AU:
@@ -2636,10 +2643,15 @@ def scrape_ebay_for_market(
                         _ebay_debug_write_html(session, browser_html, "selenium", candidate)
                         return parsed
 
+                chrome_on_proxy = bool(session.get(_ebay_sk(market, "selenium_proxy_url")))
                 if browser_first and (
-                    browser_err == "browser_proxy_error" or not ebay_us_cookie_handoff()
+                    browser_err == "browser_proxy_error"
+                    or chrome_on_proxy
+                    or not ebay_us_cookie_handoff()
                 ):
-                    # Chrome never reached eBay, so it has no cookies to hand over.
+                    # No hand-off when Chrome never reached eBay, or when Chrome is
+                    # on a proxy: eBay refuses the plain request on every other
+                    # proxy, and each refusal cools down 3 of them for 5 minutes.
                     html2, status2, err2 = None, None, ""
                 else:
                     # One plain request carrying the cookies Chrome just got from eBay.
