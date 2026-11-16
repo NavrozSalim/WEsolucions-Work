@@ -1847,8 +1847,16 @@ def _add_us_saved_cookies(driver) -> None:
             added += 1
         except Exception:
             continue
-    if added:
-        logger.info("eBay US: loaded %d saved browser cookies into Chrome", added)
+    if cookies:
+        host = ""
+        try:
+            host = urlparse(driver.current_url).netloc
+        except Exception:
+            pass
+        logger.info(
+            "eBay US: loaded %d of %d saved browser cookies into Chrome on %s",
+            added, len(cookies), host or "?",
+        )
 
 
 class EbayDriver:
@@ -2336,16 +2344,31 @@ class EbayBrowserSession:
                 except Exception as exc:
                     logger.debug("eBay AU market cookie inject: %s", exc)
 
+            us_on_proxy = bool(
+                market == EBAY_MARKET_US
+                and session_dict
+                and session_dict.get(_ebay_sk(market, "selenium_proxy_url"))
+            )
             warmed_key = _ebay_sk(market, "browser_warmed")
-            already_warmed = bool(session_dict and session_dict.get(warmed_key))
+            home = _ebay_home_origin_for_item_url(url)
+            home_host = urlparse(home).netloc
+            warmed = session_dict.get(warmed_key) if session_dict else None
+            # US remembers which site was warmed: moving from ebay.ca to ebay.com
+            # opens the ebay.com home page (and loads its saved cookies) too.
+            already_warmed = (warmed == home_host) if market == EBAY_MARKET_US else bool(warmed)
             if not already_warmed:
-                home = _ebay_home_origin_for_item_url(url)
                 driver.get(home)
                 time.sleep(0.3 + random.uniform(0.1, 0.3))
+                if us_on_proxy and _browser_page_not_loaded(driver.page_source):
+                    # The proxy refused Chrome; skip the item page's long wait.
+                    EbayDriver.mark_us_browser_proxy_blocked(session_dict)
+                    _note_us_browser_proxy_result(False)
+                    EbayDriver.close(session_dict, market)
+                    return None, "browser_proxy_error"
                 if market == EBAY_MARKET_US:
                     _add_us_saved_cookies(driver)
                 if session_dict is not None:
-                    session_dict[warmed_key] = True
+                    session_dict[warmed_key] = home_host if market == EBAY_MARKET_US else True
 
             driver.get(url)
             wait_timeout = _ebay_page_wait_timeout(region, url)
@@ -2368,11 +2391,6 @@ class EbayBrowserSession:
 
             EbayHTTP.import_cookies_from_selenium(driver, region, session_dict, market)
 
-            us_on_proxy = bool(
-                market == EBAY_MARKET_US
-                and session_dict
-                and session_dict.get(_ebay_sk(market, "selenium_proxy_url"))
-            )
             if _browser_page_not_loaded(html):
                 if us_on_proxy:
                     EbayDriver.mark_us_browser_proxy_blocked(session_dict)

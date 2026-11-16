@@ -241,6 +241,27 @@ class UsChromeProxyRefusedTests(SimpleTestCase):
                 self._fetch_stub(session)
             self.assertIsNone(ebay_common.EbayDriver._us_proxy_url({}))
 
+    def test_moving_from_ebay_ca_to_ebay_com_warms_ebay_com_and_loads_its_cookies(self):
+        visited = []
+        driver = type("D", (), {"page_source": _AKAMAI_403, "current_url": "https://www.ebay.com/",
+                                "get": lambda self, u: visited.append(u)})()
+        session = {ebay_common._ebay_sk(EBAY_MARKET_US, "browser_warmed"): "www.ebay.ca"}
+        with patch.object(ebay_common.EbayDriver, "get_or_create", return_value=driver), \
+                patch.object(ebay_common.EbayBrowserSession, "_apply_region_browser_profile"), \
+                patch.object(ebay_common.EbayBrowserSession, "_wait_until_product_or_stable_challenge",
+                             return_value=_AKAMAI_403), \
+                patch.object(ebay_common.EbayBrowserSession, "_finalize_bin_price_hydration",
+                             return_value=_AKAMAI_403), \
+                patch.object(ebay_common.EbayHTTP, "import_cookies_from_selenium"), \
+                patch.object(ebay_common.EbayDriver, "mark_us_browser_proxy_blocked"), \
+                patch.object(ebay_common, "_add_us_saved_cookies") as add_cookies:
+            ebay_common.EbayBrowserSession.warm_and_fetch(
+                "https://www.ebay.com/itm/182391181967", "USA", session, EBAY_MARKET_US)
+            add_cookies.assert_called_once()
+        self.assertEqual(len(visited), 2)  # home page, then the item
+        self.assertIn("ebay.com", visited[0])
+        self.assertEqual(session[ebay_common._ebay_sk(EBAY_MARKET_US, "browser_warmed")], "www.ebay.com")
+
     def test_stub_without_proxy_is_empty_not_proxy_error(self):
         (html, err), _ = self._fetch_stub({})
         self.assertIsNone(html)
