@@ -1802,18 +1802,29 @@ def _load_us_saved_cookies() -> list[dict]:
     """
     inline = (os.environ.get("EBAY_US_COOKIES_JSON") or "").strip()
     path = (os.environ.get("EBAY_US_COOKIES_FILE") or "").strip()
-    try:
-        if inline:
-            data = json.loads(inline)
-        elif path and os.path.isfile(path):
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-        else:
-            return []
-    except Exception as exc:
-        logger.warning("eBay US saved cookies unreadable: %s", exc)
-        return []
-    return [c for c in data if isinstance(c, dict)] if isinstance(data, list) else []
+    sources: list = []
+    if inline:
+        sources.append(("EBAY_US_COOKIES_JSON", inline))
+    elif path:
+        # ebay_ca_cookies.json next to it: Chrome tries ebay.ca first and only
+        # takes cookies for the site it is on.
+        for p in (path, os.path.join(os.path.dirname(path), "ebay_ca_cookies.json")):
+            if os.path.isfile(p):
+                sources.append((p, None))
+    out: list[dict] = []
+    for name, text in sources:
+        try:
+            if text is None:
+                with open(name, encoding="utf-8") as f:
+                    data = json.load(f)
+            else:
+                data = json.loads(text)
+        except Exception as exc:
+            logger.warning("eBay US saved cookies unreadable (%s): %s", os.path.basename(name), exc)
+            continue
+        if isinstance(data, list):
+            out.extend(c for c in data if isinstance(c, dict))
+    return out
 
 
 def _add_us_saved_cookies(driver) -> None:

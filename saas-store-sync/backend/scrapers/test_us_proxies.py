@@ -43,6 +43,11 @@ class USProxyUrlTests(_ResetPools):
         urls = ebay_us_proxies.load_ebay_us_proxy_urls(env={"US_PROXY_URLS": "http://u:p@shared:2"})
         self.assertEqual(urls, ["http://u:p@shared:2"])
 
+    def test_provider_list_format_host_port_user_pass(self):
+        urls = ebay_us_proxies.load_ebay_us_proxy_urls(
+            env={"EBAY_US_PROXY_URLS": "1.2.3.4:5678:usr:pw\n9.9.9.9:1111:usr:p:w,1.2.3.4:x:u:p"})
+        self.assertEqual(urls, ["http://usr:pw@1.2.3.4:5678", "http://usr:p%3Aw@9.9.9.9:1111"])
+
     def test_au_and_generic_lists_are_ignored(self):
         env = {
             "PROXY_URLS": "http://u:p@generic:1",

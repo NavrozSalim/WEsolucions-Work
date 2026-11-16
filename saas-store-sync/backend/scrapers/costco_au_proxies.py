@@ -91,14 +91,19 @@ def _normalize_proxy(raw: str, default_scheme: str = "http",
             netloc = f"{cred}@{netloc}"
         return urlunparse((scheme, netloc, "", "", "", ""))
 
-    # Bare host:port (no scheme).
+    # Bare host:port, or host:port:user:pass (the proxy provider's list format).
     if ":" not in raw:
         return None
-    host, _, port = raw.partition(":")
+    host, _, rest = raw.partition(":")
+    port, _, creds = rest.partition(":")
     host = host.strip()
     port = port.strip()
     if not host or not port.isdigit():
         return None
+    if creds:
+        default_user, _, default_pass = creds.partition(":")
+        if not default_user:
+            return None
     netloc = f"{host}:{port}"
     if default_user:
         cred = quote(default_user, safe="")

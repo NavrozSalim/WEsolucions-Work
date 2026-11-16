@@ -248,6 +248,23 @@ class UsChromeProxyRefusedTests(SimpleTestCase):
         self.assertEqual(ebay_common._us_browser_proxy_fails, 0)
 
 
+class UsSavedCookieFilesTests(SimpleTestCase):
+    def test_ebay_ca_file_next_to_the_us_file_is_loaded_too(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            us = os.path.join(d, "ebay_us_cookies.json")
+            with open(us, "w", encoding="utf-8") as f:
+                json.dump([{"name": "us", "value": "1", "domain": ".ebay.com"}], f)
+            with open(os.path.join(d, "ebay_ca_cookies.json"), "w", encoding="utf-8") as f:
+                json.dump([{"name": "ca", "value": "1", "domain": ".ebay.ca"}], f)
+            with patch.dict(os.environ, {"EBAY_US_COOKIES_FILE": us}):
+                os.environ.pop("EBAY_US_COOKIES_JSON", None)
+                names = [c["name"] for c in ebay_common._load_us_saved_cookies()]
+        self.assertEqual(names, ["us", "ca"])
+
+
 class AuTitleTests(SimpleTestCase):
     def test_block_page_title_is_never_used(self):
         from scrapers.ebay_au_fast import _AU_LAST_HTML_KEY, _AU_PRODUCT_HTML_KEY
