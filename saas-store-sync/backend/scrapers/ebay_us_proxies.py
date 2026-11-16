@@ -62,7 +62,7 @@ def get_ebay_us_pool() -> Optional[CostcoAuProxyPool]:
             if not urls:
                 return None
             _POOL = CostcoAuProxyPool(
-                urls, min_gap_sec=max(0.0, _env_float("EBAY_US_MIN_REQUEST_GAP_SEC", 3.0)),
+                urls, min_gap_sec=max(0.0, _env_float("EBAY_US_MIN_REQUEST_GAP_SEC", 3.0)), name="eBay US",
             )
             logger.info(
                 "eBay US proxy pool initialised: %d proxies, min_gap=%.1fs",

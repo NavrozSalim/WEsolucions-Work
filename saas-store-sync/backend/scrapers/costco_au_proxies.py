@@ -191,7 +191,8 @@ class CostcoAuProxyPool:
     each other).
     """
 
-    def __init__(self, urls: Iterable[str], *, min_gap_sec: float = 0.0) -> None:
+    def __init__(self, urls: Iterable[str], *, min_gap_sec: float = 0.0, name: str = "Costco AU") -> None:
+        self.name = name  # shown in log lines, e.g. "eBay US proxy 3"
         self._urls = [u for u in urls if u]
         self._min_gap_sec = max(0.0, float(min_gap_sec or 0.0))
         self._lock = threading.Lock()
@@ -338,8 +339,8 @@ class CostcoAuProxyPool:
             self._cooldown_until[assignment.index] = now + cooldown_sec
         log_fn = logger.warning if cooldown_sec >= 300.0 else logger.debug
         log_fn(
-            "Costco AU proxy %d (%s) cooled down for %.0fs after block",
-            assignment.index, assignment.label, cooldown_sec,
+            "%s proxy %d (%s) cooled down for %.0fs after block",
+            self.name, assignment.index, assignment.label, cooldown_sec,
         )
 
     def mark_success(self, assignment: ProxyAssignment) -> None:
@@ -365,7 +366,7 @@ class CostcoAuProxyPool:
             gap += random.uniform(0, gap * jitter_pct)
         wait = gap - elapsed
         if wait > 0:
-            logger.debug("Costco AU proxy %d sleeping %.2fs for min-gap", assignment.index, wait)
+            logger.debug("%s proxy %d sleeping %.2fs for min-gap", self.name, assignment.index, wait)
             time.sleep(wait)
         self._record_request(assignment)
 

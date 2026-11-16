@@ -82,7 +82,7 @@ def get_pool() -> Optional[CostcoAuProxyPool]:
             if not urls:
                 return None
             _POOL = CostcoAuProxyPool(
-                urls, min_gap_sec=max(0.0, _env_float("AMAZON_US_MIN_REQUEST_GAP_SEC", 2.0)),
+                urls, min_gap_sec=max(0.0, _env_float("AMAZON_US_MIN_REQUEST_GAP_SEC", 2.0)), name="Amazon US",
             )
             logger.info(
                 "Amazon US proxy pool initialised: %d proxies, min_gap=%.1fs",

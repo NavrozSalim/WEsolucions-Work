@@ -130,7 +130,7 @@ def get_ebay_au_pool() -> Optional[CostcoAuProxyPool]:
             urls = load_ebay_au_proxy_urls()
             if not urls:
                 return None
-            _POOL = CostcoAuProxyPool(urls, min_gap_sec=_min_gap_sec())
+            _POOL = CostcoAuProxyPool(urls, min_gap_sec=_min_gap_sec(), name="eBay AU")
             logger.info(
                 "eBay AU proxy pool initialised: %d proxies, min_gap=%.1fs",
                 len(urls),
