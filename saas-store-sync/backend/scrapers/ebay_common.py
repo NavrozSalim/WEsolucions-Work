@@ -1822,6 +1822,9 @@ def _load_us_saved_cookies() -> list[dict]:
         except Exception as exc:
             logger.warning("eBay US saved cookies unreadable (%s): %s", os.path.basename(name), exc)
             continue
+        # A plain list, or the extension's {"url": ..., "cookies": [...]} export.
+        if isinstance(data, dict):
+            data = data.get("cookies")
         if isinstance(data, list):
             out.extend(c for c in data if isinstance(c, dict))
     return out

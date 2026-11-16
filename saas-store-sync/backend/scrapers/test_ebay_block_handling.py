@@ -258,7 +258,9 @@ class UsSavedCookieFilesTests(SimpleTestCase):
             with open(us, "w", encoding="utf-8") as f:
                 json.dump([{"name": "us", "value": "1", "domain": ".ebay.com"}], f)
             with open(os.path.join(d, "ebay_ca_cookies.json"), "w", encoding="utf-8") as f:
-                json.dump([{"name": "ca", "value": "1", "domain": ".ebay.ca"}], f)
+                # The extension's other export format wraps the list.
+                json.dump({"url": "https://www.ebay.ca",
+                           "cookies": [{"name": "ca", "value": "1", "domain": ".ebay.ca"}]}, f)
             with patch.dict(os.environ, {"EBAY_US_COOKIES_FILE": us}):
                 os.environ.pop("EBAY_US_COOKIES_JSON", None)
                 names = [c["name"] for c in ebay_common._load_us_saved_cookies()]
