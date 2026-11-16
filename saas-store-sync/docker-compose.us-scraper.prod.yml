@@ -82,10 +82,12 @@ services:
       - EBAY_US_DISABLE_PROXIES=${EBAY_US_DISABLE_PROXIES:-}
       - EBAY_US_MIN_REQUEST_GAP_SEC=${EBAY_US_MIN_REQUEST_GAP_SEC:-3}
       - EBAY_US_HTTP_RETRIES=${EBAY_US_HTTP_RETRIES:-2}
-      # A proxy eBay refused rests this long, for every worker (shared through Redis).
-      - EBAY_US_PROXY_BLOCK_COOLDOWN_SEC=${EBAY_US_PROXY_BLOCK_COOLDOWN_SEC:-600}
+      # A proxy eBay refused rests this long (for every worker when EBAY_US_PROXY_SHARED=1).
+      - EBAY_US_PROXY_BLOCK_COOLDOWN_SEC=${EBAY_US_PROXY_BLOCK_COOLDOWN_SEC:-300}
       # 1 = workers share proxy rest and use; each IP is used by one worker at a time.
-      - EBAY_US_PROXY_SHARED=${EBAY_US_PROXY_SHARED:-1}
+      # Off by default: resting IPs did not raise the success rate (7 of 49 tries)
+      # and cut prices per hour from about 200 to 7.
+      - EBAY_US_PROXY_SHARED=${EBAY_US_PROXY_SHARED:-0}
       - EBAY_US_PROXY_HOLD_SEC=${EBAY_US_PROXY_HOLD_SEC:-120}
       # Wait this long for a free proxy, then leave the listing Pending.
       - EBAY_US_PROXY_MAX_WAIT_SEC=${EBAY_US_PROXY_MAX_WAIT_SEC:-240}

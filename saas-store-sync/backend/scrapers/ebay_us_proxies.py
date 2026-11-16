@@ -12,8 +12,8 @@ Configuration (precedence for URLs):
     EBAY_US_DISABLE_PROXIES          — 1 to send eBay from the VPS IP
     EBAY_US_MIN_REQUEST_GAP_SEC      — per-proxy gap (default 3)
     EBAY_US_HTTP_RETRIES             — proxy rotations before giving up (default 2)
-    EBAY_US_PROXY_BLOCK_COOLDOWN_SEC — rest after a block, for every worker (default 600)
-    EBAY_US_PROXY_SHARED             — workers share rest and use through Redis (default 1)
+    EBAY_US_PROXY_BLOCK_COOLDOWN_SEC — rest after a block (default 300)
+    EBAY_US_PROXY_SHARED             — workers share rest and use through Redis (default 0)
     EBAY_US_PROXY_HOLD_SEC           — a worker keeps its proxy to itself this long (default 120)
     EBAY_US_PROXY_MAX_WAIT_SEC       — wait for a free proxy before leaving a listing Pending (default 240)
 """
@@ -108,8 +108,8 @@ def mark_proxy_success(assignment: ProxyAssignment | None) -> None:
 
 
 def block_cooldown_sec() -> float:
-    """How long a proxy eBay refused rests (``EBAY_US_PROXY_BLOCK_COOLDOWN_SEC``, default 600)."""
-    return max(10.0, _env_float("EBAY_US_PROXY_BLOCK_COOLDOWN_SEC", 600.0))
+    """How long a proxy eBay refused rests (``EBAY_US_PROXY_BLOCK_COOLDOWN_SEC``, default 300)."""
+    return max(10.0, _env_float("EBAY_US_PROXY_BLOCK_COOLDOWN_SEC", 300.0))
 
 
 def mark_proxy_blocked(assignment: ProxyAssignment | None) -> None:
@@ -136,8 +136,13 @@ class ProxyPoolBusy(Exception):
 
 
 def shared_mode() -> bool:
-    """Workers share proxy rest and use (``EBAY_US_PROXY_SHARED``, default on)."""
-    return (os.environ.get("EBAY_US_PROXY_SHARED") or "1").strip().lower() in ("1", "true", "yes", "on")
+    """Workers share proxy rest and use (``EBAY_US_PROXY_SHARED``, default off).
+
+    Tried on 2026-11-16: with refused IPs resting 10 minutes for every worker,
+    7 of 49 Chrome tries got through (24% without) and prices per hour fell
+    from about 200 to 7. eBay's refusals did not depend on how hard an IP was used.
+    """
+    return (os.environ.get("EBAY_US_PROXY_SHARED") or "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def hold_sec() -> float:
