@@ -95,21 +95,23 @@ class UsBrowserFirstTests(SimpleTestCase):
             http.assert_not_called()
             self.assertEqual(out["error_code"], "blocked")
 
-    def test_ebay_ca_is_tried_first_on_every_try(self):
+    def test_ebay_com_first_then_ebay_ca_on_every_try(self):
+        os.environ.pop("EBAY_US_CA_FIRST", None)
         with patch.object(ebay_common.EbayHTTP, "fetch", return_value=(None, 403, "http_403")), \
                 patch.object(ebay_common.EbayBrowserSession, "warm_and_fetch",
                              return_value=(_AKAMAI_403, "browser_blocked")) as browser:
             scrape_ebay_for_market("https://www.ebay.com/itm/182391181967", "USA", {}, market=EBAY_MARKET_US)
         hosts = [c.args[0].split("/")[2] for c in browser.call_args_list]
-        self.assertEqual(hosts, ["www.ebay.ca", "www.ebay.com"] * ebay_common.RETRY_LIMIT)
+        self.assertEqual(hosts, ["www.ebay.com", "www.ebay.ca"] * ebay_common.RETRY_LIMIT)
 
-    def test_ca_first_can_be_switched_off(self):
-        with patch.dict(os.environ, {"EBAY_US_CA_FIRST": "0"}), \
+    def test_ca_first_can_be_switched_on(self):
+        with patch.dict(os.environ, {"EBAY_US_CA_FIRST": "1"}), \
                 patch.object(ebay_common.EbayHTTP, "fetch", return_value=(None, 403, "http_403")), \
                 patch.object(ebay_common.EbayBrowserSession, "warm_and_fetch",
                              return_value=(_AKAMAI_403, "browser_blocked")) as browser:
             scrape_ebay_for_market("https://www.ebay.com/itm/182391181967", "USA", {}, market=EBAY_MARKET_US)
-        self.assertEqual(browser.call_args_list[0].args[0].split("/")[2], "www.ebay.com")
+        hosts = [c.args[0].split("/")[2] for c in browser.call_args_list]
+        self.assertEqual(hosts, ["www.ebay.ca", "www.ebay.com"] * ebay_common.RETRY_LIMIT)
 
     def test_no_handoff_while_chrome_is_on_a_proxy(self):
         session = {ebay_common._ebay_sk(EBAY_MARKET_US, "selenium_proxy_url"): "http://u:p@a:1"}

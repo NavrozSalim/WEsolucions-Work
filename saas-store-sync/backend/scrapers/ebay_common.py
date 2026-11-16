@@ -454,8 +454,12 @@ def ebay_us_chrome_native_ua() -> bool:
 
 
 def ebay_us_ca_first() -> bool:
-    """Chrome-first tries the item on ebay.ca before ebay.com (``EBAY_US_CA_FIRST``, default on)."""
-    return _env_on("EBAY_US_CA_FIRST", "1")
+    """Chrome-first tries the item on ebay.ca before ebay.com (``EBAY_US_CA_FIRST``, default off).
+
+    With Chrome on the proxies ebay.com gets through and ebay.ca is refused, so
+    ebay.ca is only the second try. Turn on when Chrome uses the server's own IP.
+    """
+    return _env_on("EBAY_US_CA_FIRST", "0")
 
 
 def ebay_us_cookie_handoff() -> bool:

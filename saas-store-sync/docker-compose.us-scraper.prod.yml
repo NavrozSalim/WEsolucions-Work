@@ -90,7 +90,14 @@ services:
       # IP allowlist (Chrome cannot send a proxy password). 0 = server's own IP.
       - EBAY_US_BROWSER_PROXIES=${EBAY_US_BROWSER_PROXIES:-1}
       # Optional: cookies exported from a real browser (not logged in), same format as AU.
+      # ebay_ca_cookies.json in the same folder is loaded too.
       - EBAY_US_COOKIES_FILE=${EBAY_US_COOKIES_FILE:-/app/secrets/ebay_us_cookies.json}
+      # 1 = try the item on ebay.ca before ebay.com (helps only on the server's own IP).
+      - EBAY_US_CA_FIRST=${EBAY_US_CA_FIRST:-0}
+      # After Chrome on the server's own IP, one plain request with Chrome's cookies.
+      - EBAY_US_COOKIE_HANDOFF=${EBAY_US_COOKIE_HANDOFF:-1}
+      # 1 = Chrome keeps its own Linux browser name instead of a random Windows one.
+      - EBAY_US_CHROME_NATIVE_UA=${EBAY_US_CHROME_NATIVE_UA:-0}
       - ALIEXPRESS_APP_KEY=${ALIEXPRESS_APP_KEY:-}
       - ALIEXPRESS_APP_SECRET=${ALIEXPRESS_APP_SECRET:-}
       - ALIEXPRESS_TRACKING_ID=${ALIEXPRESS_TRACKING_ID:-}
