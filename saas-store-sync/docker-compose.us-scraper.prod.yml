@@ -84,6 +84,13 @@ services:
       - EBAY_US_HTTP_RETRIES=${EBAY_US_HTTP_RETRIES:-2}
       - EBAY_US_PROXY_BLOCK_COOLDOWN_SEC=${EBAY_US_PROXY_BLOCK_COOLDOWN_SEC:-300}
       - EBAY_US_FULL_ENGINE_SELENIUM=${EBAY_US_FULL_ENGINE_SELENIUM:-}
+      # eBay's bot wall refuses plain HTTP, so eBay US loads pages in Chrome.
+      - EBAY_US_BROWSER_FIRST=${EBAY_US_BROWSER_FIRST:-1}
+      # Chrome uses the eBay US proxies. Needs this server's IP on the Webshare
+      # IP allowlist (Chrome cannot send a proxy password). 0 = server's own IP.
+      - EBAY_US_BROWSER_PROXIES=${EBAY_US_BROWSER_PROXIES:-1}
+      # Optional: cookies exported from a real browser (not logged in), same format as AU.
+      - EBAY_US_COOKIES_FILE=${EBAY_US_COOKIES_FILE:-/app/secrets/ebay_us_cookies.json}
       - ALIEXPRESS_APP_KEY=${ALIEXPRESS_APP_KEY:-}
       - ALIEXPRESS_APP_SECRET=${ALIEXPRESS_APP_SECRET:-}
       - ALIEXPRESS_TRACKING_ID=${ALIEXPRESS_TRACKING_ID:-}
@@ -96,6 +103,7 @@ services:
       - ALIEXPRESS_REFRESH_TOKEN=${ALIEXPRESS_REFRESH_TOKEN:-}
     volumes:
       - catalog_media_us_worker:/app/media
+      - ${EBAY_US_SECRETS_DIR:-./secrets}:/app/secrets:ro
     restart: always
     stop_grace_period: 90s
     logging: *default-logging

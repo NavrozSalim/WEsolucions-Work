@@ -190,7 +190,34 @@ _BLOCK_INDICATORS = [
     "datadome",
     "perimeterx",
     "incapsula",
+    # Akamai's 403 page on every eBay site ("Error Page | eBay").
+    "something went wrong on our end",
 ]
+
+
+def ebay_result_error_code(last_error: str | None) -> str:
+    """Reason code for a failed eBay scrape, as the catalog reads it.
+
+    ``not_found``: eBay says the listing does not exist. ``blocked`` /
+    ``challenge``: the page was never seen (bot wall, proxy or browser error),
+    so the listing must not be treated as gone. ``no_price``: the page loaded
+    but no price was found.
+    """
+    err = (last_error or "").strip().lower()
+    if not err:
+        return "no_price"
+    if err in ("not_found", "http_404", "http_410"):
+        return "not_found"
+    if "challenge" in err or "captcha" in err:
+        return "challenge"
+    page_not_seen = (
+        "blocked", "http_4", "http_5", "empty", "proxy_exhausted", "not_product_like",
+        "http_error", "timeout", "selenium", "response_invalid", "upstream_error",
+        "connection", "curl_cffi",
+    )
+    if any(k in err for k in page_not_seen):
+        return "blocked"
+    return "no_price"
 
 PRODUCT_SIGNALS = [
     "x-price-primary",
@@ -394,6 +421,28 @@ def _ebay_proxy_pool(market: str):
     from .ebay_us_proxies import get_ebay_us_pool
 
     return get_ebay_us_pool()
+
+
+def _env_on(name: str, default: str) -> bool:
+    return (os.environ.get(name) or default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def ebay_us_browser_first() -> bool:
+    """eBay US loads pages in real Chrome (``EBAY_US_BROWSER_FIRST``, default on).
+
+    eBay's bot wall (Akamai) only lets a visitor in after running its
+    JavaScript, which plain HTTP cannot do.
+    """
+    return _env_on("EBAY_US_BROWSER_FIRST", "1")
+
+
+def ebay_us_browser_proxies() -> bool:
+    """Chrome for eBay US goes through the eBay US proxies (``EBAY_US_BROWSER_PROXIES``, default on).
+
+    Chrome cannot send a proxy password, so the server's IP must be on the
+    proxy provider's IP allowlist. Set 0 to load pages from the server's own IP.
+    """
+    return _env_on("EBAY_US_BROWSER_PROXIES", "1")
 
 
 def _ebay_http_only_with_proxies(market: str) -> bool:
@@ -1669,9 +1718,58 @@ class EbayHTTP:
             pass
 
 
+def _load_us_saved_cookies() -> list[dict]:
+    """Browser cookies for ebay.com from ``EBAY_US_COOKIES_JSON`` or ``EBAY_US_COOKIES_FILE``.
+
+    Same JSON format as the eBay AU cookie file: a list of cookie objects
+    exported from a real browser (not logged in to an eBay account).
+    """
+    inline = (os.environ.get("EBAY_US_COOKIES_JSON") or "").strip()
+    path = (os.environ.get("EBAY_US_COOKIES_FILE") or "").strip()
+    try:
+        if inline:
+            data = json.loads(inline)
+        elif path and os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            return []
+    except Exception as exc:
+        logger.warning("eBay US saved cookies unreadable: %s", exc)
+        return []
+    return [c for c in data if isinstance(c, dict)] if isinstance(data, list) else []
+
+
+def _add_us_saved_cookies(driver) -> None:
+    """Give a new US Chrome the saved browser cookies (it must be on ebay.com already)."""
+    cookies = _load_us_saved_cookies()
+    added = 0
+    for cookie in cookies:
+        payload = {k: v for k, v in cookie.items() if k in ("name", "value", "domain", "path", "secure", "httpOnly", "expiry", "sameSite")}
+        if "expiry" not in payload and isinstance(cookie.get("expirationDate"), (int, float)):
+            payload["expiry"] = int(cookie["expirationDate"])
+        if payload.get("sameSite") not in ("Strict", "Lax", "None"):
+            payload.pop("sameSite", None)
+        if not payload.get("name"):
+            continue
+        try:
+            driver.add_cookie(payload)
+            added += 1
+        except Exception:
+            continue
+    if added:
+        logger.info("eBay US: loaded %d saved browser cookies into Chrome", added)
+
+
 class EbayDriver:
     @staticmethod
-    def _create_driver(*, proxy_url: str | None = None):
+    def _create_driver(*, proxy_url: str | None = None, native_ua: bool = False):
+        """Headless Chrome for eBay.
+
+        ``native_ua`` keeps Chrome's own browser identity (with "HeadlessChrome"
+        renamed) instead of a random one. A random name that does not match the
+        real browser is one of the first things a bot wall checks.
+        """
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
         from selenium.webdriver.chrome.service import Service
@@ -1691,8 +1789,9 @@ class EbayDriver:
         height = random.randint(900, 1080)
         options.add_argument(f"--window-size={width},{height}")
 
-        ua = _random_user_agent()
-        options.add_argument(f"--user-agent={ua}")
+        if not native_ua:
+            ua = _random_user_agent()
+            options.add_argument(f"--user-agent={ua}")
 
         if proxy_url:
             from .ebay_au_proxies import proxy_chrome_arg
@@ -1727,7 +1826,47 @@ class EbayDriver:
             },
         )
 
+        if native_ua:
+            try:
+                real = driver.execute_script("return navigator.userAgent") or ""
+                if "HeadlessChrome" in real:
+                    driver.execute_cdp_cmd(
+                        "Network.setUserAgentOverride",
+                        {"userAgent": real.replace("HeadlessChrome", "Chrome")},
+                    )
+            except Exception as exc:
+                logger.debug("eBay Chrome user agent override failed: %s", exc)
+
         return driver
+
+    @staticmethod
+    def _us_proxy_url(session_dict: dict | None, *, force_rotate: bool = False) -> str | None:
+        """Next eBay US proxy for Chrome, or None to use the server's own IP."""
+        if session_dict is None or not ebay_us_browser_proxies():
+            return None
+        from . import ebay_us_proxies
+
+        if not ebay_us_proxies.proxies_configured():
+            return None
+        assignment = ebay_us_proxies.acquire_proxy(session_dict, force_rotate=force_rotate)
+        if assignment is None:
+            return None
+        ebay_us_proxies.get_ebay_us_pool().wait_for_gap(assignment)
+        ebay_us_proxies.remember_proxy(session_dict, assignment)
+        session_dict[_ebay_sk(EBAY_MARKET_US, "browser_proxy")] = assignment
+        return assignment.url
+
+    @staticmethod
+    def mark_us_browser_proxy_blocked(session_dict: dict | None) -> None:
+        """Cool down the proxy that Chrome was refused on; the next try rotates."""
+        if not session_dict:
+            return
+        assignment = session_dict.get(_ebay_sk(EBAY_MARKET_US, "browser_proxy"))
+        if assignment is None:
+            return
+        from . import ebay_us_proxies
+
+        ebay_us_proxies.mark_proxy_blocked(assignment)
 
     @staticmethod
     def _au_proxy_url(session_dict: dict | None, *, force_rotate: bool = False) -> str | None:
@@ -1757,8 +1896,11 @@ class EbayDriver:
         proxy_key = _ebay_sk(market, "selenium_proxy_url")
 
         proxy_url = None
+        us_browser = market == EBAY_MARKET_US and ebay_us_browser_first()
         if market == EBAY_MARKET_AU:
             proxy_url = EbayDriver._au_proxy_url(session_dict, force_rotate=force_proxy_rotate)
+        elif us_browser:
+            proxy_url = EbayDriver._us_proxy_url(session_dict, force_rotate=force_proxy_rotate)
 
         if session_dict is not None and key in session_dict:
             driver = session_dict[key]
@@ -1780,11 +1922,15 @@ class EbayDriver:
                         pass
                     session_dict.pop(key, None)
 
-        driver = EbayDriver._create_driver(proxy_url=proxy_url)
+        driver = EbayDriver._create_driver(proxy_url=proxy_url, native_ua=us_browser)
         if session_dict is not None:
             session_dict[key] = driver
             if proxy_url:
                 session_dict[proxy_key] = proxy_url
+            if us_browser:
+                # A new browser has none of the old one's cookies: open the home
+                # page (and load saved cookies) again before the next item.
+                session_dict.pop(_ebay_sk(market, "browser_warmed"), None)
         return driver
 
     @staticmethod
@@ -2100,6 +2246,8 @@ class EbayBrowserSession:
                 home = _ebay_home_origin_for_item_url(url)
                 driver.get(home)
                 time.sleep(0.3 + random.uniform(0.1, 0.3))
+                if market == EBAY_MARKET_US:
+                    _add_us_saved_cookies(driver)
                 if session_dict is not None:
                     session_dict[warmed_key] = True
 
@@ -2139,6 +2287,8 @@ class EbayBrowserSession:
                     if proxies_configured():
                         mark_proxy_blocked(session_proxy_assignment(session_dict))
                         EbayDriver.invalidate_au_proxy(session_dict)
+                elif market == EBAY_MARKET_US and ebay_us_browser_first():
+                    EbayDriver.mark_us_browser_proxy_blocked(session_dict)
                 if "splashui/challenge" in current_url.lower():
                     return html, f"browser_{reason}"
                 return html, f"browser_{reason}"
@@ -2160,7 +2310,7 @@ def _parse_html_to_result(html: str, url: str) -> Optional[dict]:
 
     title_text = (soup.title.string if soup.title else "").lower()
     if "page not found" in title_text or "doesn't exist" in title_text:
-        return {"price": None, "stock": None, "title": None}
+        return {"price": None, "stock": None, "title": None, "error_code": "not_found"}
 
     err_hdr = soup.select_one("p.error-header-v2__title")
     if err_hdr:
@@ -2243,9 +2393,12 @@ def scrape_ebay_for_market(
 
     eff_region = _ebay_market_region(market)
     url = _normalize_url(vendor_url, eff_region)
+    # eBay US goes straight to Chrome: eBay's bot wall refuses plain HTTP from
+    # every proxy, and each refused fetch only cost time and burned a proxy.
+    browser_first = market == EBAY_MARKET_US and ebay_us_browser_first()
 
     candidate_urls = [url]
-    if market == EBAY_MARKET_US:
+    if market == EBAY_MARKET_US and not browser_first:
         if "ebay.com.au" not in url.lower():
             ca_url = _to_ebay_ca_url(url)
             if ca_url != url:
@@ -2259,9 +2412,12 @@ def scrape_ebay_for_market(
     last_browser_html = None
     attempts = max(1, min(max_attempts if max_attempts is not None else RETRY_LIMIT, RETRY_LIMIT))
 
-    http_only = _ebay_http_only_with_proxies(market)
+    http_only = (not browser_first) and _ebay_http_only_with_proxies(market)
+    give_up = False
 
     for attempt in range(attempts):
+        if give_up:
+            break
         if attempt > 0:
             backoff_delay(attempt, base=2.0, jitter=1.5)
             if market == EBAY_MARKET_AU:
@@ -2275,7 +2431,9 @@ def scrape_ebay_for_market(
         for candidate in try_urls:
             logger.info("eBay scrape attempt=%s url=%s", attempt + 1, candidate)
 
-            if _ebay_http_first_enabled(eff_region):
+            if browser_first:
+                html, status, err = None, None, ""
+            elif _ebay_http_first_enabled(eff_region):
                 html, status, err = EbayHTTP.fetch(candidate, eff_region, session, market)
             else:
                 html, status, err = None, None, "http_skipped"
@@ -2302,7 +2460,11 @@ def scrape_ebay_for_market(
                 # only waste ~30s. Retry HTTP with the same warm curl_cffi session —
                 # eBay BIN hydration often unlocks on the 2nd hit.
                 browser_html, browser_err = None, ""
-                html2, status2, err2 = EbayHTTP.fetch(candidate, eff_region, session, market)
+                if status in (404, 410):
+                    # A missing listing is missing on every proxy; one fetch is enough.
+                    html2, status2, err2 = None, None, ""
+                else:
+                    html2, status2, err2 = EbayHTTP.fetch(candidate, eff_region, session, market)
             else:
                 browser_html, browser_err = EbayBrowserSession.warm_and_fetch(
                     candidate,
@@ -2322,7 +2484,11 @@ def scrape_ebay_for_market(
                         _ebay_debug_write_html(session, browser_html, "selenium", candidate)
                         return parsed
 
-                html2, status2, err2 = EbayHTTP.fetch(candidate, eff_region, session, market)
+                if browser_first:
+                    # No plain-HTTP hand-off: the bot wall refuses it.
+                    html2, status2, err2 = None, None, ""
+                else:
+                    html2, status2, err2 = EbayHTTP.fetch(candidate, eff_region, session, market)
 
             if html2 and not err2:
                 if market == EBAY_MARKET_AU:
@@ -2349,7 +2515,13 @@ def scrape_ebay_for_market(
                 if status_val is not None:
                     last_error = classify_failure(status_val, browser_html or html2 or html or "")
 
-            if not should_retry_failure(last_error):
+            code = ebay_result_error_code(last_error)
+            if code == "not_found" or (
+                not should_retry_failure(last_error) and code not in ("blocked", "challenge")
+            ):
+                # Nothing a retry can change (missing listing, page with no price).
+                # This used to leave only the inner loop, so every round ran again.
+                give_up = True
                 break
 
             if len(candidate_urls) > 1:
@@ -2365,7 +2537,13 @@ def scrape_ebay_for_market(
     if last_browser_html:
         save_debug_html(last_browser_html, f"ebay_{market}", url, last_error or "unknown")
 
-    return {"price": None, "stock": None, "title": None}
+    return {
+        "price": None,
+        "stock": None,
+        "title": None,
+        "error_code": ebay_result_error_code(last_error),
+        "error_message": (last_error or "")[:200],
+    }
 
 
 def close_ebay_market_session(session: dict, market: str):

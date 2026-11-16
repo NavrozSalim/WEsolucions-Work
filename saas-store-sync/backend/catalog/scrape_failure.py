@@ -8,6 +8,43 @@ logger = logging.getLogger(__name__)
 
 FALLBACK_LISTING_PRICE = Decimal('489.99')
 
+# eBay answers with a bot wall (Akamai) when it does not trust a request. Those
+# codes mean "the page was not seen", not "the product is gone", so the listing
+# keeps its price and stock and stays Pending for the next pass.
+VENDOR_BLOCK_CODES = frozenset({'blocked', 'challenge', 'captcha'})
+# Blocked tries in a row before the listing fails the usual way.
+BLOCK_RETRY_LIMIT = 3
+
+
+def is_vendor_block(product, result) -> bool:
+    """True when an eBay scrape was refused by the bot wall (US or AU)."""
+    from catalog.marketplace_catalog import vendor_is_ebay
+
+    if not isinstance(result, dict) or result.get('price') is not None:
+        return False
+    if (result.get('error_code') or '') not in VENDOR_BLOCK_CODES:
+        return False
+    return vendor_is_ebay(getattr(product, 'vendor', None))
+
+
+def leave_pending_after_block(pm, code: str, message: str = '') -> bool:
+    """Keep a blocked listing Pending, untouched. False once the retry limit is reached.
+
+    Price, stock and title stay as they were and nothing is pushed. The try
+    count rides on ``failed_sync_count``, which a successful scrape and the
+    scheduled reset both clear.
+    """
+    tries = (pm.failed_sync_count or 0) + 1
+    if tries >= BLOCK_RETRY_LIMIT:
+        return False
+    pm.failed_sync_count = tries
+    note = f'{code or "blocked"}: vendor page blocked, will retry ({tries}/{BLOCK_RETRY_LIMIT})'
+    if message:
+        note = f'{note}: {str(message)[:200]}'
+    pm.scrape_error = note[:512]
+    pm.save(update_fields=['failed_sync_count', 'scrape_error'])
+    return True
+
 
 def fail_product_mapping(pm, code: str, message: str = '', *, store=None) -> None:
     """Mark a listing failed, set local stock to 0, push zero inventory when possible.

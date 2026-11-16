@@ -30,6 +30,7 @@ from .ebay_common import (
     _normalize_url,
     _parse_html_to_result_au,
     close_ebay_market_session,
+    ebay_result_error_code,
     scrape_ebay_for_market,
 )
 
@@ -143,8 +144,15 @@ def _note_au_html(session: dict, html: str | None, err: str | None = None) -> No
 
 
 def _title_from_session_html(session: dict) -> str | None:
+    """Product title from the last page this session saw, if that page was a product.
+
+    A block or challenge page has a title too ("Error Page", "Pardon our
+    interruption..."), which used to be saved as the listing's title.
+    """
     html = session.get(_AU_LAST_HTML_KEY) or ""
-    if not html:
+    if not html or not session.get(_AU_PRODUCT_HTML_KEY):
+        return None
+    if _is_challenge_or_blocked(html)[0]:
         return None
     try:
         soup = BeautifulSoup(html, "lxml")
@@ -172,6 +180,8 @@ def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
     """
     if session is None:
         session = {}
+    # The title of a failed item must come from this item's page, not the last one.
+    session.pop(_AU_LAST_HTML_KEY, None)
 
     eff_region = region or "AU"
     url = _normalize_url(vendor_url, eff_region)
@@ -224,7 +234,13 @@ def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
             "eBay AU HTTP block (%s) under proxies — skipping full engine url=%s total=%.2fs",
             http_block_err, url[:70], time.monotonic() - t_start,
         )
-        return {"price": None, "stock": None, "title": _title_from_session_html(session)}
+        return {
+            "price": None,
+            "stock": None,
+            "title": _title_from_session_html(session),
+            "error_code": ebay_result_error_code(http_block_err),
+            "error_message": str(http_block_err)[:200],
+        }
 
     if fast_scrape_enabled() and not _should_skip_fast_selenium(session):
         t0 = time.monotonic()
@@ -268,11 +284,20 @@ def scrape_ebay_au(vendor_url: str, region: str, session: dict = None) -> dict:
         return result
 
     title = (result or {}).get("title") or _title_from_session_html(session)
-    return {
+    out = {
         "price": (result or {}).get("price"),
         "stock": (result or {}).get("stock"),
         "title": title,
     }
+    code = (result or {}).get("error_code")
+    if not code and session.get(_AU_BLOCKED_KEY) and not session.get(_AU_PRODUCT_HTML_KEY):
+        code = ebay_result_error_code(str(session.get(_AU_BLOCKED_KEY)))
+    if code:
+        out["error_code"] = code
+        message = (result or {}).get("error_message")
+        if message:
+            out["error_message"] = message
+    return out
 
 
 def close_ebay_au_session(session: dict):

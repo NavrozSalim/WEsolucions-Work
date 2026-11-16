@@ -648,6 +648,12 @@ def run_store_sync(self, store_id):
                     )
                     updated += 1
                     continue
+                from catalog.scrape_failure import is_vendor_block, leave_pending_after_block
+
+                if is_vendor_block(pm.product, result):
+                    scrape_title = ''
+                    if leave_pending_after_block(pm, err_code, err_msg):
+                        continue
                 _apply_no_vendor_price_fallback(
                     pm,
                     err_code,

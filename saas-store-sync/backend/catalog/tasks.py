@@ -7,6 +7,7 @@ import uuid
 from datetime import timedelta
 
 from celery import chord, group, shared_task
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.utils import timezone
 from django.db import transaction
@@ -47,6 +48,7 @@ from .models import (
     StoreCatalogCeleryScrapeState,
 )
 from .marketplace_catalog import listing_sku_lookup_order, store_is_reverb, store_is_sears, vendor_is_ebay
+from .scrape_failure import is_vendor_block, leave_pending_after_block
 from .services import _normalize
 from products.models import Product
 from vendor.models import Vendor
@@ -253,6 +255,14 @@ def _queue_scrape_continuation(
         metadata=meta,
     )
     return True
+
+
+def _blocked_note(blocked_n: int) -> str:
+    """Activity-log suffix for eBay listings the bot wall refused this run."""
+    return (
+        f' {blocked_n} eBay listing(s) were blocked by eBay and left Pending with their price '
+        f'and stock unchanged; they are retried on the next pass.'
+    )
 
 
 def _pending_left_scrape_note(store, *, user_cancelled: bool, vendor_id=None) -> tuple[str, int]:
@@ -1338,6 +1348,15 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                 err_msg = (
                     result.get('error_message') if isinstance(result, dict) else ''
                 ) or ''
+                if is_vendor_block(product, result):
+                    scrape_title = ''
+                    if leave_pending_after_block(pm, err_code, err_msg):
+                        logger.warning(
+                            "Catalog scrape blocked sku=%s url=%s code=%s; left Pending",
+                            product.vendor_sku, (url or '')[:160], err_code,
+                        )
+                        last_progress_at = timezone.now()
+                        continue
                 logger.warning(
                     "Catalog scrape no price sku=%s url=%s code=%s msg=%s",
                     product.vendor_sku,
@@ -1859,11 +1878,15 @@ def _process_store_wide_scrape_mappings(
     session,
     emit_stall_log: bool,
     root_task_id: str | None = None,
+    deadline_mono: float | None = None,
 ):
     """Inner loop for store-wide scrape (single process or one parallel chunk).
 
     ``root_task_id`` is the run this batch belongs to. When omitted the loop
     joins whatever run currently owns the store.
+
+    ``deadline_mono`` (``time.monotonic()`` value): stop before the next listing
+    once it has passed, leaving the rest Pending for the next batch.
     """
     from decimal import Decimal
 
@@ -1886,7 +1909,7 @@ def _process_store_wide_scrape_mappings(
     from vendor.models import VendorPrice
     from scrapers import get_price_and_stock
 
-    processed = succeeded = failed = 0
+    processed = succeeded = failed = blocked = 0
     now = timezone.now()
     error_summary = None
     stalled_out = False
@@ -1919,6 +1942,17 @@ def _process_store_wide_scrape_mappings(
                 user_cancelled = True
                 break
             mono = time.monotonic()
+            if deadline_mono is not None and mono >= deadline_mono:
+                # Hand off before the task's time limit. A scraper used to catch
+                # the time-limit signal as an ordinary error, the batch carried
+                # on, and Celery then killed the process: its lane never sent
+                # the next batch and the scrape looked stopped.
+                logger.warning(
+                    'Store scrape batch for store %s reached its time budget; handing off.', store.id,
+                )
+                stalled_out = True
+                error_summary = error_summary or 'batch_time_limit'
+                break
             if last_heartbeat_mono is None or mono - last_heartbeat_mono >= _SCRAPE_HEARTBEAT_EVERY_SEC:
                 touch_celery_scrape_heartbeat(str(store.id), scrape_root_id)
                 last_heartbeat_mono = mono
@@ -2021,6 +2055,8 @@ def _process_store_wide_scrape_mappings(
                         scrape_title = (result.get('title') or '').strip()[:500]
                     elif not uses_nora:
                         raise ValueError('Product has no vendor_url or resolvable SKU')
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception as e:
                     _refresh_db_connection()
                     if uses_nora:
@@ -2080,6 +2116,16 @@ def _process_store_wide_scrape_mappings(
                 err_msg = (
                     result.get('error_message') if isinstance(result, dict) else ''
                 ) or ''
+                if is_vendor_block(product, result):
+                    scrape_title = ''
+                    if leave_pending_after_block(pm, err_code, err_msg):
+                        logger.warning(
+                            "Store-wide scrape blocked sku=%s url=%s code=%s; left Pending",
+                            product.vendor_sku, (url or "")[:160], err_code,
+                        )
+                        blocked += 1
+                        last_progress_at = timezone.now()
+                        continue
                 logger.warning(
                     "Store-wide scrape no price sku=%s url=%s code=%s msg=%s",
                     product.vendor_sku,
@@ -2180,6 +2226,8 @@ def _process_store_wide_scrape_mappings(
                 failed += 1
                 last_progress_at = timezone.now()
                 continue
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as loop_err:
         fatal_error = str(loop_err)
         logger.exception('Store-wide scrape aborted: %s', loop_err)
@@ -2188,6 +2236,7 @@ def _process_store_wide_scrape_mappings(
         'rows_processed': processed,
         'rows_succeeded': succeeded,
         'failed': failed,
+        'blocked': blocked,
         'error_summary': error_summary,
         'stalled': stalled_out,
         'fatal_error': fatal_error,
@@ -2227,7 +2276,7 @@ def _scrape_lane_counter_key(store_id, root_task_id: str | None) -> str:
     return f'catalog:scrape_lanes:{store_id}'
 
 
-_SCRAPE_TOTAL_COUNTS = ('rows_processed', 'rows_succeeded', 'failed')
+_SCRAPE_TOTAL_COUNTS = ('rows_processed', 'rows_succeeded', 'failed', 'blocked')
 _SCRAPE_TOTAL_FLAGS = ('stalled', 'user_cancelled')
 _SCRAPE_TOTAL_TEXTS = ('fatal_error', 'error_summary', 'error')
 
@@ -2461,6 +2510,10 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False, vend
         f'{finished_label} finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
         f'{succeeded} listing(s) updated, {failed} failed, {processed} processed.'
     )
+    blocked_n = int(stats.get('blocked') or 0)
+    if blocked_n:
+        end_meta['blocked'] = blocked_n
+        end_msg += _blocked_note(blocked_n)
     if stalled_out:
         end_msg += (
             f' Stopped early: no progress moving listings off Pending for '
@@ -2519,6 +2572,9 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False, vend
     return out
 
 
+_BATCH_HANDOFF_MARGIN_SEC = 300
+
+
 def _scrape_chunk_soft_limit() -> int:
     """Seconds one batch may run before it gives up and hands off to the next.
 
@@ -2575,6 +2631,8 @@ def catalog_scrape_store_chunk_task(
     lane_count = max(1, int(lane_count or 1))
     vendor_id = vendor_id or ''
     root_task_id = root_task_id or ''
+    # Leave room for the slowest single listing (a few Chrome loads with retries).
+    deadline_mono = time.monotonic() + max(60, _scrape_chunk_soft_limit() - _BATCH_HANDOFF_MARGIN_SEC)
     stats = {
         'error': 'store_not_found',
         'rows_processed': 0,
@@ -2609,6 +2667,7 @@ def catalog_scrape_store_chunk_task(
             session=session,
             emit_stall_log=False,
             root_task_id=root_task_id or None,
+            deadline_mono=deadline_mono,
         )
         return stats
     except SoftTimeLimitExceeded:
@@ -2673,7 +2732,7 @@ def catalog_scrape_store_finalize(
     vendor_id = (str(vendor_id).strip() if vendor_id else '') or None
 
     try:
-        processed = succeeded = failed = 0
+        processed = succeeded = failed = blocked_n = 0
         stalled_out = False
         user_cancelled = False
         error_summary = None
@@ -2697,6 +2756,7 @@ def catalog_scrape_store_finalize(
             succeeded += int(r.get('rows_succeeded', 0))
             failed += int(r.get('failed', 0))
             processed += int(r.get('rows_processed', 0))
+            blocked_n += int(r.get('blocked', 0) or 0)
             stalled_out = stalled_out or bool(r.get('stalled'))
             user_cancelled = user_cancelled or bool(r.get('user_cancelled'))
             es = r.get('error_summary')
@@ -2715,6 +2775,9 @@ def catalog_scrape_store_finalize(
             f'Store-wide vendor scrape finished at {timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")}. '
             f'{succeeded} listing(s) updated, {failed} failed, {processed} processed (parallel chunks).'
         )
+        if blocked_n:
+            end_meta['blocked'] = blocked_n
+            end_msg += _blocked_note(blocked_n)
         if fatal_parts:
             end_msg += ' Errors: ' + '; '.join(fatal_parts[:5])
         if stalled_out:
