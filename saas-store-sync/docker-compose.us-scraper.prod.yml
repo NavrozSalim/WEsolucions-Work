@@ -98,8 +98,9 @@ services:
       - EBAY_US_COOKIE_HANDOFF=${EBAY_US_COOKIE_HANDOFF:-1}
       # 1 = Chrome keeps its own Linux browser name instead of a random Windows one.
       - EBAY_US_CHROME_NATIVE_UA=${EBAY_US_CHROME_NATIVE_UA:-0}
-      # 1 = windowed Chrome on a virtual screen (Xvfb); 0 = headless.
-      - EBAY_US_CHROME_HEADFUL=${EBAY_US_CHROME_HEADFUL:-1}
+      # 1 = windowed Chrome on a virtual screen (Xvfb); 0 = headless (default: it got
+      # through no more often than headless and started slower).
+      - EBAY_US_CHROME_HEADFUL=${EBAY_US_CHROME_HEADFUL:-0}
       - ALIEXPRESS_APP_KEY=${ALIEXPRESS_APP_KEY:-}
       - ALIEXPRESS_APP_SECRET=${ALIEXPRESS_APP_SECRET:-}
       - ALIEXPRESS_TRACKING_ID=${ALIEXPRESS_TRACKING_ID:-}

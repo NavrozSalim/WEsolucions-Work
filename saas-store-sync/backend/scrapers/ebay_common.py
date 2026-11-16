@@ -1888,8 +1888,12 @@ def _add_us_saved_cookies(driver) -> None:
 
 
 def ebay_us_chrome_headful() -> bool:
-    """eBay US Chrome runs windowed on a virtual screen (``EBAY_US_CHROME_HEADFUL``, default on)."""
-    return _env_on("EBAY_US_CHROME_HEADFUL", "1")
+    """eBay US Chrome runs windowed on a virtual screen (``EBAY_US_CHROME_HEADFUL``, default off).
+
+    On the eBay US proxies it got through no more often than headless Chrome
+    (about 1 try in 5) and took longer to start.
+    """
+    return _env_on("EBAY_US_CHROME_HEADFUL", "0")
 
 
 _XVFB: dict = {"proc": None, "display": None, "warned": False}
