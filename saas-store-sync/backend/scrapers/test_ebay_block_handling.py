@@ -57,11 +57,11 @@ class UsBrowserFirstTests(SimpleTestCase):
                              return_value=(_CHALLENGE, "browser_challenge")) as browser:
             out = scrape_ebay_for_market("https://www.ebay.com/itm/1", "USA", {}, market=EBAY_MARKET_US)
         # One cookie hand-off per Chrome try; Chrome's error is the one reported.
-        self.assertEqual(http.call_count, ebay_common.RETRY_LIMIT)
-        self.assertEqual(browser.call_count, ebay_common.RETRY_LIMIT)
+        self.assertEqual(http.call_count, ebay_common.ebay_us_chrome_attempts())
+        self.assertEqual(browser.call_count, ebay_common.ebay_us_chrome_attempts())
         # Only the first try keeps its proxy; every retry rotates.
         rotates = [c.kwargs["force_proxy_rotate"] for c in browser.call_args_list]
-        self.assertEqual(rotates, [False] + [True] * (ebay_common.RETRY_LIMIT - 1))
+        self.assertEqual(rotates, [False] + [True] * (ebay_common.ebay_us_chrome_attempts() - 1))
         self.assertEqual(out["error_code"], "challenge")
         self.assertIsNone(out["title"])
 
@@ -102,7 +102,7 @@ class UsBrowserFirstTests(SimpleTestCase):
                              return_value=(_AKAMAI_403, "browser_blocked")) as browser:
             scrape_ebay_for_market("https://www.ebay.com/itm/182391181967", "USA", {}, market=EBAY_MARKET_US)
         hosts = [c.args[0].split("/")[2] for c in browser.call_args_list]
-        self.assertEqual(hosts, ["www.ebay.com", "www.ebay.ca"] * ebay_common.RETRY_LIMIT)
+        self.assertEqual(hosts, ["www.ebay.com", "www.ebay.ca"] * ebay_common.ebay_us_chrome_attempts())
 
     def test_no_ebay_ca_while_chrome_uses_the_proxies(self):
         with patch.object(ebay_common, "_us_chrome_uses_proxies", return_value=True), \
@@ -121,7 +121,7 @@ class UsBrowserFirstTests(SimpleTestCase):
                              return_value=(_AKAMAI_403, "browser_blocked")) as browser:
             scrape_ebay_for_market("https://www.ebay.com/itm/182391181967", "USA", {}, market=EBAY_MARKET_US)
         hosts = [c.args[0].split("/")[2] for c in browser.call_args_list]
-        self.assertEqual(hosts, ["www.ebay.ca", "www.ebay.com"] * ebay_common.RETRY_LIMIT)
+        self.assertEqual(hosts, ["www.ebay.ca", "www.ebay.com"] * ebay_common.ebay_us_chrome_attempts())
 
     def test_no_handoff_while_chrome_is_on_a_proxy(self):
         session = {ebay_common._ebay_sk(EBAY_MARKET_US, "selenium_proxy_url"): "http://u:p@a:1"}

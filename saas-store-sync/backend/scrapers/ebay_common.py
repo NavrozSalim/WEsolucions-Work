@@ -453,6 +453,14 @@ def ebay_us_chrome_native_ua() -> bool:
     return _env_on("EBAY_US_CHROME_NATIVE_UA", "0")
 
 
+def ebay_us_chrome_attempts() -> int:
+    """Chrome tries per eBay US listing, each on a fresh proxy (``EBAY_US_CHROME_ATTEMPTS``, default 5)."""
+    try:
+        return max(1, min(10, int((os.environ.get("EBAY_US_CHROME_ATTEMPTS") or "5").strip())))
+    except ValueError:
+        return 5
+
+
 def ebay_us_ca_first() -> bool:
     """Chrome-first tries the item on ebay.ca before ebay.com (``EBAY_US_CA_FIRST``, default off).
 
@@ -2135,7 +2143,13 @@ class EbayDriver:
 
         if not ebay_us_proxies.proxies_configured():
             return None
-        assignment = ebay_us_proxies.acquire_proxy(session_dict, force_rotate=force_rotate)
+        if ebay_us_proxies.shared_mode():
+            # Every worker sees which proxies are resting or taken; waits for a
+            # free one (raises ProxyPoolBusy) instead of reusing a refused IP.
+            current = session_dict.get(_ebay_sk(EBAY_MARKET_US, "browser_proxy"))
+            assignment = ebay_us_proxies.acquire_shared_wait(current, force_rotate=force_rotate)
+        else:
+            assignment = ebay_us_proxies.acquire_proxy(session_dict, force_rotate=force_rotate)
         if assignment is None:
             return None
         ebay_us_proxies.get_ebay_us_pool().wait_for_gap(assignment)
@@ -2530,6 +2544,10 @@ class EbayBrowserSession:
                 session_dict, market, force_proxy_rotate=force_proxy_rotate,
             )
         except Exception as exc:
+            from .ebay_us_proxies import ProxyPoolBusy
+
+            if isinstance(exc, ProxyPoolBusy):
+                return None, "proxy_exhausted"
             return None, f"selenium_init: {exc}"
 
         try:
@@ -2786,7 +2804,8 @@ def scrape_ebay_for_market(
         random_delay(0.2, 0.6)
     last_error = None
     last_browser_html = None
-    attempts = max(1, min(max_attempts if max_attempts is not None else RETRY_LIMIT, RETRY_LIMIT))
+    limit = ebay_us_chrome_attempts() if browser_first else RETRY_LIMIT
+    attempts = max(1, min(max_attempts if max_attempts is not None else limit, limit))
 
     http_only = (not browser_first) and _ebay_http_only_with_proxies(market)
     give_up = False
@@ -2913,6 +2932,11 @@ def scrape_ebay_for_market(
                     last_error = classify_failure(status_val, browser_html or html2 or html or "")
 
             code = ebay_result_error_code(last_error)
+            if browser_err == "proxy_exhausted":
+                # No free proxy even after waiting: leave the listing Pending
+                # rather than wait again on every remaining try.
+                give_up = True
+                break
             if code == "not_found" or (
                 not should_retry_failure(last_error) and code not in ("blocked", "challenge")
             ):

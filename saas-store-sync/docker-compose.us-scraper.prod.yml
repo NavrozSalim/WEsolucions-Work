@@ -82,7 +82,15 @@ services:
       - EBAY_US_DISABLE_PROXIES=${EBAY_US_DISABLE_PROXIES:-}
       - EBAY_US_MIN_REQUEST_GAP_SEC=${EBAY_US_MIN_REQUEST_GAP_SEC:-3}
       - EBAY_US_HTTP_RETRIES=${EBAY_US_HTTP_RETRIES:-2}
-      - EBAY_US_PROXY_BLOCK_COOLDOWN_SEC=${EBAY_US_PROXY_BLOCK_COOLDOWN_SEC:-300}
+      # A proxy eBay refused rests this long, for every worker (shared through Redis).
+      - EBAY_US_PROXY_BLOCK_COOLDOWN_SEC=${EBAY_US_PROXY_BLOCK_COOLDOWN_SEC:-600}
+      # 1 = workers share proxy rest and use; each IP is used by one worker at a time.
+      - EBAY_US_PROXY_SHARED=${EBAY_US_PROXY_SHARED:-1}
+      - EBAY_US_PROXY_HOLD_SEC=${EBAY_US_PROXY_HOLD_SEC:-120}
+      # Wait this long for a free proxy, then leave the listing Pending.
+      - EBAY_US_PROXY_MAX_WAIT_SEC=${EBAY_US_PROXY_MAX_WAIT_SEC:-240}
+      # Chrome tries per listing, each on a fresh proxy.
+      - EBAY_US_CHROME_ATTEMPTS=${EBAY_US_CHROME_ATTEMPTS:-5}
       - EBAY_US_FULL_ENGINE_SELENIUM=${EBAY_US_FULL_ENGINE_SELENIUM:-}
       # eBay's bot wall refuses plain HTTP, so eBay US loads pages in Chrome.
       - EBAY_US_BROWSER_FIRST=${EBAY_US_BROWSER_FIRST:-1}

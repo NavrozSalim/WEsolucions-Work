@@ -34,6 +34,12 @@ def leave_pending_after_block(pm, code: str, message: str = '') -> bool:
     count rides on ``failed_sync_count``, which a successful scrape and the
     scheduled reset both clear.
     """
+    if (message or '').strip() == 'proxy_exhausted':
+        # Our own throttle (every proxy resting or in use), not the vendor
+        # refusing: it does not count toward the limit.
+        pm.scrape_error = 'proxy_exhausted: every proxy was resting or in use, will retry'
+        pm.save(update_fields=['scrape_error'])
+        return True
     tries = (pm.failed_sync_count or 0) + 1
     if tries >= BLOCK_RETRY_LIMIT:
         return False
