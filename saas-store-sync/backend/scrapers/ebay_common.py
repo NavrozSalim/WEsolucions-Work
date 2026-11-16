@@ -445,6 +445,19 @@ def ebay_us_browser_proxies() -> bool:
     return _env_on("EBAY_US_BROWSER_PROXIES", "1")
 
 
+def ebay_us_chrome_native_ua() -> bool:
+    """``EBAY_US_CHROME_NATIVE_UA=1``: Chrome keeps its own Linux browser name.
+
+    Off by default: the run that got past eBay's wall used a random Windows name.
+    """
+    return _env_on("EBAY_US_CHROME_NATIVE_UA", "0")
+
+
+def ebay_us_cookie_handoff() -> bool:
+    """After Chrome, one plain request with Chrome's eBay cookies (``EBAY_US_COOKIE_HANDOFF``, default on)."""
+    return _env_on("EBAY_US_COOKIE_HANDOFF", "1")
+
+
 # When the proxies refuse Chrome (server IP not on the allowlist), every page is
 # an empty stub. After this many refusals in a row on different proxies, Chrome
 # uses the server's own IP for a while instead of failing every listing.
@@ -1982,7 +1995,9 @@ class EbayDriver:
                         pass
                     session_dict.pop(key, None)
 
-        driver = EbayDriver._create_driver(proxy_url=proxy_url, native_ua=us_browser)
+        driver = EbayDriver._create_driver(
+            proxy_url=proxy_url, native_ua=us_browser and ebay_us_chrome_native_ua(),
+        )
         if session_dict is not None:
             session_dict[key] = driver
             if proxy_url:
@@ -2557,6 +2572,13 @@ def scrape_ebay_for_market(
                     market,
                     force_proxy_rotate=attempt > 0,
                 )
+                if browser_first:
+                    logger.info(
+                        "eBay Chrome attempt=%s via=%s result=%s",
+                        attempt + 1,
+                        "proxy" if session.get(_ebay_sk(market, "selenium_proxy_url")) else "server IP",
+                        browser_err or "page loaded",
+                    )
                 if browser_html:
                     last_browser_html = browser_html
                     if market == EBAY_MARKET_AU:
@@ -2568,10 +2590,13 @@ def scrape_ebay_for_market(
                         _ebay_debug_write_html(session, browser_html, "selenium", candidate)
                         return parsed
 
-                if browser_first:
-                    # No plain-HTTP hand-off: the bot wall refuses it.
+                if browser_first and (
+                    browser_err == "browser_proxy_error" or not ebay_us_cookie_handoff()
+                ):
+                    # Chrome never reached eBay, so it has no cookies to hand over.
                     html2, status2, err2 = None, None, ""
                 else:
+                    # One plain request carrying the cookies Chrome just got from eBay.
                     html2, status2, err2 = EbayHTTP.fetch(candidate, eff_region, session, market)
 
             if html2 and not err2:
@@ -2584,7 +2609,8 @@ def scrape_ebay_for_market(
                     _ebay_debug_write_html(session, html2, "http_cookie", candidate)
                     return parsed
 
-            parts = [err2, browser_err, err]
+            # Chrome's error says what eBay did; the hand-off's is secondary.
+            parts = [browser_err, err2, err] if browser_first else [err2, browser_err, err]
             if status is not None:
                 parts.append(f"http_{status}")
             if status2 is not None:

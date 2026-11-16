@@ -34,6 +34,11 @@ class Command(BaseCommand):
             metavar="PATH",
             help="eBay only: write last HTML used for parsing to this path (debug/discount timing)",
         )
+        parser.add_argument(
+            "--steps",
+            action="store_true",
+            help="Print each scraper step (which fetch got the price, or why it failed).",
+        )
 
     def handle(self, *args, **options):
         url = (options["url"] or "").strip()
@@ -41,6 +46,17 @@ class Command(BaseCommand):
         if region not in ("USA", "AU", "UK"):
             self.stderr.write(self.style.WARNING("Region should be USA, AU, or UK; using USA."))
             region = "USA"
+
+        if options.get("steps"):
+            import logging
+            import sys
+
+            handler = logging.StreamHandler(sys.stdout)
+            handler.setFormatter(logging.Formatter("  %(relativeCreated)6.0fms %(message)s"))
+            scraper_log = logging.getLogger("scrapers")
+            scraper_log.addHandler(handler)
+            scraper_log.setLevel(logging.INFO)
+            scraper_log.propagate = False
 
         session = {}
         save_html = (options.get("save_html") or "").strip()

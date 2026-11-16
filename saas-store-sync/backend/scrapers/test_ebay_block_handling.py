@@ -52,11 +52,12 @@ class UsBrowserFirstTests(SimpleTestCase):
         self.assertEqual(out["price"], 9.99)
 
     def test_us_challenge_retries_with_new_proxy_then_reports_challenge(self):
-        with patch.object(ebay_common.EbayHTTP, "fetch") as http, \
+        with patch.object(ebay_common.EbayHTTP, "fetch", return_value=(None, 403, "http_403")) as http, \
                 patch.object(ebay_common.EbayBrowserSession, "warm_and_fetch",
                              return_value=(_CHALLENGE, "browser_challenge")) as browser:
             out = scrape_ebay_for_market("https://www.ebay.com/itm/1", "USA", {}, market=EBAY_MARKET_US)
-        http.assert_not_called()
+        # One cookie hand-off per Chrome try; Chrome's error is the one reported.
+        self.assertEqual(http.call_count, ebay_common.RETRY_LIMIT)
         self.assertEqual(browser.call_count, ebay_common.RETRY_LIMIT)
         # Only the first try keeps its proxy; every retry rotates.
         rotates = [c.kwargs["force_proxy_rotate"] for c in browser.call_args_list]
@@ -67,10 +68,37 @@ class UsBrowserFirstTests(SimpleTestCase):
     def test_us_page_with_no_price_is_tried_once(self):
         with patch.object(ebay_common.EbayBrowserSession, "warm_and_fetch",
                           return_value=("<html>no price</html>", "")) as browser, \
+                patch.object(ebay_common.EbayHTTP, "fetch", return_value=(None, None, "")), \
                 patch.object(ebay_common, "_parse_html_to_result", return_value=None):
             out = scrape_ebay_for_market("https://www.ebay.com/itm/1", "USA", {}, market=EBAY_MARKET_US)
         browser.assert_called_once()
         self.assertEqual(out["error_code"], "no_price")
+
+    def test_cookie_handoff_gets_the_price_after_chrome_is_blocked(self):
+        with patch.object(ebay_common.EbayHTTP, "fetch",
+                          return_value=("<html>item</html>", 200, "")) as http, \
+                patch.object(ebay_common.EbayBrowserSession, "warm_and_fetch",
+                             return_value=(_AKAMAI_403, "browser_blocked")), \
+                patch.object(ebay_common, "_parse_html_to_result",
+                             side_effect=lambda h, u: {"price": 9.99, "stock": 20, "title": "T"}
+                             if h == "<html>item</html>" else None):
+            out = scrape_ebay_for_market("https://www.ebay.com/itm/1", "USA", {}, market=EBAY_MARKET_US)
+        http.assert_called_once()
+        self.assertEqual(out["price"], 9.99)
+
+    def test_no_handoff_when_switched_off_or_proxy_refused(self):
+        for env, err in (({"EBAY_US_COOKIE_HANDOFF": "0"}, "browser_blocked"), ({}, "browser_proxy_error")):
+            with patch.dict(os.environ, env), \
+                    patch.object(ebay_common.EbayHTTP, "fetch") as http, \
+                    patch.object(ebay_common.EbayBrowserSession, "warm_and_fetch", return_value=(None, err)):
+                out = scrape_ebay_for_market("https://www.ebay.com/itm/1", "USA", {}, market=EBAY_MARKET_US)
+            http.assert_not_called()
+            self.assertEqual(out["error_code"], "blocked")
+
+    def test_chrome_uses_a_random_windows_name_unless_native_is_on(self):
+        self.assertFalse(ebay_common.ebay_us_chrome_native_ua())
+        with patch.dict(os.environ, {"EBAY_US_CHROME_NATIVE_UA": "1"}):
+            self.assertTrue(ebay_common.ebay_us_chrome_native_ua())
 
 
 @patch.object(ebay_common, "random_delay", lambda *a, **k: None)
