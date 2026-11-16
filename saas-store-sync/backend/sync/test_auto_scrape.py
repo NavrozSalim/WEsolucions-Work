@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from catalog.models import ProductMapping
 from marketplace.models import Marketplace
@@ -31,7 +32,7 @@ class NormalizePayloadTests(TestCase):
         })
         self.assertEqual(clean['run_times'], ['06:00', '18:30'])
         self.assertEqual(clean['retry_failed_cycles'], 3)
-        self.assertTrue(clean['push_after'])
+        self.assertFalse(clean['push_after'])  # Auto Scraping never pushes
 
     def test_rejects_bad_values(self):
         bad = [
@@ -106,7 +107,7 @@ class RunAutoScrapeTests(AutoScrapeBase):
             patch.object(auto_scrape, '_scrape_already_running', return_value=False),
             patch.object(auto_scrape, '_store_update_running', return_value=False),
             patch.object(auto_scrape, '_catalog_scrape_pass', side_effect=scrape_side_effect),
-            patch.object(auto_scrape, '_catalog_push', return_value='queued'),
+            patch('catalog.marketplace_push.push_product_mapping_to_marketplace', return_value=(True, None)),
         )
 
     def _run(self, scrape_side_effect):
@@ -138,7 +139,8 @@ class RunAutoScrapeTests(AutoScrapeBase):
         self.assertEqual(self.sched.last_status, 'success')
         self.assertIsNotNone(self.sched.last_finished_at)
 
-    def test_stops_after_max_cycles_and_pushes_when_on(self):
+    def test_stops_after_max_cycles_and_never_pushes(self):
+        # push_after left on by an older save is ignored.
         AutoScrapeSchedule.objects.filter(pk=self.sched.pk).update(retry_failed_cycles=2, push_after=True)
         self._mapping('sku-x', 'scraped')
 
@@ -151,7 +153,7 @@ class RunAutoScrapeTests(AutoScrapeBase):
         self.assertEqual(result['failed_after'], [1, 1, 1])
         self.assertEqual(result['stop_reason'], 'cycles_done')
         self.assertEqual(result['status'], 'partial')
-        push.assert_called_once()
+        push.assert_not_called()
 
     def test_zero_cycles_scrapes_once(self):
         AutoScrapeSchedule.objects.filter(pk=self.sched.pk).update(retry_failed_cycles=0)
@@ -186,6 +188,47 @@ class RunAutoScrapeTests(AutoScrapeBase):
         self.assertTrue(result['skipped'])
         self.assertEqual(result['reason'], 'scrape_running')
         scrape.assert_not_called()
+
+
+class PushHeldDuringAutoScrapeTests(AutoScrapeBase):
+    """A failed row gets stock 0 locally but nothing is sent while Auto Scraping runs."""
+
+    def _fail_row(self):
+        from catalog.scrape_failure import apply_no_vendor_price_fallback, fail_product_mapping
+
+        pm = self._mapping('sku-f', 'pending')
+        pm.store_price = 50
+        pm.store_stock = 7
+        pm.save(update_fields=['store_price', 'store_stock'])
+        pm2 = self._mapping('sku-n', 'pending')
+        with patch('catalog.marketplace_push.push_product_mapping_to_marketplace',
+                   return_value=(True, None)) as push, \
+                patch('sync.tasks._build_store_vendor_pricing_inventory_caches',
+                      return_value=({}, None, {}, None)):
+            fail_product_mapping(pm, 'scrape_failed', store=self.store)
+            apply_no_vendor_price_fallback(pm2, store=self.store, price_by_vendor_id={}, price_fallback=None)
+        pm.refresh_from_db()
+        self.assertEqual(pm.store_stock, 0)
+        self.assertEqual(pm.sync_status, 'failed')
+        return push
+
+    def test_no_push_while_auto_scrape_running(self):
+        AutoScrapeSchedule.objects.filter(pk=self.sched.pk).update(
+            last_status='running', last_run_at=timezone.now(),
+        )
+        self.assertTrue(auto_scrape.auto_scrape_run_active(self.store.id))
+        self._fail_row().assert_not_called()
+
+    def test_push_as_before_when_no_auto_scrape_run(self):
+        AutoScrapeSchedule.objects.filter(pk=self.sched.pk).update(last_status='success')
+        self.assertFalse(auto_scrape.auto_scrape_run_active(self.store.id))
+        self.assertEqual(self._fail_row().call_count, 2)
+
+    def test_stale_running_does_not_hold_pushes(self):
+        AutoScrapeSchedule.objects.filter(pk=self.sched.pk).update(
+            last_status='running', last_run_at=timezone.now() - timedelta(hours=13),
+        )
+        self.assertFalse(auto_scrape.auto_scrape_run_active(self.store.id))
 
 
 @override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())

@@ -66,7 +66,7 @@ export function buildAutoScrapePayload(form) {
             run_times: [...new Set(form.auto_scrape_times || [])].sort(),
             timezone: form.auto_scrape_timezone,
             retry_failed_cycles: Number(form.auto_scrape_retry_cycles) || 0,
-            // Pushing is left to each vendor's Continuous update / Scheduled Updates.
+            // Auto Scraping never pushes; Scheduled Updates / Manual sync do.
             push_after: false,
         },
     };
@@ -218,6 +218,8 @@ export default function AutoScrapeCard({ form, setForm, timezoneOptions, lastRun
                     <p className="text-xs text-slate-500 dark:text-slate-400">
                         At each run time all active listings are set to Pending and scraped. Then, up to this many times,
                         Failed listings are set back to Pending and scraped again. It stops early when nothing is Failed.
+                        Auto Scraping only scrapes: nothing is sent to the marketplace (not even stock 0 for Failed
+                        listings). Scheduled Updates or Manual sync send the price/stock.
                     </p>
                 </div>
             )}

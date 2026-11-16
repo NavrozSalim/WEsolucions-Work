@@ -139,8 +139,24 @@ def apply_no_vendor_price_fallback(
     _push_fallback_listing(pm, store, price_by_vendor_id, price_fallback)
 
 
+def _push_held_for_auto_scrape(pm, store) -> bool:
+    """Auto Scraping only scrapes: no marketplace push while its run is active."""
+    from sync.auto_scrape import auto_scrape_run_active
+
+    if not auto_scrape_run_active(getattr(store, 'id', None) or pm.store_id):
+        return False
+    logger.info(
+        'Auto Scraping run active: marketplace push held pm=%s sku=%s',
+        getattr(pm, 'id', None),
+        getattr(pm, 'marketplace_child_sku', None),
+    )
+    return True
+
+
 def _push_fallback_listing(pm, store, price_by_vendor_id=None, price_fallback=None) -> None:
     if store.connection_status != 'connected':
+        return
+    if _push_held_for_auto_scrape(pm, store):
         return
 
     try:
@@ -192,6 +208,8 @@ def _push_zero_stock_for_failed(pm, store) -> None:
     if store.connection_status != 'connected':
         return
     if pm.store_price is None:
+        return
+    if _push_held_for_auto_scrape(pm, store):
         return
 
     try:

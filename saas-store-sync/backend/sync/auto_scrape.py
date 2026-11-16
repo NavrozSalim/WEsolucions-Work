@@ -6,7 +6,11 @@ One run:
   2. Up to ``retry_failed_cycles`` times: if any active listing is Failed, reset only the
      Failed ones to Pending and scrape again. Stops early at 0 Failed, on Stop scraping,
      or when a scrape is still running at the wait limit.
-  3. Optional marketplace push (``push_after``).
+
+Auto Scraping never sends anything to the marketplace. While a run is active,
+``auto_scrape_run_active`` makes the scrape-failure helpers skip their stock-0 and
+fallback pushes; the local price/stock still update. Scheduled Updates and Manual
+sync are the only pushes. (``push_after`` on the model is kept but always off.)
 
 This is the manual "Start Scraping → Reset Failed to Pending → Start Scraping …" cycle,
 done on a schedule. Celery Beat calls ``sync.tasks.check_auto_scrape_schedules`` every
@@ -72,8 +76,25 @@ def normalize_auto_scrape_payload(data: dict) -> dict:
         'run_times': times,
         'timezone': tz_name,
         'retry_failed_cycles': cycles,
-        'push_after': bool(data.get('push_after', False)),
+        'push_after': False,  # Auto Scraping never pushes to the marketplace.
     }
+
+
+def auto_scrape_run_active(store_id) -> bool:
+    """True while an Auto Scraping run is going on this store (marketplace pushes are held)."""
+    from sync.models import AutoScrapeSchedule
+
+    if not store_id:
+        return False
+    try:
+        return AutoScrapeSchedule.objects.filter(
+            store_id=store_id,
+            last_status='running',
+            last_run_at__gte=timezone.now() - STALE_RUNNING,
+        ).exists()
+    except Exception:  # noqa: BLE001 — never block a scrape on this check
+        logger.exception('auto_scrape_run_active check failed store=%s', store_id)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +132,8 @@ def due_run_time(sched, now_utc=None):
     return best
 
 
-def claim_due_slot(sched, slot) -> bool:
-    """Atomically mark ``slot`` as triggered. False when another tick already took it."""
+def claim_due_slot(sched, slot, now_utc=None) -> bool:
+    """Atomically mark ``slot`` as triggered at the tick time. False when another tick already took it."""
     from django.db.models import Q
 
     from sync.models import AutoScrapeSchedule
@@ -120,7 +141,7 @@ def claim_due_slot(sched, slot) -> bool:
     return bool(
         AutoScrapeSchedule.objects.filter(pk=sched.pk)
         .filter(Q(last_triggered_at__isnull=True) | Q(last_triggered_at__lt=slot))
-        .update(last_triggered_at=timezone.now())
+        .update(last_triggered_at=now_utc or timezone.now())
     )
 
 
@@ -207,15 +228,6 @@ def _catalog_scrape_pass(store) -> dict:
     return {}
 
 
-def _catalog_push(store) -> str:
-    from sync.tasks import _store_can_push_to_marketplace, run_store_push_listings_only
-
-    if not _store_can_push_to_marketplace(store.id):
-        return 'skipped_not_connected'
-    run_store_push_listings_only.delay(str(store.id))
-    return 'queued'
-
-
 # --- managed (full_store StoreListing) stores -----------------------------
 
 def _managed_failed_count(store) -> int:
@@ -255,20 +267,6 @@ def _managed_scrape_pass(store) -> dict:
     if res.get('error'):
         return {'stop': 'scrape_still_running'}
     return {}
-
-
-def _managed_push(store) -> str:
-    from listings import listing_service
-    from sync.tasks import _store_can_push_to_marketplace
-
-    if not _store_can_push_to_marketplace(store.id):
-        return 'skipped_not_connected'
-    try:
-        res = listing_service.push_inventory(store.user, store, allow_async=True) or {}
-    except Exception as exc:  # noqa: BLE001
-        logger.exception('Auto scrape managed push failed store=%s', store.id)
-        return f'failed: {str(exc)[:200]}'
-    return 'done' if res.get('ok', True) else f"failed: {str(res.get('message') or '')[:200]}"
 
 
 _STOP_TEXT = {
@@ -318,7 +316,6 @@ def run_auto_scrape(store_id: str) -> dict:
     reset_failed = (lambda: _managed_reset(store, 'failed')) if managed else (lambda: _catalog_reset_failed(store))
     scrape_pass = (lambda: _managed_scrape_pass(store)) if managed else (lambda: _catalog_scrape_pass(store))
     failed_count = (lambda: _managed_failed_count(store)) if managed else (lambda: _catalog_failed_count(store))
-    push = (lambda: _managed_push(store)) if managed else (lambda: _catalog_push(store))
 
     max_cycles = int(sched.retry_failed_cycles or 0)
     summary = {
@@ -328,7 +325,6 @@ def run_auto_scrape(store_id: str) -> dict:
         'failed_after': [],   # Failed count after the first scrape, then after each cycle
         'cycles_run': 0,
         'stop_reason': '',
-        'push': '',
     }
     AutoScrapeSchedule.objects.filter(pk=sched.pk).update(
         last_run_at=now, last_finished_at=None, last_status='running', last_summary=summary,
@@ -375,9 +371,6 @@ def run_auto_scrape(store_id: str) -> dict:
         if stop.get('error'):
             summary['error'] = stop['error']
 
-        if sched.push_after and not stop.get('stop'):
-            summary['push'] = push()
-
         trail = ' → '.join(str(n) for n in summary['failed_after'])
         if stop.get('stop'):
             status = 'stopped'
@@ -388,8 +381,8 @@ def run_auto_scrape(store_id: str) -> dict:
         else:
             status = 'success' if n_failed == 0 else 'partial'
             msg = (
-                f"Auto Scraping finished: {summary['cycles_run']} retry cycle(s), Failed: {trail}."
-                + (f" Push: {summary['push']}." if summary['push'] else '')
+                f"Auto Scraping finished: {summary['cycles_run']} retry cycle(s), Failed: {trail}. "
+                'Nothing was sent to the marketplace.'
             )
         _log(store, msg, 'auto_scrape_end', dict(summary))
         _save(status)
@@ -413,6 +406,6 @@ def check_due_schedules(now_utc=None) -> list:
         slot = due_run_time(sched, now_utc)
         if slot is None:
             continue
-        if claim_due_slot(sched, slot):
+        if claim_due_slot(sched, slot, now_utc):
             due.append(str(sched.store_id))
     return due

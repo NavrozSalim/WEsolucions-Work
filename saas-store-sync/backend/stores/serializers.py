@@ -478,7 +478,7 @@ class StoreSerializer(serializers.ModelSerializer):
             'run_times': list(sched.run_times or []),
             'timezone': sched.timezone,
             'retry_failed_cycles': sched.retry_failed_cycles,
-            'push_after': sched.push_after,
+            'push_after': False,  # Auto Scraping never pushes
             'last_run_at': sched.last_run_at.isoformat() if sched.last_run_at else None,
             'last_finished_at': sched.last_finished_at.isoformat() if sched.last_finished_at else None,
             'last_status': sched.last_status or '',
