@@ -322,6 +322,14 @@ class UsChromeIdentityAndWaitTests(SimpleTestCase):
         self.assertIn("Chrome/138.0.0.0", ua)
         self.assertNotIn("Headless", ua)
 
+    def test_no_virtual_screen_when_switched_off_or_missing(self):
+        ebay_common._reset_us_virtual_display()
+        with patch.dict(os.environ, {"EBAY_US_CHROME_HEADFUL": "0"}):
+            self.assertIsNone(ebay_common._us_virtual_display())
+        with patch.dict(os.environ, {"EBAY_US_CHROME_HEADFUL": "1"}), \
+                patch("shutil.which", return_value=None):
+            self.assertIsNone(ebay_common._us_virtual_display())
+
     def _driver(self, pages):
         seq = iter(pages)
 

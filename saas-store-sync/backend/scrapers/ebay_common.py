@@ -1887,6 +1887,78 @@ def _add_us_saved_cookies(driver) -> None:
         )
 
 
+def ebay_us_chrome_headful() -> bool:
+    """eBay US Chrome runs windowed on a virtual screen (``EBAY_US_CHROME_HEADFUL``, default on)."""
+    return _env_on("EBAY_US_CHROME_HEADFUL", "1")
+
+
+_XVFB: dict = {"proc": None, "display": None, "warned": False}
+
+
+def _reset_us_virtual_display() -> None:
+    proc = _XVFB.get("proc")
+    _XVFB.update(proc=None, display=None)
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
+def _us_virtual_display() -> str | None:
+    """This worker process's virtual screen (``:N``), started on first use; None = headless.
+
+    ``-terminate`` makes the screen close by itself when its last Chrome closes,
+    so a worker process that exits never leaves one behind; the next Chrome
+    starts a new one.
+    """
+    if not ebay_us_chrome_headful():
+        return None
+    proc = _XVFB.get("proc")
+    if proc is not None and proc.poll() is None:
+        return _XVFB["display"]
+    import shutil
+    import subprocess
+
+    xvfb = shutil.which("Xvfb")
+    if not xvfb:
+        if not _XVFB["warned"]:
+            _XVFB["warned"] = True
+            logger.warning("eBay US: Xvfb is not installed; Chrome runs headless.")
+        return None
+    read_fd, write_fd = os.pipe()
+    number = ""
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            [xvfb, "-displayfd", str(write_fd), "-screen", "0", "1920x1080x24",
+             "-nolisten", "tcp", "-terminate"],
+            pass_fds=(write_fd,),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os.close(write_fd)
+        write_fd = -1
+        import select
+
+        ready, _, _ = select.select([read_fd], [], [], 10)
+        if ready:
+            number = os.read(read_fd, 32).decode().strip()
+    except Exception as exc:
+        logger.warning("eBay US: virtual screen failed to start: %s", exc)
+    finally:
+        if write_fd >= 0:
+            os.close(write_fd)
+        os.close(read_fd)
+    if not number.isdigit():
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+        return None
+    _XVFB.update(proc=proc, display=f":{number}")
+    logger.info("eBay US: Chrome runs on virtual screen :%s", number)
+    return _XVFB["display"]
+
+
 _US_PROFILE_SCRIPT = """
 (() => {
   const spoof = (proto) => {
@@ -1963,7 +2035,11 @@ class EbayDriver:
         from selenium.webdriver.chrome.service import Service
 
         options = Options()
-        options.add_argument("--headless=new")
+        # eBay US runs as a normal windowed Chrome on a virtual screen: eBay's
+        # bot wall recognises headless Chrome. Without the screen, headless.
+        display = _us_virtual_display() if us_profile else None
+        if display is None:
+            options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
@@ -1994,12 +2070,26 @@ class EbayDriver:
             options.binary_location = chrome_bin
 
         chromedriver_path = os.environ.get("CHROMEDRIVER_PATH")
+        service_env = {**os.environ, "DISPLAY": display} if display else None
         if chromedriver_path and os.path.isfile(chromedriver_path):
-            service = Service(executable_path=chromedriver_path)
+            service = Service(executable_path=chromedriver_path, env=service_env)
         else:
-            service = Service()
+            service = Service(env=service_env)
 
-        driver = webdriver.Chrome(service=service, options=options)
+        try:
+            driver = webdriver.Chrome(service=service, options=options)
+        except Exception:
+            if not display:
+                raise
+            # The virtual screen may have just closed with the last Chrome; fall
+            # back to headless for this one rather than lose the listing.
+            _reset_us_virtual_display()
+            options.add_argument("--headless=new")
+            if chromedriver_path and os.path.isfile(chromedriver_path):
+                service = Service(executable_path=chromedriver_path)
+            else:
+                service = Service()
+            driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(TIMEOUT_SEC)
 
         driver.execute_cdp_cmd(
