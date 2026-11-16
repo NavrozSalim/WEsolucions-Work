@@ -104,6 +104,16 @@ class UsBrowserFirstTests(SimpleTestCase):
         hosts = [c.args[0].split("/")[2] for c in browser.call_args_list]
         self.assertEqual(hosts, ["www.ebay.com", "www.ebay.ca"] * ebay_common.RETRY_LIMIT)
 
+    def test_no_ebay_ca_while_chrome_uses_the_proxies(self):
+        with patch.object(ebay_common, "_us_chrome_uses_proxies", return_value=True), \
+                patch.object(ebay_common.EbayBrowserSession, "warm_and_fetch",
+                             return_value=(_AKAMAI_403, "browser_blocked")) as browser:
+            scrape_ebay_for_market("https://www.ebay.com/itm/182391181967", "USA",
+                                   {ebay_common._ebay_sk(EBAY_MARKET_US, "selenium_proxy_url"): "http://u:p@a:1"},
+                                   market=EBAY_MARKET_US)
+        hosts = {c.args[0].split("/")[2] for c in browser.call_args_list}
+        self.assertEqual(hosts, {"www.ebay.com"})
+
     def test_ca_first_can_be_switched_on(self):
         with patch.dict(os.environ, {"EBAY_US_CA_FIRST": "1"}), \
                 patch.object(ebay_common.EbayHTTP, "fetch", return_value=(None, 403, "http_403")), \
@@ -192,6 +202,7 @@ class UsChromeProxyTests(SimpleTestCase):
         self.assertNotIn("sameSite", driver.added[0])
 
 
+@patch.object(ebay_common, "_human_pause", lambda driver: None)
 class UsChromeProxyRefusedTests(SimpleTestCase):
     """The server IP is not on the proxy allowlist: Chrome gets an empty stub."""
 
@@ -268,8 +279,10 @@ class UsChromeProxyRefusedTests(SimpleTestCase):
             ebay_common.EbayBrowserSession.warm_and_fetch(
                 "https://www.ebay.com/itm/182391181967", "USA", session, EBAY_MARKET_US)
             add_cookies.assert_called_once()
-        self.assertEqual(len(visited), 2)  # home page, then the item
+        # Home page, the item, then one more visit to the item after eBay's refusal.
+        self.assertEqual(len(visited), 3)
         self.assertIn("ebay.com", visited[0])
+        self.assertEqual(visited[1], visited[2])
         self.assertEqual(session[ebay_common._ebay_sk(EBAY_MARKET_US, "browser_warmed")], "www.ebay.com")
 
     def test_page_with_a_price_is_not_marked_blocked(self):
@@ -297,6 +310,52 @@ class UsChromeProxyRefusedTests(SimpleTestCase):
         self.assertIsNone(html)
         self.assertEqual(err, "empty_browser_html")
         self.assertEqual(ebay_common._us_browser_proxy_fails, 0)
+
+
+class UsChromeIdentityAndWaitTests(SimpleTestCase):
+    def test_windows_name_uses_the_real_chrome_version(self):
+        ua, major, full = ebay_common.us_windows_user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "HeadlessChrome/138.0.7204.92 Safari/537.36")
+        self.assertEqual((major, full), ("138", "138.0.7204.92"))
+        self.assertIn("Windows NT 10.0", ua)
+        self.assertIn("Chrome/138.0.0.0", ua)
+        self.assertNotIn("Headless", ua)
+
+    def _driver(self, pages):
+        seq = iter(pages)
+
+        class D:
+            page_source = ""
+
+            def find_elements(self, *a):
+                return []
+
+        d = D()
+        type(d).page_source = property(lambda self: next(seq, pages[-1]))
+        return d
+
+    def test_check_page_is_waited_out_when_asked(self):
+        product = "<html>item</html>"
+        driver = self._driver([_CHALLENGE, _CHALLENGE, product])
+        with patch.object(ebay_common.time, "sleep"), \
+                patch.object(ebay_common, "_looks_like_product_html", side_effect=lambda h: h == product), \
+                patch.object(ebay_common, "_parse_html_to_result",
+                             side_effect=lambda h, u: {"price": 9.99} if h == product else None):
+            html = ebay_common.EbayBrowserSession._wait_until_product_or_stable_challenge(
+                driver, timeout=30, wait_out_challenge=True)
+        self.assertEqual(html, product)
+
+    def test_check_page_returns_at_once_by_default(self):
+        driver = self._driver([_CHALLENGE, "<html>item</html>"])
+        html = ebay_common.EbayBrowserSession._wait_until_product_or_stable_challenge(driver, timeout=30)
+        self.assertEqual(html, _CHALLENGE)
+
+    def test_hard_refusal_is_not_waited_out(self):
+        driver = self._driver([_AKAMAI_403, "<html>item</html>"])
+        html = ebay_common.EbayBrowserSession._wait_until_product_or_stable_challenge(
+            driver, timeout=30, wait_out_challenge=True)
+        self.assertEqual(html, _AKAMAI_403)
 
 
 class UsSavedCookieFilesTests(SimpleTestCase):

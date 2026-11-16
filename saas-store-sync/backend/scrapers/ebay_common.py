@@ -448,7 +448,7 @@ def ebay_us_browser_proxies() -> bool:
 def ebay_us_chrome_native_ua() -> bool:
     """``EBAY_US_CHROME_NATIVE_UA=1``: Chrome keeps its own Linux browser name.
 
-    Off by default: the run that got past eBay's wall used a random Windows name.
+    Off by default: eBay US Chrome presents one consistent Windows Chrome instead.
     """
     return _env_on("EBAY_US_CHROME_NATIVE_UA", "0")
 
@@ -467,6 +467,21 @@ def ebay_us_cookie_handoff() -> bool:
     return _env_on("EBAY_US_COOKIE_HANDOFF", "1")
 
 
+# How long US Chrome waits on eBay's "Pardon Our Interruption" page.
+_US_CHALLENGE_WAIT_SEC = 25
+
+
+def _human_pause(driver) -> None:
+    """A few seconds on the page with a little scrolling, as a person would."""
+    try:
+        for _ in range(2):
+            time.sleep(random.uniform(1.2, 2.0))
+            driver.execute_script(f"window.scrollBy(0, {random.randint(150, 450)});")
+        time.sleep(random.uniform(0.5, 1.0))
+    except Exception:
+        pass
+
+
 # When the proxies refuse Chrome (server IP not on the allowlist), every page is
 # an empty stub. After this many refusals in a row on different proxies, Chrome
 # uses the server's own IP for a while instead of failing every listing.
@@ -478,6 +493,15 @@ _us_browser_proxy_off_until = 0.0
 
 def _us_browser_proxies_active() -> bool:
     return ebay_us_browser_proxies() and time.monotonic() >= _us_browser_proxy_off_until
+
+
+def _us_chrome_uses_proxies() -> bool:
+    """US Chrome will go through the eBay US proxies (configured, on, not switched off)."""
+    if not _us_browser_proxies_active():
+        return False
+    from . import ebay_us_proxies
+
+    return ebay_us_proxies.proxies_configured()
 
 
 def _note_us_browser_proxy_result(ok: bool) -> None:
@@ -1863,14 +1887,76 @@ def _add_us_saved_cookies(driver) -> None:
         )
 
 
+_US_PROFILE_SCRIPT = """
+(() => {
+  const spoof = (proto) => {
+    if (!proto) return;
+    const orig = proto.getParameter;
+    proto.getParameter = function (p) {
+      if (p === 37445) return 'Google Inc. (Intel)';
+      if (p === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+      return orig.call(this, p);
+    };
+  };
+  spoof(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
+  spoof(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
+  Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+  Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+  Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 0});
+})();
+"""
+
+
+def us_windows_user_agent(real_user_agent: str) -> tuple[str, str, str]:
+    """(user agent, major, full version): Windows Chrome at the real Chrome's version."""
+    m = re.search(r"Chrome/(\d+)\.(\d+\.\d+\.\d+)", real_user_agent or "")
+    major, full = (m.group(1), f"{m.group(1)}.{m.group(2)}") if m else ("131", "131.0.0.0")
+    ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    )
+    return ua, major, full
+
+
+def _apply_us_windows_profile(driver) -> None:
+    real = driver.execute_script("return navigator.userAgent") or ""
+    ua, major, full = us_windows_user_agent(real)
+    brands = [("Chromium", major, full), ("Google Chrome", major, full), ("Not_A Brand", "24", "24.0.0.0")]
+    driver.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {
+            "userAgent": ua,
+            "acceptLanguage": "en-US,en;q=0.9",
+            "platform": "Win32",
+            "userAgentMetadata": {
+                "brands": [{"brand": b, "version": v} for b, v, _ in brands],
+                "fullVersionList": [{"brand": b, "version": f} for b, _, f in brands],
+                "fullVersion": full,
+                "platform": "Windows",
+                "platformVersion": "10.0.0",
+                "architecture": "x86",
+                "bitness": "64",
+                "model": "",
+                "mobile": False,
+                "wow64": False,
+            },
+        },
+    )
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": _US_PROFILE_SCRIPT})
+
+
 class EbayDriver:
     @staticmethod
-    def _create_driver(*, proxy_url: str | None = None, native_ua: bool = False):
+    def _create_driver(
+        *, proxy_url: str | None = None, native_ua: bool = False, us_profile: bool = False,
+    ):
         """Headless Chrome for eBay.
 
         ``native_ua`` keeps Chrome's own browser identity (with "HeadlessChrome"
-        renamed) instead of a random one. A random name that does not match the
-        real browser is one of the first things a bot wall checks.
+        renamed) instead of a random one. ``us_profile`` (eBay US) presents one
+        consistent Windows Chrome: the same version and platform in the browser
+        name, its client hints and the page's navigator, and a normal graphics card.
+        A browser whose signals disagree is one of the first things a bot wall checks.
         """
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
@@ -1891,7 +1977,7 @@ class EbayDriver:
         height = random.randint(900, 1080)
         options.add_argument(f"--window-size={width},{height}")
 
-        if not native_ua:
+        if not native_ua and not us_profile:
             ua = _random_user_agent()
             options.add_argument(f"--user-agent={ua}")
 
@@ -1938,6 +2024,11 @@ class EbayDriver:
                     )
             except Exception as exc:
                 logger.debug("eBay Chrome user agent override failed: %s", exc)
+        elif us_profile:
+            try:
+                _apply_us_windows_profile(driver)
+            except Exception as exc:
+                logger.warning("eBay US Chrome profile failed: %s", exc)
 
         return driver
 
@@ -2026,8 +2117,9 @@ class EbayDriver:
                         pass
                     session_dict.pop(key, None)
 
+        native = us_browser and ebay_us_chrome_native_ua()
         driver = EbayDriver._create_driver(
-            proxy_url=proxy_url, native_ua=us_browser and ebay_us_chrome_native_ua(),
+            proxy_url=proxy_url, native_ua=native, us_profile=us_browser and not native,
         )
         if session_dict is not None:
             session_dict[key] = driver
@@ -2242,7 +2334,14 @@ class EbayBrowserSession:
         time.sleep(0.2 + random.uniform(0.05, 0.15))
 
     @staticmethod
-    def _wait_until_product_or_stable_challenge(driver, timeout: int = PAGE_WAIT_TIMEOUT) -> str:
+    def _wait_until_product_or_stable_challenge(
+        driver, timeout: int = PAGE_WAIT_TIMEOUT, *, wait_out_challenge: bool = False,
+    ) -> str:
+        """Poll until the item page shows, or eBay blocks it.
+
+        ``wait_out_challenge``: keep waiting on eBay's "Pardon Our Interruption"
+        page, which lets a real browser through once its script has run.
+        """
         from selenium.webdriver.common.by import By
         start = time.time()
         last_html = ""
@@ -2269,9 +2368,15 @@ class EbayBrowserSession:
             try:
                 html = driver.page_source
                 last_html = html
-                blocked, _ = _is_challenge_or_blocked(html)
-                if blocked:
+                blocked, why = _is_challenge_or_blocked(html)
+                if blocked and not (wait_out_challenge and why == "challenge"):
                     return html
+                if blocked:
+                    parsed = _parse_html_to_result(html, "")
+                    if parsed is not None and parsed.get("price") is not None:
+                        return html  # the item page itself, mentioning the check page
+                    time.sleep(1.0)
+                    continue
             except Exception:
                 pass
 
@@ -2360,9 +2465,15 @@ class EbayBrowserSession:
             # US remembers which site was warmed: moving from ebay.ca to ebay.com
             # opens the ebay.com home page (and loads its saved cookies) too.
             already_warmed = (warmed == home_host) if market == EBAY_MARKET_US else bool(warmed)
+            us_chrome = market == EBAY_MARKET_US and ebay_us_browser_first()
             if not already_warmed:
                 driver.get(home)
-                time.sleep(0.3 + random.uniform(0.1, 0.3))
+                if us_chrome:
+                    # eBay's bot check runs its script on the first page; opening
+                    # the item half a second later is what bots do.
+                    _human_pause(driver)
+                else:
+                    time.sleep(0.3 + random.uniform(0.1, 0.3))
                 if us_on_proxy and _browser_page_not_loaded(driver.page_source):
                     # The proxy refused Chrome; skip the item page's long wait.
                     EbayDriver.mark_us_browser_proxy_blocked(session_dict)
@@ -2376,7 +2487,23 @@ class EbayBrowserSession:
 
             driver.get(url)
             wait_timeout = _ebay_page_wait_timeout(region, url)
-            html = cls._wait_until_product_or_stable_challenge(driver, timeout=wait_timeout)
+            if us_chrome:
+                wait_timeout = max(wait_timeout, _US_CHALLENGE_WAIT_SEC)
+            html = cls._wait_until_product_or_stable_challenge(
+                driver, timeout=wait_timeout, wait_out_challenge=us_chrome,
+            )
+            if us_chrome and _is_challenge_or_blocked(html)[1] == "blocked":
+                # A refusal often clears once the check script has run: one more
+                # visit in the same Chrome, after a pause, before giving up.
+                _human_pause(driver)
+                driver.get(url)
+                html = cls._wait_until_product_or_stable_challenge(
+                    driver, timeout=wait_timeout, wait_out_challenge=True,
+                )
+                logger.info(
+                    "eBay Chrome second visit: %s",
+                    _is_challenge_or_blocked(html)[1] or "page loaded",
+                )
 
             # Skip long discount polling when the first DOM already yields a BIN price.
             if _parse_html_to_result(html, url) is not None:
@@ -2552,6 +2679,10 @@ def scrape_ebay_for_market(
                 # eBay's wall refuses the item on ebay.com but lets it through on
                 # ebay.ca (US sellers' prices show there in US $).
                 candidate_urls.insert(0, ca_url)
+            elif browser_first and _us_chrome_uses_proxies():
+                # On the proxies ebay.ca was refused every time; a second site
+                # only doubles the time a refused listing takes.
+                pass
             else:
                 candidate_urls.append(ca_url)
 
