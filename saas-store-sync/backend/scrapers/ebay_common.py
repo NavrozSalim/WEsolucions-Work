@@ -213,7 +213,7 @@ def ebay_result_error_code(last_error: str | None) -> str:
     page_not_seen = (
         "blocked", "http_4", "http_5", "empty", "proxy_exhausted", "not_product_like",
         "http_error", "timeout", "selenium", "response_invalid", "upstream_error",
-        "connection", "curl_cffi",
+        "connection", "curl_cffi", "proxy_error",
     )
     if any(k in err for k in page_not_seen):
         return "blocked"
@@ -443,6 +443,64 @@ def ebay_us_browser_proxies() -> bool:
     proxy provider's IP allowlist. Set 0 to load pages from the server's own IP.
     """
     return _env_on("EBAY_US_BROWSER_PROXIES", "1")
+
+
+# When the proxies refuse Chrome (server IP not on the allowlist), every page is
+# an empty stub. After this many refusals in a row on different proxies, Chrome
+# uses the server's own IP for a while instead of failing every listing.
+_US_PROXY_FAILS_BEFORE_OFF = 2
+_US_PROXY_OFF_SEC = 1800
+_us_browser_proxy_fails = 0
+_us_browser_proxy_off_until = 0.0
+
+
+def _us_browser_proxies_active() -> bool:
+    return ebay_us_browser_proxies() and time.monotonic() >= _us_browser_proxy_off_until
+
+
+def _note_us_browser_proxy_result(ok: bool) -> None:
+    """Count Chrome proxy refusals; after a run of them, use the server's own IP."""
+    global _us_browser_proxy_fails, _us_browser_proxy_off_until
+    if ok:
+        _us_browser_proxy_fails = 0
+        return
+    _us_browser_proxy_fails += 1
+    if _us_browser_proxy_fails >= _US_PROXY_FAILS_BEFORE_OFF:
+        _us_browser_proxy_fails = 0
+        _us_browser_proxy_off_until = time.monotonic() + _US_PROXY_OFF_SEC
+        logger.warning(
+            "eBay US: the proxies refused Chrome %s times in a row; using this server's own IP "
+            "for %s minutes. Add this server's IP to the proxy provider's IP allowlist, "
+            "or set EBAY_US_BROWSER_PROXIES=0.",
+            _US_PROXY_FAILS_BEFORE_OFF,
+            _US_PROXY_OFF_SEC // 60,
+        )
+
+
+_BROWSER_NET_ERROR_MARKERS = (
+    "err_tunnel_connection_failed",
+    "err_proxy_connection_failed",
+    "err_proxy_auth",
+    "err_no_supported_proxies",
+    "err_connection_refused",
+    "err_connection_reset",
+    "err_connection_closed",
+    "err_empty_response",
+    "err_timed_out",
+    "class=\"neterror\"",
+)
+
+
+def _browser_page_not_loaded(html: str | None) -> bool:
+    """Chrome shows an empty stub or its own error page when the proxy refuses it."""
+    if not html:
+        return True
+    if _looks_like_product_html(html):
+        return False
+    lower = html.lower()
+    if any(m in lower for m in _BROWSER_NET_ERROR_MARKERS):
+        return True
+    return len(html) < 1500 and "ebay" not in lower
 
 
 def _ebay_http_only_with_proxies(market: str) -> bool:
@@ -1842,7 +1900,7 @@ class EbayDriver:
     @staticmethod
     def _us_proxy_url(session_dict: dict | None, *, force_rotate: bool = False) -> str | None:
         """Next eBay US proxy for Chrome, or None to use the server's own IP."""
-        if session_dict is None or not ebay_us_browser_proxies():
+        if session_dict is None or not _us_browser_proxies_active():
             return None
         from . import ebay_us_proxies
 
@@ -1905,7 +1963,9 @@ class EbayDriver:
         if session_dict is not None and key in session_dict:
             driver = session_dict[key]
             bound_proxy = session_dict.get(proxy_key)
-            if proxy_url and bound_proxy != proxy_url:
+            # A US Chrome that was on a proxy is rebuilt when proxies are switched off.
+            proxy_changed = bound_proxy != proxy_url and (proxy_url or us_browser)
+            if proxy_changed:
                 try:
                     driver.quit()
                 except Exception:
@@ -1927,6 +1987,8 @@ class EbayDriver:
             session_dict[key] = driver
             if proxy_url:
                 session_dict[proxy_key] = proxy_url
+            else:
+                session_dict.pop(proxy_key, None)
             if us_browser:
                 # A new browser has none of the old one's cookies: open the home
                 # page (and load saved cookies) again before the next item.
@@ -2272,8 +2334,20 @@ class EbayBrowserSession:
 
             EbayHTTP.import_cookies_from_selenium(driver, region, session_dict, market)
 
-            if not html:
+            us_on_proxy = bool(
+                market == EBAY_MARKET_US
+                and session_dict
+                and session_dict.get(_ebay_sk(market, "selenium_proxy_url"))
+            )
+            if _browser_page_not_loaded(html):
+                if us_on_proxy:
+                    EbayDriver.mark_us_browser_proxy_blocked(session_dict)
+                    _note_us_browser_proxy_result(False)
+                    EbayDriver.close(session_dict, market)
+                    return None, "browser_proxy_error"
                 return None, "empty_browser_html"
+            if us_on_proxy:
+                _note_us_browser_proxy_result(True)
 
             blocked, reason = _is_challenge_or_blocked(html)
             if blocked:
@@ -2296,6 +2370,16 @@ class EbayBrowserSession:
             return html, ""
 
         except Exception as exc:
+            if (
+                market == EBAY_MARKET_US
+                and "net::err_" in str(exc).lower()
+                and session_dict
+                and session_dict.get(_ebay_sk(market, "selenium_proxy_url"))
+            ):
+                EbayDriver.mark_us_browser_proxy_blocked(session_dict)
+                _note_us_browser_proxy_result(False)
+                EbayDriver.close(session_dict, market)
+                return None, "browser_proxy_error"
             return None, f"selenium_error: {exc}"
 
 

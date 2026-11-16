@@ -138,6 +138,72 @@ class UsChromeProxyTests(SimpleTestCase):
         self.assertNotIn("sameSite", driver.added[0])
 
 
+class UsChromeProxyRefusedTests(SimpleTestCase):
+    """The server IP is not on the proxy allowlist: Chrome gets an empty stub."""
+
+    _STUB = "<html><head></head><body></body></html>"
+
+    def setUp(self):
+        from scrapers import ebay_us_proxies
+
+        ebay_us_proxies.reset_pool_for_tests()
+        self.addCleanup(ebay_us_proxies.reset_pool_for_tests)
+        self._reset_switch()
+        self.addCleanup(self._reset_switch)
+
+    @staticmethod
+    def _reset_switch():
+        ebay_common._us_browser_proxy_fails = 0
+        ebay_common._us_browser_proxy_off_until = 0.0
+
+    def test_stub_and_chrome_error_pages_count_as_not_loaded(self):
+        self.assertTrue(ebay_common._browser_page_not_loaded(self._STUB))
+        self.assertTrue(ebay_common._browser_page_not_loaded(
+            '<html><body class="neterror">ERR_TUNNEL_CONNECTION_FAILED</body></html>' + "x" * 5000))
+        self.assertFalse(ebay_common._browser_page_not_loaded(_AKAMAI_403))
+        product = "<html>" + "x" * 8000 + 'data-testid="x-price-primary" err_timed_out</html>'
+        self.assertFalse(ebay_common._browser_page_not_loaded(product))
+        self.assertEqual(ebay_common.ebay_result_error_code("browser_proxy_error"), "blocked")
+
+    def _fetch_stub(self, session):
+        driver = type("D", (), {"page_source": self._STUB, "current_url": "about:blank",
+                                "get": lambda self, u: None})()
+        with patch.object(ebay_common.EbayDriver, "get_or_create", return_value=driver), \
+                patch.object(ebay_common.EbayBrowserSession, "_apply_region_browser_profile"), \
+                patch.object(ebay_common.EbayBrowserSession, "_wait_until_product_or_stable_challenge",
+                             return_value=self._STUB), \
+                patch.object(ebay_common.EbayBrowserSession, "_finalize_bin_price_hydration",
+                             return_value=self._STUB), \
+                patch.object(ebay_common.EbayHTTP, "import_cookies_from_selenium"), \
+                patch.object(ebay_common, "_add_us_saved_cookies"), \
+                patch.object(ebay_common.EbayDriver, "close") as close:
+            out = ebay_common.EbayBrowserSession.warm_and_fetch(
+                "https://www.ebay.com/itm/1", "USA", session, EBAY_MARKET_US)
+        return out, close
+
+    def test_refused_proxy_is_reported_and_chrome_closed(self):
+        session = {ebay_common._ebay_sk(EBAY_MARKET_US, "selenium_proxy_url"): "http://u:p@a:1"}
+        (html, err), close = self._fetch_stub(session)
+        self.assertIsNone(html)
+        self.assertEqual(err, "browser_proxy_error")
+        close.assert_called_once()
+
+    def test_two_refusals_switch_chrome_to_server_ip(self):
+        env = {"EBAY_US_PROXY_URLS": "http://u:p@a:1,http://u:p@b:2", "EBAY_US_MIN_REQUEST_GAP_SEC": "0"}
+        with patch.dict(os.environ, env):
+            self.assertIsNotNone(ebay_common.EbayDriver._us_proxy_url({}))
+            for _ in range(ebay_common._US_PROXY_FAILS_BEFORE_OFF):
+                session = {ebay_common._ebay_sk(EBAY_MARKET_US, "selenium_proxy_url"): "http://u:p@a:1"}
+                self._fetch_stub(session)
+            self.assertIsNone(ebay_common.EbayDriver._us_proxy_url({}))
+
+    def test_stub_without_proxy_is_empty_not_proxy_error(self):
+        (html, err), _ = self._fetch_stub({})
+        self.assertIsNone(html)
+        self.assertEqual(err, "empty_browser_html")
+        self.assertEqual(ebay_common._us_browser_proxy_fails, 0)
+
+
 class AuTitleTests(SimpleTestCase):
     def test_block_page_title_is_never_used(self):
         from scrapers.ebay_au_fast import _AU_LAST_HTML_KEY, _AU_PRODUCT_HTML_KEY
