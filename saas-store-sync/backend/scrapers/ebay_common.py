@@ -453,6 +453,11 @@ def ebay_us_chrome_native_ua() -> bool:
     return _env_on("EBAY_US_CHROME_NATIVE_UA", "0")
 
 
+def ebay_us_ca_first() -> bool:
+    """Chrome-first tries the item on ebay.ca before ebay.com (``EBAY_US_CA_FIRST``, default on)."""
+    return _env_on("EBAY_US_CA_FIRST", "1")
+
+
 def ebay_us_cookie_handoff() -> bool:
     """After Chrome, one plain request with Chrome's eBay cookies (``EBAY_US_COOKIE_HANDOFF``, default on)."""
     return _env_on("EBAY_US_COOKIE_HANDOFF", "1")
@@ -2497,10 +2502,14 @@ def scrape_ebay_for_market(
     browser_first = market == EBAY_MARKET_US and ebay_us_browser_first()
 
     candidate_urls = [url]
-    if market == EBAY_MARKET_US and not browser_first:
-        if "ebay.com.au" not in url.lower():
-            ca_url = _to_ebay_ca_url(url)
-            if ca_url != url:
+    if market == EBAY_MARKET_US and "ebay.com.au" not in url.lower():
+        ca_url = _to_ebay_ca_url(url)
+        if ca_url != url:
+            if browser_first and ebay_us_ca_first():
+                # eBay's wall refuses the item on ebay.com but lets it through on
+                # ebay.ca (US sellers' prices show there in US $).
+                candidate_urls.insert(0, ca_url)
+            else:
                 candidate_urls.append(ca_url)
 
     if eff_region == "AU":
@@ -2525,7 +2534,12 @@ def scrape_ebay_for_market(
                 if proxies_configured():
                     EbayDriver.invalidate_au_proxy(session)
 
-        try_urls = candidate_urls if attempt % 2 == 0 else list(reversed(candidate_urls))
+        # Chrome-first keeps ebay.ca first on every try: each refused ebay.com
+        # request puts proxies on a 5-minute cooldown.
+        if browser_first or attempt % 2 == 0:
+            try_urls = candidate_urls
+        else:
+            try_urls = list(reversed(candidate_urls))
 
         for candidate in try_urls:
             logger.info("eBay scrape attempt=%s url=%s", attempt + 1, candidate)

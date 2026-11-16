@@ -95,6 +95,22 @@ class UsBrowserFirstTests(SimpleTestCase):
             http.assert_not_called()
             self.assertEqual(out["error_code"], "blocked")
 
+    def test_ebay_ca_is_tried_first_on_every_try(self):
+        with patch.object(ebay_common.EbayHTTP, "fetch", return_value=(None, 403, "http_403")), \
+                patch.object(ebay_common.EbayBrowserSession, "warm_and_fetch",
+                             return_value=(_AKAMAI_403, "browser_blocked")) as browser:
+            scrape_ebay_for_market("https://www.ebay.com/itm/182391181967", "USA", {}, market=EBAY_MARKET_US)
+        hosts = [c.args[0].split("/")[2] for c in browser.call_args_list]
+        self.assertEqual(hosts, ["www.ebay.ca", "www.ebay.com"] * ebay_common.RETRY_LIMIT)
+
+    def test_ca_first_can_be_switched_off(self):
+        with patch.dict(os.environ, {"EBAY_US_CA_FIRST": "0"}), \
+                patch.object(ebay_common.EbayHTTP, "fetch", return_value=(None, 403, "http_403")), \
+                patch.object(ebay_common.EbayBrowserSession, "warm_and_fetch",
+                             return_value=(_AKAMAI_403, "browser_blocked")) as browser:
+            scrape_ebay_for_market("https://www.ebay.com/itm/182391181967", "USA", {}, market=EBAY_MARKET_US)
+        self.assertEqual(browser.call_args_list[0].args[0].split("/")[2], "www.ebay.com")
+
     def test_chrome_uses_a_random_windows_name_unless_native_is_on(self):
         self.assertFalse(ebay_common.ebay_us_chrome_native_ua())
         with patch.dict(os.environ, {"EBAY_US_CHROME_NATIVE_UA": "1"}):
