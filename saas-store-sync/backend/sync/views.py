@@ -93,6 +93,15 @@ class TriggerManualUpdateView(APIView):
         except Store.DoesNotExist:
             return Response({"error": "Store not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        from sync.run_schedules import run_hold_active
+
+        if run_hold_active(store.pk):
+            return Response(
+                {"detail": "An Auto Scraping or Scheduled Update run is going on this store. "
+                           "Try again when it finishes."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         run_inline = (
             request.data.get('run_inline')
             or request.query_params.get('inline') == '1'

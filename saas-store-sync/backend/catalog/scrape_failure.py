@@ -140,13 +140,17 @@ def apply_no_vendor_price_fallback(
 
 
 def _push_held_for_auto_scrape(pm, store) -> bool:
-    """Auto Scraping only scrapes: no marketplace push while its run is active."""
-    from sync.auto_scrape import auto_scrape_run_active
+    """No per-row marketplace push while an Auto Scraping / Scheduled Update run is active.
 
-    if not auto_scrape_run_active(getattr(store, 'id', None) or pm.store_id):
+    Auto Scraping sends nothing; a Scheduled Update sends every row once at the end
+    (Failed rows with their stock 0).
+    """
+    from sync.run_schedules import run_hold_active
+
+    if not run_hold_active(getattr(store, 'id', None) or pm.store_id):
         return False
     logger.info(
-        'Auto Scraping run active: marketplace push held pm=%s sku=%s',
+        'Scheduled run active: marketplace push held pm=%s sku=%s',
         getattr(pm, 'id', None),
         getattr(pm, 'marketplace_child_sku', None),
     )

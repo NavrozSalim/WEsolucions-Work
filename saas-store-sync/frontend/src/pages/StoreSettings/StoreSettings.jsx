@@ -413,8 +413,13 @@ export default function StoreSettings() {
                                 {filteredStores.map((store) => {
                                     const conn = store.connection_status || 'pending';
                                     const sched = store.sync_schedule;
+                                    const schedTimes = sched?.run_times || [];
                                     const schedLabel = sched?.enabled
-                                        ? (sched.crontab_hour?.includes('/') ? `Every ${sched.crontab_hour.replace('*/', '')}h` : `Daily ${sched.crontab_hour}:${(sched.crontab_minute || '0').padStart(2, '0')}`)
+                                        ? (schedTimes.length > 1
+                                            ? `${schedTimes.length}× a day`
+                                            : schedTimes.length === 1
+                                                ? `Daily ${schedTimes[0]}`
+                                                : (sched.crontab_hour?.includes('/') ? `Every ${sched.crontab_hour.replace('*/', '')}h` : `Daily ${sched.crontab_hour}:${(sched.crontab_minute || '0').padStart(2, '0')}`))
                                         : null;
                                     return (
                                         <tr key={store.id}>

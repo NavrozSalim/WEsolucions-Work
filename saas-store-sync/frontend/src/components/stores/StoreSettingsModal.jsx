@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Plus, Clock, Trash2, Copy } from 'lucide-react';
+import { X, Plus, Trash2, Copy } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
@@ -12,12 +12,13 @@ import BunningsConnectionFields from './BunningsConnectionFields';
 import TemuConnectionFields, { buildTemuPayload, emptyTemuFields } from './TemuConnectionFields';
 import NoraInventoryUploadField, { isNoraVendor, isWallkoalaVendor } from './NoraInventoryUploadField';
 import AutoPurchasingStep, { autoBuyRowsFromStore, buildAutoBuyPayload } from './AutoPurchasingStep';
-import AutoScrapeCard, {
-    autoScrapeFieldsFromStore,
-    buildAutoScrapePayload,
-    emptyAutoScrapeFields,
-    validateAutoScrapeFields,
-} from './AutoScrapeCard';
+import {
+    AutoSchedulingStep,
+    buildSchedulePayloads,
+    emptyScheduleFields,
+    scheduleFieldsFromStore,
+    validateScheduleFields,
+} from './ScheduleCard';
 import ShopifyConnectFields, {
     buildShopifyPayload,
     shopifyFieldsFromStore,
@@ -45,31 +46,6 @@ const TIMEZONE_OPTIONS = {
         { value: 'Australia/Brisbane', label: 'Brisbane (AEST)' },
     ],
 };
-
-const FREQUENCY_OPTIONS = [
-    { value: 'daily', label: 'Daily' },
-    { value: 'every_12h', label: 'Every 12 hours' },
-    { value: 'every_6h', label: 'Every 6 hours' },
-    { value: 'every_2h', label: 'Every 2 hours' },
-];
-
-function crontabToFrequency(hour) {
-    if (hour === '*/2') return 'every_2h';
-    if (hour === '*/6') return 'every_6h';
-    if (hour === '*/12') return 'every_12h';
-    return 'daily';
-}
-
-function frequencyToCrontab(freq, hour, minute) {
-    const h = parseInt(hour, 10) || 0;
-    const m = parseInt(minute, 10) || 0;
-    switch (freq) {
-        case 'every_2h': return { crontab_hour: '*/2', crontab_minute: String(m) };
-        case 'every_6h': return { crontab_hour: '*/6', crontab_minute: String(m) };
-        case 'every_12h': return { crontab_hour: '*/12', crontab_minute: String(m) };
-        default: return { crontab_hour: String(h), crontab_minute: String(m) };
-    }
-}
 
 function storeToForm(store) {
     if (!store) return {
@@ -101,12 +77,8 @@ function storeToForm(store) {
         ...shopifyFieldsFromStore(null),
         vendor_price_settings: [],
         vendor_inventory_settings: [],
+        ...emptyScheduleFields('America/New_York'),
         schedule_enabled: false,
-        schedule_frequency: 'daily',
-        schedule_hour: '10',
-        schedule_minute: '00',
-        schedule_timezone: 'America/New_York',
-        ...emptyAutoScrapeFields('America/New_York'),
     };
     const sched = store.sync_schedule;
     return {
@@ -173,12 +145,7 @@ function storeToForm(store) {
             has_nora_inventory_file: !!vi.has_nora_inventory_file,
             nora_inventory_uploaded_at: vi.nora_inventory_uploaded_at || null,
         })),
-        schedule_enabled: sched?.enabled ?? sched?.is_active ?? false,
-        schedule_frequency: sched ? crontabToFrequency(sched.crontab_hour) : 'daily',
-        schedule_hour: sched?.crontab_hour?.replace('*/', '') || '10',
-        schedule_minute: sched?.crontab_minute || '00',
-        schedule_timezone: sched?.timezone || (store.region === 'AU' ? 'Australia/Sydney' : 'America/New_York'),
-        ...autoScrapeFieldsFromStore(
+        ...scheduleFieldsFromStore(
             store,
             sched?.timezone || (store.region === 'AU' ? 'Australia/Sydney' : 'America/New_York'),
         ),
@@ -213,6 +180,20 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const priceVendorIdSet = new Set(usedPriceVendorIds.map((id) => String(id)));
     const inventoryVendorIdSet = new Set(usedInventoryVendorIds.map((id) => String(id)));
     const priceVendorsMissingInventory = [...priceVendorIdSet].filter((id) => !inventoryVendorIdSet.has(id));
+    const scheduleVendorOptions = (() => {
+        const seen = new Set();
+        const out = [];
+        const add = (id, name) => {
+            const key = String(id || '');
+            if (!key || seen.has(key)) return;
+            seen.add(key);
+            out.push({ value: key, label: name || key });
+        };
+        usedPriceVendorIds.forEach((id) => add(id, vendors.find((v) => String(v.id) === String(id))?.name));
+        const vs = store?.vendor_schedules || {};
+        [...(vs.scrape || []), ...(vs.update || [])].forEach((r) => add(r.vendor_id, r.vendor_name));
+        return out.sort((a, b) => a.label.localeCompare(b.label));
+    })();
 
     const addVendorPrice = (vendorId) => {
         const vid = vendorId || selectedVendorPrice;
@@ -379,8 +360,10 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const marketplaceCode = (store?.marketplace_code || store?.marketplace_name || '').toString().trim().toLowerCase();
     const showShopifyConnect = isManaged && ['reverb', 'lasoo', 'mydeal', 'etsy', 'bunnings', 'temu'].includes(marketplaceCode);
     const showRrpDiscount = isMydeal || isSears || isKogan;
-    // Same Store / Price / Inventory flow as inventory-only stores (including managed).
-    const maxStep = 4;
+    // Store / Price / Inventory / Auto Scheduling / Auto Purchasing (managed stores too).
+    const maxStep = 5;
+    // Vendor times are for inventory-only stores.
+    const scheduleAllowVendors = !isManaged;
     // Lasoo managed: vendors optional (same as create). Reverb managed: required.
     const vendorsOptional = isManaged && (isLasoo || isBunnings || isTemu);
     const credentialsLabel = isSears
@@ -401,19 +384,10 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
     const koganAuth = (form.kogan_auth_method || 'json') === 'token' ? 'token' : 'json';
 
     const buildPayload = () => {
-        const cron = frequencyToCrontab(form.schedule_frequency, form.schedule_hour, form.schedule_minute);
         const payload = {
             name: form.name.trim(),
             ...buildAutoBuyPayload(form),
-            sync_schedule: form.schedule_enabled ? {
-                enabled: true,
-                schedule_type: 'crontab',
-                crontab_hour: cron.crontab_hour,
-                crontab_minute: cron.crontab_minute,
-                crontab_day_of_week: '*',
-                timezone: form.schedule_timezone,
-            } : { enabled: false },
-            ...buildAutoScrapePayload(form),
+            ...buildSchedulePayloads(form, { allowVendors: scheduleAllowVendors }),
         };
 
         if (isLasoo) {
@@ -546,8 +520,6 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                 requireSecrets: !store?.shopify_has_credentials,
             }));
         }
-        const autoScrapeErr = validateAutoScrapeFields(form);
-        if (autoScrapeErr) errs.push(autoScrapeErr);
         return errs;
     };
     const validateStep2 = () => {
@@ -586,16 +558,29 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
         return errs;
     };
 
+    const validateStep4 = () => validateScheduleFields(form, { allowVendors: scheduleAllowVendors });
+
     const handleSubmit = () => {
         let errs = [];
+        let fixStep = step;
         if (step === 1) errs = validateStep1();
         else if (step === 2) errs = validateStep2();
-        else errs = validateStep3();
+        else if (step === 3) errs = validateStep3();
+        else if (step === 4) errs = validateStep4();
+        else {
+            // Saving from Auto Purchasing still checks Inventory and Auto Scheduling.
+            errs = validateStep3();
+            fixStep = 3;
+            if (!errs.length) {
+                errs = validateStep4();
+                fixStep = 4;
+            }
+        }
 
         if (errs.length) {
             setError(errs.join('. '));
-            // Saving from Auto Purchasing still checks Inventory: show the step that needs fixing.
-            if (step === 4) setStep(3);
+            // Show the step that needs fixing.
+            if (fixStep !== step) setStep(fixStep);
             return;
         }
         if (step < maxStep) {
@@ -662,7 +647,8 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                             { num: 1, label: 'Store' },
                             { num: 2, label: 'Price' },
                             { num: 3, label: 'Inventory' },
-                            { num: 4, label: 'Auto Purchasing' },
+                            { num: 4, label: 'Auto Scheduling' },
+                            { num: 5, label: 'Auto Purchasing' },
                         ].map((t) => (
                             <button
                                 key={t.num}
@@ -692,7 +678,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                 <div className="flex-1 min-h-0 overflow-y-auto px-8 py-4 flex flex-col items-stretch" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(100,116,139,.35) transparent' }}>
                     {error && <p className="text-rose-600 dark:text-rose-400 text-sm mb-3 shrink-0">{error}</p>}
 
-                    {/* Step 1: Store basics + Schedule */}
+                    {/* Step 1: Store basics */}
                     {step === 1 && (
                         <div className="space-y-5">
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -822,82 +808,20 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                                     hasExistingCredentials={!!store?.shopify_has_credentials}
                                 />
                             )}
-
-                            <AutoScrapeCard
-                                form={form}
-                                setForm={setForm}
-                                timezoneOptions={regionTimezones}
-                                lastRun={store?.auto_scrape}
-                                storeActive={store?.is_active !== false}
-                            />
-
-                            <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-5 space-y-4">
-                                <div className="flex items-center gap-3">
-                                    <Clock className="h-5 w-5 text-slate-500 dark:text-slate-400" />
-                                    <div className="flex-1">
-                                        <h3 className="text-sm font-medium text-slate-900 dark:text-slate-100">Scheduled Updates</h3>
-                                        <p className="text-xs text-slate-500 dark:text-slate-400">
-                                            Automatically scrape and push price/inventory
-                                        </p>
-                                    </div>
-                                    <label className="relative inline-flex items-center cursor-pointer">
-                                        <input
-                                            type="checkbox"
-                                            checked={form.schedule_enabled}
-                                            onChange={(e) => setForm((f) => ({ ...f, schedule_enabled: e.target.checked }))}
-                                            className="sr-only peer"
-                                        />
-                                        <div className="w-9 h-5 bg-slate-300 dark:bg-slate-600 peer-focus:ring-2 peer-focus:ring-accent-400 rounded-full peer peer-checked:after:translate-x-full peer-checked:rtl:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:inset-s-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-accent-500"></div>
-                                    </label>
-                                </div>
-                                {form.schedule_enabled && (
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-                                        <Select
-                                            label="Frequency"
-                                            value={form.schedule_frequency}
-                                            onChange={(e) => setForm((f) => ({ ...f, schedule_frequency: e.target.value }))}
-                                            options={FREQUENCY_OPTIONS}
-                                        />
-                                        <Select
-                                            label="Timezone"
-                                            value={form.schedule_timezone}
-                                            onChange={(e) => setForm((f) => ({ ...f, schedule_timezone: e.target.value }))}
-                                            options={regionTimezones}
-                                        />
-                                        {form.schedule_frequency === 'daily' && (
-                                            <div className="sm:col-span-2 flex gap-3 items-end">
-                                                <div className="flex-1">
-                                                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Update time</label>
-                                                    <div className="flex gap-2">
-                                                        <select
-                                                            value={form.schedule_hour}
-                                                            onChange={(e) => setForm((f) => ({ ...f, schedule_hour: e.target.value }))}
-                                                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-hidden"
-                                                        >
-                                                            {Array.from({ length: 24 }, (_, i) => (
-                                                                <option key={i} value={String(i)}>
-                                                                    {i === 0 ? '12 AM' : i < 12 ? `${i} AM` : i === 12 ? '12 PM' : `${i - 12} PM`}
-                                                                </option>
-                                                            ))}
-                                                        </select>
-                                                        <span className="text-slate-500 dark:text-slate-400 self-center">:</span>
-                                                        <select
-                                                            value={form.schedule_minute}
-                                                            onChange={(e) => setForm((f) => ({ ...f, schedule_minute: e.target.value }))}
-                                                            className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-accent-500 focus:ring-1 focus:ring-accent-500 outline-hidden"
-                                                        >
-                                                            {['00', '15', '30', '45'].map((m) => (
-                                                                <option key={m} value={m}>{m}</option>
-                                                            ))}
-                                                        </select>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
                         </div>
+                    )}
+
+                    {/* Step 4: Auto Scheduling */}
+                    {step === 4 && (
+                        <AutoSchedulingStep
+                            form={form}
+                            setForm={setForm}
+                            timezoneOptions={regionTimezones}
+                            vendorOptions={scheduleVendorOptions}
+                            allowVendors={scheduleAllowVendors}
+                            storeActive={store?.is_active !== false}
+                            store={store}
+                        />
                     )}
 
                     {/* Step 2: Price */}
@@ -1179,7 +1103,7 @@ export default function StoreSettingsModal({ open, onClose, onSuccess, store = n
                             ))}
                         </div>
                     )}
-                    {step === 4 && (
+                    {step === 5 && (
                         <AutoPurchasingStep
                             region={form.region}
                             rows={form.auto_buy_vendors}

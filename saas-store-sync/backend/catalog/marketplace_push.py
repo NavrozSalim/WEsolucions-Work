@@ -39,7 +39,7 @@ def mark_mapping_pushed(pm, *, now=None, clear_error: bool = False, scrape_error
     pm.save(update_fields=fields)
 
 
-def manual_sync_mappings(store, vendor_id=None):
+def manual_sync_mappings(store, vendor_id=None, exclude_vendor_ids=None):
     """Rows Manual sync can update.
 
     Sears and Walmart need a child SKU or a marketplace id. Kogan matches the
@@ -78,6 +78,9 @@ def manual_sync_mappings(store, vendor_id=None):
         )
     if vendor_id:
         qs = qs.filter(product__vendor_id=vendor_id)
+    if exclude_vendor_ids:
+        # Vendors with their own Scheduled Update times push in their own run.
+        qs = qs.exclude(product__vendor_id__in=list(exclude_vendor_ids))
     return qs
 
 

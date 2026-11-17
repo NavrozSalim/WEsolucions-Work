@@ -98,6 +98,7 @@ class StoreSerializer(serializers.ModelSerializer):
     vendor_price_settings = StoreVendorPriceSettingsReadSerializer(many=True, read_only=True)
     vendor_inventory_settings = StoreVendorInventorySettingsReadSerializer(many=True, read_only=True)
     sync_schedule = serializers.SerializerMethodField()
+    vendor_schedules = serializers.SerializerMethodField()
     auto_scrape = serializers.SerializerMethodField()
     shopify_connected = serializers.SerializerMethodField()
     shopify_has_credentials = serializers.SerializerMethodField()
@@ -139,7 +140,7 @@ class StoreSerializer(serializers.ModelSerializer):
             'connection_status', 'last_validated_at',
             'is_active', 'created_at', 'updated_at',
             'vendor_price_settings', 'vendor_inventory_settings',
-            'sync_schedule', 'auto_scrape',
+            'sync_schedule', 'auto_scrape', 'vendor_schedules',
         ]
         extra_kwargs = {
             # Keep token hidden in responses; accept blank/missing at serializer layer.
@@ -451,7 +452,19 @@ class StoreSerializer(serializers.ModelSerializer):
             validated_data['shopify_access_token'] = ''
             validated_data['shopify_token_expires_at'] = None
 
+    def _latest_runs(self, obj):
+        """Newest ScheduledRun per (kind, vendor) for this store, cached per serializer."""
+        from sync.run_schedules import latest_runs_by_key
+
+        cache = self.__dict__.setdefault('_latest_runs_cache', {})
+        key = str(obj.pk)
+        if key not in cache:
+            cache[key] = latest_runs_by_key(obj)
+        return cache[key]
+
     def get_sync_schedule(self, obj):
+        from sync.run_schedules import KIND_UPDATE, run_info, sync_schedule_run_times
+
         try:
             sched = obj.sync_schedule
         except Exception:
@@ -465,25 +478,60 @@ class StoreSerializer(serializers.ModelSerializer):
             'crontab_day_of_week': sched.crontab_day_of_week,
             'interval_seconds': sched.interval_seconds,
             'timezone': sched.timezone,
+            'run_times': sync_schedule_run_times(sched),
+            'retry_failed_cycles': sched.retry_failed_cycles,
             'last_run': sched.last_run.isoformat() if sched.last_run else None,
+            **run_info(self._latest_runs(obj).get((KIND_UPDATE, None))),
         }
 
     def get_auto_scrape(self, obj):
+        from sync.run_schedules import KIND_SCRAPE, run_info
+
         try:
             sched = obj.auto_scrape_schedule
         except Exception:
             return None
+        latest = self._latest_runs(obj).get((KIND_SCRAPE, None))
+        if latest is not None:
+            info = run_info(latest)
+        else:
+            # Runs from before Auto Scheduling kept their result on the schedule row.
+            info = {
+                'last_run_at': sched.last_run_at.isoformat() if sched.last_run_at else None,
+                'last_finished_at': sched.last_finished_at.isoformat() if sched.last_finished_at else None,
+                'last_status': sched.last_status or '',
+                'last_summary': sched.last_summary or {},
+            }
         return {
             'enabled': sched.is_active,
             'run_times': list(sched.run_times or []),
             'timezone': sched.timezone,
             'retry_failed_cycles': sched.retry_failed_cycles,
             'push_after': False,  # Auto Scraping never pushes
-            'last_run_at': sched.last_run_at.isoformat() if sched.last_run_at else None,
-            'last_finished_at': sched.last_finished_at.isoformat() if sched.last_finished_at else None,
-            'last_status': sched.last_status or '',
-            'last_summary': sched.last_summary or {},
+            **info,
         }
+
+    def get_vendor_schedules(self, obj):
+        """Own run times per vendor: ``{'scrape': [...], 'update': [...]}``."""
+        from sync.models import VendorSchedule
+        from sync.run_schedules import KIND_SCRAPE, KIND_UPDATE, run_info
+
+        out = {KIND_SCRAPE: [], KIND_UPDATE: []}
+        rows = VendorSchedule.objects.filter(store=obj).select_related('vendor').order_by('vendor__name')
+        latest = None
+        for row in rows:
+            if latest is None:
+                latest = self._latest_runs(obj)
+            out.setdefault(row.kind, []).append({
+                'vendor_id': str(row.vendor_id),
+                'vendor_name': row.vendor.name if row.vendor else '',
+                'enabled': row.is_active,
+                'run_times': list(row.run_times or []),
+                'timezone': row.timezone,
+                'retry_failed_cycles': row.retry_failed_cycles,
+                **run_info(latest.get((row.kind, str(row.vendor_id)))),
+            })
+        return out
 
     def create(self, validated_data):
         from vendor.models import Vendor
@@ -662,7 +710,9 @@ class StoreSerializer(serializers.ModelSerializer):
                 validated_data['api_token'] = validate_api_token_shape(mkt, token_raw)
         sched_raw = req.get('sync_schedule')
         if not sched_raw or not isinstance(sched_raw, dict) or not sched_raw.get('enabled', False):
-            raise ValidationError({'sync_schedule': 'Scheduled updates are required. Choose frequency and time.'})
+            raise ValidationError({'sync_schedule': 'Scheduled updates are required. Choose the run times.'})
+        # Check the Auto Scheduling settings before anything is saved.
+        self._validate_schedule_payloads(req, management_mode)
 
         price_settings_data = req.get('vendor_price_settings', [])
         inventory_settings_data = req.get('vendor_inventory_settings', [])
@@ -811,6 +861,8 @@ class StoreSerializer(serializers.ModelSerializer):
         from marketplace.models import Marketplace
         from sync.models import SyncSchedule
         req = self.context['request'].data
+        # Check the Auto Scheduling settings before anything is saved.
+        self._validate_schedule_payloads(req, instance.management_mode)
         MYDEAL_SECRET_FIELDS = (
             'mydeal_sandbox_client_id',
             'mydeal_sandbox_client_secret',
@@ -1296,30 +1348,128 @@ class StoreSerializer(serializers.ModelSerializer):
                     fixed_value=fixed_val,
                 )
 
+    @staticmethod
+    def _clean_schedule_card(data, kind, field, management_mode):
+        """Validate one card payload (``sync_schedule`` / ``auto_scrape``). None when off or absent."""
+        from vendor.models import Vendor
+        from sync.run_schedules import normalize_card_payload
+
+        if data is None:
+            return None
+        if not isinstance(data, dict):
+            raise ValidationError({field: 'Must be an object.'})
+        if not data.get('enabled', False):
+            return None
+        try:
+            clean = normalize_card_payload(data, kind)
+        except ValueError as exc:
+            raise ValidationError({field: str(exc)}) from None
+        vendors = clean.get('vendors') or []
+        if vendors and management_mode == 'full_store':
+            raise ValidationError({field: 'Vendor times are only for inventory-only stores.'})
+        if vendors:
+            ids = [row['vendor_id'] for row in vendors]
+            try:
+                found = set(str(v) for v in Vendor.objects.filter(pk__in=ids).values_list('id', flat=True))
+            except Exception:  # noqa: BLE001 — a malformed id
+                found = set()
+            if any(i not in found for i in ids):
+                raise ValidationError({field: 'Vendor times: one of the vendors was not found.'})
+        return clean
+
+    def _validate_schedule_payloads(self, req, management_mode):
+        from sync.run_schedules import KIND_SCRAPE, KIND_UPDATE
+
+        if 'sync_schedule' in req:
+            self._clean_schedule_card(req.get('sync_schedule'), KIND_UPDATE, 'sync_schedule', management_mode)
+        if 'auto_scrape' in req:
+            self._clean_schedule_card(req.get('auto_scrape'), KIND_SCRAPE, 'auto_scrape', management_mode)
+
+    @staticmethod
+    def _save_vendor_schedules(store, kind, rows, tz_name):
+        """Replace the store's vendor times of ``kind`` with ``rows``.
+
+        A new row, or one whose times or timezone change, only fires from the next
+        run time on, so saving a few minutes after a run time does not start a run.
+        """
+        from django.utils import timezone as dj_tz
+
+        from sync.models import VendorSchedule
+
+        now = dj_tz.now()
+        existing = {str(r.vendor_id): r for r in VendorSchedule.objects.filter(store=store, kind=kind)}
+        keep = set()
+        for row in rows:
+            vid = row['vendor_id']
+            keep.add(vid)
+            obj = existing.get(vid)
+            if obj is None:
+                VendorSchedule.objects.create(
+                    store=store, vendor_id=vid, kind=kind, is_active=True,
+                    run_times=row['run_times'], timezone=tz_name,
+                    retry_failed_cycles=row['retry_failed_cycles'], last_triggered_at=now,
+                )
+                continue
+            changed = obj.run_times != row['run_times'] or obj.timezone != tz_name or not obj.is_active
+            obj.run_times = row['run_times']
+            obj.timezone = tz_name
+            obj.retry_failed_cycles = row['retry_failed_cycles']
+            obj.is_active = True
+            fields = ['run_times', 'timezone', 'retry_failed_cycles', 'is_active', 'updated_at']
+            if changed:
+                obj.last_triggered_at = now
+                fields.append('last_triggered_at')
+            obj.save(update_fields=fields)
+        stale = [vid for vid in existing if vid not in keep]
+        if stale:
+            VendorSchedule.objects.filter(store=store, kind=kind, vendor_id__in=stale).delete()
+
     def _save_sync_schedule(self, store, data, SyncSchedule):
+        """Save Scheduled Updates. Off deletes the schedule (vendor times are kept)."""
+        from django.utils import timezone as dj_tz
+
+        from sync.run_schedules import KIND_UPDATE
+
         if not data or not isinstance(data, dict):
             return
-        enabled = data.get('enabled', False)
-        if not enabled:
+        if not data.get('enabled', False):
             SyncSchedule.objects.filter(store=store).delete()
             return
+        clean = self._clean_schedule_card(data, KIND_UPDATE, 'sync_schedule', store.management_mode)
+        times = clean['run_times']
+        first_h, first_m = (int(x) for x in times[0].split(':'))
         defaults = {
-            'schedule_type': data.get('schedule_type', 'crontab'),
-            'crontab_hour': str(data.get('crontab_hour', '10')),
-            'crontab_minute': str(data.get('crontab_minute', '0')),
-            'crontab_day_of_week': str(data.get('crontab_day_of_week', '*')),
+            # Crontab fields mirror the first run time for older readers; run_times is used.
+            'schedule_type': 'crontab',
+            'crontab_hour': str(first_h),
+            'crontab_minute': str(first_m),
+            'crontab_day_of_week': '*',
             'crontab_day_of_month': '*',
             'crontab_month_of_year': '*',
-            'interval_seconds': data.get('interval_seconds'),
-            'timezone': data.get('timezone', 'UTC'),
+            'interval_seconds': None,
+            'timezone': clean['timezone'],
+            'run_times': times,
+            'retry_failed_cycles': clean['retry_failed_cycles'],
             'is_active': True,
         }
+        current = SyncSchedule.objects.filter(store=store).first()
+        if (
+            current is None
+            or not current.is_active
+            or list(current.run_times or []) != times
+            or current.timezone != clean['timezone']
+        ):
+            defaults['last_triggered_at'] = dj_tz.now()
         SyncSchedule.objects.update_or_create(store=store, defaults=defaults)
+        if clean.get('vendors') is not None:
+            self._save_vendor_schedules(store, KIND_UPDATE, clean['vendors'], clean['timezone'])
 
     def _save_auto_scrape(self, store, data):
-        """Save Auto Scraping settings. Off keeps the row (and its last-run info) but deactivates it."""
-        from sync.auto_scrape import normalize_auto_scrape_payload
+        """Save Auto Scraping settings. Off keeps the row (and its vendor times) but deactivates it."""
+        from django.utils import timezone as dj_tz
+
         from sync.models import AutoScrapeSchedule
+        from sync.run_schedules import KIND_SCRAPE
 
         if data is None:
             return
@@ -1328,11 +1478,22 @@ class StoreSerializer(serializers.ModelSerializer):
         if not data.get('enabled', False):
             AutoScrapeSchedule.objects.filter(store=store).update(is_active=False)
             return
-        try:
-            clean = normalize_auto_scrape_payload(data)
-        except ValueError as exc:
-            raise ValidationError({'auto_scrape': str(exc)}) from None
-        AutoScrapeSchedule.objects.update_or_create(
-            store=store,
-            defaults={**clean, 'is_active': True},
-        )
+        clean = self._clean_schedule_card(data, KIND_SCRAPE, 'auto_scrape', store.management_mode)
+        defaults = {
+            'run_times': clean['run_times'],
+            'timezone': clean['timezone'],
+            'retry_failed_cycles': clean['retry_failed_cycles'],
+            'push_after': False,  # Auto Scraping never pushes to the marketplace.
+            'is_active': True,
+        }
+        current = AutoScrapeSchedule.objects.filter(store=store).first()
+        if (
+            current is None
+            or not current.is_active
+            or list(current.run_times or []) != clean['run_times']
+            or current.timezone != clean['timezone']
+        ):
+            defaults['last_triggered_at'] = dj_tz.now()
+        AutoScrapeSchedule.objects.update_or_create(store=store, defaults=defaults)
+        if clean.get('vendors') is not None:
+            self._save_vendor_schedules(store, KIND_SCRAPE, clean['vendors'], clean['timezone'])

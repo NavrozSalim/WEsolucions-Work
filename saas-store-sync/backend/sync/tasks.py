@@ -864,7 +864,7 @@ def _scheduled_ingest_refresh(store) -> dict:
     return result
 
 
-def _run_browser_scrape_for_scheduled_update(store, source: str) -> dict:
+def _run_browser_scrape_for_scheduled_update(store, source: str, on_poll=None) -> dict:
     """
     Run Amazon/eBay (live) scrapes the same way as Catalog → Start Scraping:
     ``StoreCatalogCeleryScrapeState`` + ``catalog_scrape_store_task`` on heavy-* workers.
@@ -940,6 +940,11 @@ def _run_browser_scrape_for_scheduled_update(store, source: str) -> dict:
             return {'completed': True, 'task_id': task_id}
         if st.cancel_requested:
             saw_cancel = True
+        if on_poll is not None:
+            try:
+                on_poll()
+            except Exception:  # noqa: BLE001 — a heartbeat must never stop the wait
+                logger.exception('on_poll failed during scheduled browser scrape wait')
         time.sleep(poll_interval)
 
     logger.warning(
@@ -973,7 +978,7 @@ def _run_browser_scrape_for_scheduled_update(store, source: str) -> dict:
     }
 
 
-def _wait_managed_listing_scrape(store) -> dict:
+def _wait_managed_listing_scrape(store, on_poll=None) -> dict:
     """Wait until Lasoo/Reverb/Etsy Inventory scrape finishes on heavy-au/heavy-us."""
     import time
 
@@ -994,6 +999,11 @@ def _wait_managed_listing_scrape(store) -> dict:
                 'scraped': int(last.get('scraped') or 0),
                 'failed': int(last.get('failed') or 0),
             }
+        if on_poll is not None:
+            try:
+                on_poll()
+            except Exception:  # noqa: BLE001
+                logger.exception('on_poll failed during managed scrape wait')
         time.sleep(poll_interval)
 
     logger.warning(
@@ -1555,80 +1565,52 @@ def run_store_update(self, store_id, source='beat'):
 
 @shared_task
 def check_scheduled_updates():
+    """Celery Beat, every minute: Scheduled Updates run times (store-wide and per vendor).
+
+    Due run times become waiting ``ScheduledRun`` rows; the store's next waiting run
+    starts when the store is free (see ``sync.run_schedules``). Manual "Update now"
+    still uses ``run_store_update``.
     """
-    Celery Beat calls this every minute. Check each active SyncSchedule and
-    enqueue run_store_update if the schedule is due.
-    """
-    import logging
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
+    from sync.run_schedules import KIND_UPDATE, tick
 
-    logger = logging.getLogger(__name__)
-    from sync.models import SyncSchedule
-
-    now_utc = timezone.now()
-
-    for sched in SyncSchedule.objects.filter(is_active=True).select_related('store'):
-        if not sched.store.is_active:
-            continue
-
-        try:
-            tz_info = ZoneInfo(sched.timezone or 'UTC')
-        except Exception:
-            tz_info = ZoneInfo('UTC')
-
-        now_local = now_utc.astimezone(tz_info)
-
-        if sched.schedule_type == 'interval':
-            if sched.interval_seconds and sched.interval_seconds > 0:
-                if sched.last_run is None:
-                    is_due = True
-                else:
-                    elapsed = (now_utc - sched.last_run).total_seconds()
-                    is_due = elapsed >= sched.interval_seconds
-            else:
-                continue
-        else:
-            is_due = _crontab_matches(sched, now_local)
-            if is_due and sched.last_run:
-                last_local = sched.last_run.astimezone(tz_info)
-                if last_local.date() == now_local.date() and last_local.hour == now_local.hour and last_local.minute == now_local.minute:
-                    is_due = False
-
-        if is_due:
-            import hashlib
-
-            h = int(hashlib.md5(str(sched.store_id).encode('utf-8')).hexdigest()[:8], 16)
-            countdown = h % 30
-            logger.info(
-                "Enqueuing scheduled update for store %s (countdown=%ss)",
-                sched.store.name,
-                countdown,
-            )
-            run_store_update.apply_async(
-                args=[str(sched.store_id), 'beat'],
-                countdown=countdown,
-            )
+    return tick(KIND_UPDATE)
 
 
 @shared_task
 def check_auto_scrape_schedules():
-    """Celery Beat, every minute: queue ``run_store_auto_scrape`` for due Auto Scraping slots."""
-    from sync.auto_scrape import check_due_schedules
+    """Celery Beat, every minute: Auto Scraping run times (store-wide and per vendor)."""
+    from sync.run_schedules import KIND_SCRAPE, tick
 
-    store_ids = check_due_schedules()
-    for store_id in store_ids:
-        logger.info("Enqueuing Auto Scraping for store %s", store_id)
-        run_store_auto_scrape.apply_async(args=[store_id])
-    return {'queued': store_ids}
+    return tick(KIND_SCRAPE)
+
+
+@shared_task(bind=True)
+def run_scheduled_run(self, run_id):
+    """Run one Auto Scraping / Scheduled Update ``ScheduledRun`` (sync queue)."""
+    from sync.models import ScheduledRun
+    from sync.run_schedules import execute_run, try_start_next, _enqueue
+
+    try:
+        return execute_run(str(run_id))
+    finally:
+        # Start the store's next waiting run now instead of at the next minute tick.
+        store_id = ScheduledRun.objects.filter(pk=run_id).values_list('store_id', flat=True).first()
+        if store_id:
+            try:
+                nxt = try_start_next(store_id)
+                if nxt is not None:
+                    _enqueue(nxt)
+            except Exception:  # noqa: BLE001 — the minute tick starts it instead
+                logger.exception('Could not start the next scheduled run for store %s', store_id)
 
 
 @shared_task(bind=True)
 def run_store_auto_scrape(self, store_id):
-    """Auto Scraping run: full scrape, then up to N "reset Failed to Pending, scrape again" cycles."""
-    from sync.auto_scrape import run_auto_scrape
+    """Older entry point (messages queued before the Auto Scheduling update): queue a store run."""
+    from sync.run_schedules import KIND_SCRAPE, queue_store_run
 
-    return run_auto_scrape(str(store_id))
+    run = queue_store_run(str(store_id), KIND_SCRAPE)
+    return {'store_id': str(store_id), 'run_id': str(run.id) if run else None}
 
 
 def _crontab_matches(sched, now_local):
@@ -1760,7 +1742,7 @@ def _return_push_listings_cancelled(store, succeeded, failed, skipped, total_to_
     }
 
 
-def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_id=None):
+def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_id=None, exclude_vendor_ids=None):
     """
     Push local store_price / store_stock to the marketplace.
 
@@ -1768,6 +1750,8 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
     stock 0 locally; Manual sync sends that 0. Pending rows are left out.
 
     disable_schedule: if True (manual sync from Catalog), turn off SyncSchedule.is_active for this store.
+    exclude_vendor_ids: leave these vendors out (a Scheduled Update for the store's
+    other vendors, when these vendors have their own update times).
     """
     import logging
     from sync.push_listings_cancel import PushListingsCancelled, should_abort_push_listings
@@ -1799,6 +1783,14 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
         vendor_row = Vendor.objects.filter(pk=vendor_id).only('name').first()
         vendor_label = ((vendor_row.name if vendor_row else '') or '').strip()
     scope_note = f' for {vendor_label}' if vendor_label else ''
+    if exclude_vendor_ids and not vendor_id:
+        from vendor.models import Vendor
+        excluded_names = sorted(
+            (n or '').strip()
+            for n in Vendor.objects.filter(pk__in=list(exclude_vendor_ids)).values_list('name', flat=True)
+        )
+        if excluded_names:
+            scope_note = f' (except {", ".join(excluded_names)}, which have their own update times)'
     append_catalog_log(
         store.id,
         f'Marketplace sync started{scope_note} — pushing local prices and stock to your marketplace.',
@@ -1818,7 +1810,7 @@ def _execute_store_push_listings_only(store_id, disable_schedule=False, vendor_i
 
     adapter = get_adapter(store)
     price_by_vid, price_fb, _, _ = _build_store_vendor_pricing_inventory_caches(store)
-    qs = manual_sync_mappings(store, vendor_id).select_related('product', 'product__vendor')
+    qs = manual_sync_mappings(store, vendor_id, exclude_vendor_ids).select_related('product', 'product__vendor')
     total_to_push = qs.count()
 
     succeeded, failed, skipped = 0, 0, 0

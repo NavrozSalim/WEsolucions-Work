@@ -668,11 +668,16 @@ def _update_product_mapping(pm: ProductMapping, row: CatalogUploadRow) -> None:
         pm.save(update_fields=list(updates.keys()))
 
 
-def _chunked_reset_store_active_listings_pending_scrape(store) -> dict:
+def _chunked_reset_store_active_listings_pending_scrape(
+    store, *, vendor_ids=None, exclude_vendor_ids=None,
+) -> dict:
     """Mark all active listings pending rescrape after catalog sync — chunked UPDATEs only.
 
     A single store-wide UPDATE would lock/update every row at once and stall the API.
     Same semantics as before: ``sync_status='pending'``, clear scrape errors and counters.
+
+    ``vendor_ids`` limits the reset to those vendors; ``exclude_vendor_ids`` leaves
+    those vendors alone (vendors with their own schedule times).
     """
     batch = int(getattr(settings, 'CATALOG_POST_SYNC_PENDING_RESET_BATCH', 2500) or 2500)
     batch = max(200, min(batch, 20000))
@@ -685,11 +690,12 @@ def _chunked_reset_store_active_listings_pending_scrape(store) -> dict:
     last_id = None
 
     while True:
-        q = (
-            ProductMapping.objects.filter(store=store, is_active=True)
-            .order_by('id')
-            .values_list('id', flat=True)
-        )
+        q = ProductMapping.objects.filter(store=store, is_active=True)
+        if vendor_ids:
+            q = q.filter(product__vendor_id__in=list(vendor_ids))
+        if exclude_vendor_ids:
+            q = q.exclude(product__vendor_id__in=list(exclude_vendor_ids))
+        q = q.order_by('id').values_list('id', flat=True)
         if last_id is not None:
             q = q.filter(id__gt=last_id)
         ids = list(q[:batch])
