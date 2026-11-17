@@ -33,6 +33,7 @@ import {
     createTestOrder,
     exportOrdersExcel,
     getBunningsCarriers,
+    getReverbShippingProviders,
     getOrderCancelReasons,
     getOrders,
     getOrdersFetch,
@@ -106,6 +107,11 @@ const BUNNINGS_FALLBACK_CARRIERS = [
     { code: 'COURIERSPLEASE', name: 'Couriers Please' },
     { code: 'SENDLE', name: 'Sendle' },
 ];
+
+// Used only if Reverb's live provider list cannot be loaded (same list as the backend fallback).
+const REVERB_FALLBACK_CARRIERS = [
+    'USPS', 'UPS', 'FedEx', 'DHL', 'DHL Express', 'Australia Post', 'Canada Post', 'Royal Mail', 'Other',
+].map((name) => ({ code: name, name }));
 
 const MYDEAL_CARRIERS = [
     { value: 'Australia Post', label: 'Australia Post', requiresTracking: true },
@@ -368,9 +374,13 @@ function ShippingModal({ open, onClose, onSubmit, order, loading, marketplaceCod
         tracking_number: '', carrier: '', carrier_other: '', tracking_url: '', shipped_date: '',
     });
     const [error, setError] = useState('');
-    const [bunningsCarriers, setBunningsCarriers] = useState(BUNNINGS_FALLBACK_CARRIERS);
     const isMydeal = (marketplaceCode || '').toLowerCase() === 'mydeal';
     const isBunnings = (marketplaceCode || '').toLowerCase() === 'bunnings';
+    const isReverb = (marketplaceCode || '').toLowerCase() === 'reverb';
+    // Bunnings and Reverb only accept their own carrier names, so both use a list.
+    const usesCarrierList = isBunnings || isReverb;
+    const fallbackCarriers = isReverb ? REVERB_FALLBACK_CARRIERS : BUNNINGS_FALLBACK_CARRIERS;
+    const [carrierList, setCarrierList] = useState(fallbackCarriers);
     const selectedCarrier = isMydeal ? mydealCarrier(form.carrier) : null;
     const needsTracking = isMydeal ? selectedCarrier?.requiresTracking !== false : true;
     const needsCustomName = Boolean(selectedCarrier?.customName);
@@ -383,11 +393,13 @@ function ShippingModal({ open, onClose, onSubmit, order, loading, marketplaceCod
     }, [open]);
 
     useEffect(() => {
-        if (!open || !isBunnings || !storeId) {
+        if (!open || !usesCarrierList || !storeId) {
             return undefined;
         }
         let cancelled = false;
-        getBunningsCarriers(storeId)
+        const fallback = isReverb ? REVERB_FALLBACK_CARRIERS : BUNNINGS_FALLBACK_CARRIERS;
+        setCarrierList(fallback);
+        (isReverb ? getReverbShippingProviders(storeId) : getBunningsCarriers(storeId))
             .then((res) => {
                 const list = Array.isArray(res.data?.carriers) ? res.data.carriers : [];
                 const rows = list
@@ -397,16 +409,16 @@ function ShippingModal({ open, onClose, onSubmit, order, loading, marketplaceCod
                     }))
                     .filter((row) => row.code);
                 if (!cancelled) {
-                    setBunningsCarriers(rows.length ? rows : BUNNINGS_FALLBACK_CARRIERS);
+                    setCarrierList(rows.length ? rows : fallback);
                 }
             })
             .catch(() => {
-                if (!cancelled) setBunningsCarriers(BUNNINGS_FALLBACK_CARRIERS);
+                if (!cancelled) setCarrierList(fallback);
             });
         return () => {
             cancelled = true;
         };
-    }, [open, isBunnings, storeId]);
+    }, [open, usesCarrierList, isReverb, storeId]);
 
     if (!open) return null;
 
@@ -518,7 +530,7 @@ function ShippingModal({ open, onClose, onSubmit, order, loading, marketplaceCod
                                 onChange={(e) => setForm((f) => ({ ...f, tracking_number: e.target.value }))}
                                 required
                             />
-                            {isBunnings ? (
+                            {usesCarrierList ? (
                                 <Select
                                     label="Carrier"
                                     required
@@ -526,7 +538,7 @@ function ShippingModal({ open, onClose, onSubmit, order, loading, marketplaceCod
                                     onChange={(e) => setForm((f) => ({ ...f, carrier: e.target.value }))}
                                     options={[
                                         { value: '', label: 'Select carrier' },
-                                        ...bunningsCarriers.map((c) => ({
+                                        ...carrierList.map((c) => ({
                                             value: c.code,
                                             label: c.name && c.name !== c.code ? `${c.name} (${c.code})` : c.code,
                                         })),
@@ -541,17 +553,25 @@ function ShippingModal({ open, onClose, onSubmit, order, loading, marketplaceCod
                                     required
                                 />
                             )}
-                            <Input
-                                label="Tracking URL (optional)"
-                                value={form.tracking_url}
-                                onChange={(e) => setForm((f) => ({ ...f, tracking_url: e.target.value }))}
-                            />
-                            <Input
-                                label="Shipped date (optional)"
-                                type="date"
-                                value={form.shipped_date}
-                                onChange={(e) => setForm((f) => ({ ...f, shipped_date: e.target.value }))}
-                            />
+                            {isReverb ? (
+                                <p className="text-xs text-slate-500 dark:text-slate-400">
+                                    Reverb marks the order shipped and emails the buyer the tracking number.
+                                </p>
+                            ) : (
+                                <>
+                                    <Input
+                                        label="Tracking URL (optional)"
+                                        value={form.tracking_url}
+                                        onChange={(e) => setForm((f) => ({ ...f, tracking_url: e.target.value }))}
+                                    />
+                                    <Input
+                                        label="Shipped date (optional)"
+                                        type="date"
+                                        value={form.shipped_date}
+                                        onChange={(e) => setForm((f) => ({ ...f, shipped_date: e.target.value }))}
+                                    />
+                                </>
+                            )}
                         </>
                     )}
                     <div className="flex justify-end gap-2 pt-2">
@@ -1677,6 +1697,8 @@ export default function Orders() {
     const isMydeal = marketplaceCode === 'mydeal';
     const isBunnings = marketplaceCode === 'bunnings';
     const canPartialRefund = supportsPartialRefund(marketplaceCode);
+    // Etsy's API has no seller cancel/refund; that is done in Etsy Shop Manager.
+    const canCancel = marketplaceCode !== 'etsy';
     const orderIdLabel = isReverb || isBunnings ? 'Order ID' : 'Invoice';
     const orderDateTz = isMydeal ? MYDEAL_TZ : undefined;
 
@@ -2107,15 +2129,17 @@ export default function Orders() {
                                                         Refund
                                                     </button>
                                                 )}
-                                                <button
-                                                    type="button"
-                                                    className="inline-flex min-h-10 items-center gap-1 rounded-md border border-slate-200 px-3 text-xs font-medium text-rose-600 disabled:opacity-40 dark:border-slate-700"
-                                                    onClick={() => setCancelOrderRow(o)}
-                                                    disabled={terminal}
-                                                >
-                                                    <Ban className="h-3.5 w-3.5" />
-                                                    Cancel
-                                                </button>
+                                                {canCancel && (
+                                                    <button
+                                                        type="button"
+                                                        className="inline-flex min-h-10 items-center gap-1 rounded-md border border-slate-200 px-3 text-xs font-medium text-rose-600 disabled:opacity-40 dark:border-slate-700"
+                                                        onClick={() => setCancelOrderRow(o)}
+                                                        disabled={terminal}
+                                                    >
+                                                        <Ban className="h-3.5 w-3.5" />
+                                                        Cancel
+                                                    </button>
+                                                )}
                                                 </>)}
                                                 <button
                                                     type="button"
@@ -2256,15 +2280,17 @@ export default function Orders() {
                                                                         <BadgePercent className="h-4 w-4" />
                                                                     </button>
                                                                 )}
-                                                                <button
-                                                                    type="button"
-                                                                    title="Cancel order"
-                                                                    className="rounded-md p-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20 disabled:opacity-40"
-                                                                    onClick={() => setCancelOrderRow(o)}
-                                                                    disabled={['cancelled', 'refunded', 'shipping_complete'].includes(o.status)}
-                                                                >
-                                                                    <Ban className="h-4 w-4" />
-                                                                </button>
+                                                                {canCancel && (
+                                                                    <button
+                                                                        type="button"
+                                                                        title="Cancel order"
+                                                                        className="rounded-md p-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20 disabled:opacity-40"
+                                                                        onClick={() => setCancelOrderRow(o)}
+                                                                        disabled={['cancelled', 'refunded', 'shipping_complete'].includes(o.status)}
+                                                                    >
+                                                                        <Ban className="h-4 w-4" />
+                                                                    </button>
+                                                                )}
                                                                 </>)}
                                                                 <button
                                                                     type="button"

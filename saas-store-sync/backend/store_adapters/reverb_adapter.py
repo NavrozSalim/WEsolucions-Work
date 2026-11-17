@@ -475,3 +475,33 @@ class ReverbAdapter(BaseStoreAdapter):
             f"/api/my/orders/selling/{quote(oid)}/refund_requests",
             json=body,
         )
+
+    def list_shipping_providers(self):
+        """GET /api/shipping/providers: the carrier names Reverb accepts on ship."""
+        return self._request("GET", "/api/shipping/providers")
+
+    def ship_order(
+        self,
+        order_number: str,
+        *,
+        provider: str,
+        tracking_number: str,
+        send_notification: bool = True,
+    ) -> dict | None:
+        """POST /api/my/orders/selling/{order_number}/ship (Reverb "Ship Orders" guide).
+
+        ``provider`` must be one of the names from ``list_shipping_providers``.
+        ``send_notification`` emails the buyer that the item has shipped.
+        """
+        oid = str(order_number or "").strip()
+        if not oid:
+            raise ValueError("order_number is required")
+        return self._request(
+            "POST",
+            f"/api/my/orders/selling/{quote(oid)}/ship",
+            json={
+                "provider": provider,
+                "tracking_number": tracking_number,
+                "send_notification": bool(send_notification),
+            },
+        )

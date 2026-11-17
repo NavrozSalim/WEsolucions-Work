@@ -170,6 +170,10 @@ export const getBunningsLogistics = (storeId) =>
     api.get(`/stores/${storeId}/listings/bunnings/logistics/`);
 
 /** Bunnings OR23 carrier codes for the shipping modal. */
+/** Reverb shipping provider names for the Ship form (GET /api/shipping/providers). */
+export const getReverbShippingProviders = (storeId) =>
+    api.get(`/stores/${storeId}/listings/reverb/shipping-providers/`);
+
 export const getBunningsCarriers = (storeId) =>
     api.get(`/stores/${storeId}/listings/bunnings/carriers/`);
 

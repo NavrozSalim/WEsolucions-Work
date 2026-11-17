@@ -15,7 +15,7 @@ from store_adapters import get_adapter
 from store_adapters.reverb_adapter import ReverbAPIError
 
 from ..errors import MarketplaceError
-from ..models import Environment, MarketplaceOrder, OrderStatus
+from ..models import Environment, MarketplaceOrder, OrderShipment, OrderStatus
 from ..order_upsert import persist_marketplace_order
 
 logger = logging.getLogger("listings.reverb")
@@ -558,3 +558,123 @@ def partial_refund(
         logger.exception("Reverb partial refund unexpected error order=%s", order.external_order_key)
         return {"ok": False, "marketplace_ok": False, "message": str(exc)[:400]}
     return {"ok": True, "marketplace_ok": True, "currency": currency}
+
+
+# Used only when GET /api/shipping/providers fails, so the Ship form still has
+# choices. The live list from Reverb is the source of truth.
+REVERB_FALLBACK_PROVIDERS = (
+    "USPS", "UPS", "FedEx", "DHL", "DHL Express", "Australia Post",
+    "Canada Post", "Royal Mail", "Other",
+)
+
+
+def normalize_shipping_providers(payload) -> list[dict]:
+    """Turn Reverb's provider list into ``[{"code", "name"}]`` rows.
+
+    ``code`` is the exact text Reverb expects as ``provider`` on ship. The doc
+    does not show the response body, so plain strings and objects under the
+    usual keys are both accepted.
+    """
+    rows = payload
+    if isinstance(payload, dict):
+        rows = None
+        for key in ("shipping_providers", "providers", "data", "results"):
+            if isinstance(payload.get(key), list):
+                rows = payload[key]
+                break
+    if not isinstance(rows, list):
+        return []
+    out, seen = [], set()
+    for row in rows:
+        if isinstance(row, str):
+            code, name = row.strip(), row.strip()
+        elif isinstance(row, dict):
+            code = str(
+                row.get("provider") or row.get("name") or row.get("code")
+                or row.get("value") or row.get("id") or ""
+            ).strip()
+            name = str(row.get("display_name") or row.get("name") or code).strip()
+        else:
+            continue
+        if not code or code.lower() in seen:
+            continue
+        seen.add(code.lower())
+        out.append({"code": code, "name": name or code})
+    return out
+
+
+def shipping_providers(store) -> dict:
+    """Carrier choices for the Reverb Ship form (live list, fallback on error)."""
+    fallback = [{"code": p, "name": p} for p in REVERB_FALLBACK_PROVIDERS]
+    if not (getattr(store, "api_token", None) or "").strip():
+        return {"carriers": fallback, "source": "fallback",
+                "detail": "No Reverb API token configured for this store."}
+    try:
+        rows = normalize_shipping_providers(get_adapter(store).list_shipping_providers())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Reverb shipping providers failed store=%s: %s", store.pk, exc)
+        return {"carriers": fallback, "source": "fallback", "detail": str(exc)[:300]}
+    if not rows:
+        return {"carriers": fallback, "source": "fallback",
+                "detail": "Reverb returned no shipping providers."}
+    return {"carriers": rows, "source": "reverb"}
+
+
+def ship(order: MarketplaceOrder, *, tracking_number: str, carrier: str,
+         send_notification: bool = True) -> dict:
+    """Mark a Reverb order shipped: POST /my/orders/selling/{order}/ship."""
+    tracking = (tracking_number or "").strip()
+    provider = (carrier or "").strip()
+    if not tracking:
+        raise MarketplaceError("Tracking number is required for Reverb shipments.")
+    if not provider:
+        raise MarketplaceError("Choose a Reverb shipping provider.")
+    order_number = (order.external_order_key or order.invoice_number or "").strip()
+    if not order_number:
+        raise MarketplaceError("Reverb order number is missing on this order.")
+    if not (getattr(order.store, "api_token", None) or "").strip():
+        raise MarketplaceError(
+            "No Reverb API token configured for this store. Add it in store settings."
+        )
+
+    body = {
+        "provider": provider,
+        "tracking_number": tracking,
+        "send_notification": bool(send_notification),
+    }
+    shipment = OrderShipment.objects.create(
+        order=order,
+        tracking_number=tracking,
+        carrier=provider,
+        tracking_url="",
+        shipped_at=timezone.now(),
+        status="submitted",
+        marketplace_request_json=body,
+    )
+    try:
+        data = get_adapter(order.store).ship_order(
+            order_number,
+            provider=provider,
+            tracking_number=tracking,
+            send_notification=send_notification,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if not isinstance(exc, ReverbAPIError):
+            logger.exception("Reverb ship unexpected error order=%s", order_number)
+        message = str(exc)[:400] or "Reverb ship failed."
+        shipment.status = "failed"
+        shipment.marketplace_response_json = {"error": message}
+        shipment.save(update_fields=["status", "marketplace_response_json"])
+        return {"ok": False, "message": message, "shipment_id": str(shipment.id)}
+
+    shipment.marketplace_response_json = data if isinstance(data, (dict, list)) else {}
+    shipment.save(update_fields=["marketplace_response_json"])
+    order.shipping_status = "submitted"
+    order.status = OrderStatus.SHIPPING_SUBMITTED
+    order.save(update_fields=["shipping_status", "status", "updated_at"])
+    return {
+        "ok": True,
+        "message": "Shipping info sent to Reverb."
+        + (" The buyer was emailed." if send_notification else ""),
+        "shipment_id": str(shipment.id),
+    }

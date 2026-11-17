@@ -397,6 +397,22 @@ class StoreBunningsCarriersView(APIView):
         return Response({'carriers': bunnings_orders.carrier_choices(result.data)})
 
 
+class StoreReverbShippingProvidersView(APIView):
+    """Reverb shipping provider names for the Ship form (GET /api/shipping/providers)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        from listings.reverb import orders as reverb_orders
+
+        store = _get_store(request, store_pk)
+        if marketplace_kind(store.marketplace) != 'reverb':
+            return Response(
+                {'detail': 'Shipping providers are only available for Reverb stores.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(reverb_orders.shipping_providers(store))
+
+
 class StoreBunningsAttributesView(APIView):
     """Bunnings PM11 required/recommended attributes for a hierarchy."""
     permission_classes = [IsAuthenticated]

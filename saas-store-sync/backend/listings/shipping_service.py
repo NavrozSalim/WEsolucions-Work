@@ -9,6 +9,10 @@ There is no separate "complete" endpoint; marking complete is an upsert with
 MyDeal (WMP):
 - ``POST /orders/fulfill`` with OrderFulfillment + tracking per OrderItem.
 
+Reverb:
+- ``POST /api/my/orders/selling/{order_number}/ship`` with provider (from
+  ``GET /api/shipping/providers``), tracking_number and send_notification.
+
 Temu:
 - ``bg.logistics.shipment.create`` with the tracking number and child order
   lines, then ``bg.logistics.shipment.confirm`` to mark the parent order shipped.
@@ -373,9 +377,11 @@ def submit(order: MarketplaceOrder, *, tracking_number: str, carrier: str,
             carrier=carrier,
         )
     elif kind == "reverb":
-        raise MarketplaceError(
-            "Shipping/tracking push is not supported for Reverb yet. "
-            "Mark shipped in Reverb seller tools, or ask for Reverb ship API support."
+        from .reverb import orders as reverb_orders
+        result = reverb_orders.ship(
+            order,
+            tracking_number=tracking_number,
+            carrier=carrier,
         )
     elif kind == "bunnings":
         result = _submit_bunnings(
@@ -510,7 +516,18 @@ def complete(order: MarketplaceOrder) -> dict:
             "message": "Marked complete locally (Temu marks shipped from the confirmed shipment).",
         }
     if kind == "reverb":
-        raise MarketplaceError("Shipping complete is not supported for Reverb yet.")
+        # Reverb has no "delivered" call; it follows the carrier's tracking.
+        order.shipping_status = "complete"
+        order.status = OrderStatus.SHIPPING_COMPLETE
+        order.save(update_fields=["shipping_status", "status", "updated_at"])
+        last = order.shipments.first()
+        if last:
+            last.status = "complete"
+            last.save(update_fields=["status"])
+        return {
+            "ok": True,
+            "message": "Marked complete locally (Reverb tracks delivery from the carrier).",
+        }
     if kind != "lasoo":
         raise MarketplaceError(
             f'Shipping complete is not supported yet for "{kind or "this marketplace"}".'
