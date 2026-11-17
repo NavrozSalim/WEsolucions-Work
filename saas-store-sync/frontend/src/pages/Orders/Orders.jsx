@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
     BadgePercent,
@@ -1218,6 +1218,12 @@ export default function Orders() {
     const [stores, setStores] = useState([]);
     const [storesLoading, setStoresLoading] = useState(true);
     const [selectedStore, setSelectedStore] = useState(initialStore);
+    // The store on screen right now. A response for any other store (a slow load, a 5s refresh or
+    // an action started before the user switched stores) is dropped, so one store's orders never
+    // show under another.
+    const storeRef = useRef(selectedStore);
+    storeRef.current = selectedStore;
+    const isCurrentStore = (storeId) => storeRef.current === storeId;
     const [orders, setOrders] = useState([]);
     const [loading, setLoading] = useState(false);
     const [refreshing, setRefreshing] = useState(false);
@@ -1261,10 +1267,12 @@ export default function Orders() {
     const loadOrders = useCallback(
         (refresh = false) => {
             if (!selectedStore) return;
+            const store = selectedStore;
             const setter = refresh ? setRefreshing : setLoading;
             setter(true);
-            getOrders(selectedStore, { refresh })
+            getOrders(store, { refresh })
                 .then((res) => {
+                    if (storeRef.current !== store) return;
                     const list = Array.isArray(res.data?.orders) ? res.data.orders : [];
                     setOrders(list);
                     const r = res.data?.refresh;
@@ -1282,12 +1290,15 @@ export default function Orders() {
                     }
                 })
                 .catch((err) => {
+                    if (storeRef.current !== store) return;
                     setMessage({
                         text: err.response?.data?.detail || 'Failed to load orders.',
                         variant: 'error',
                     });
                 })
-                .finally(() => setter(false));
+                .finally(() => {
+                    if (storeRef.current === store) setter(false);
+                });
         },
         [selectedStore, initialOrderKey]
     );
@@ -1296,6 +1307,9 @@ export default function Orders() {
         setOrders([]);
         setMessage(null);
         setExpandedId(null);
+        // A load still running for the previous store no longer clears these itself.
+        setRefreshing(false);
+        setLoading(false);
         if (selectedStore) {
             setSearchParams((prev) => {
                 const next = new URLSearchParams(prev);
@@ -1316,6 +1330,7 @@ export default function Orders() {
         const timer = setInterval(() => {
             getOrders(storeAtStart)
                 .then((res) => {
+                    if (!isCurrentStore(storeAtStart)) return;
                     if (Array.isArray(res.data?.orders)) setOrders(res.data.orders);
                 })
                 .catch(() => {});
@@ -1326,14 +1341,15 @@ export default function Orders() {
     const [recheckingId, setRecheckingId] = useState(null);
     const handleRecheck = (order = null) => {
         if (!selectedStore) return;
+        const store = selectedStore;
         setRecheckingId(order ? order.id : 'all');
-        recheckOrderPurchase(selectedStore, order ? order.id : null)
+        recheckOrderPurchase(store, order ? order.id : null)
             .then((res) => {
                 if (!order) setMessage({ text: res.data?.message || 'Checking orders.', variant: 'success' });
-                return getOrders(selectedStore);
+                return getOrders(store);
             })
             .then((res) => {
-                if (Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
+                if (isCurrentStore(store) && Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
             })
             .catch((err) => {
                 setMessage({ text: err.response?.data?.detail || 'Could not start the check.', variant: 'error' });
@@ -1350,14 +1366,15 @@ export default function Orders() {
     const confirmProcess = () => {
         const order = processOrderRow;
         if (!order || !selectedStore) return;
+        const store = selectedStore;
         setProcessingId(order.id);
-        processOrderPurchase(selectedStore, order.id, { force: processForce })
+        processOrderPurchase(store, order.id, { force: processForce })
             .then((res) => {
                 setMessage({ text: res.data?.message || 'Order sent to the laptop to buy.', variant: 'success' });
-                return getOrders(selectedStore);
+                return getOrders(store);
             })
             .then((res) => {
-                if (Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
+                if (isCurrentStore(store) && Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
             })
             .catch((err) => {
                 setMessage({ text: err.response?.data?.detail || 'Could not send the order to buy.', variant: 'error' });
@@ -1374,14 +1391,15 @@ export default function Orders() {
     const confirmStop = () => {
         const order = stopOrderRow;
         if (!order || !selectedStore) return;
+        const store = selectedStore;
         setStoppingId(order.id);
-        stopOrderPurchase(selectedStore, order.id)
+        stopOrderPurchase(store, order.id)
             .then((res) => {
                 setMessage({ text: res.data?.message || 'Stopping.', variant: 'success' });
-                return getOrders(selectedStore);
+                return getOrders(store);
             })
             .then((res) => {
-                if (Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
+                if (isCurrentStore(store) && Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
             })
             .catch((err) => {
                 setMessage({ text: err.response?.data?.detail || 'Could not stop this order.', variant: 'error' });
@@ -1442,15 +1460,16 @@ export default function Orders() {
     };
     const confirmProcessAll = () => {
         if (!selectedStore) return;
+        const store = selectedStore;
         setProcessingAll(true);
-        processAllOrders(selectedStore, processAllVendor)
+        processAllOrders(store, processAllVendor)
             .then((res) => {
                 const r = res.data || {};
                 setMessage({ text: r.message || 'Orders sent to the laptop to buy.', variant: r.not_sent?.length ? 'warning' : 'success' });
-                return getOrders(selectedStore);
+                return getOrders(store);
             })
             .then((res) => {
-                if (Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
+                if (isCurrentStore(store) && Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
             })
             .catch((err) => {
                 setMessage({ text: err.response?.data?.detail || 'Could not send the orders to buy.', variant: 'error' });
@@ -1602,8 +1621,10 @@ export default function Orders() {
         setFetchJob(null);
         setLaptopOnline(null);
         if (!selectedStore || !isAutoPurchaseOnly) return;
-        getOrdersFetch(selectedStore)
+        const store = selectedStore;
+        getOrdersFetch(store)
             .then((res) => {
+                if (!isCurrentStore(store)) return;
                 setFetchJob(res.data?.fetch || null);
                 setLaptopOnline(!!res.data?.laptop_online);
             })
@@ -1615,6 +1636,7 @@ export default function Orders() {
         const timer = setInterval(() => {
             getOrdersFetch(storeAtStart)
                 .then((res) => {
+                    if (!isCurrentStore(storeAtStart)) return;
                     const job = res.data?.fetch || null;
                     setLaptopOnline(!!res.data?.laptop_online);
                     setFetchJob(job);
@@ -1626,7 +1648,7 @@ export default function Orders() {
                             variant: job.status === 'finished' ? 'success' : 'error',
                         });
                         getOrders(storeAtStart).then((r) => {
-                            if (Array.isArray(r.data?.orders)) setOrders(r.data.orders);
+                            if (isCurrentStore(storeAtStart) && Array.isArray(r.data?.orders)) setOrders(r.data.orders);
                         }).catch(() => {});
                     }
                 })
@@ -1636,9 +1658,11 @@ export default function Orders() {
     }, [fetchActive, selectedStore]);
     const handleStartFetch = () => {
         if (!selectedStore) return;
+        const store = selectedStore;
         setStartingFetch(true);
-        startOrdersFetch(selectedStore)
+        startOrdersFetch(store)
             .then((res) => {
+                if (!isCurrentStore(store)) return;
                 setFetchJob(res.data?.fetch || null);
                 setLaptopOnline(!!res.data?.laptop_online);
                 setMessage({ text: res.data?.message || 'Fetch sent to the worker laptop.', variant: res.data?.laptop_online ? 'success' : 'warning' });
