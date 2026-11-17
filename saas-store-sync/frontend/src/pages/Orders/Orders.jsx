@@ -1323,6 +1323,18 @@ export default function Orders() {
         [selectedStore, initialOrderKey]
     );
 
+    // After Ship / Done / Cancel / Refund: keep the list on screen and swap in the
+    // fresh one when it arrives, instead of clearing it behind "Loading orders…".
+    const reloadOrdersQuietly = () => {
+        const store = selectedStore;
+        if (!store) return;
+        getOrders(store)
+            .then((res) => {
+                if (isCurrentStore(store) && Array.isArray(res.data?.orders)) setOrders(res.data.orders);
+            })
+            .catch(() => {});
+    };
+
     useEffect(() => {
         setOrders([]);
         setMessage(null);
@@ -1528,7 +1540,7 @@ export default function Orders() {
             .then((res) => {
                 setMessage({ text: res.data?.message || 'Shipping info sent.', variant: 'success' });
                 setShippingOrder(null);
-                loadOrders(false);
+                reloadOrdersQuietly();
             })
             .catch((err) => {
                 setMessage({
@@ -1550,7 +1562,7 @@ export default function Orders() {
                     variant: marketplaceOk ? 'success' : 'warning',
                 });
                 setCancelOrderRow(null);
-                loadOrders(false);
+                reloadOrdersQuietly();
             })
             .catch((err) => {
                 setMessage({
@@ -1577,7 +1589,7 @@ export default function Orders() {
                     variant: marketplaceOk ? 'success' : 'warning',
                 });
                 setRefundOrderRow(null);
-                loadOrders(false);
+                reloadOrdersQuietly();
             })
             .catch((err) => {
                 setMessage({
@@ -1593,7 +1605,7 @@ export default function Orders() {
         completeOrderShipping(selectedStore, order.id)
             .then((res) => {
                 setMessage({ text: res.data?.message || 'Shipping marked complete.', variant: 'success' });
-                loadOrders(false);
+                reloadOrdersQuietly();
             })
             .catch((err) => {
                 setMessage({

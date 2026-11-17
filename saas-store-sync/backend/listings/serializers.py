@@ -425,7 +425,7 @@ class MarketplaceOrderSerializer(serializers.ModelSerializer):
             return None
 
     def get_details(self, obj):
-        from .order_service import build_order_details, enrich_order_line_items
+        from .order_service import build_order_details, enrich_order_line_items, listing_lookup_cache
 
         details = build_order_details(
             obj.raw_response_json,
@@ -433,7 +433,12 @@ class MarketplaceOrderSerializer(serializers.ModelSerializer):
             line_items=obj.line_items_json,
             total_cents=obj.total_amount_cents,
         )
-        return enrich_order_line_items(details, obj.store)
+        # One listing lookup per store for the whole response, not one per order:
+        # reading every listing for every order made the orders list take minutes.
+        caches = self.context.setdefault('listing_lookup_by_store', {})
+        if obj.store_id not in caches:
+            caches[obj.store_id] = listing_lookup_cache(obj.store)
+        return enrich_order_line_items(details, obj.store, indexes=caches[obj.store_id])
 
     def get_shopify_admin_url(self, obj):
         from .shopify.orders import admin_order_url

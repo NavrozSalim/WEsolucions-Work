@@ -1633,7 +1633,7 @@ class StoreOrdersView(APIView):
                 refresh_result = {'ok': False, 'message': str(exc), 'fetched': 0}
         orders = list(
             MarketplaceOrder.objects.filter(store=store)
-            .select_related('purchase_check')
+            .select_related('purchase_check', 'store')
             .prefetch_related('shipments')
         )
         tickets_by_order_key: dict[str, list] = {}

@@ -1194,11 +1194,29 @@ def _match_listing_for_line_item(item: dict, by_variant, by_sku, by_title):
     return None
 
 
-def enrich_order_line_items(details: dict, store) -> dict:
+def listing_lookup_cache(store):
+    """Return a callable giving the store's listing indexes, built at most once.
+
+    Pass it as ``indexes`` to ``enrich_order_line_items`` when enriching many
+    orders of one store, so the store's listings are read once per request
+    instead of once per order.
+    """
+    built = []
+
+    def get():
+        if not built:
+            built.append(_listing_lookup_indexes(store))
+        return built[0]
+
+    return get
+
+
+def enrich_order_line_items(details: dict, store, indexes=None) -> dict:
     """Attach marketplaceSku / vendorUrl from local StoreListing matches.
 
     Also sets top-level ``sourceLinks`` for the orders list column:
     unique vendor URLs across line items (empty when none matched).
+    ``indexes`` is an optional ``listing_lookup_cache(store)`` to reuse.
     """
     if not isinstance(details, dict) or store is None:
         return details
@@ -1207,7 +1225,7 @@ def enrich_order_line_items(details: dict, store) -> dict:
         details["sourceLinks"] = []
         return details
 
-    by_variant, by_sku, by_title = _listing_lookup_indexes(store)
+    by_variant, by_sku, by_title = indexes() if indexes else _listing_lookup_indexes(store)
     enriched = []
     source_links: list[str] = []
     seen_links: set[str] = set()

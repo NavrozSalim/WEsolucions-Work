@@ -6,7 +6,7 @@ from datetime import datetime
 
 from openpyxl import Workbook
 
-from .order_service import build_order_details, enrich_order_line_items
+from .order_service import build_order_details, enrich_order_line_items, listing_lookup_cache
 
 
 def _workbook_response_bytes(wb: Workbook) -> bytes:
@@ -234,6 +234,7 @@ def build_orders_xlsx(orders, store) -> bytes:
     ]
     ws.append(headers)
 
+    listing_indexes = listing_lookup_cache(store)
     for order in orders:
         details = build_order_details(
             order.raw_response_json,
@@ -242,7 +243,7 @@ def build_orders_xlsx(orders, store) -> bytes:
             total_cents=order.total_amount_cents,
         )
         try:
-            details = enrich_order_line_items(details, store)
+            details = enrich_order_line_items(details, store, indexes=listing_indexes)
         except Exception:
             pass
 
