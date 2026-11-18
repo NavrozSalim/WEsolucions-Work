@@ -879,14 +879,25 @@ def _build_vendor_export(store: Store, export_type: str, vendor_id: str) -> Http
     )
 
 
-def _build_by_vendor_zip(store: Store) -> HttpResponse:
-    """ZIP with a folder per vendor holding that vendor's Price and Inventory files."""
-    kinds = _KINDS_BY_TYPE['both']
+def build_vendor_zip_bytes(
+    store: Store,
+    vendor_ids: list[str] | None = None,
+    kinds: tuple[str, ...] = _KINDS_BY_TYPE['both'],
+) -> tuple[bytes, int]:
+    """ZIP with a folder per vendor holding that vendor's Price and/or Inventory files.
+
+    ``vendor_ids`` limits it to those vendors (ids or ``unmapped``); None means all.
+    Returns (zip bytes, number of CSV files in it).
+    """
     vendors, files = _vendor_files(store, kinds)
+    wanted = {str(v) for v in vendor_ids} if vendor_ids is not None else None
     zbuf = io.BytesIO()
     used_folders: set[str] = set()
+    count = 0
     with zipfile.ZipFile(zbuf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for vendor in _sorted_groups(vendors):
+            if wanted is not None and vendor['id'] not in wanted:
+                continue
             base = _safe_name(vendor['name'])
             folder = base
             n = 2
@@ -902,7 +913,14 @@ def _build_by_vendor_zip(store: Store) -> HttpResponse:
                     f'{folder}/{vendor_file_name(store, vendor["name"], kind)}',
                     _write_csv(_headers_for(kind), lines),
                 )
-    return _zip_response(zbuf.getvalue(), export_filename(store, 'by_vendor'))
+                count += 1
+    return zbuf.getvalue(), count
+
+
+def _build_by_vendor_zip(store: Store) -> HttpResponse:
+    """ZIP with a folder per vendor holding that vendor's Price and Inventory files."""
+    content, _ = build_vendor_zip_bytes(store)
+    return _zip_response(content, export_filename(store, 'by_vendor'))
 
 
 def export_filename(store: Store, kind: str) -> str:

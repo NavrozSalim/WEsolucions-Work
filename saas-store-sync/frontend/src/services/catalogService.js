@@ -424,6 +424,20 @@ export const uploadMydealTemplate = (storeId, kind, file) => {
     });
 };
 
+/** MyDeal "Upload the file on the Marketplace": runs done by the inventory bot laptop. */
+export const listMydealUploadRuns = (storeId) =>
+    api.get(`/stores/${storeId}/mydeal/upload-runs/`);
+
+/** vendors: vendor ids (or 'unmapped'); kinds: ['inventory', 'price'] */
+export const startMydealUploadRun = (storeId, { vendors, kinds, dryRun = false }) =>
+    api.post(`/stores/${storeId}/mydeal/upload-runs/`, { vendors, kinds, dry_run: dryRun });
+
+export const getMydealUploadRun = (storeId, runId) =>
+    api.get(`/stores/${storeId}/mydeal/upload-runs/${runId}/`);
+
+export const cancelMydealUploadRun = (storeId, runId) =>
+    api.post(`/stores/${storeId}/mydeal/upload-runs/${runId}/cancel/`);
+
 /**
  * type: price | inventory | both | by_vendor (ZIP with a folder per vendor).
  * vendor: optional vendor id or 'unmapped' — only that vendor's rows (price | inventory | both).

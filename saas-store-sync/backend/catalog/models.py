@@ -602,3 +602,43 @@ class MydealTemplateRow(models.Model):
         indexes = [
             models.Index(fields=['store', 'kind', 'sku'], name='cat_mydeal_st_kind_sku'),
         ]
+
+
+class MydealUploadRun(models.Model):
+    """One "Upload the file on the Marketplace" request: the inventory bot laptop uploads
+    the chosen vendors' MyDeal Stock/Status and/or Price files to the seller portal."""
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Waiting for the laptop'
+        RUNNING = 'running', 'Running'
+        FINISHED = 'finished', 'Finished'
+        FAILED = 'failed', 'Failed'
+        CANCELLED = 'cancelled', 'Cancelled'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='mydeal_upload_runs')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+                             related_name='+')
+    vendors = models.JSONField(default=list, blank=True, help_text='[{"id", "name"}] chosen; id may be "unmapped".')
+    kinds = models.JSONField(default=list, blank=True, help_text='"inventory" and/or "price".')
+    dry_run = models.BooleanField(default=False)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
+    laptop = models.CharField(max_length=128, blank=True, default='', help_text='Ingest token label that ran it.')
+    exit_code = models.IntegerField(null=True, blank=True)
+    log_text = models.TextField(blank=True, default='')
+    results = models.JSONField(default=list, blank=True, help_text='One entry per uploaded file.')
+    message = models.TextField(blank=True, default='')
+    attention = models.CharField(max_length=300, blank=True, default='',
+                                 help_text='Set while the bot waits for the person at the laptop.')
+    started_at = models.DateTimeField(auto_now_add=True)
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'catalog_mydealuploadrun'
+        ordering = ['-started_at']
+        indexes = [models.Index(fields=['store', 'status'], name='cat_mdupload_store_status')]
+
+    def __str__(self):
+        return f'MyDeal upload {self.id} ({self.status})'

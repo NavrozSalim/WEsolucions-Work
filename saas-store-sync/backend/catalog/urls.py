@@ -1,5 +1,6 @@
 from django.urls import path, include, register_converter
 from rest_framework.routers import DefaultRouter
+from . import mydeal_upload_views as mdu
 from .views import (
     ProductMappingViewSet,
     CatalogUploadView,
@@ -116,6 +117,15 @@ urlpatterns = [
     path('stores/<uuid:store_pk>/mydeal/templates/status/', MydealTemplateStatusView.as_view(), name='mydeal-template-status'),
     path('stores/<uuid:store_pk>/mydeal/templates/upload/', MydealTemplateUploadView.as_view(), name='mydeal-template-upload'),
     path('stores/<uuid:store_pk>/mydeal/templates/export/', MydealTemplateExportView.as_view(), name='mydeal-template-export'),
+    path('stores/<uuid:store_pk>/mydeal/upload-runs/', mdu.UploadRunsView.as_view(), name='mydeal-upload-runs'),
+    path('stores/<uuid:store_pk>/mydeal/upload-runs/<uuid:run_id>/', mdu.UploadRunDetailView.as_view(), name='mydeal-upload-run'),
+    path('stores/<uuid:store_pk>/mydeal/upload-runs/<uuid:run_id>/cancel/', mdu.UploadRunCancelView.as_view(), name='mydeal-upload-run-cancel'),
+    # Inventory bot laptop (ingest bearer token with scope "inventory-bot")
+    path('ingest/inventory-bot/next-job/', mdu.LaptopNextJobView.as_view(), name='inventory-bot-next-job'),
+    path('ingest/inventory-bot/jobs/<uuid:run_id>/', mdu.LaptopJobStatusView.as_view(), name='inventory-bot-job-status'),
+    path('ingest/inventory-bot/jobs/<uuid:run_id>/file/', mdu.LaptopJobFileView.as_view(), name='inventory-bot-job-file'),
+    path('ingest/inventory-bot/jobs/<uuid:run_id>/progress/', mdu.LaptopJobProgressView.as_view(), name='inventory-bot-job-progress'),
+    path('ingest/inventory-bot/jobs/<uuid:run_id>/complete/', mdu.LaptopJobCompleteView.as_view(), name='inventory-bot-job-complete'),
     path('ingest/heb/', HebIngestView.as_view(), name='ingest-heb'),
     path('ingest/heb/urls/', HebIngestUrlsView.as_view(), name='ingest-heb-urls'),
     path('ingest/heb/next-job/', HebIngestNextJobView.as_view(), name='ingest-heb-next-job'),

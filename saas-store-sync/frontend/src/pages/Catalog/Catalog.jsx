@@ -4,6 +4,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import {
     Search,
     UploadCloud,
+    Send,
     RefreshCw,
     Trash2,
     ChevronLeft,
@@ -52,6 +53,7 @@ import {
     getMydealTemplateStatus,
 } from '../../services/catalogService';
 import MydealUploadModal from '../../components/catalog/MydealUploadModal';
+import MydealMarketplaceUploadModal from '../../components/catalog/MydealMarketplaceUploadModal';
 import ListingFormModal from '../../components/listings/ListingFormModal';
 import BulkListingModal from '../../components/listings/BulkListingModal';
 import MarketplaceLookupModal from '../../components/listings/MarketplaceLookupModal';
@@ -1060,6 +1062,7 @@ export default function Catalog() {
     const [mydealUploadOpen, setMydealUploadOpen] = useState(false);
     const [mydealDownloadOpen, setMydealDownloadOpen] = useState(false);
     const [mydealDownloading, setMydealDownloading] = useState(false);
+    const [mydealMarketplaceOpen, setMydealMarketplaceOpen] = useState(false);
     // Vendor split for the Download templates menu: { storeId, loading, list, error }
     const [mydealVendors, setMydealVendors] = useState({ storeId: null, loading: false, list: [], error: '' });
     const [deleteStoreConfirm, setDeleteStoreConfirm] = useState(null);
@@ -2880,6 +2883,15 @@ export default function Catalog() {
                                             </div>
                                         )}
                                     </div>
+                                    <Button
+                                        variant="primary"
+                                        size="sm"
+                                        onClick={() => setMydealMarketplaceOpen(true)}
+                                        title="Send the vendor files to the inventory bot laptop, which uploads them to MyDeal"
+                                    >
+                                        <Send className="h-4 w-4 mr-1.5" />
+                                        Upload the file on the Marketplace
+                                    </Button>
                                 </>
                             ) : !isManagedStore ? (
                                 <Button
@@ -3750,6 +3762,13 @@ export default function Catalog() {
                 )}
             </div>
             )}
+
+            <MydealMarketplaceUploadModal
+                open={mydealMarketplaceOpen && !!selectedStore && isMydealStore}
+                storeId={selectedStore}
+                storeName={selectedStoreData?.name}
+                onClose={() => setMydealMarketplaceOpen(false)}
+            />
 
             <MydealUploadModal
                 open={mydealUploadOpen && !!selectedStore}
