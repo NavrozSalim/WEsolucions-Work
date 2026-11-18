@@ -2848,11 +2848,6 @@ export default function Catalog() {
                                         </Button>
                                         {mydealDownloadOpen && (
                                             <div className="absolute right-0 top-full z-20 mt-1 w-72 max-w-[calc(100vw-2rem)] rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 py-1 shadow-lg">
-                                                <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">All vendors</div>
-                                                <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('price')}>Price CSV</button>
-                                                <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('inventory')}>Inventory CSV</button>
-                                                <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('both')}>Both (ZIP)</button>
-                                                <div className="my-1 border-t border-slate-200 dark:border-slate-700" />
                                                 <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">By vendor</div>
                                                 <button type="button" className="block w-full px-3 py-2 text-left text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('by_vendor')}>All vendors, separate files (ZIP)</button>
                                                 <div className="max-h-64 overflow-y-auto">
