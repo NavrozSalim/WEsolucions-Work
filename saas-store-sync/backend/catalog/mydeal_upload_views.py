@@ -7,7 +7,8 @@ Web page (signed-in user):
   POST /api/v1/stores/<store>/mydeal/upload-runs/<run>/cancel/
 
 Inventory bot laptop (bearer ingest token with scope "inventory-bot"; a token with an
-owner only sees that owner's stores):
+owner only sees that owner's stores, and a token with a store list (create_ingest_token
+--stores) only those stores, since each laptop is signed in to one MyDeal account):
   GET  /api/v1/ingest/inventory-bot/next-job/
   GET  /api/v1/ingest/inventory-bot/jobs/<run>/                   status (cancelled -> stop)
   GET  /api/v1/ingest/inventory-bot/jobs/<run>/file/              the run's ZIP
@@ -27,6 +28,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from catalog.excel_ingest_views import token_stores
 from catalog.ingest_views import IngestRateThrottle, _authenticate
 from catalog.models import MydealUploadRun
 from catalog.mydeal_templates import store_is_mydeal
@@ -118,9 +120,16 @@ class _LaptopBase(APIView):
     def owned_run(self, request, run_id):
         token = self.token(request)
         run = MydealUploadRun.objects.select_related('store', 'store__marketplace').filter(pk=run_id).first()
-        if run is None or (token.created_by_id and run.store.user_id != token.created_by_id):
+        if run is None or not _token_may_run(token, run):
             return None
         return run
+
+
+def _token_may_run(token, run) -> bool:
+    if token.created_by_id and run.store.user_id != token.created_by_id:
+        return False
+    allowed = token_stores(token)
+    return not allowed or (run.store.name or '').strip().upper() in allowed
 
 
 def _not_found():
@@ -131,12 +140,12 @@ class LaptopNextJobView(_LaptopBase):
     def get(self, request):
         token = self.token(request)
         with transaction.atomic():
-            qs = MydealUploadRun.objects.select_for_update(skip_locked=True).filter(
+            qs = MydealUploadRun.objects.select_for_update(skip_locked=True, of=('self',)).filter(
                 status=MydealUploadRun.Status.PENDING,
-            )
+            ).select_related('store')
             if token.created_by_id:
                 qs = qs.filter(store__user_id=token.created_by_id)
-            run = qs.order_by('started_at').first()
+            run = next((r for r in qs.order_by('started_at')[:50] if _token_may_run(token, r)), None)
             if run is not None:
                 now = timezone.now()
                 run.status = MydealUploadRun.Status.RUNNING

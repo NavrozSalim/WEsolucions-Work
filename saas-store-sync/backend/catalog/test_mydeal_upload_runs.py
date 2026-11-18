@@ -22,11 +22,11 @@ User = get_user_model()
 API = '/api/v1'
 
 
-def _token(label, scopes, owner=None):
+def _token(label, scopes, owner=None, stores=None):
     raw = f'raw-{label}'
     IngestToken.objects.create(
         label=label, token_hash=hashlib.sha256(raw.encode()).hexdigest(), token_prefix=raw[:8],
-        scopes=scopes, is_active=True, created_by=owner,
+        scopes=scopes, is_active=True, created_by=owner, stores=stores or [],
     )
     return raw
 
@@ -191,3 +191,20 @@ class MydealUploadRunTests(TestCase):
         job = self.laptop.get(f'{API}/ingest/inventory-bot/next-job/').json()
         self.assertEqual(other_owner.get(job['status_url']).status_code, 404)
         self.assertEqual(other_owner.get(job['file_url']).status_code, 404)
+
+    def test_token_store_list_limits_jobs(self):
+        shemaya = Store.objects.create(
+            user=self.user, name='Shemaya', region='AU', api_token='tok2', marketplace=self.mp,
+            mydeal_setup_method='upload',
+        )
+        MydealUploadRun.objects.create(store=shemaya, vendors=[{'id': 'x', 'name': 'X'}], kinds=['price'])
+        pp_laptop = APIClient()
+        pp_laptop.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {_token('pp-laptop', ['inventory-bot'], self.user, ['BW-P&P'])}")
+        self.assertIsNone(pp_laptop.get(f'{API}/ingest/inventory-bot/next-job/').json()['job_id'])
+        shemaya_run = MydealUploadRun.objects.get(store=shemaya)
+        self.assertEqual(pp_laptop.get(f'{API}/ingest/inventory-bot/jobs/{shemaya_run.id}/').status_code, 404)
+        run_id = self._start().json()['id']
+        self.assertEqual(pp_laptop.get(f'{API}/ingest/inventory-bot/next-job/').json()['job_id'], run_id)
+        shemaya_run.refresh_from_db()
+        self.assertEqual(shemaya_run.status, 'pending')
