@@ -156,6 +156,7 @@ class LaptopNextJobView(_LaptopBase):
         if run is None:
             return Response({'job_id': None, 'checked_at': timezone.now().isoformat()})
         run = MydealUploadRun.objects.select_related('store').get(pk=run.pk)
+        runs.log_claimed(run)
         logger.info('Laptop %s claimed MyDeal upload %s for %s', token.label, run.id, run.store.name)
         base = f'/api/v1/ingest/inventory-bot/jobs/{run.id}'
         return Response({

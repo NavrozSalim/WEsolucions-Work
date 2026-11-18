@@ -11,7 +11,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from catalog.models import IngestToken, MydealTemplateRow, MydealUploadRun, ProductMapping
+from catalog.models import CatalogActivityLog, IngestToken, MydealTemplateRow, MydealUploadRun, ProductMapping
 from catalog.mydeal_upload_runs import UploadRunError, start_run
 from marketplace.models import Marketplace
 from products.models import Product
@@ -141,6 +141,45 @@ class MydealUploadRunTests(TestCase):
         self.assertEqual((run.attention, run.message, run.exit_code), ('', 'Finished: 1 vendor(s), 1 file(s)', 0))
         self.assertIsNotNone(run.finished_at)
         self.assertEqual(self.laptop.post(job['complete_url'], {'exit_code': 0}, format='json').status_code, 409)
+
+    def test_activity_log_entries(self):
+        run_id = self._start(vendors=[str(self.vevor.id)], kinds=['inventory', 'price']).json()['id']
+        job = self.laptop.get(f'{API}/ingest/inventory-bot/next-job/').json()
+        results = [
+            {'vendor': 'Vevor Upl', 'kind': 'inventory', 'part': 1, 'parts': 1, 'status': 'submitted',
+             'dash_state': 'completed', 'request_id': '6afe1b6d', 'requested_at': '18/11/2026 13:41'},
+            {'vendor': 'Vevor Upl', 'kind': 'price', 'part': 1, 'parts': 1, 'status': 'submitted',
+             'dash_state': 'completed_with_errors', 'error_count': 2, 'request_id': '6afe1b83',
+             'requested_at': '18/11/2026 13:41'},
+        ]
+        self.laptop.post(job['complete_url'], {'exit_code': 1, 'results': results,
+                                               'message': 'Finished: 1 vendor(s), 2 file(s)'}, format='json')
+        logs = list(CatalogActivityLog.objects.filter(store=self.store).order_by('created_at'))
+        self.assertEqual([l.action_type for l in logs], [
+            'mydeal_upload_queued', 'mydeal_upload_started', 'mydeal_upload_file', 'mydeal_upload_file',
+            'mydeal_upload_finished'])
+        self.assertIn('Inventory + Price for Vevor Upl', logs[0].message)
+        self.assertIn('laptop inv-laptop started', logs[1].message)
+        self.assertEqual(logs[2].message,
+                         'Inventory updated: Vevor Upl at 18/11/2026 13:41, COMPLETED, request 6afe1b6d')
+        self.assertTrue(logs[3].message.startswith('Price updated with 2 error(s): Vevor Upl'))
+        self.assertIn('Finished: 1 vendor(s), 2 file(s)', logs[4].message)
+        self.assertEqual(logs[4].metadata['mydeal_upload_run'], run_id)
+        self.assertEqual(logs[0].user_id, self.user.id)
+
+    def test_cancel_and_dry_run_logs(self):
+        run_id = self._start().json()['id']
+        self.web.post(f'{API}/stores/{self.store.id}/mydeal/upload-runs/{run_id}/cancel/')
+        self.assertTrue(CatalogActivityLog.objects.filter(
+            store=self.store, action_type='mydeal_upload_cancelled').exists())
+        self._start(dry_run=True)
+        job = self.laptop.get(f'{API}/ingest/inventory-bot/next-job/').json()
+        self.laptop.post(job['complete_url'], {'exit_code': 0, 'message': 'Dry run finished',
+                                               'results': [{'vendor': 'Vevor Upl', 'kind': 'inventory',
+                                                            'status': 'dry_run'}]}, format='json')
+        self.assertFalse(CatalogActivityLog.objects.filter(store=self.store, action_type='mydeal_upload_file').exists())
+        last = CatalogActivityLog.objects.filter(store=self.store).order_by('-created_at').first()
+        self.assertIn('(dry run)', last.message)
 
     def test_zip_only_has_chosen_kind(self):
         self._start(vendors=[str(self.amazon.id)], kinds=['price'])

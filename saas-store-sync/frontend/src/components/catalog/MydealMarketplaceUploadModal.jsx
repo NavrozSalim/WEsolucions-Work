@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Loader2, X, XCircle } from 'lucide-react';
+import { AlertTriangle, Loader2, X, XCircle } from 'lucide-react';
 import Button from '../ui/Button';
 import {
     cancelMydealUploadRun,
@@ -164,7 +164,7 @@ export default function MydealMarketplaceUploadModal({ open, onClose, storeId, s
         });
     }, [storeId]);
 
-    // Open: load vendors and recent runs; show the active run if there is one.
+    // Open: load vendors and runs; show the active run if there is one. Finished runs are in the Logs tab.
     useEffect(() => {
         if (!open || !storeId) return;
         const sid = storeId;
@@ -253,7 +253,7 @@ export default function MydealMarketplaceUploadModal({ open, onClose, storeId, s
                     <div>
                         <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Upload the file on the Marketplace</h2>
                         <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                            Store: {storeName || 'MyDeal'}. The inventory bot laptop uploads each vendor&apos;s file to MyDeal, one at a time.
+                            Store: {storeName || 'MyDeal'}. The inventory bot laptop uploads each vendor&apos;s file to MyDeal, one at a time. Each upload&apos;s result is written to the Logs tab.
                         </p>
                     </div>
                     <button type="button" onClick={onClose} className="rounded-md p-1 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Close">
@@ -348,34 +348,6 @@ export default function MydealMarketplaceUploadModal({ open, onClose, storeId, s
                                 )}
                             </div>
                         </div>
-                    )}
-
-                    {runs.length > 0 && (
-                        <section>
-                            <h3 className="mb-2 text-sm font-medium text-slate-800 dark:text-slate-100">Recent uploads</h3>
-                            <ul className="divide-y divide-slate-100 rounded-lg border border-slate-200 text-xs dark:divide-slate-800 dark:border-slate-700">
-                                {runs.map((r) => (
-                                    <li key={r.id}>
-                                        <button
-                                            type="button"
-                                            onClick={() => setViewRun(r)}
-                                            className={`flex w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800/50 ${viewRun?.id === r.id ? 'bg-slate-50 dark:bg-slate-800/50' : ''}`}
-                                        >
-                                            <span className="flex min-w-0 items-center gap-2">
-                                                {r.status === 'finished' && r.exit_code === 0
-                                                    ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
-                                                    : <StatusBadge run={r} />}
-                                                <span className="truncate text-slate-700 dark:text-slate-200">
-                                                    {(r.vendors || []).length} vendor(s) · {(r.kinds || []).join(' + ')}{r.dry_run ? ' · dry run' : ''}
-                                                    {r.message ? ` · ${r.message}` : ''}
-                                                </span>
-                                            </span>
-                                            <span className="shrink-0 text-slate-400">{when(r.started_at)}</span>
-                                        </button>
-                                    </li>
-                                ))}
-                            </ul>
-                        </section>
                     )}
                 </div>
             </div>

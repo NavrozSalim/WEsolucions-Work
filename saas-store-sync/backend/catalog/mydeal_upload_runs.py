@@ -12,6 +12,7 @@ from typing import Any
 from django.db import transaction
 from django.utils import timezone
 
+from catalog.activity_log import append_catalog_log
 from catalog.models import MydealTemplateRow, MydealUploadRun
 from catalog.mydeal_templates import (
     UNMAPPED_VENDOR,
@@ -34,6 +35,57 @@ RESULT_FIELDS = (
 
 class UploadRunError(ValueError):
     """Shown to the user when a run cannot be started or changed."""
+
+
+# ---------- activity log (Catalog > Logs) ----------
+
+KIND_LABELS = {'inventory': 'Inventory', 'price': 'Price'}
+
+
+def _what(run: MydealUploadRun) -> str:
+    kinds = ' + '.join(KIND_LABELS.get(k, k) for k in run.kinds or [])
+    names = ', '.join(v.get('name') or v.get('id') or '' for v in run.vendors or [])
+    return f"{kinds} for {names}" + (' (dry run)' if run.dry_run else '')
+
+
+def _activity(run: MydealUploadRun, message: str, action_type: str, **extra) -> None:
+    append_catalog_log(
+        run.store_id,
+        message,
+        action_type=action_type,
+        user_id=run.user_id,
+        metadata={'mydeal_upload_run': str(run.id), **extra},
+    )
+
+
+def result_line(r: dict) -> str:
+    """One file's outcome, worded like the bot's log."""
+    what = KIND_LABELS.get(r.get('kind'), 'File')
+    who = r.get('vendor') or '?'
+    if (r.get('parts') or 1) not in (1, '1', ''):
+        who += f" (part {r.get('part')} of {r.get('parts')})"
+    when = r.get('requested_at') or r.get('uploaded_at') or ''
+    at = f' at {when}' if when else ''
+    req = f", request {r['request_id']}" if r.get('request_id') else ''
+    status, dash = r.get('status'), r.get('dash_state')
+    if status == 'dry_run':
+        return f"Dry run (not imported): {who} {what} file, {r.get('rows', '')} rows"
+    if status == 'rejected':
+        return f"{what} upload refused by the portal: {who} - {r.get('message', '')}"
+    if status == 'failed':
+        return f"{what} upload failed: {who} - {r.get('message', '')}"
+    if dash == 'completed':
+        return f"{what} updated: {who}{at}, COMPLETED{req}"
+    if dash == 'completed_with_errors':
+        return (f"{what} updated with {r.get('error_count') or 0} error(s): {who}{at}{req}. "
+                'Open View Result on the Import Request Dashboard.')
+    if dash == 'failed':
+        return f"{what} import FAILED on MyDeal: {who}{at}{req}"
+    if dash == 'pending':
+        return f"{what} still processing on MyDeal: {who}{at}{req}"
+    if dash == 'not_found':
+        return f"{what} uploaded but not found on the Import Request Dashboard: {who}{at}"
+    return f"{what} uploaded: {who}{at}"
 
 
 def _clean_kinds(kinds) -> list[str]:
@@ -81,7 +133,7 @@ def start_run(store, user, vendor_ids, kinds, *, dry_run: bool = False) -> Mydea
                 'An upload for this store is already waiting or running. '
                 'Wait for it to finish or cancel it first.'
             )
-        return MydealUploadRun.objects.create(
+        run = MydealUploadRun.objects.create(
             store=store,
             user=user if getattr(user, 'is_authenticated', False) else None,
             vendors=vendors,
@@ -89,6 +141,15 @@ def start_run(store, user, vendor_ids, kinds, *, dry_run: bool = False) -> Mydea
             dry_run=bool(dry_run),
             status=MydealUploadRun.Status.PENDING,
         )
+    _activity(run, f'Marketplace upload queued: {_what(run)}. Waiting for the inventory bot laptop.',
+              'mydeal_upload_queued')
+    return run
+
+
+def log_claimed(run: MydealUploadRun) -> None:
+    laptop = f' {run.laptop}' if run.laptop else ''
+    _activity(run, f'Inventory bot laptop{laptop} started the marketplace upload: {_what(run)}.',
+              'mydeal_upload_started')
 
 
 def cancel_run(run: MydealUploadRun) -> MydealUploadRun:
@@ -103,6 +164,8 @@ def cancel_run(run: MydealUploadRun) -> MydealUploadRun:
         run.message = 'Cancelled before the laptop started it.'
         fields += ['finished_at', 'message']
     run.save(update_fields=fields)
+    _activity(run, 'Marketplace upload cancelled before the laptop started it.' if was_pending
+              else 'Marketplace upload cancel requested; the laptop stops the bot.', 'mydeal_upload_cancelled')
     return run
 
 
@@ -173,6 +236,16 @@ def finish_run(run: MydealUploadRun, data: dict) -> None:
         run.message = {0: 'All files uploaded and completed.', 1: 'Finished; some files need a look.'}.get(
             code, f'The bot stopped (exit code {code}). See the log.')
     run.save(update_fields=['exit_code', 'attention', 'message', 'finished_at', 'status'])
+    if not run.dry_run:
+        for r in run.results or []:
+            _activity(run, result_line(r), 'mydeal_upload_file', vendor=r.get('vendor', ''),
+                      kind=r.get('kind', ''), request_id=r.get('request_id', ''))
+    label = {
+        MydealUploadRun.Status.FINISHED: 'finished',
+        MydealUploadRun.Status.CANCELLED: 'cancelled',
+    }.get(run.status, 'failed')
+    _activity(run, f'Marketplace upload {label}: {_what(run)}. {run.message}',
+              f'mydeal_upload_{label}', exit_code=code)
 
 
 def serialize_run(run: MydealUploadRun, *, with_log: bool = True) -> dict[str, Any]:
@@ -200,6 +273,6 @@ def serialize_run(run: MydealUploadRun, *, with_log: bool = True) -> dict[str, A
 
 
 __all__ = [
-    'ACTIVE', 'LAPTOP_SCOPE', 'UNMAPPED_VENDOR', 'UploadRunError', 'cancel_run', 'finish_run',
-    'record_progress', 'run_zip', 'serialize_run', 'start_run',
+    'ACTIVE', 'LAPTOP_SCOPE', 'UNMAPPED_VENDOR', 'UploadRunError', 'cancel_run', 'finish_run', 'log_claimed',
+    'record_progress', 'result_line', 'run_zip', 'serialize_run', 'start_run',
 ]
