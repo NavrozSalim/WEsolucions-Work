@@ -13,6 +13,7 @@ from catalog.mydeal_templates import (
     ingest_mydeal_templates_zip,
     store_is_mydeal,
     template_status,
+    vendor_template_summary,
 )
 from users.org_scope import get_store_for_user
 
@@ -27,7 +28,10 @@ class MydealTemplateStatusView(APIView):
                 {'error': 'Not a Mydeal store.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        return Response(template_status(store))
+        data = template_status(store)
+        if (request.query_params.get('vendors') or '').strip().lower() in ('1', 'true', 'yes'):
+            data['vendors'] = vendor_template_summary(store)
+        return Response(data)
 
 
 class MydealTemplateUploadView(APIView):
@@ -74,7 +78,8 @@ class MydealTemplateExportView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         export_type = (request.query_params.get('type') or 'both').strip().lower()
+        vendor = request.query_params.get('vendor')
         try:
-            return build_export_response(store, export_type)
+            return build_export_response(store, export_type, vendor)
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)

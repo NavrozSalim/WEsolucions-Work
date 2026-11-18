@@ -49,6 +49,7 @@ import {
     cancelCatalogPushListings,
     updateProductMapping,
     downloadMydealTemplates,
+    getMydealTemplateStatus,
 } from '../../services/catalogService';
 import MydealUploadModal from '../../components/catalog/MydealUploadModal';
 import ListingFormModal from '../../components/listings/ListingFormModal';
@@ -1059,6 +1060,8 @@ export default function Catalog() {
     const [mydealUploadOpen, setMydealUploadOpen] = useState(false);
     const [mydealDownloadOpen, setMydealDownloadOpen] = useState(false);
     const [mydealDownloading, setMydealDownloading] = useState(false);
+    // Vendor split for the Download templates menu: { storeId, loading, list, error }
+    const [mydealVendors, setMydealVendors] = useState({ storeId: null, loading: false, list: [], error: '' });
     const [deleteStoreConfirm, setDeleteStoreConfirm] = useState(null);
     const [deletingStoreId, setDeletingStoreId] = useState(null);
     const [resettingId, setResettingId] = useState(null);
@@ -1925,11 +1928,30 @@ export default function Catalog() {
             .finally(() => setUploading(false));
     };
 
-    const handleMydealDownload = (type) => {
+    const toggleMydealDownloadMenu = () => {
+        const opening = !mydealDownloadOpen;
+        setMydealDownloadOpen(opening);
+        if (!opening || !selectedStore) return;
+        const storeId = selectedStore;
+        setMydealVendors({ storeId, loading: true, list: [], error: '' });
+        getMydealTemplateStatus(storeId, { withVendors: true })
+            .then((r) => {
+                setMydealVendors((prev) => (prev.storeId === storeId
+                    ? { storeId, loading: false, list: r?.data?.vendors || [], error: '' }
+                    : prev));
+            })
+            .catch((err) => {
+                setMydealVendors((prev) => (prev.storeId === storeId
+                    ? { storeId, loading: false, list: [], error: formatCatalogError(err) || 'Could not load vendors' }
+                    : prev));
+            });
+    };
+
+    const handleMydealDownload = (type, vendor = null) => {
         if (!selectedStore) return;
         setMydealDownloading(true);
         setMydealDownloadOpen(false);
-        downloadMydealTemplates(selectedStore, type)
+        downloadMydealTemplates(selectedStore, type, vendor)
             .then(() => setMessage('Templates downloaded.'))
             .catch((err) => setMessage(formatCatalogError(err) || 'Download failed'))
             .finally(() => setMydealDownloading(false));
@@ -2817,7 +2839,7 @@ export default function Catalog() {
                                         <Button
                                             variant="secondary"
                                             size="sm"
-                                            onClick={() => setMydealDownloadOpen((o) => !o)}
+                                            onClick={toggleMydealDownloadMenu}
                                             disabled={mydealDownloading}
                                         >
                                             <Download className="h-4 w-4 mr-1.5" />
@@ -2825,10 +2847,41 @@ export default function Catalog() {
                                             <ChevronDown className="h-3 w-3 ml-1" />
                                         </Button>
                                         {mydealDownloadOpen && (
-                                            <div className="absolute right-0 top-full z-20 mt-1 min-w-44 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 py-1 shadow-lg">
+                                            <div className="absolute right-0 top-full z-20 mt-1 w-72 max-w-[calc(100vw-2rem)] rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 py-1 shadow-lg">
+                                                <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">All vendors</div>
                                                 <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('price')}>Price CSV</button>
                                                 <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('inventory')}>Inventory CSV</button>
                                                 <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('both')}>Both (ZIP)</button>
+                                                <div className="my-1 border-t border-slate-200 dark:border-slate-700" />
+                                                <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">By vendor</div>
+                                                <button type="button" className="block w-full px-3 py-2 text-left text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800" onClick={() => handleMydealDownload('by_vendor')}>All vendors, separate files (ZIP)</button>
+                                                <div className="max-h-64 overflow-y-auto">
+                                                    {mydealVendors.loading && (
+                                                        <div className="px-3 py-2 text-xs text-slate-400">Loading vendors…</div>
+                                                    )}
+                                                    {!mydealVendors.loading && mydealVendors.error && (
+                                                        <div className="px-3 py-2 text-xs text-red-500">{mydealVendors.error}</div>
+                                                    )}
+                                                    {!mydealVendors.loading && !mydealVendors.error && mydealVendors.list.length === 0 && (
+                                                        <div className="px-3 py-2 text-xs text-slate-400">No template rows yet.</div>
+                                                    )}
+                                                    {!mydealVendors.loading && mydealVendors.list.map((v) => (
+                                                        <button
+                                                            key={v.id}
+                                                            type="button"
+                                                            className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800"
+                                                            onClick={() => handleMydealDownload('both', v.id)}
+                                                            title={v.id === 'unmapped' ? 'MyDeal SKUs with no catalog mapping' : `Price and Inventory files for ${v.name}`}
+                                                        >
+                                                            <span className={`truncate ${v.id === 'unmapped' ? 'italic text-amber-600 dark:text-amber-400' : ''}`}>
+                                                                {v.id === 'unmapped' ? 'Unmapped SKUs' : v.name}
+                                                            </span>
+                                                            <span className="shrink-0 text-[10px] text-slate-400">
+                                                                {v.price_rows} price / {v.inventory_rows} inv
+                                                            </span>
+                                                        </button>
+                                                    ))}
+                                                </div>
                                             </div>
                                         )}
                                     </div>

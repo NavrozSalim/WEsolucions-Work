@@ -408,8 +408,11 @@ function runCatalogJobPost(url, body, storeId, options = {}) {
         });
 }
 
-export const getMydealTemplateStatus = (storeId) =>
-    api.get(`/stores/${storeId}/mydeal/templates/status/`);
+/** withVendors: also return `vendors` — each vendor's price/inventory row counts (plus `unmapped`). */
+export const getMydealTemplateStatus = (storeId, { withVendors = false } = {}) =>
+    api.get(`/stores/${storeId}/mydeal/templates/status/`, {
+        params: withVendors ? { vendors: 1 } : undefined,
+    });
 
 /** kind: price | inventory | zip (ZIP with one or both Mydeal CSV templates) */
 export const uploadMydealTemplate = (storeId, kind, file) => {
@@ -421,16 +424,22 @@ export const uploadMydealTemplate = (storeId, kind, file) => {
     });
 };
 
-/** type: price | inventory | both */
-export const downloadMydealTemplates = (storeId, type = 'both') => {
+/**
+ * type: price | inventory | both | by_vendor (ZIP with a folder per vendor).
+ * vendor: optional vendor id or 'unmapped' — only that vendor's rows (price | inventory | both).
+ */
+export const downloadMydealTemplates = (storeId, type = 'both', vendor = null) => {
     const fallback = type === 'price'
         ? 'Mydeal-Price-Template.csv'
         : type === 'inventory'
             ? 'Mydeal-Inventory-Template.csv'
-            : 'Mydeal-Templates.zip';
-    const mime = type === 'both' ? 'application/zip' : 'text/csv';
+            : type === 'by_vendor'
+                ? 'Mydeal-Templates-by-Vendor.zip'
+                : 'Mydeal-Templates.zip';
+    const mime = type === 'price' || type === 'inventory' ? 'text/csv' : 'application/zip';
+    const params = vendor ? { type, vendor } : { type };
     return apiDownload(api, `/stores/${storeId}/mydeal/templates/export/`, {
-        params: { type },
+        params,
         fallbackFilename: fallback,
         mimeType: mime,
     });

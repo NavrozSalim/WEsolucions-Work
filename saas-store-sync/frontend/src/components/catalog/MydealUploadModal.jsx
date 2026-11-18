@@ -227,7 +227,9 @@ export default function MydealUploadModal({ open, onClose, storeId, onComplete }
                     {allDone && (
                         <p className="text-sm text-slate-600 dark:text-slate-400">
                             Both templates are stored. Upload catalog (if needed), scrape, then use{' '}
-                            <strong>Download templates</strong> on the catalog page.
+                            <strong>Download templates</strong> on the catalog page. You can download one file with
+                            every vendor, or separate Price and Inventory files for each vendor (SKUs are matched to
+                            vendors through your catalog mapping; SKUs with no mapping go in an Unmapped file).
                         </p>
                     )}
                 </div>

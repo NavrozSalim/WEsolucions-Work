@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import io
+import uuid
 import zipfile
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
@@ -18,6 +19,7 @@ from django.http import HttpResponse
 from catalog.marketplace_rrp import compute_marketplace_rrp
 from catalog.models import MydealTemplateRow, ProductMapping
 from stores.models import Store, StoreVendorPriceSettings
+from vendor.models import Vendor
 
 MYDEAL_PRICE_HEADERS = [
     'DealID',
@@ -489,31 +491,48 @@ def _unmapped_delete_rows(store: Store, store_name: str) -> list[list[str]]:
     return rows
 
 
-def _catalog_removed_sku_keys(store: Store) -> set[str]:
-    """SKUs that exist only on inactive mappings (deleted from the catalog)."""
+UNMAPPED_VENDOR = 'unmapped'
+UNMAPPED_VENDOR_LABEL = 'Unmapped'
+
+
+def _mapping_vendor(pm) -> dict[str, str]:
+    product = getattr(pm, 'product', None)
+    vendor = getattr(product, 'vendor', None) if product is not None else None
+    if vendor is None:
+        return {'id': UNMAPPED_VENDOR, 'name': UNMAPPED_VENDOR_LABEL}
+    name = (vendor.name or vendor.code or '').strip() or 'Vendor'
+    return {'id': str(vendor.id), 'name': name}
+
+
+def _catalog_removed_sku_vendors(store: Store) -> dict[str, dict[str, str]]:
+    """SKUs that exist only on inactive mappings (deleted from the catalog).
+
+    Maps normalized SKU -> {'id', 'name'} of the vendor that mapping belonged to.
+    """
     active: set[str] = set()
-    inactive: set[str] = set()
+    inactive: dict[str, dict[str, str]] = {}
     qs = (
         ProductMapping.objects.filter(store=store)
-        .select_related("product")
-        .only(
-            "is_active",
-            "marketplace_child_sku",
-            "marketplace_parent_sku",
-            "product__vendor_sku",
-        )
+        .select_related('product', 'product__vendor')
     )
     for pm in qs.iterator(chunk_size=500):
         keys = {_sku_key(sku) for sku in mapping_sku_keys(pm)}
         if pm.is_active:
             active.update(keys)
-        else:
-            inactive.update(keys)
-    return inactive - active
+            continue
+        vendor = _mapping_vendor(pm)
+        for key in keys:
+            inactive[key] = vendor
+    return {k: v for k, v in inactive.items() if k not in active}
+
+
+def _catalog_removed_sku_keys(store: Store) -> set[str]:
+    """SKUs that exist only on inactive mappings (deleted from the catalog)."""
+    return set(_catalog_removed_sku_vendors(store))
 
 
 def _listing_data_by_sku(store: Store) -> dict[str, dict[str, Any]]:
-    """Map normalized SKU -> {price, stock, rrp_margin_pct}."""
+    """Map normalized SKU -> {price, stock, margin_pct, vendor_id, vendor_name}."""
     margin_by_vendor: dict[str, Decimal | None] = {}
     for ps in StoreVendorPriceSettings.objects.filter(store=store).select_related('vendor'):
         vid = str(ps.vendor_id)
@@ -539,108 +558,351 @@ def _listing_data_by_sku(store: Store) -> dict[str, dict[str, Any]]:
             continue
         vid = str(pm.product.vendor_id) if pm.product_id else ''
         margin_pct = margin_by_vendor.get(vid)
+        vendor = _mapping_vendor(pm)
         entry = {
             'price': pm.store_price,
             'stock': pm.store_stock,
             'margin_pct': margin_pct,
+            'vendor_id': vendor['id'],
+            'vendor_name': vendor['name'],
         }
         for sk in sku_keys:
             out[sk] = entry
     return out
 
 
-def _export_price_csv(store: Store) -> bytes:
+class _SkuLookup:
+    """Catalog data and vendor for each MyDeal template SKU."""
+
+    def __init__(self, store: Store):
+        self.by_sku = _listing_data_by_sku(store)
+        self.by_key = {_sku_key(sku): data for sku, data in self.by_sku.items()}
+        self.removed = _catalog_removed_sku_vendors(store)
+
+    def data(self, sku: str) -> dict[str, Any]:
+        return self.by_sku.get(sku) or self.by_key.get(_sku_key(sku)) or {}
+
+    def vendor(self, sku: str) -> dict[str, str]:
+        """The one vendor that owns this SKU, or the Unmapped group.
+
+        Each SKU gets exactly one vendor, so the vendor files add up to the
+        all-vendor file.
+        """
+        data = self.data(sku)
+        if data.get('vendor_id'):
+            return {'id': data['vendor_id'], 'name': data['vendor_name']}
+        removed = self.removed.get(_sku_key(sku))
+        if removed:
+            return removed
+        return {'id': UNMAPPED_VENDOR, 'name': UNMAPPED_VENDOR_LABEL}
+
+
+def _kind_title(kind: str) -> str:
+    return 'Price' if kind == MydealTemplateRow.Kind.PRICE else 'Inventory'
+
+
+def _headers_for(kind: str) -> list[str]:
+    if kind == MydealTemplateRow.Kind.PRICE:
+        return MYDEAL_PRICE_HEADERS
+    return MYDEAL_INVENTORY_HEADERS
+
+
+def _template_rows(store: Store, kind: str) -> list[MydealTemplateRow]:
     rows = list(
-        MydealTemplateRow.objects.filter(
-            store=store, kind=MydealTemplateRow.Kind.PRICE,
-        ).order_by('row_number')
+        MydealTemplateRow.objects.filter(store=store, kind=kind).order_by('row_number')
     )
     if not rows:
-        raise ValueError('Price template not uploaded yet.')
+        raise ValueError(f'{_kind_title(kind)} template not uploaded yet.')
+    return rows
 
-    by_sku = _listing_data_by_sku(store)
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(MYDEAL_PRICE_HEADERS)
-    for tr in rows:
-        sku = _normalize_sku(tr.sku)
-        data = by_sku.get(sku, {})
-        price = data.get('price')
-        margin_pct = data.get('margin_pct')
-        price_str = ''
-        rrp_str = ''
-        if price is not None:
+
+def _price_line(tr: MydealTemplateRow, lookup: _SkuLookup) -> list[str]:
+    sku = _normalize_sku(tr.sku)
+    data = lookup.by_sku.get(sku, {})
+    price = data.get('price')
+    margin_pct = data.get('margin_pct')
+    price_str = ''
+    rrp_str = ''
+    if price is not None:
+        try:
+            p = Decimal(str(price)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            price_str = f'{p:.2f}'
+            rrp = compute_marketplace_rrp(p, margin_pct)
+            if rrp is not None:
+                rrp_str = f'{rrp:.2f}'
+        except Exception:
+            pass
+    return [
+        tr.deal_id,
+        tr.variant_id,
+        tr.external_id,
+        sku,
+        tr.options,
+        tr.deal_title,
+        price_str,
+        rrp_str,
+    ]
+
+
+def _inventory_line(tr: MydealTemplateRow, lookup: _SkuLookup) -> list[str]:
+    sku = _normalize_sku(tr.sku)
+    key = _sku_key(sku)
+    # A blank stock cell leaves the old quantity on MyDeal.
+    # Discontinued TRUE is only for products that are on MyDeal and not
+    # mapped. Mapped products that leave the catalog keep Discontinued
+    # FALSE and send stock 0.
+    if _is_discontinued(tr.discontinued):
+        stock_str = '0'
+        discontinued = 'TRUE'
+    elif key in lookup.removed:
+        stock_str = '0'
+        discontinued = 'FALSE'
+    else:
+        stock = lookup.data(sku).get('stock')
+        stock_str = ''
+        if stock is not None:
             try:
-                p = Decimal(str(price)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-                price_str = f'{p:.2f}'
-                rrp = compute_marketplace_rrp(p, margin_pct)
-                if rrp is not None:
-                    rrp_str = f'{rrp:.2f}'
-            except Exception:
-                pass
-        writer.writerow([
-            tr.deal_id,
-            tr.variant_id,
-            tr.external_id,
-            sku,
-            tr.options,
-            tr.deal_title,
-            price_str,
-            rrp_str,
-        ])
-    return buf.getvalue().encode('utf-8')
+                stock_str = str(int(stock))
+            except (TypeError, ValueError):
+                stock_str = ''
+        discontinued = tr.discontinued or 'FALSE'
+    return [
+        tr.deal_id,
+        tr.variant_id,
+        tr.external_id,
+        sku,
+        tr.options,
+        tr.deal_title,
+        stock_str,
+        discontinued,
+        tr.mydeal_approved or 'Approved',
+    ]
 
 
-def _export_inventory_csv(store: Store) -> bytes:
-    rows = list(
-        MydealTemplateRow.objects.filter(
-            store=store, kind=MydealTemplateRow.Kind.INVENTORY,
-        ).order_by('row_number')
-    )
-    if not rows:
-        raise ValueError('Inventory template not uploaded yet.')
+def _build_lines(
+    store: Store,
+    kind: str,
+    lookup: _SkuLookup,
+) -> list[tuple[dict[str, str], list[str]]]:
+    """(vendor, csv line) for every template row of ``kind``, in template order."""
+    line_fn = _price_line if kind == MydealTemplateRow.Kind.PRICE else _inventory_line
+    return [
+        (lookup.vendor(_normalize_sku(tr.sku)), line_fn(tr, lookup))
+        for tr in _template_rows(store, kind)
+    ]
 
-    by_sku = _listing_data_by_sku(store)
-    by_key = {_sku_key(sku): data for sku, data in by_sku.items()}
-    removed_keys = _catalog_removed_sku_keys(store)
+
+def _write_csv(headers: list[str], lines: list[list[str]]) -> bytes:
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(MYDEAL_INVENTORY_HEADERS)
-    for tr in rows:
-        sku = _normalize_sku(tr.sku)
-        key = _sku_key(sku)
-        # A blank stock cell leaves the old quantity on MyDeal.
-        # Discontinued TRUE is only for products that are on MyDeal and not
-        # mapped. Mapped products that leave the catalog keep Discontinued
-        # FALSE and send stock 0.
-        if _is_discontinued(tr.discontinued):
-            stock_str = '0'
-            discontinued = 'TRUE'
-        elif key in removed_keys:
-            stock_str = '0'
-            discontinued = 'FALSE'
-        else:
-            data = by_sku.get(sku) or by_key.get(key) or {}
-            stock = data.get('stock')
-            stock_str = ''
-            if stock is not None:
-                try:
-                    stock_str = str(int(stock))
-                except (TypeError, ValueError):
-                    stock_str = ''
-            discontinued = tr.discontinued or 'FALSE'
-        writer.writerow([
-            tr.deal_id,
-            tr.variant_id,
-            tr.external_id,
-            sku,
-            tr.options,
-            tr.deal_title,
-            stock_str,
-            discontinued,
-            tr.mydeal_approved or 'Approved',
-        ])
+    writer.writerow(headers)
+    writer.writerows(lines)
     return buf.getvalue().encode('utf-8')
+
+
+def _kind_lines(
+    store: Store,
+    kind: str,
+    vendor_id: str | None = None,
+    lookup: _SkuLookup | None = None,
+) -> list[list[str]]:
+    lookup = lookup or _SkuLookup(store)
+    return [
+        line for vendor, line in _build_lines(store, kind, lookup)
+        if vendor_id is None or vendor['id'] == vendor_id
+    ]
+
+
+def _export_price_csv(store: Store, vendor_id: str | None = None) -> bytes:
+    kind = MydealTemplateRow.Kind.PRICE
+    return _write_csv(_headers_for(kind), _kind_lines(store, kind, vendor_id))
+
+
+def _export_inventory_csv(store: Store, vendor_id: str | None = None) -> bytes:
+    kind = MydealTemplateRow.Kind.INVENTORY
+    return _write_csv(_headers_for(kind), _kind_lines(store, kind, vendor_id))
+
+
+def _sorted_groups(groups: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Vendors by name, with the Unmapped group last."""
+    return sorted(
+        groups.values(),
+        key=lambda g: (g['id'] == UNMAPPED_VENDOR, g['name'].lower()),
+    )
+
+
+def vendor_template_summary(store: Store) -> list[dict[str, Any]]:
+    """Each vendor with its Price and Inventory template row counts.
+
+    Includes an ``unmapped`` entry for MyDeal SKUs with no catalog mapping.
+    """
+    lookup = _SkuLookup(store)
+    groups: dict[str, dict[str, Any]] = {}
+    for kind, field in (
+        (MydealTemplateRow.Kind.PRICE, 'price_rows'),
+        (MydealTemplateRow.Kind.INVENTORY, 'inventory_rows'),
+    ):
+        skus = (
+            MydealTemplateRow.objects.filter(store=store, kind=kind)
+            .values_list('sku', flat=True)
+        )
+        for raw in skus.iterator(chunk_size=2000):
+            vendor = lookup.vendor(_normalize_sku(raw))
+            group = groups.setdefault(
+                vendor['id'],
+                {
+                    'id': vendor['id'],
+                    'name': vendor['name'],
+                    'price_rows': 0,
+                    'inventory_rows': 0,
+                },
+            )
+            group[field] += 1
+    return _sorted_groups(groups)
+
+
+def _safe_name(raw: str) -> str:
+    cleaned = ''.join('-' if c in '\\/:*?"<>|' else c for c in (raw or ''))
+    return cleaned.strip(' .') or 'Vendor'
+
+
+def vendor_file_name(store: Store, vendor_name: str, kind: str) -> str:
+    label = mydeal_store_label(store)
+    return f'Mydeal - {label} - {_safe_name(vendor_name)} - {_kind_title(kind)} Template.csv'
+
+
+_KINDS_BY_TYPE = {
+    'price': (MydealTemplateRow.Kind.PRICE,),
+    'inventory': (MydealTemplateRow.Kind.INVENTORY,),
+    'both': (MydealTemplateRow.Kind.PRICE, MydealTemplateRow.Kind.INVENTORY),
+}
+
+
+def _vendor_files(
+    store: Store,
+    kinds: tuple[str, ...],
+    vendor_id: str | None = None,
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, list[list[str]]]]]:
+    """Group template lines by vendor.
+
+    Returns (vendors by id, {vendor_id: {kind: lines}}). A kind whose template
+    is not uploaded is skipped; when none of ``kinds`` is uploaded, raises
+    ValueError.
+    """
+    lookup = _SkuLookup(store)
+    vendors: dict[str, dict[str, str]] = {}
+    files: dict[str, dict[str, list[list[str]]]] = {}
+    errors: list[str] = []
+    uploaded = 0
+    for kind in kinds:
+        try:
+            lines = _build_lines(store, kind, lookup)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        uploaded += 1
+        for vendor, line in lines:
+            if vendor_id is not None and vendor['id'] != vendor_id:
+                continue
+            vendors.setdefault(vendor['id'], vendor)
+            files.setdefault(vendor['id'], {}).setdefault(kind, []).append(line)
+    if not uploaded:
+        raise ValueError(' '.join(errors) or 'No templates uploaded yet.')
+    return vendors, files
+
+
+def _vendor_label(vendor_id: str) -> str:
+    if vendor_id == UNMAPPED_VENDOR:
+        return UNMAPPED_VENDOR_LABEL
+    vendor = Vendor.objects.filter(id=vendor_id).only('name', 'code').first()
+    if vendor is None:
+        raise ValueError('Vendor not found.')
+    return (vendor.name or vendor.code or '').strip() or 'Vendor'
+
+
+def _normalize_vendor_param(raw: str | None) -> str | None:
+    value = (raw or '').strip()
+    if not value or value.lower() == 'all':
+        return None
+    if value.lower() == UNMAPPED_VENDOR:
+        return UNMAPPED_VENDOR
+    try:
+        return str(uuid.UUID(value))
+    except ValueError as exc:
+        raise ValueError('vendor must be a vendor id or "unmapped".') from exc
+
+
+def _csv_response(content: bytes, filename: str) -> HttpResponse:
+    resp = HttpResponse(content, content_type='text/csv; charset=utf-8')
+    resp['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return resp
+
+
+def _zip_response(content: bytes, filename: str) -> HttpResponse:
+    resp = HttpResponse(content, content_type='application/zip')
+    resp['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return resp
+
+
+def _build_vendor_export(store: Store, export_type: str, vendor_id: str) -> HttpResponse:
+    """One vendor's Price and/or Inventory file."""
+    label = mydeal_store_label(store)
+    vendor_name = _vendor_label(vendor_id)
+    kinds = _KINDS_BY_TYPE[export_type]
+    if len(kinds) == 1:
+        kind = kinds[0]
+        lines = _kind_lines(store, kind, vendor_id)
+        if not lines:
+            raise ValueError(
+                f'No {_kind_title(kind).lower()} template rows for {vendor_name}.'
+            )
+        return _csv_response(
+            _write_csv(_headers_for(kind), lines),
+            vendor_file_name(store, vendor_name, kind),
+        )
+
+    _, files = _vendor_files(store, kinds, vendor_id)
+    by_kind = files.get(vendor_id) or {}
+    if not by_kind:
+        raise ValueError(f'No template rows for {vendor_name}.')
+    zbuf = io.BytesIO()
+    with zipfile.ZipFile(zbuf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for kind in kinds:
+            if kind in by_kind:
+                zf.writestr(
+                    vendor_file_name(store, vendor_name, kind),
+                    _write_csv(_headers_for(kind), by_kind[kind]),
+                )
+    return _zip_response(
+        zbuf.getvalue(),
+        f'Mydeal - {label} - {_safe_name(vendor_name)} - Templates.zip',
+    )
+
+
+def _build_by_vendor_zip(store: Store) -> HttpResponse:
+    """ZIP with a folder per vendor holding that vendor's Price and Inventory files."""
+    kinds = _KINDS_BY_TYPE['both']
+    vendors, files = _vendor_files(store, kinds)
+    zbuf = io.BytesIO()
+    used_folders: set[str] = set()
+    with zipfile.ZipFile(zbuf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for vendor in _sorted_groups(vendors):
+            base = _safe_name(vendor['name'])
+            folder = base
+            n = 2
+            while folder.lower() in used_folders:
+                folder = f'{base} ({n})'
+                n += 1
+            used_folders.add(folder.lower())
+            for kind in kinds:
+                lines = files[vendor['id']].get(kind)
+                if not lines:
+                    continue
+                zf.writestr(
+                    f'{folder}/{vendor_file_name(store, vendor["name"], kind)}',
+                    _write_csv(_headers_for(kind), lines),
+                )
+    return _zip_response(zbuf.getvalue(), export_filename(store, 'by_vendor'))
 
 
 def export_filename(store: Store, kind: str) -> str:
@@ -649,39 +911,46 @@ def export_filename(store: Store, kind: str) -> str:
         return f'Mydeal - {label} - Price Template.csv'
     if kind == 'inventory':
         return f'Mydeal - {label} - Inventory Template.csv'
+    if kind == 'by_vendor':
+        return f'Mydeal - {label} - Templates by Vendor.zip'
     return f'Mydeal - {label} - Templates.zip'
 
 
-def build_export_response(store: Store, export_type: str) -> HttpResponse:
+def build_export_response(
+    store: Store,
+    export_type: str,
+    vendor: str | None = None,
+) -> HttpResponse:
+    """Filled MyDeal template download.
+
+    export_type: price | inventory | both | by_vendor.
+    vendor: a vendor id, or ``unmapped``, to get only that vendor's rows
+    (with price, inventory or both). Omitted means all vendors in one file.
+    """
+    if export_type == 'by_vendor':
+        return _build_by_vendor_zip(store)
+    if export_type not in _KINDS_BY_TYPE:
+        raise ValueError('export_type must be price, inventory, both, or by_vendor.')
+    vendor_id = _normalize_vendor_param(vendor)
+    if vendor_id is not None:
+        return _build_vendor_export(store, export_type, vendor_id)
+
     label = mydeal_store_label(store)
     if export_type == 'price':
-        content = _export_price_csv(store)
-        resp = HttpResponse(content, content_type='text/csv; charset=utf-8')
-        resp['Content-Disposition'] = (
-            f'attachment; filename="{export_filename(store, "price")}"'
-        )
-        return resp
+        return _csv_response(_export_price_csv(store), export_filename(store, 'price'))
     if export_type == 'inventory':
-        content = _export_inventory_csv(store)
-        resp = HttpResponse(content, content_type='text/csv; charset=utf-8')
-        resp['Content-Disposition'] = (
-            f'attachment; filename="{export_filename(store, "inventory")}"'
+        return _csv_response(_export_inventory_csv(store), export_filename(store, 'inventory'))
+    lookup = _SkuLookup(store)
+    price_kind = MydealTemplateRow.Kind.PRICE
+    inv_kind = MydealTemplateRow.Kind.INVENTORY
+    zbuf = io.BytesIO()
+    with zipfile.ZipFile(zbuf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            f'Mydeal - {label} - Price Template.csv',
+            _write_csv(_headers_for(price_kind), _kind_lines(store, price_kind, lookup=lookup)),
         )
-        return resp
-    if export_type == 'both':
-        zbuf = io.BytesIO()
-        with zipfile.ZipFile(zbuf, 'w', zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(
-                f'Mydeal - {label} - Price Template.csv',
-                _export_price_csv(store),
-            )
-            zf.writestr(
-                f'Mydeal - {label} - Inventory Template.csv',
-                _export_inventory_csv(store),
-            )
-        resp = HttpResponse(zbuf.getvalue(), content_type='application/zip')
-        resp['Content-Disposition'] = (
-            f'attachment; filename="Mydeal - {label} - Templates.zip"'
+        zf.writestr(
+            f'Mydeal - {label} - Inventory Template.csv',
+            _write_csv(_headers_for(inv_kind), _kind_lines(store, inv_kind, lookup=lookup)),
         )
-        return resp
-    raise ValueError('export_type must be price, inventory, or both.')
+    return _zip_response(zbuf.getvalue(), export_filename(store, 'both'))
