@@ -150,7 +150,7 @@ class MydealUploadRunTests(TestCase):
              'dash_state': 'completed', 'request_id': '6afe1b6d', 'requested_at': '18/11/2026 13:41'},
             {'vendor': 'Vevor Upl', 'kind': 'price', 'part': 1, 'parts': 1, 'status': 'submitted',
              'dash_state': 'completed_with_errors', 'error_count': 2, 'request_id': '6afe1b83',
-             'requested_at': '18/11/2026 13:41'},
+             'requested_at': '18/11/2026 13:41', 'attempts': 2},
         ]
         self.laptop.post(job['complete_url'], {'exit_code': 1, 'results': results,
                                                'message': 'Finished: 1 vendor(s), 2 file(s)'}, format='json')
@@ -163,6 +163,8 @@ class MydealUploadRunTests(TestCase):
         self.assertEqual(logs[2].message,
                          'Inventory updated: Vevor Upl at 18/11/2026 13:41, COMPLETED, request 6afe1b6d')
         self.assertTrue(logs[3].message.startswith('Price updated with 2 error(s): Vevor Upl'))
+        self.assertTrue(logs[3].message.endswith('(try 2)'))
+        self.assertEqual(MydealUploadRun.objects.get(pk=run_id).results[1]['attempts'], 2)
         self.assertIn('Finished: 1 vendor(s), 2 file(s)', logs[4].message)
         self.assertEqual(logs[4].metadata['mydeal_upload_run'], run_id)
         self.assertEqual(logs[0].user_id, self.user.id)

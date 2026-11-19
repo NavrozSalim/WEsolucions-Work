@@ -29,7 +29,7 @@ LOG_LIMIT = 200_000
 MAX_RESULTS = 1000
 RESULT_FIELDS = (
     'vendor', 'kind', 'part', 'parts', 'rows', 'uploaded_at', 'status', 'message',
-    'request_id', 'requested_at', 'dash_state', 'error_count',
+    'request_id', 'requested_at', 'dash_state', 'error_count', 'attempts',
 )
 
 
@@ -60,6 +60,15 @@ def _activity(run: MydealUploadRun, message: str, action_type: str, **extra) -> 
 
 def result_line(r: dict) -> str:
     """One file's outcome, worded like the bot's log."""
+    line = _result_text(r)
+    try:
+        tries = int(r.get('attempts') or 1)
+    except (TypeError, ValueError):
+        tries = 1
+    return f'{line} (try {tries})' if tries > 1 else line
+
+
+def _result_text(r: dict) -> str:
     what = KIND_LABELS.get(r.get('kind'), 'File')
     who = r.get('vendor') or '?'
     if (r.get('parts') or 1) not in (1, '1', ''):

@@ -36,6 +36,11 @@ const RESULT_LABEL = {
 };
 
 function resultStatus(r) {
+    const s = baseStatus(r);
+    return r.attempts > 1 ? { ...s, text: `${s.text} (try ${r.attempts})` } : s;
+}
+
+function baseStatus(r) {
     if (r.status === 'dry_run') return { text: 'Dry run (not imported)', tone: 'text-slate-500' };
     if (r.status === 'rejected') return { text: `Refused: ${r.message || ''}`, tone: 'text-red-600 dark:text-red-400' };
     if (r.status === 'failed') return { text: `Upload failed: ${r.message || ''}`, tone: 'text-red-600 dark:text-red-400' };
