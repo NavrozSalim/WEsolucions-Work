@@ -459,3 +459,91 @@ class SerializerTests(Base):
                                             'inventory_only')
         # Off or absent is fine.
         ser._validate_schedule_payloads({'auto_scrape': {'enabled': False}}, 'inventory_only')
+
+
+class MydealBotUploadTests(Base):
+    """MyDeal inventory-only stores: a Scheduled Update queues the inventory bot upload."""
+
+    def setUp(self):
+        super().setUp()
+        mydeal, _ = Marketplace.objects.get_or_create(code='mydeal', defaults={'name': 'MyDeal'})
+        Store.objects.filter(pk=self.store.pk).update(marketplace=mydeal)
+        self.store.refresh_from_db()
+        self.row_no = 0
+
+    def _template(self, sku):
+        from catalog.models import MydealTemplateRow
+
+        for kind in (MydealTemplateRow.Kind.INVENTORY, MydealTemplateRow.Kind.PRICE):
+            self.row_no += 1
+            MydealTemplateRow.objects.create(
+                store=self.store, kind=kind, row_number=self.row_no, deal_id='D', variant_id='V', sku=sku,
+            )
+
+    def _run(self, vendor=None):
+        run = self._running(rs.KIND_UPDATE, vendor)
+
+        def scrape(_store, _source, _hb):
+            ProductMapping.objects.filter(store=self.store, sync_status='pending').update(sync_status='scraped')
+            return {}
+
+        with patch.object(rs, '_catalog_scrape_pass', side_effect=scrape), \
+                patch('sync.tasks._execute_store_push_listings_only') as server_push:
+            result = rs.execute_run(str(run.id))
+        server_push.assert_not_called()  # MyDeal has no server push
+        run.refresh_from_db()
+        return run, result
+
+    def test_store_wide_update_queues_upload_without_own_time_vendors_or_unmapped(self):
+        from catalog.models import MydealUploadRun
+
+        self._mapping('c1', 'scraped', self.costco)
+        self._mapping('a1', 'scraped', self.amazon)
+        self._template('c1')
+        self._template('a1')
+        self._template('not-in-catalog')  # Unmapped group
+        self._vendor_row(self.amazon, rs.KIND_UPDATE)
+        run, result = self._run()
+        self.assertEqual(result['push'], 'queued')
+        self.assertEqual(run.status, 'success')
+        upload = MydealUploadRun.objects.get(pk=result['upload_run_id'])
+        self.assertEqual([v['id'] for v in upload.vendors], [str(self.costco.id)])
+        self.assertEqual(sorted(upload.kinds), ['inventory', 'price'])
+        self.assertIsNone(upload.user)
+        self.assertEqual(upload.status, MydealUploadRun.Status.PENDING)
+
+    def test_vendor_update_uploads_only_that_vendor(self):
+        from catalog.models import MydealUploadRun
+
+        self._mapping('c1', 'scraped', self.costco)
+        self._mapping('a1', 'scraped', self.amazon)
+        self._template('c1')
+        self._template('a1')
+        self._vendor_row(self.amazon, rs.KIND_UPDATE)
+        _, result = self._run(vendor=self.amazon)
+        upload = MydealUploadRun.objects.get(pk=result['upload_run_id'])
+        self.assertEqual([v['id'] for v in upload.vendors], [str(self.amazon.id)])
+
+    def test_upload_already_waiting_is_skipped_not_failed(self):
+        self._mapping('c1', 'scraped', self.costco)
+        self._template('c1')
+        _, first = self._run()
+        self.assertEqual(first['push'], 'queued')
+        run, second = self._run()
+        self.assertEqual(second['push'], 'skipped_upload_already_queued')
+        self.assertEqual(run.status, 'success')
+
+    def test_no_template_rows(self):
+        self._mapping('c1', 'scraped', self.costco)
+        _, result = self._run()
+        self.assertEqual(result['push'], 'skipped_no_template_rows')
+
+    def test_auto_scraping_still_never_uploads(self):
+        from catalog.models import MydealUploadRun
+
+        self._mapping('c1', 'scraped', self.costco)
+        self._template('c1')
+        run = self._running(rs.KIND_SCRAPE)
+        with patch.object(rs, '_catalog_scrape_pass', return_value={}):
+            rs.execute_run(str(run.id))
+        self.assertFalse(MydealUploadRun.objects.exists())

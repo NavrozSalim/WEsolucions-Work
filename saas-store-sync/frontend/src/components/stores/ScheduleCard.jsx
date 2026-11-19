@@ -37,7 +37,8 @@ const KIND = {
         maxTimes: UPDATE_MAX_TIMES,
         defaultTime: '10:00',
         help: 'At each run time the listings are set to Pending and scraped, Failed listings are retried up to '
-            + 'this many times, then price and stock are sent to the marketplace once (Failed listings with stock 0).',
+            + 'this many times, then price and stock are sent to the marketplace once (Failed listings with stock 0). '
+            + 'MyDeal stores: the run queues "Upload the file on the Marketplace" for the inventory bot laptop.',
     },
 };
 
@@ -196,6 +197,10 @@ const PUSH_TEXT = {
     skipped_not_connected: 'not sent (store not connected)',
     skipped_push_already_running: 'not sent (a Manual sync was running)',
     skipped_scrape_still_running: 'not sent (scrape still running)',
+    queued: 'upload queued for the bot laptop',
+    skipped_upload_already_queued: 'upload not queued (another upload was waiting or running)',
+    skipped_no_template_rows: 'upload not queued (no MyDeal template rows)',
+    skipped_upload_error: 'upload not queued (see Logs)',
 };
 
 const SKIP_TEXT = {

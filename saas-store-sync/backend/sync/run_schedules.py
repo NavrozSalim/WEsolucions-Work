@@ -8,7 +8,10 @@ Both kinds run the same way at their local run times:
      and scrape again. Stops early at 0 Failed, on Stop scraping, or when the scrape is
      still running at the wait limit.
   3. Scheduled Updates only: one marketplace push of the listings in scope (the Manual
-     sync push, so Failed rows send their stock 0). Auto Scraping never pushes.
+     sync push, so Failed rows send their stock 0). MyDeal inventory-only stores have no
+     server push: the run queues a "Upload the file on the Marketplace" run for the
+     inventory bot laptop instead (Stock/Status + Price files of the vendors in scope).
+     Auto Scraping never pushes.
 
 While any run is active on a store, the per-row pushes in ``catalog.scrape_failure``
 (stock 0 for a Failed row, the no-price fallback) are held: Auto Scraping sends nothing,
@@ -608,6 +611,12 @@ def _is_managed(store) -> bool:
     return getattr(store, 'management_mode', '') == 'full_store'
 
 
+def _store_is_mydeal(store) -> bool:
+    from catalog.mydeal_templates import store_is_mydeal
+
+    return store_is_mydeal(store)
+
+
 def _card_and_row(store, kind, vendor_id):
     """``(card_on, cycles)`` for the run's schedule row; ``(False, 0)`` when it is off or gone."""
     from sync.models import AutoScrapeSchedule, SyncSchedule, VendorSchedule
@@ -751,6 +760,39 @@ def _catalog_push(store, run, include, exclude) -> dict:
     }
 
 
+def _mydeal_bot_upload(store, include, exclude) -> dict:
+    """MyDeal: queue the inventory bot laptop upload of the vendors in scope.
+
+    The ZIP is built when the laptop claims the run, so it carries the prices and
+    stock this run just scraped. The Unmapped group (MyDeal SKUs with no catalog
+    listing) is never uploaded automatically.
+    """
+    from catalog import mydeal_upload_runs as upload_runs
+    from catalog.mydeal_templates import UNMAPPED_VENDOR, vendor_template_summary
+
+    include_ids = {str(v) for v in include or []}
+    exclude_ids = {str(v) for v in exclude or []}
+    vendor_ids = []
+    for v in vendor_template_summary(store):
+        vid = str(v['id'])
+        if vid == UNMAPPED_VENDOR or vid in exclude_ids:
+            continue
+        if include_ids and vid not in include_ids:
+            continue
+        if v.get('price_rows') or v.get('inventory_rows'):
+            vendor_ids.append(vid)
+    if not vendor_ids:
+        return {'push': 'skipped_no_template_rows'}
+    try:
+        run = upload_runs.start_run(store, None, vendor_ids, list(upload_runs.KINDS))
+    except upload_runs.UploadRunError as exc:
+        msg = str(exc)
+        if 'already waiting or running' in msg:
+            return {'push': 'skipped_upload_already_queued'}
+        return {'push': 'skipped_upload_error', 'push_error': msg[:300]}
+    return {'push': 'queued', 'upload_run_id': str(run.id), 'upload_vendors': len(vendor_ids)}
+
+
 # --- managed (full_store StoreListing) stores: store-wide only ---------------
 
 def _managed_failed_count(store) -> int:
@@ -866,7 +908,10 @@ def execute_run(run_id) -> dict:
         reset_failed = lambda: _catalog_reset_failed(store, include, exclude)  # noqa: E731
         scrape_pass = lambda: _catalog_scrape_pass(store, source, heartbeat)  # noqa: E731
         failed_count = lambda: _catalog_failed_count(store, include, exclude)  # noqa: E731
-        push = lambda: _catalog_push(store, run, include, exclude)  # noqa: E731
+        if _store_is_mydeal(store):
+            push = lambda: _mydeal_bot_upload(store, include, exclude)  # noqa: E731
+        else:
+            push = lambda: _catalog_push(store, run, include, exclude)  # noqa: E731
 
     summary = {
         'started_at': now.isoformat(),
@@ -992,6 +1037,17 @@ def _push_note(summary) -> str:
         return ' Marketplace push skipped: a Manual sync was already running.'
     if push == 'skipped_scrape_still_running':
         return ' Marketplace push skipped: the scrape is still running.'
+    if push == 'queued':
+        return (
+            f" Marketplace upload queued for the inventory bot laptop ({summary.get('upload_vendors', 0)} "
+            'vendor file set(s)).'
+        )
+    if push == 'skipped_upload_already_queued':
+        return ' Marketplace upload not queued: an upload for this store is already waiting or running.'
+    if push == 'skipped_no_template_rows':
+        return ' Marketplace upload not queued: no MyDeal template rows for these vendors.'
+    if push == 'skipped_upload_error':
+        return f" Marketplace upload not queued: {summary.get('push_error') or 'see the logs'}."
     if push == 'failed':
         return f" Marketplace push failed: {summary.get('push_error') or 'see the logs'}."
     if push.startswith('skipped_'):
