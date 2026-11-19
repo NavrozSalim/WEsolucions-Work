@@ -6,10 +6,9 @@ scraping product pages (which gets rate-limited / Cloudflare-blocked), we:
 
   1. Download https://ads-feed.s3.us-west-2.amazonaws.com/ads/business/563/vevor-563.xlsx
   2. Resolve columns from the header row: ``SKU``, ``after coupon price``
-     (preferred over ``MAP``) and ``Inventory quantity``. If the header is
-     unrecognizable we fall back to the legacy positional layout A=SKU,
-     G=Price, I=Inventory (0-based 0, 6, 8) that the feed used before Vevor
-     expanded it to a full catalog export.
+     and ``Inventory quantity``. A missing column, or values that do not look
+     like prices and stock, fail the feed (``scrapers.feed_format``) so a
+     changed layout never reaches the marketplace as wrong prices or stock.
   3. Build a SKU -> {price, stock} lookup.
   4. Update ``VendorPrice`` rows for matching products.
 
@@ -29,7 +28,10 @@ from typing import Iterable
 
 import requests
 
+from scrapers.feed_format import check_feed_quality, is_whole_number, require_columns
+
 logger = logging.getLogger("scrapers.vevor_au_ingest")
+FEED_LABEL = "Vevor AU"
 
 DEFAULT_VEVOR_AU_FEED_URL = (
     "https://ads-feed.s3.us-west-2.amazonaws.com/ads/business/563/vevor-563.xlsx"
@@ -175,8 +177,13 @@ def load_vevor_feed_lookups() -> dict:
     Returns ``{lookup, lookup_compact, lookup_by_url, feed_rows}``.
     """
     xlsx_path = fetch_vevor_feed(VEVOR_AU_FEED_URL)
+    stats: dict = {}
     try:
-        lookup, lookup_compact, pos_rows = load_veror_via_excel_positions(xlsx_path)
+        lookup, lookup_compact, pos_rows = load_veror_via_excel_positions(xlsx_path, stats=stats)
+        check_feed_quality(
+            "vevor", FEED_LABEL,
+            rows=stats.get("rows", 0), priced=stats.get("priced", 0), bad_stock=stats.get("bad_stock", 0),
+        )
     finally:
         try:
             os.unlink(xlsx_path)
@@ -272,7 +279,8 @@ def round_precise(val: float, digits: int = 2) -> float:
         return round(float(val), digits)
 
 
-# Legacy positional layout (pre-2026 feed): A=SKU, G=Price, I=Inventory.
+# Legacy positional layout (pre-2026 feed): A=SKU, G=Price, I=Inventory. No longer read: a header
+# without the named columns fails the feed (FeedFormatError).
 LEGACY_SKU_COL = 0
 LEGACY_PRICE_COL = 6
 LEGACY_INVENTORY_COL = 8
@@ -287,17 +295,13 @@ def resolve_vevor_feed_columns(header_row) -> tuple[int, int, int, str]:
     """
     Map the feed header row to ``(sku_idx, price_idx, inventory_idx, mode)``.
 
-    The live Vevor AU feed uses ``after coupon price`` (Excel column 35 /
-    0-based index 34) as the sellable cost, with ``MAP (Minimum Advertised
-    Price)`` beside it. Stock is ``Inventory quantity``. Column G is
-    ``Availability`` and column I is product weight, so the legacy
-    positional read yields $0 prices and bogus stock.
-
-    ``mode`` is ``"header"`` when all three columns were found by name, else
-    ``"legacy"`` (positional fallback for the old A/G/I layout).
+    The live Vevor AU feed uses ``after coupon price`` as the sellable cost and
+    ``Inventory quantity`` as stock. Raises ``FeedFormatError`` when one of
+    ``SKU``, ``after coupon price`` or ``Inventory quantity`` is missing: the
+    old positional read (G = Availability, I = weight) and the MAP column would
+    give wrong prices and stock. ``mode`` is always ``"header"``.
     """
     sku_idx = price_idx = inventory_idx = None
-    map_price_idx = None
     for idx, cell in enumerate(header_row or ()):
         name = _normalize_header(cell)
         if not name:
@@ -309,23 +313,18 @@ def resolve_vevor_feed_columns(header_row) -> tuple[int, int, int, str]:
             or ("after" in name and "coupon" in name and "price" in name)
         ):
             price_idx = idx
-        elif map_price_idx is None and (
-            name == "map (minimum advertised price)"
-            or ("map" in name and "price" in name)
-            or name in ("price", "posted price")
-        ):
-            map_price_idx = idx
         elif inventory_idx is None and name in (
             "inventory quantity",
             "inventory",
             "posted inventory",
         ):
             inventory_idx = idx
-    if price_idx is None:
-        price_idx = map_price_idx
-    if sku_idx is not None and price_idx is not None and inventory_idx is not None:
-        return sku_idx, price_idx, inventory_idx, "header"
-    return LEGACY_SKU_COL, LEGACY_PRICE_COL, LEGACY_INVENTORY_COL, "legacy"
+    require_columns(FEED_LABEL, header_row, {
+        "SKU": sku_idx,
+        "after coupon price": price_idx,
+        "Inventory quantity": inventory_idx,
+    })
+    return sku_idx, price_idx, inventory_idx, "header"
 
 
 def _cell(row, idx):
@@ -333,7 +332,7 @@ def _cell(row, idx):
     return row[idx] if idx < len(row) else None
 
 
-def load_veror_via_excel_positions(path: str) -> tuple[dict, dict, int]:
+def load_veror_via_excel_positions(path: str, *, stats: dict | None = None) -> tuple[dict, dict, int]:
     """
     Read the Vevor AU feed XLSX into SKU lookups.
 
@@ -346,6 +345,9 @@ def load_veror_via_excel_positions(path: str) -> tuple[dict, dict, int]:
     - ``lookup``: {sku: {'Posted Price': float, 'Posted Inventory': int}}
     - ``lookup_compact``: same by ``compact_id(sku)`` for fuzzy match fallback.
     - ``pos_rows_scanned``: number of data rows scanned.
+
+    ``stats`` (optional) gets ``rows``, ``priced`` and ``bad_stock`` for the
+    format check. Raises ``FeedFormatError`` when a required column is missing.
     """
     from openpyxl import load_workbook
 
@@ -357,19 +359,14 @@ def load_veror_via_excel_positions(path: str) -> tuple[dict, dict, int]:
         pos_rows = 0
         sku_idx = price_idx = inventory_idx = None
         link_idx = None
-        mode = "legacy"
+        mode = "header"
         priced_rows = 0
+        sku_rows = 0
+        bad_stock = 0
         for idx, row in enumerate(ws.iter_rows(values_only=True)):
             if idx == 0:
                 sku_idx, price_idx, inventory_idx, mode = resolve_vevor_feed_columns(row)
                 link_idx = _product_link_column_index(row)
-                if mode == "legacy":
-                    logger.warning(
-                        "Vevor AU feed header not recognized (%r...); using legacy "
-                        "positional columns A/G/I — prices may be wrong if the feed "
-                        "layout changed.",
-                        list(row or ())[:5],
-                    )
                 continue
             if row is None or not any(cell is not None for cell in row):
                 continue
@@ -377,8 +374,12 @@ def load_veror_via_excel_positions(path: str) -> tuple[dict, dict, int]:
             sku = clean_id(_cell(row, sku_idx))
             if not sku:
                 continue
+            sku_rows += 1
             price = round_precise(parse_price_value(_cell(row, price_idx)), 2)
-            stock = parse_inventory_value(_cell(row, inventory_idx))
+            raw_stock = _cell(row, inventory_idx)
+            if not is_whole_number(raw_stock):
+                bad_stock += 1
+            stock = parse_inventory_value(raw_stock)
             if price > 0:
                 priced_rows += 1
             entry = {"Posted Price": price, "Posted Inventory": int(stock)}
@@ -403,6 +404,8 @@ def load_veror_via_excel_positions(path: str) -> tuple[dict, dict, int]:
                 "sku=%s price=%s inventory=%s).",
                 len(lookup), priced_rows, mode, sku_idx, price_idx, inventory_idx,
             )
+        if stats is not None:
+            stats.update(rows=sku_rows, priced=priced_rows, bad_stock=bad_stock)
         return lookup, lookup_compact, pos_rows
     finally:
         wb.close()

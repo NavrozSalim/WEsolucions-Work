@@ -2,17 +2,15 @@
 
 The live feed uses ``after coupon price`` (Excel col 35 / index 34) for cost,
 with ``MAP (Minimum Advertised Price)`` beside it; stock is ``Inventory
-quantity``. The legacy feed used A=SKU, G=Price, I=Inventory. Both layouts
-must parse correctly.
+quantity``. A feed without those columns (including the legacy A/G/I layout)
+fails with FeedFormatError instead of being read by position.
 """
 import os
 import tempfile
 import unittest
 
+from scrapers.feed_format import FeedFormatError
 from scrapers.vevor_au_ingest import (
-    LEGACY_INVENTORY_COL,
-    LEGACY_PRICE_COL,
-    LEGACY_SKU_COL,
     is_vevor_product_url,
     is_vevor_vendor_code,
     load_veror_via_excel_positions,
@@ -82,11 +80,13 @@ class ResolveColumnsTests(unittest.TestCase):
         self.assertEqual(mode, 'header')
         self.assertEqual((sku_i, price_i, inv_i), (0, 1, 3))
 
-    def test_falls_back_to_map_when_after_coupon_missing(self):
+    def test_map_is_not_used_when_after_coupon_missing(self):
         header = ['SKU', 'MAP (Minimum Advertised Price)', 'Inventory Quantity']
-        sku_i, price_i, inv_i, mode = resolve_vevor_feed_columns(header)
-        self.assertEqual(mode, 'header')
-        self.assertEqual((sku_i, price_i, inv_i), (0, 1, 2))
+        with self.assertRaises(FeedFormatError) as ctx:
+            resolve_vevor_feed_columns(header)
+        self.assertIn('"after coupon price" not found', str(ctx.exception))
+        self.assertIn('columns now: SKU, MAP (Minimum Advertised Price), Inventory Quantity', str(ctx.exception))
+        self.assertIn('nothing was sent to the marketplace', str(ctx.exception))
 
     def test_header_matching_is_case_and_whitespace_tolerant(self):
         header = ['  sku ', 'x', 'After  Coupon Price', 'Inventory Quantity']
@@ -94,21 +94,20 @@ class ResolveColumnsTests(unittest.TestCase):
         self.assertEqual(mode, 'header')
         self.assertEqual((sku_i, price_i, inv_i), (0, 2, 3))
 
-    def test_unknown_header_falls_back_to_legacy_positions(self):
-        sku_i, price_i, inv_i, mode = resolve_vevor_feed_columns(['a', 'b', 'c'])
-        self.assertEqual(mode, 'legacy')
-        self.assertEqual((sku_i, price_i, inv_i), (LEGACY_SKU_COL, LEGACY_PRICE_COL, LEGACY_INVENTORY_COL))
+    def test_unknown_header_fails(self):
+        with self.assertRaises(FeedFormatError) as ctx:
+            resolve_vevor_feed_columns(['a', 'b', 'c'])
+        self.assertIn('"SKU", "after coupon price", "Inventory quantity" not found', str(ctx.exception))
 
-    def test_empty_header_falls_back_to_legacy_positions(self):
+    def test_empty_header_fails(self):
         for header in (None, [], ['', None]):
-            _, _, _, mode = resolve_vevor_feed_columns(header)
-            self.assertEqual(mode, 'legacy')
+            with self.assertRaises(FeedFormatError):
+                resolve_vevor_feed_columns(header)
 
-    def test_legacy_posted_headers_resolve_by_name(self):
-        header = ['SKU', 'Posted Price', 'Posted Inventory']
-        sku_i, price_i, inv_i, mode = resolve_vevor_feed_columns(header)
-        self.assertEqual(mode, 'header')
-        self.assertEqual((sku_i, price_i, inv_i), (0, 1, 2))
+    def test_renamed_stock_column_fails(self):
+        header = ['SKU', 'after coupon price', 'Stock level']
+        with self.assertRaisesRegex(FeedFormatError, '"Inventory quantity" not found'):
+            resolve_vevor_feed_columns(header)
 
 
 class LoadCurrentFeedTests(unittest.TestCase):
@@ -160,7 +159,7 @@ class LoadCurrentFeedTests(unittest.TestCase):
 
 
 class LoadLegacyFeedTests(unittest.TestCase):
-    """The pre-2026 layout (A=SKU, G=Price, I=Inventory, no known header) must still parse."""
+    """The pre-2026 layout (A=SKU, G=Price, I=Inventory, no known header) is not guessed any more."""
 
     def setUp(self):
         header = ['ID', 'col1', 'col2', 'col3', 'col4', 'col5', 'cost', 'col7', 'qty']
@@ -173,11 +172,9 @@ class LoadLegacyFeedTests(unittest.TestCase):
     def tearDown(self):
         os.unlink(self.path)
 
-    def test_legacy_positional_read(self):
-        lookup, _, rows = load_veror_via_excel_positions(self.path)
-        self.assertEqual(rows, 2)
-        self.assertEqual(lookup['LEGACYSKU000000001'], {'Posted Price': 129.99, 'Posted Inventory': 4})
-        self.assertEqual(lookup['LEGACYSKU000000002'], {'Posted Price': 59.90, 'Posted Inventory': 12})
+    def test_legacy_layout_fails(self):
+        with self.assertRaises(FeedFormatError):
+            load_veror_via_excel_positions(self.path)
 
 
 class ShortRowTests(unittest.TestCase):

@@ -2828,6 +2828,24 @@ def cancel_scrape(user, store) -> dict:
     }
 
 
+def _note_feed_format_error(store, kind: str, err) -> bool:
+    """True when ``err`` is a changed feed format; logs it on the store's activity log."""
+    from scrapers.feed_format import FeedFormatError
+
+    if not isinstance(err, FeedFormatError):
+        return False
+    logger.error("%s (store=%s)", err, getattr(store, "id", ""))
+    try:
+        from catalog.activity_log import append_catalog_log
+
+        append_catalog_log(
+            store.id, str(err), action_type="feed_format_error", metadata={"vendor": kind},
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not log the %s feed format error", kind)
+    return True
+
+
 def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
     """Refresh vendor price/stock on managed listings.
 
@@ -3030,6 +3048,9 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
     vevor_feed_error = ""
     costway_lookups = None
     costway_feed_error = ""
+    # Feed whose format changed: its listings are left as they are (last good price and stock, still
+    # Pending, so not pushed) instead of being failed with stock 0.
+    feed_format_errors = {"vevor": False, "costway": False}
     desktop_queued: dict = {}
     try:
         pending_writes = []
@@ -3075,12 +3096,15 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     vevor_lookups = load_vevor_feed_lookups()
                     logger.info("Vevor AU feed ready for managed scrape store=%s", store.id)
                 except Exception as feed_err:  # noqa: BLE001
-                    logger.exception(
-                        "Vevor AU feed unavailable for managed scrape store=%s", store.id,
-                    )
                     vevor_feed_error = (
                         str(feed_err) or "Vevor AU feed download failed."
                     )[:500]
+                    if _note_feed_format_error(store, "vevor", feed_err):
+                        feed_format_errors["vevor"] = True
+                    else:
+                        logger.exception(
+                            "Vevor AU feed unavailable for managed scrape store=%s", store.id,
+                        )
             if any(_is_costway_listing(listing) for listing in listings):
                 early = scrape_prog.scrape_job_state(store.id, my_gen)
                 if early == "superseded":
@@ -3116,12 +3140,15 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     costway_lookups = load_costway_feed_lookups()
                     logger.info("Costway AU feed ready for managed scrape store=%s", store.id)
                 except Exception as feed_err:  # noqa: BLE001
-                    logger.exception(
-                        "Costway AU feed unavailable for managed scrape store=%s", store.id,
-                    )
                     costway_feed_error = (
                         str(feed_err) or "Costway AU feed download failed."
                     )[:500]
+                    if _note_feed_format_error(store, "costway", feed_err):
+                        feed_format_errors["costway"] = True
+                    else:
+                        logger.exception(
+                            "Costway AU feed unavailable for managed scrape store=%s", store.id,
+                        )
             def _flush_writes(feed=None):
                 nonlocal pending_are_feed
                 if feed is None:
@@ -3377,6 +3404,12 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                             "inventory": None,
                             "error": "",
                         }
+                        if feed_format_errors.get(kind):
+                            # Not saved: the listing keeps its last good price and stock.
+                            row["error"] = (err or "")[:500]
+                            failed += 1
+                            rows.append(row)
+                            continue
                         if err or (price is None and stock is None):
                             listing.inventory_sync_status = InventorySyncStatus.FAILED
                             listing.last_scrape_at = now
@@ -3519,12 +3552,22 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     logger.warning("Listing scrape failed SKU %s: %s", listing.sku, message)
                     _queue_write(listing, immediate=immediate)
 
+                def _keep_row(message: str) -> None:
+                    """Feed format changed: report the row but leave the listing unchanged."""
+                    nonlocal failed
+                    row["error"] = (message or "")[:500]
+                    failed += 1
+                    rows.append(row)
+
                 result = {}
                 price = None
                 stock = None
                 if uses_vevor:
                     if vevor_feed_error:
-                        _fail_row(vevor_feed_error)
+                        if feed_format_errors["vevor"]:
+                            _keep_row(vevor_feed_error)
+                        else:
+                            _fail_row(vevor_feed_error)
                         continue
                     lookups = vevor_lookups or {}
                     entry = lookup_vevor_price_stock(
@@ -3551,7 +3594,10 @@ def scrape_listings(user, store, listing_ids=None, job_generation=None) -> dict:
                     result = {"price": price, "inventory": stock}
                 elif uses_costway:
                     if costway_feed_error:
-                        _fail_row(costway_feed_error)
+                        if feed_format_errors["costway"]:
+                            _keep_row(costway_feed_error)
+                        else:
+                            _fail_row(costway_feed_error)
                         continue
                     lookups = costway_lookups or {}
                     entry = lookup_costway_price_stock(

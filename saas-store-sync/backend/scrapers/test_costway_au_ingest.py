@@ -8,10 +8,9 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from scrapers.feed_format import FeedFormatError
+
 from scrapers.costway_au_ingest import (
-    COSTWAY_PRICE_COL,
-    COSTWAY_QTY_COL,
-    COSTWAY_SKU_COL,
     fetch_costway_feed,
     is_costway_product_url,
     is_costway_vendor_code,
@@ -59,25 +58,36 @@ class ResolveColumnsTests(unittest.TestCase):
         self.assertEqual(link_i, 6)
 
     def test_qty_is_not_weight(self):
-        header = ['SKU', 'Price', 'Weight', 'QTY']
+        header = ['SKU', 'Price', 'Weight', 'QTY', 'Item NO.', 'Link']
         sku_i, price_i, qty_i, _, _, mode = resolve_costway_feed_columns(header)
         self.assertEqual(mode, 'header')
         self.assertEqual((sku_i, price_i, qty_i), (0, 1, 3))
 
     def test_item_no_period_and_case(self):
-        header = ['  sku ', 'ITEM NO.', 'x', 'Price', 'qty']
+        header = ['  sku ', 'ITEM NO.', 'x', 'Price', 'qty', 'LINK']
         sku_i, price_i, qty_i, item_i, _, mode = resolve_costway_feed_columns(header)
         self.assertEqual(mode, 'header')
         self.assertEqual((sku_i, price_i, qty_i, item_i), (0, 3, 4, 1))
 
-    def test_unknown_header_uses_screenshot_positions(self):
-        sku_i, price_i, qty_i, item_i, link_i, mode = resolve_costway_feed_columns(['a', 'b', 'c'])
-        self.assertEqual(mode, 'positional')
-        self.assertEqual(sku_i, COSTWAY_SKU_COL)
-        self.assertEqual(price_i, COSTWAY_PRICE_COL)
-        self.assertEqual(qty_i, COSTWAY_QTY_COL)
-        self.assertEqual(item_i, 1)
-        self.assertEqual(link_i, 6)
+    def test_unknown_header_fails(self):
+        with self.assertRaises(FeedFormatError) as ctx:
+            resolve_costway_feed_columns(['a', 'b', 'c'])
+        self.assertIn('"SKU", "Item NO.", "Price", "QTY", "Link" not found', str(ctx.exception))
+
+    def test_renamed_qty_column_fails(self):
+        header = [('Stock' if c == 'QTY' else c) for c in COSTWAY_FEED_HEADER]
+        with self.assertRaises(FeedFormatError) as ctx:
+            resolve_costway_feed_columns(header)
+        self.assertIn('column "QTY" not found', str(ctx.exception))
+        self.assertIn('Costway AU prices and stock were not updated', str(ctx.exception))
+
+    def test_empty_file_fails(self):
+        path = _write_csv([])
+        try:
+            with self.assertRaises(FeedFormatError):
+                load_costway_via_csv(path)
+        finally:
+            os.unlink(path)
 
 
 class LoadCostwayCsvTests(unittest.TestCase):

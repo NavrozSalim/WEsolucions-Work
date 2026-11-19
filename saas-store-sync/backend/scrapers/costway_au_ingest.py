@@ -19,6 +19,10 @@ Price (vendor cost) and QTY (stock) are applied only when Vendor ID equals
 Item NO. + "-" + SKU (for example ``73982054-TP10003``). The same SKU with a
 different Item NO. is a different product and is left unchanged. A product
 Link is used only when the row has no Vendor ID. Weight is never treated as qty.
+
+A header without SKU, Item NO., Price, QTY and Link, or values that do not look
+like prices and stock, fail the feed (``scrapers.feed_format``) so a changed
+layout never reaches the marketplace as wrong prices or stock.
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ from typing import Iterable
 
 import requests
 
+from scrapers.feed_format import check_feed_quality, require_columns
 from scrapers.vevor_au_ingest import (
     clean_id,
     compact_id,
@@ -39,11 +44,12 @@ from scrapers.vevor_au_ingest import (
 )
 
 logger = logging.getLogger("scrapers.costway_au_ingest")
+FEED_LABEL = "Costway AU"
 
 DEFAULT_COSTWAY_AU_FEED_URL = "https://au.costway.com/media/feed/Dropship-AU.csv"
 
-# Screenshot / live Dropship-AU.csv layout when the header is unrecognizable.
-# A=SKU, B=Item NO., E=Price, G=Link, H=QTY — not Vevor's A/G/I (G=Availability, I=weight).
+# Live Dropship-AU.csv layout, for reference only: A=SKU, B=Item NO., E=Price, G=Link, H=QTY.
+# Columns are found by name; a header without them fails the feed (FeedFormatError).
 COSTWAY_SKU_COL = 0
 COSTWAY_ITEM_NO_COL = 1
 COSTWAY_PRICE_COL = 4
@@ -297,8 +303,8 @@ def resolve_costway_feed_columns(header_row) -> tuple[int, int, int, int | None,
     """
     Map the CSV header to ``(sku, price, qty, item_no, link, mode)``.
 
-    ``mode`` is ``"header"`` when SKU, Price, and QTY were found by name, else
-    ``"positional"`` for the Dropship-AU layout A/E/H.
+    Raises ``FeedFormatError`` when SKU, Item NO., Price, QTY or Link is
+    missing; columns are never guessed by position. ``mode`` is ``"header"``.
     """
     sku_idx = price_idx = qty_idx = None
     item_no_idx = link_idx = None
@@ -317,16 +323,14 @@ def resolve_costway_feed_columns(header_row) -> tuple[int, int, int, int | None,
             item_no_idx = idx
         elif link_idx is None and name_key in ("link", "product link", "product url"):
             link_idx = idx
-    if sku_idx is not None and price_idx is not None and qty_idx is not None:
-        return sku_idx, price_idx, qty_idx, item_no_idx, link_idx, "header"
-    return (
-        COSTWAY_SKU_COL,
-        COSTWAY_PRICE_COL,
-        COSTWAY_QTY_COL,
-        COSTWAY_ITEM_NO_COL,
-        COSTWAY_LINK_COL,
-        "positional",
-    )
+    require_columns(FEED_LABEL, header_row, {
+        "SKU": sku_idx,
+        "Item NO.": item_no_idx,
+        "Price": price_idx,
+        "QTY": qty_idx,
+        "Link": link_idx,
+    })
+    return sku_idx, price_idx, qty_idx, item_no_idx, link_idx, "header"
 
 
 def _cell(row, idx):
@@ -422,13 +426,17 @@ def _row_price_qty_link(row, price_idx, qty_idx, link_idx):
     return _anchored_price_qty_link(row)
 
 
-def load_costway_via_csv(path: str) -> tuple[dict, dict, int]:
+def load_costway_via_csv(path: str, *, stats: dict | None = None) -> tuple[dict, dict, int]:
     """
     Read the Costway AU CSV into SKU lookups.
 
     Returns ``(lookup, lookup_compact, data_rows_scanned)``.
     Each entry is ``{'Posted Price': float, 'Posted Inventory': int}`` and may
     include ``Product Link``.
+
+    ``stats`` (optional) gets ``rows`` (rows with Item NO. and SKU), ``priced``
+    and ``skipped`` (rows whose price / qty / link could not be read) for the
+    format check. Raises ``FeedFormatError`` when a required column is missing.
     """
     lookup: dict[str, dict] = {}
     lookup_compact: dict[str, dict] = {}
@@ -437,7 +445,9 @@ def load_costway_via_csv(path: str) -> tuple[dict, dict, int]:
     skipped_rows = 0
     sku_idx = price_idx = qty_idx = None
     item_no_idx = link_idx = None
-    mode = "positional"
+    mode = "header"
+    keyed_rows = 0
+    header_seen = False
 
     with open(path, "r", encoding="utf-8-sig", newline="") as handle:
         sample = handle.read(8192)
@@ -459,12 +469,7 @@ def load_costway_via_csv(path: str) -> tuple[dict, dict, int]:
                 sku_idx, price_idx, qty_idx, item_no_idx, link_idx, mode = (
                     resolve_costway_feed_columns(row)
                 )
-                if mode == "positional":
-                    logger.warning(
-                        "Costway AU feed header not recognized (%r...); using "
-                        "positional SKU/Price/QTY columns A/E/H.",
-                        list(row or ())[:8],
-                    )
+                header_seen = True
                 continue
             if not row or not any(str(cell).strip() for cell in row if cell is not None):
                 continue
@@ -474,6 +479,7 @@ def load_costway_via_csv(path: str) -> tuple[dict, dict, int]:
             pair = costway_feed_key(item_no, sku)
             if not pair:
                 continue
+            keyed_rows += 1
             parsed = _row_price_qty_link(row, price_idx, qty_idx, link_idx)
             if parsed is None:
                 skipped_rows += 1
@@ -502,6 +508,10 @@ def load_costway_via_csv(path: str) -> tuple[dict, dict, int]:
             "sku=%s price=%s qty=%s).",
             len(lookup), priced_rows, skipped_rows, mode, sku_idx, price_idx, qty_idx,
         )
+    if not header_seen:
+        resolve_costway_feed_columns(())   # empty file: report the missing columns
+    if stats is not None:
+        stats.update(rows=keyed_rows, priced=priced_rows, skipped=skipped_rows)
     return lookup, lookup_compact, pos_rows
 
 
@@ -584,8 +594,13 @@ def build_costway_url_index(lookup: dict) -> dict[str, dict]:
 def load_costway_feed_lookups() -> dict:
     """Download and parse the live Costway AU CSV once per scrape job."""
     csv_path = fetch_costway_feed(COSTWAY_AU_FEED_URL)
+    stats: dict = {}
     try:
-        lookup, lookup_compact, pos_rows = load_costway_via_csv(csv_path)
+        lookup, lookup_compact, pos_rows = load_costway_via_csv(csv_path, stats=stats)
+        check_feed_quality(
+            "costway", FEED_LABEL,
+            rows=stats.get("rows", 0), priced=stats.get("priced", 0), skipped=stats.get("skipped", 0),
+        )
     finally:
         try:
             os.unlink(csv_path)

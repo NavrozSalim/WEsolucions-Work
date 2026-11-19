@@ -3204,15 +3204,31 @@ def _run_pending_feed_ingest(
     try:
         lookups = load_lookups() or {}
     except Exception as e:
-        logger.exception('%s feed download/parse failed: %s', label, e)
+        from scrapers.feed_format import FeedFormatError
+
+        format_changed = isinstance(e, FeedFormatError)
+        if format_changed:
+            # Rows stay Pending with their last good price and stock; Pending rows are never pushed.
+            logger.error('%s for store %s', e, store_id)
+            from catalog.activity_log import append_catalog_log
+
+            append_catalog_log(
+                store_id, str(e), action_type='feed_format_error',
+                metadata={'vendor': kind, 'pending_rows': total},
+            )
+        else:
+            logger.exception('%s feed download/parse failed: %s', label, e)
         _finalize_vevor_scrape_job(
             job_id, store_id, status='failed',
             stats={
-                'error': str(e)[:240], 'total': total,
+                'error': str(e)[:500], 'total': total,
                 'processed': 0, 'scraped': 0, 'failed': 0, 'phase': 'failed',
             },
         )
-        return {'status': 'failed', 'error': str(e), 'updated': 0}
+        return {
+            'status': 'format_changed' if format_changed else 'failed',
+            'error': str(e), 'updated': 0,
+        }
 
     lookup = lookups.get('lookup') or {}
     pos_rows = int(lookups.get('feed_rows') or 0)

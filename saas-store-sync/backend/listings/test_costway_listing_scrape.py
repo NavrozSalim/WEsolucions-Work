@@ -215,6 +215,28 @@ class ManagedListingCostwayScrapeTests(TestCase):
     @patch("scrapers.close_amazon_session")
     @patch("scrapers.get_price_and_stock")
     @patch("scrapers.costway_au_ingest.load_costway_feed_lookups")
+    def test_costway_format_change_keeps_stock(self, mock_feed, mock_price, _close, _nora):
+        from scrapers.feed_format import FeedFormatError
+
+        mock_feed.side_effect = FeedFormatError("Costway AU", 'column "QTY" not found (columns now: SKU).')
+        mock_price.return_value = {"price": 18.5, "stock": 7}
+        costway = self._listing("TP10003", url="http://au.costway.com/a.html")
+        StoreListing.objects.filter(pk=costway.pk).update(vendor_price=100, inventory=5)
+        ebay = self._listing("EBAY-1", url="https://www.ebay.com.au/itm/1", source="ebayau")
+        result = listing_service.scrape_listings(self.user, self.store)
+        self.assertEqual((result["scraped"], result["failed"]), (1, 1))
+        costway.refresh_from_db()
+        ebay.refresh_from_db()
+        # Not failed with stock 0 (the download-error rule): left as it was, still Pending.
+        self.assertEqual(costway.inventory_sync_status, InventorySyncStatus.PENDING)
+        self.assertEqual((float(costway.vendor_price), costway.inventory), (100.0, 5))
+        self.assertEqual(ebay.inventory_sync_status, InventorySyncStatus.SCRAPED)
+        self.assertIn('column "QTY" not found', next(r["error"] for r in result["rows"] if r["sku"] == "TP10003"))
+
+    @patch("stores.nora.load_store_nora_stock_map", return_value=None)
+    @patch("scrapers.close_amazon_session")
+    @patch("scrapers.get_price_and_stock")
+    @patch("scrapers.costway_au_ingest.load_costway_feed_lookups")
     def test_kogan_sku_uses_costway_file_not_a_page(self, mock_feed, mock_price, _close, _nora):
         mock_feed.return_value = self._feed("36301993-TP10562", price=189.0, stock=4)
         mock_feed.return_value["lookup"]["36301993"] = {"Posted Price": 0, "Posted Inventory": 0}

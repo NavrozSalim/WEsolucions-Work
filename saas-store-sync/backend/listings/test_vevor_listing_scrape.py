@@ -204,3 +204,28 @@ class ManagedListingVendorScrapeTests(TestCase):
         self.assertIn("S3 timeout", vevor.last_scrape_error)
         self.assertEqual(ebay.inventory_sync_status, InventorySyncStatus.SCRAPED)
         self.assertEqual(float(ebay.vendor_price), 18.5)
+
+    @patch("stores.nora.load_store_nora_stock_map", return_value=None)
+    @patch("scrapers.close_amazon_session")
+    @patch("scrapers.get_price_and_stock")
+    @patch("scrapers.vevor_au_ingest.load_vevor_feed_lookups")
+    def test_vevor_format_change_leaves_listing_unchanged(self, mock_feed, mock_price, _close, _nora):
+        from catalog.models import CatalogActivityLog
+        from scrapers.feed_format import FeedFormatError
+
+        mock_feed.side_effect = FeedFormatError("Vevor AU", 'column "after coupon price" not found (columns now: SKU).')
+        mock_price.return_value = {"price": 18.5, "stock": 7}
+        vevor = self._listing("VEVOR-SKU-1", url="https://www.vevor.com.au/a.html", source="vevorau")
+        StoreListing.objects.filter(pk=vevor.pk).update(vendor_price=40, inventory=9)
+        ebay = self._listing("EBAY-1", url="https://www.ebay.com.au/itm/1", source="ebayau")
+        result = listing_service.scrape_listings(self.user, self.store)
+        self.assertEqual((result["scraped"], result["failed"]), (1, 1))
+        vevor.refresh_from_db()
+        ebay.refresh_from_db()
+        # Not failed and not zeroed: last good price and stock, still Pending (Pending is not pushed).
+        self.assertEqual(vevor.inventory_sync_status, InventorySyncStatus.PENDING)
+        self.assertEqual((float(vevor.vendor_price), vevor.inventory), (40.0, 9))
+        self.assertEqual(vevor.last_scrape_error, "")
+        self.assertEqual(ebay.inventory_sync_status, InventorySyncStatus.SCRAPED)
+        log = CatalogActivityLog.objects.get(store=self.store, action_type="feed_format_error")
+        self.assertIn("Vevor AU feed format changed", log.message)
