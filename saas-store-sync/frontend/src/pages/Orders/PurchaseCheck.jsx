@@ -28,6 +28,29 @@ const SHIPPING_SOURCE = {
     none: 'none shown',
 };
 
+/** "Thu, 3 Dec 2026" from the bot's ISO delivery date. */
+function deliveryDay(iso) {
+    if (!iso) return '';
+    const d = new Date(`${iso}T00:00:00`);
+    return Number.isNaN(d.getTime())
+        ? iso
+        : d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+/** Delivery the laptop bot picked at checkout: date, days from purchase, fee; amber when later than 8 days. */
+function DeliveryNote({ delivery }) {
+    if (!delivery?.date) return null;
+    const fee = delivery.fee_cents == null ? '' : delivery.fee_cents === 0 ? ' · delivery free' : ` · delivery ${money(delivery.fee_cents)}`;
+    return (
+        <p className={`mt-1 ${delivery.late ? 'font-medium text-amber-700 dark:text-amber-300' : ''}`} title={delivery.text || undefined}>
+            Arrives by {deliveryDay(delivery.date)}
+            {delivery.days != null && ` (${delivery.days} days)`}
+            {fee}
+            {delivery.late && ' · later than 8 days'}
+        </p>
+    );
+}
+
 /** True while the order is being bought or was bought: no Recheck, no second Process. */
 export function purchaseLocked(check) {
     return ['queued', 'purchasing', 'purchased'].includes(check?.purchase_status);
@@ -43,13 +66,26 @@ export function PurchaseCheckBadge({ check }) {
         );
     }
     if (check.purchase_status === 'purchased') {
+        const delivery = check.delivery?.date ? check.delivery : null;
         return (
-            <span
-                title={check.purchase_error || undefined}
-                className="mt-1 inline-block rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200"
-            >
-                Purchased{check.vendor_order_number ? ` · ${check.vendor_order_number}` : ''}{check.purchase_error ? ' (!)' : ''}
-            </span>
+            <>
+                <span
+                    title={check.purchase_error || undefined}
+                    className="mt-1 inline-block rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200"
+                >
+                    Purchased{check.vendor_order_number ? ` · ${check.vendor_order_number}` : ''}{check.purchase_error ? ' (!)' : ''}
+                </span>
+                {delivery && (
+                    <span
+                        title={delivery.late ? 'Arrives later than 8 days after purchase' : undefined}
+                        className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[11px] font-medium ${delivery.late
+                            ? 'bg-amber-50 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200'
+                            : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'}`}
+                    >
+                        Arrives {deliveryDay(delivery.date)}
+                    </span>
+                )}
+            </>
         );
     }
     if (check.purchase_status === 'failed') {
@@ -211,6 +247,7 @@ function PurchaseStatusNote({ check, onStop, stopping, onSaveVendorNumber, savin
                     Purchased{check.vendor_order_number ? ` · vendor order ${check.vendor_order_number}` : ''}
                     {check.purchased_at && <span className="font-normal opacity-75"> · {when(check.purchased_at)}</span>}
                 </p>
+                <DeliveryNote delivery={check.delivery} />
                 <VendorOrderNumberEdit check={check} onSave={onSaveVendorNumber} saving={savingVendorNumber} />
                 {check.purchase_error && <p className="mt-1 text-amber-700 dark:text-amber-300">{check.purchase_error}</p>}
                 <RecheckOrderIdButton check={check} onRecheckOrderId={onRecheckOrderId} busy={recheckingOrderId} />
@@ -365,6 +402,13 @@ export function PurchaseCheckPanel({ check, onRecheck, rechecking, onProcess, on
                         <SumRow label="After Fees" value={money(check.after_fees_cents)} />
                         <SumRow label="Cost" value={check.cost_cents == null ? '—' : `- ${money(check.cost_cents)}`} />
                         <SumRow label="Vendor shipping" value={check.shipping_cents == null ? '—' : `- ${money(check.shipping_cents)}`} />
+                        {check.delivery?.checkout_extra_cents ? (
+                            <SumRow
+                                label="Extra at checkout (delivery)"
+                                value={`- ${money(check.delivery.checkout_extra_cents)}`}
+                                tone="text-rose-600 dark:text-rose-400"
+                            />
+                        ) : null}
                         <SumRow
                             label="Earning"
                             value={money(earning)}

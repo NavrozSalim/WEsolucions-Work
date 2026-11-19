@@ -563,7 +563,31 @@ def check_payload(check) -> dict | None:
         'purchase_error': check.purchase_error or '',
         'purchase_requested_at': check.purchase_requested_at.isoformat() if check.purchase_requested_at else None,
         'purchased_at': check.purchased_at.isoformat() if check.purchased_at else None,
+        'delivery': delivery_summary(check),
         **_order_id_lookup(check),
+    }
+
+
+# The laptop bot prefers delivery within this many days of buying (up to 15); later shows as late.
+DELIVERY_PREFERRED_DAYS = 8
+
+
+def delivery_summary(check) -> dict | None:
+    """The delivery the bot picked at checkout: the latest arrival date over the order's lines."""
+    lines = [ln for ln in check.lines_json or [] if ln.get('delivery_date')]
+    extra = sum(int(ln.get('checkout_extra_cents') or 0) for ln in check.lines_json or [])
+    if not lines:
+        return {'checkout_extra_cents': extra} if extra else None
+    last = max(lines, key=lambda ln: ln['delivery_date'])
+    fees = [ln.get('delivery_fee_cents') for ln in lines if ln.get('delivery_fee_cents') is not None]
+    days = last.get('delivery_days')
+    return {
+        'date': last['delivery_date'],
+        'days': days,
+        'text': last.get('delivery_text') or '',
+        'fee_cents': sum(fees) if fees else None,
+        'checkout_extra_cents': extra or None,
+        'late': days is not None and days > DELIVERY_PREFERRED_DAYS,
     }
 
 

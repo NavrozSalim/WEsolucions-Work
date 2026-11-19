@@ -192,13 +192,37 @@ def write_order_file(order, marketplace: str, path: Path) -> None:
     wb.save(path)
 
 
-def write_mapping_file(check, vendor: str, path: Path) -> None:
-    """SKU | Vendor | Vendor URL | Vendor SKU | Max Price (checked vendor price per unit)."""
+def line_max_totals(check) -> list:
+    """Most each line may cost at the vendor's checkout (items + delivery) with the order still in profit.
+
+    Cents per line, or None (no profit guard) when the earning is unknown or not above 0 (Force process).
+    The order's earning is shared over the lines by what they cost; the order keeps at least 1 cent.
+    """
+    lines = check.lines_json or []
+    earning = check.earning_cents
+    if not lines or earning is None or earning <= 0 or any(ln.get('cost_cents') is None for ln in lines):
+        return [None] * len(lines)
+    spends = [int(ln.get('cost_cents') or 0) + int(ln.get('shipping_cents') or 0) for ln in lines]
+    room = earning - 1
+    total = sum(spends)
+    shares = [room * s // total for s in spends] if total > 0 else [0] * len(lines)
+    shares[-1] += room - sum(shares)  # rounding goes to the last line
+    return [s + sh for s, sh in zip(spends, shares)]
+
+
+def write_mapping_file(check, vendor: str, path: Path, *, profit_guard: bool = True) -> None:
+    """SKU | Vendor | Vendor URL | Vendor SKU | Max Price | Max Total.
+
+    Max Price: the checked vendor price per unit. Max Total: the most the line may cost at checkout
+    (items + delivery fee) and still make a profit; the bot does not buy above it. Blank for Force process.
+    """
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.append(['SKU', 'Vendor', 'Vendor URL', 'Vendor SKU', 'Max Price'])
-    for ln in check.lines_json or []:
-        ws.append([ln['sku'], vendor, ln['vendor_url'], ln.get('vendor_id') or '', _money(ln['vendor_price_cents'])])
+    ws.append(['SKU', 'Vendor', 'Vendor URL', 'Vendor SKU', 'Max Price', 'Max Total'])
+    totals = line_max_totals(check) if profit_guard else [None] * len(check.lines_json or [])
+    for ln, max_total in zip(check.lines_json or [], totals):
+        ws.append([ln['sku'], vendor, ln['vendor_url'], ln.get('vendor_id') or '', _money(ln['vendor_price_cents']),
+                   _money(max_total) if max_total is not None else ''])
     wb.save(path)
 
 
@@ -256,7 +280,7 @@ def start_purchase(order, user, *, force=False):
         )
         run_dir = Path(run.run_dir)
         write_order_file(order, marketplace, run_dir / 'orders.xlsx')
-        write_mapping_file(check, account.vendor, run_dir / 'mapping.xlsx')
+        write_mapping_file(check, account.vendor, run_dir / 'mapping.xlsx', profit_guard=not forced)
         _bot().write_accounts_file(store.user, run_dir / 'accounts.json')
         run.command = json.dumps(_bot().build_command(
             store, marketplace, account.name, run_dir / 'orders.xlsx', run_dir / 'mapping.xlsx',
@@ -500,6 +524,64 @@ def stop_purchase(order, user):
     return check
 
 
+# Bot line statuses that need a person, with the words shown on the Orders page.
+BOT_STATUS_LABELS = {
+    'loss_after_delivery': 'Loss after the delivery fee at checkout, not bought',
+    'delivery_too_late': 'Delivery too late, not bought',
+}
+
+
+def _result_cents(value):
+    text = str(value if value is not None else '').replace('$', '').replace(',', '').strip()
+    if not text:
+        return None
+    try:
+        return int((Decimal(text) * 100).quantize(Decimal('1')))
+    except Exception:
+        return None
+
+
+def _result_int(value):
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _apply_delivery(check, by_sku) -> list:
+    """Copy the delivery the bot picked at checkout onto the check's lines. Returns loss notes per line.
+
+    A line the bot did not buy because the checkout total (with the delivery fee) made a loss lowers the
+    order's earning by what it cost above the check, so the order shows as a loss and can be Force processed.
+    """
+    from .auto_purchase_check import _money as money
+
+    lines = [dict(ln) for ln in check.lines_json or []]
+    notes, extra = [], 0
+    for ln in lines:
+        r = by_sku.get(str(ln.get('sku') or '').strip().upper()) or {}
+        if str(r.get('delivery_date') or '').strip():
+            ln['delivery_date'] = str(r['delivery_date']).strip()[:10]
+            ln['delivery_days'] = _result_int(r.get('delivery_days'))
+        fee, total = _result_cents(r.get('delivery_fee')), _result_cents(r.get('checkout_total'))
+        if fee is not None:
+            ln['delivery_fee_cents'] = fee
+        if str(r.get('delivery_text') or '').strip():
+            ln['delivery_text'] = str(r['delivery_text']).strip()[:200]
+        if total is not None:
+            ln['checkout_total_cents'] = total
+        if r.get('status') == 'loss_after_delivery' and total is not None:
+            spend = int(ln.get('cost_cents') or 0) + int(ln.get('shipping_cents') or 0)
+            ln['checkout_extra_cents'] = total - spend
+            extra += total - spend
+            fee_txt = 'free' if fee == 0 else money(fee) if fee is not None else 'not shown'
+            notes.append(f"{ln.get('sku')}: checkout total {money(total)} with delivery {fee_txt}")
+    check.lines_json = lines
+    if notes and check.earning_cents is not None:
+        check.earning_cents -= extra
+    return notes
+
+
 def apply_purchase_result(run) -> None:
     """Called when a purchase job finishes: copy the bot's per-line result onto the order."""
     from .models import MarketplaceOrder, OrderPurchaseCheck, PurchaseStatus
@@ -532,7 +614,8 @@ def apply_purchase_result(run) -> None:
             problems.append(f'{s}: the laptop bot stopped before finishing this item'
                             + (f' ({tail[:400]})' if tail else ''))
         elif r.get('status') != 'purchased':
-            problems.append(f"{s}: {r.get('status')}" + (f" ({r.get('error')})" if r.get('error') else ''))
+            label = BOT_STATUS_LABELS.get(r.get('status')) or r.get('status')
+            problems.append(f"{s}: {label}" + (f" ({r.get('error')})" if r.get('error') else ''))
         elif r.get('error'):
             problems.append(f"{s}: {r.get('error')}")
     if not rows and run.status in ('failed', 'rejected', 'cancelled'):
@@ -540,6 +623,17 @@ def apply_purchase_result(run) -> None:
         problems.append(f'Laptop job {run.status}' + (f": {' / '.join(tail)}" if tail else ''))
 
     check.vendor_order_number = ', '.join(numbers)[:255]
+    loss_notes = _apply_delivery(check, by_sku)
+    fields = ['purchase_status', 'purchased_at', 'purchase_error', 'vendor_order_number', 'lines_json', 'updated_at']
+    if loss_notes:
+        # Not bought because of the delivery fee: the order now shows as a loss for review (Force process).
+        from .auto_purchase_check import _money as money
+        from .models import PurchaseCheckStatus
+
+        check.status = PurchaseCheckStatus.BLOCKED
+        check.reasons = [f'Loss: earning {money(check.earning_cents)} after the delivery fee at checkout ('
+                         + '; '.join(loss_notes) + ')']
+        fields += ['status', 'reasons', 'earning_cents']
     if bought and len(bought) == len(wanted):
         check.purchase_status = PurchaseStatus.PURCHASED
         check.purchased_at = timezone.now()
@@ -557,7 +651,7 @@ def apply_purchase_result(run) -> None:
                                     + ('; '.join(problems) or 'nothing bought.'))[:1000]
         else:
             check.purchase_error = '; '.join(problems) or 'The laptop did not buy this order.'
-    check.save(update_fields=['purchase_status', 'purchased_at', 'purchase_error', 'vendor_order_number', 'updated_at'])
+    check.save(update_fields=fields)
     logger.info('Auto purchase result order %s: %s %s', run.marketplace_order_id, check.purchase_status,
                 check.vendor_order_number)
 

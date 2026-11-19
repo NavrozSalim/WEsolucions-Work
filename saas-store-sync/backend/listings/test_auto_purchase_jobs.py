@@ -35,6 +35,8 @@ def xlsx_rows(content: bytes):
 def result_xlsx(rows):
     cols = ['order_id', 'sku', 'buy_qty', 'vendor', 'vendor_url', 'stock_seen', 'status',
             'vendor_order_number', 'error', 'screenshot']
+    cols += [k for k in ('delivery_date', 'delivery_days', 'delivery_fee', 'delivery_text', 'checkout_total')
+             if any(k in r for r in rows)]
     wb = openpyxl.Workbook()
     wb.active.append(cols)
     for r in rows:
@@ -251,6 +253,84 @@ class AutoPurchaseJobTests(TestCase):
         self.assertIn('price_changed', c.purchase_error)
         self.assertIn('34.00', c.purchase_error)
         self.assertEqual(self.c.post(self.url(f'{order.id}/process/')).status_code, 202)
+
+    # ------------------------------------------------------------------ delivery and profit at checkout
+
+    def costed_order(self, key='TJPQ6RDG'):
+        return self.buyable_order(key, lines=[
+            {'sku': 'TFS-KAZ-1-New', 'quantity': 1, 'priceCents': 5921, 'vendor_url': 'https://www.amazon.com.au/dp/B01',
+             'vendor_id': 'B01', 'vendor_price_cents': 3000, 'cost_cents': 3000, 'shipping_cents': 0, 'result': 'ok'},
+            {'sku': 'TFS-KAZ-2-New', 'quantity': 2, 'priceCents': 1649, 'vendor_url': 'https://www.amazon.com.au/dp/B02',
+             'vendor_id': 'B02', 'vendor_price_cents': 800, 'cost_cents': 1600, 'shipping_cents': 0, 'result': 'ok'},
+        ])
+
+    def test_mapping_max_total_keeps_the_order_in_profit(self):
+        order = self.costed_order()
+        self.c.post(self.url(f'{order.id}/process/'))
+        mapping = xlsx_rows(b''.join(self.laptop.get(self.claim()['files']['mapping']).streaming_content))
+        # earning 10.00 shared by cost (30.00 / 16.00), less 1 cent: the order cannot go below +0.01
+        self.assertEqual([(r['SKU'], r['Max Price'], r['Max Total']) for r in mapping],
+                         [('TFS-KAZ-1-New', '30.00', '36.51'), ('TFS-KAZ-2-New', '8.00', '19.48')])
+
+    def test_no_max_total_without_a_known_profit(self):
+        from listings.auto_purchase_jobs import line_max_totals
+
+        check = OrderPurchaseCheck(lines_json=[{'cost_cents': 3000}], earning_cents=-250)
+        self.assertEqual(line_max_totals(check), [None])
+        check.earning_cents = None
+        self.assertEqual(line_max_totals(check), [None])
+
+    def test_purchase_saves_delivery_date_and_shows_late_delivery(self):
+        order = self.costed_order()
+        self.c.post(self.url(f'{order.id}/process/'))
+        self.complete(self.claim(), 0, done=[
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-1-New', 'status': 'purchased', 'vendor_order_number': '249-1',
+             'delivery_date': '2026-11-26', 'delivery_days': 7, 'delivery_fee': 0, 'delivery_text': 'Thursday 26 Nov FREE',
+             'checkout_total': 30.0},
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-2-New', 'status': 'purchased', 'vendor_order_number': '249-1',
+             'delivery_date': '2026-12-03', 'delivery_days': 14, 'delivery_fee': 0, 'delivery_text': 'Thursday 3 Dec FREE',
+             'checkout_total': 16.0},
+        ], remaining=[])
+        c = self.check(order)
+        self.assertEqual(c.purchase_status, 'purchased')
+        self.assertEqual(c.lines_json[1]['delivery_date'], '2026-12-03')
+        listed = {o['invoice_number']: o for o in self.c.get(self.url()).data['orders']}
+        delivery = listed['TJPQ6RDG']['purchase_check']['delivery']
+        self.assertEqual((delivery['date'], delivery['days'], delivery['late'], delivery['fee_cents']),
+                         ('2026-12-03', 14, True, 0))
+
+    def test_delivery_fee_loss_is_shown_for_review_and_can_be_forced(self):
+        order = self.costed_order()
+        self.c.post(self.url(f'{order.id}/process/'))
+        self.complete(self.claim(), 0, done=[], remaining=[
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-1-New', 'status': 'loss_after_delivery',
+             'error': 'checkout total 44.99 (delivery 14.99) is above Max Total 36.51', 'delivery_date': '2026-11-24',
+             'delivery_days': 5, 'delivery_fee': 14.99, 'checkout_total': 44.99},
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-2-New', 'status': ''},
+        ])
+        c = self.check(order)
+        self.assertEqual((c.purchase_status, c.status, c.earning_cents), ('failed', 'blocked', 1000 - 1499))
+        self.assertTrue(c.reasons[0].startswith('Loss: earning -4.99 after the delivery fee at checkout'))
+        self.assertIn('Loss after the delivery fee at checkout, not bought', c.purchase_error)
+        listed = {o['invoice_number']: o for o in self.c.get(self.url()).data['orders']}
+        self.assertTrue(listed['TJPQ6RDG']['purchase_check']['can_force'])
+        res = self.c.post(self.url(f'{order.id}/process/'), {'force': True}, format='json')
+        self.assertEqual(res.status_code, 202, res.data)
+        mapping = xlsx_rows(b''.join(self.laptop.get(self.claim()['files']['mapping']).streaming_content))
+        self.assertEqual([r['Max Total'] for r in mapping], [None, None])  # forced: no profit guard
+
+    def test_delivery_too_late_is_a_failed_purchase_with_the_reason(self):
+        order = self.costed_order()
+        self.c.post(self.url(f'{order.id}/process/'))
+        self.complete(self.claim(), 0, done=[], remaining=[
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-1-New', 'status': 'delivery_too_late',
+             'error': 'not bought: earliest delivery is Mon 07 Dec 2026 (18 days); more than 15 days'},
+            {'order_id': 'TJPQ6RDG', 'sku': 'TFS-KAZ-2-New', 'status': ''},
+        ])
+        c = self.check(order)
+        self.assertEqual((c.purchase_status, c.status), ('failed', 'buyable'))
+        self.assertIn('Delivery too late, not bought', c.purchase_error)
+        self.assertIn('18 days', c.purchase_error)
 
     def test_partly_bought_order_is_locked(self):
         order = self.buyable_order()
