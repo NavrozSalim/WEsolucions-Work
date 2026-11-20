@@ -185,6 +185,81 @@ export function TrackingCell({ order, onReplace, onGet, gettingId }) {
     );
 }
 
+const DETAIL_STATUS = {
+    queued: 'Waiting for the Tracking Bot',
+    not_shipped: 'Not shipped yet',
+    partly: 'Some packages not shipped yet',
+    found: 'Tracking found',
+    cancelled: 'Cancelled at Amazon',
+    failed: "Couldn't read the tracking",
+};
+
+/** Order details (Shipping / tracking card): the vendor's tracking numbers, where each came from, history. */
+export function TrackingDetails({ tracking, formatDate, onReplace }) {
+    const t = tracking;
+    if (!t) return null;
+    const current = t.current || [];
+    const replaced = t.replaced || [];
+    const warning = nameWarning(t.note);
+    const status = t.pending ? DETAIL_STATUS.queued : DETAIL_STATUS[t.status] || 'Not checked yet';
+    const note = (t.note || '').replace(/^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}: /, '');
+    return (
+        <div className="mb-3">
+            <p className="mb-1.5 text-xs font-medium text-slate-500 dark:text-slate-400">Vendor tracking (Tracking Bot)</p>
+            {current.length > 0 ? (
+                <ul className="space-y-1.5">
+                    {current.map((row) => (
+                        <li key={row.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md bg-slate-50 px-2.5 py-1.5 dark:bg-slate-800/60">
+                            <CopyChip value={row.tracking_number} />
+                            <span className="text-slate-700 dark:text-slate-300">{row.carrier || 'Carrier not shown'}</span>
+                            <span className="text-xs text-slate-500 dark:text-slate-400">
+                                {row.source === 'user' ? 'entered by you' : 'read by the Tracking Bot'}
+                                {row.vendor_order_number ? ` · order ${row.vendor_order_number}` : ''}
+                                {row.created_at ? ` · ${formatDate(row.created_at)}` : ''}
+                            </span>
+                            {onReplace && (
+                                <button
+                                    type="button"
+                                    onClick={() => onReplace(row)}
+                                    className="ml-auto inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium text-accent-600 hover:bg-slate-100 dark:text-accent-400 dark:hover:bg-slate-800"
+                                >
+                                    <Pencil className="h-3 w-3" />
+                                    Replace
+                                </button>
+                            )}
+                        </li>
+                    ))}
+                </ul>
+            ) : (
+                <p className="text-slate-500 dark:text-slate-400">No vendor tracking yet.</p>
+            )}
+            {replaced.length > 0 && (
+                <ul className="mt-1.5 space-y-0.5 text-xs text-slate-500 dark:text-slate-400">
+                    {replaced.map((row) => (
+                        <li key={row.id} className="flex items-center gap-1">
+                            <History className="h-3 w-3" />
+                            <span className="font-mono line-through">{row.tracking_number}</span>
+                            {row.carrier ? ` (${row.carrier})` : ''}
+                            {row.replaced_at ? ` · replaced ${formatDate(row.replaced_at)}` : ' · replaced'}
+                        </li>
+                    ))}
+                </ul>
+            )}
+            {warning && (
+                <p className="mt-1.5 flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                    {warning}
+                </p>
+            )}
+            <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
+                {status}
+                {t.checked_at ? ` · last checked ${formatDate(t.checked_at)}` : ''}
+                {note && !warning && t.status !== 'found' ? ` · ${note}` : ''}
+            </p>
+        </div>
+    );
+}
+
 const BOTS = [['order', 'Order bot'], ['tracking', 'Tracking Bot'], ['inventory', 'Inventory bot']];
 
 function trackingRunText(run) {
