@@ -1524,6 +1524,93 @@ class StoreOrderRecheckOrderIdView(APIView):
                         status=status.HTTP_202_ACCEPTED)
 
 
+def _tracking_response(order, message, code=status.HTTP_200_OK):
+    from .order_tracking import tracking_payload
+
+    order = MarketplaceOrder.objects.select_related('purchase_check').prefetch_related('trackings').get(pk=order.pk)
+    try:
+        check = order.purchase_check
+    except Exception:
+        check = None
+    return Response({'message': message, 'tracking': tracking_payload(order, check)}, status=code)
+
+
+class StoreOrdersGetTrackingView(APIView):
+    """Get tracking (whole store): the Tracking Bot reads tracking for every purchased order not yet tracked."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk):
+        from stores.auto_order_bot import laptop_online
+
+        from .order_tracking import due_checks, start_tracking
+
+        store = _get_store(request, store_pk)
+        due = due_checks(store)
+        if not due:
+            return Response({'message': 'No purchased orders are waiting for tracking (orders bought in the last '
+                                        '30 days with an Amazon AU order number).', 'queued': 0})
+        runs = start_tracking(store, request.user, due)
+        if not runs:
+            return Response({'detail': "No purchase account for these orders' vendor on the store's Auto "
+                                       'Purchasing step.'}, status=status.HTTP_400_BAD_REQUEST)
+        msg = f'Getting tracking for {len(due)} order(s) on the laptop (Tracking Bot).'
+        if not laptop_online(store.user or request.user):
+            msg += ' No laptop is online right now; it runs when the Tracking Bot is running.'
+        return Response({'message': msg, 'queued': len(due)}, status=status.HTTP_202_ACCEPTED)
+
+
+class StoreOrderGetTrackingView(APIView):
+    """Get tracking on one purchased order."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk, pk):
+        from stores.auto_order_bot import laptop_online
+
+        from .auto_purchase_jobs import AutoPurchaseError
+        from .order_tracking import start_order_tracking
+
+        store = _get_store(request, store_pk)
+        order = MarketplaceOrder.objects.filter(store=store, id=pk).first()
+        if order is None:
+            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            start_order_tracking(order, request.user)
+        except AutoPurchaseError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        msg = f'Getting the tracking of {order.invoice_number} on the laptop (Tracking Bot).'
+        if not laptop_online(store.user or request.user):
+            msg += ' No laptop is online right now; it runs when the Tracking Bot is running.'
+        return _tracking_response(order, msg, status.HTTP_202_ACCEPTED)
+
+
+class StoreOrderTrackingView(APIView):
+    """Replace a tracking number (or add one): ``tracking_id`` of the number to replace, ``tracking_number``,
+    optional ``carrier``. The old number is kept as history; the bot no longer changes this order."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk, pk):
+        from django.core.exceptions import ValidationError
+
+        from .auto_purchase_jobs import AutoPurchaseError
+        from .order_tracking import replace_tracking
+
+        store = _get_store(request, store_pk)
+        order = MarketplaceOrder.objects.filter(store=store, id=pk).first()
+        if order is None:
+            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        tracking_id = (str(request.data.get('tracking_id') or '').strip()) or None
+        try:
+            new = replace_tracking(order, request.user, request.data.get('tracking_number'),
+                                   request.data.get('carrier'), tracking_id)
+        except AutoPurchaseError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        except ValidationError:
+            return Response({'detail': 'That tracking number was not found. Reload the page.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        what = 'replaced' if new.replaces_id else 'saved'
+        return _tracking_response(order, f'Tracking {new.tracking_number} {what} for {order.invoice_number}.')
+
+
 class StoreOrderStopView(APIView):
     """Auto Purchasing Stop: cancel the laptop run that is buying this order (the laptop kills the bot)."""
     permission_classes = [IsAuthenticated]
@@ -1634,7 +1721,7 @@ class StoreOrdersView(APIView):
         orders = list(
             MarketplaceOrder.objects.filter(store=store)
             .select_related('purchase_check', 'store')
-            .prefetch_related('shipments')
+            .prefetch_related('shipments', 'trackings')
         )
         tickets_by_order_key: dict[str, list] = {}
         for ticket in SupportTicket.objects.filter(store=store).exclude(

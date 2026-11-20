@@ -538,6 +538,7 @@ class AutoOrderRun(models.Model):
         FETCH_ORDERS = 'fetch_orders', 'Fetch orders file'
         PURCHASE = 'purchase', 'Buy one order'
         LOOKUP_ORDER = 'lookup_order', 'Find vendor order number'
+        TRACKING = 'tracking', 'Get tracking numbers'
 
     kind = models.CharField(
         max_length=20, choices=Kind.choices, default=Kind.RUN, db_index=True,

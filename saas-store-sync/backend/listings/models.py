@@ -301,6 +301,15 @@ class PurchaseStatus(models.TextChoices):
     FAILED = 'failed', 'Purchase failed'
 
 
+class TrackingStatus(models.TextChoices):
+    QUEUED = 'queued', 'Waiting for the Tracking Bot'
+    NOT_SHIPPED = 'not_shipped', 'Not shipped yet'
+    PARTLY = 'partly', 'Some packages shipped'
+    FOUND = 'found', 'Tracking found'
+    CANCELLED = 'cancelled', 'Cancelled at the vendor'
+    FAILED = 'failed', 'Tracking not read'
+
+
 # A purchase in these states must not be started again or re-checked.
 PURCHASE_LOCKED = (PurchaseStatus.QUEUED, PurchaseStatus.PURCHASING, PurchaseStatus.PURCHASED)
 
@@ -349,11 +358,53 @@ class OrderPurchaseCheck(models.Model):
     forced_at = models.DateTimeField(null=True, blank=True)
     forced_loss_cents = models.IntegerField(null=True, blank=True)
 
+    # Tracking Bot: the laptop reads the vendor's tracking number of a purchased order.
+    tracking_status = models.CharField(
+        max_length=20, choices=TrackingStatus.choices, blank=True, default='', db_index=True,
+    )
+    tracking_run_id = models.UUIDField(null=True, blank=True, help_text='stores.AutoOrderRun that reads the tracking.')
+    tracking_checked_at = models.DateTimeField(null=True, blank=True)
+    tracking_note = models.TextField(blank=True, default='')
+
     class Meta:
         db_table = 'listings_orderpurchasecheck'
 
     def __str__(self):
         return f"Purchase check {self.status} for order {self.order_id}"
+
+
+class OrderTracking(models.Model):
+    """A vendor tracking number of a purchased order: read by the Tracking Bot or typed by the user (Replace).
+
+    A replaced number is kept (``replaced_at`` set) so the order shows what it was before.
+    """
+    class Source(models.TextChoices):
+        BOT = 'bot', 'Tracking Bot'
+        USER = 'user', 'Entered by user'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    order = models.ForeignKey(MarketplaceOrder, on_delete=models.CASCADE, related_name='trackings')
+    vendor_order_number = models.CharField(max_length=255, blank=True, default='')
+    tracking_number = models.CharField(max_length=255)
+    carrier = models.CharField(max_length=255, blank=True, default='')
+    ship_name = models.CharField(max_length=255, blank=True, default='', help_text="Name on the vendor's tracking page.")
+    source = models.CharField(max_length=10, choices=Source.choices, default=Source.BOT)
+    replaces = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    replaced_at = models.DateTimeField(null=True, blank=True)
+    replaced_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'listings_ordertracking'
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"Tracking {self.tracking_number} for order {self.order_id}"
 
 
 class TicketStatus(models.TextChoices):

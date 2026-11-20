@@ -419,3 +419,18 @@ def check_auto_purchase_orders(store_id: str, order_ids: list):
     counts = run_purchase_checks(store_id, order_ids)
     logger.info("Auto purchase check store=%s: %s", store_id, counts)
     return counts
+
+
+@shared_task(name="listings.queue_order_tracking", ignore_result=True)
+def queue_order_tracking():
+    """Every few hours: a Tracking Bot job for each auto-purchase store with purchased orders not yet tracked."""
+    from .order_tracking import start_tracking
+
+    queued = 0
+    for store in Store.objects.filter(is_active=True, user__isnull=False).exclude(auto_buy_vendor=""):
+        try:
+            queued += len(start_tracking(store, auto=True))
+        except Exception:
+            logger.exception("Tracking Bot schedule failed store=%s", store.id)
+    logger.info("Tracking Bot schedule: %d job(s) queued", queued)
+    return queued

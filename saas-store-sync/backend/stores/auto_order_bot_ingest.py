@@ -73,6 +73,11 @@ class NextJobView(_Base):
             )
             if token.created_by_id:
                 qs = qs.filter(store__user_id=token.created_by_id)
+            # The other agent on the laptop has the account's Chrome profile open: wait for it.
+            for kind in kinds:
+                busy = bot.busy_accounts(kind, token.created_by_id)
+                if busy:
+                    qs = qs.exclude(kind=kind, account_name__in=busy)
             run = qs.select_related('store').order_by('started_at').first()
             if run is not None:
                 run.status = AutoOrderRun.Status.RUNNING

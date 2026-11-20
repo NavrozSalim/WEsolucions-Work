@@ -339,6 +339,12 @@ export const setVendorOrderNumber = (storeId, orderId, vendorOrderNumber) =>
     api.post(`/stores/${storeId}/orders/${orderId}/vendor-order-number/`, { vendor_order_number: vendorOrderNumber });
 /** Auto Purchasing: the laptop finds a processed order's vendor order number in the vendor's order list. */
 export const recheckOrderId = (storeId, orderId) => api.post(`/stores/${storeId}/orders/${orderId}/recheck-order-id/`);
+/** Tracking Bot: read tracking for every purchased order not yet tracked (whole store). */
+export const getStoreTracking = (storeId) => api.post(`/stores/${storeId}/orders/get-tracking/`);
+/** Tracking Bot: read the tracking of one purchased order. */
+export const getOrderTracking = (storeId, orderId) => api.post(`/stores/${storeId}/orders/${orderId}/get-tracking/`);
+/** Replace a tracking number (tracking_id) or add one: { tracking_id, tracking_number, carrier }. */
+export const saveOrderTracking = (storeId, orderId, data) => api.post(`/stores/${storeId}/orders/${orderId}/tracking/`, data);
 /** Auto Purchasing: buy every order that is in profit with no errors. */
 export const processAllOrders = (storeId, vendor = '') => api.post(`/stores/${storeId}/orders/process-all/`, vendor ? { vendor } : {});
 /** Orders of the user's deleted stores (kept 7 days) and linking them to this store. */

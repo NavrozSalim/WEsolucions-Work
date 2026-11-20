@@ -43,11 +43,15 @@ import {
     setVendorOrderNumber,
     recheckOrderId,
     recheckOrderPurchase,
+    getOrderTracking,
+    getStoreTracking,
+    saveOrderTracking,
     startOrdersFetch,
     submitOrderShipping,
 } from '../../services/listingService';
 import ConfirmModal from '../../components/ui/ConfirmModal';
 import { AttentionNote, PurchaseCheckBadge, PurchaseCheckPanel, purchaseLocked } from './PurchaseCheck';
+import { ReplaceTrackingModal, TrackingCell } from './OrderTracking';
 
 const STATUS_STYLES = {
     new: 'bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300',
@@ -1478,6 +1482,51 @@ export default function Orders() {
             .finally(() => setRecheckingOrderIdId(null));
     };
 
+    // Tracking Bot: Get tracking (one order or the whole store) and Replace / Add a tracking number.
+    const [gettingTrackingId, setGettingTrackingId] = useState(null);
+    const [trackingEdit, setTrackingEdit] = useState(null); // { order, tracking } (tracking null = add)
+    const [savingTracking, setSavingTracking] = useState(false);
+    const setOrderTracking = (orderId, tracking) => {
+        if (tracking) setOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, tracking } : o)));
+    };
+    const handleGetTracking = (order) => {
+        if (!selectedStore) return;
+        const store = selectedStore;
+        setGettingTrackingId(order ? order.id : 'all');
+        (order ? getOrderTracking(store, order.id) : getStoreTracking(store))
+            .then((res) => {
+                setMessage({ text: res.data?.message || 'Getting tracking on the laptop.', variant: 'success' });
+                if (order) {
+                    setOrderTracking(order.id, res.data?.tracking);
+                    return null;
+                }
+                if (!res.data?.queued) return null;
+                return getOrders(store).then((r) => {
+                    if (isCurrentStore(store) && Array.isArray(r?.data?.orders)) setOrders(r.data.orders);
+                });
+            })
+            .catch((err) => {
+                setMessage({ text: err.response?.data?.detail || 'Could not start Get tracking.', variant: 'error' });
+            })
+            .finally(() => setGettingTrackingId(null));
+    };
+    const submitTracking = (data) => {
+        const edit = trackingEdit;
+        if (!edit || !selectedStore) return;
+        setSavingTracking(true);
+        saveOrderTracking(selectedStore, edit.order.id, data)
+            .then((res) => {
+                setMessage({ text: res.data?.message || 'Tracking saved.', variant: 'success' });
+                setOrderTracking(edit.order.id, res.data?.tracking);
+                setTrackingEdit(null);
+            })
+            .catch((err) => {
+                setMessage({ text: err.response?.data?.detail || 'Could not save the tracking number.', variant: 'error' });
+            })
+            .finally(() => setSavingTracking(false));
+    };
+    const showTracking = !!selectedStoreData?.auto_buy_vendor;
+
     // Process all: every order that is ready to buy (in profit, no errors, not bought yet).
     const readyToBuy = orders.filter((o) => !o.is_history && o.purchase_check?.status === 'buyable'
         && !purchaseLocked(o.purchase_check));
@@ -1930,6 +1979,17 @@ export default function Orders() {
                                     <RefreshCw className={`mr-1.5 h-4 w-4 ${recheckingId === 'all' ? 'animate-spin' : ''}`} />
                                     Recheck all
                                 </Button>
+                                <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    className="w-full justify-center sm:w-auto"
+                                    onClick={() => handleGetTracking(null)}
+                                    disabled={gettingTrackingId === 'all'}
+                                    title="The Tracking Bot reads Amazon tracking for every purchased order that has none yet (also runs every 3 hours)"
+                                >
+                                    <Truck className={`mr-1.5 h-4 w-4 ${gettingTrackingId === 'all' ? 'animate-pulse' : ''}`} />
+                                    {gettingTrackingId === 'all' ? 'Sending…' : 'Get tracking'}
+                                </Button>
                             </>
                         )}
                         <Button
@@ -2084,6 +2144,11 @@ export default function Orders() {
                                                     <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
                                                         {itemsSummary(o)} · {formatDate(orderedAt, orderDateTz)}
                                                     </p>
+                                                    {showTracking && o.tracking && (
+                                                        <div className="mt-2">
+                                                            <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} />
+                                                        </div>
+                                                    )}
                                                 </div>
                                                 <div className="shrink-0 text-right">
                                                     <p className="text-sm font-semibold tabular-nums text-slate-900 dark:text-slate-100">
@@ -2184,6 +2249,7 @@ export default function Orders() {
                                             <th className="px-4 py-2.5">Source</th>
                                             <th className="px-4 py-2.5">Total</th>
                                             <th className="px-4 py-2.5">Status</th>
+                                            {showTracking && <th className="px-4 py-2.5">Tracking</th>}
                                             <th className="px-4 py-2.5">Ticket</th>
                                             <th className="px-4 py-2.5 text-right">Actions</th>
                                         </tr>
@@ -2240,6 +2306,11 @@ export default function Orders() {
                                                                 </p>
                                                             )}
                                                         </td>
+                                                        {showTracking && (
+                                                            <td className="px-4 py-2.5 align-top">
+                                                                <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} />
+                                                            </td>
+                                                        )}
                                                         <td className="px-4 py-2.5">
                                                             {primaryTicket ? (
                                                                 <button
@@ -2317,7 +2388,7 @@ export default function Orders() {
                                                     </tr>
                                                     {expandedId === o.id && (
                                                         <tr className="border-t border-slate-100 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/40">
-                                                            <td colSpan={9} className="px-4 py-4">
+                                                            <td colSpan={showTracking ? 10 : 9} className="px-4 py-4">
                                                                 <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} onRecheckOrderId={selectedStoreData?.auto_buy_vendor ? handleRecheckOrderId : null} recheckingOrderIdId={recheckingOrderIdId} />
                                                             </td>
                                                         </tr>
@@ -2333,6 +2404,14 @@ export default function Orders() {
                 </div>
             )}
 
+            <ReplaceTrackingModal
+                open={!!trackingEdit}
+                order={trackingEdit?.order}
+                tracking={trackingEdit?.tracking}
+                loading={savingTracking}
+                onClose={() => setTrackingEdit(null)}
+                onSubmit={submitTracking}
+            />
             <ShippingModal
                 open={!!shippingOrder}
                 order={shippingOrder}

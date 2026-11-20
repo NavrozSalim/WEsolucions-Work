@@ -138,6 +138,10 @@ def finish_run(run: AutoOrderRun, exit_code: int | None, stdout: str) -> None:
         from listings.auto_purchase_jobs import apply_lookup_result
 
         apply_lookup_result(run)
+    elif run.kind == AutoOrderRun.Kind.TRACKING:
+        from listings.order_tracking import apply_tracking_result
+
+        apply_tracking_result(run)
 
 
 def execute_run(run_id) -> None:
@@ -167,6 +171,25 @@ def runner_mode() -> str:
 ACTIVE = (AutoOrderRun.Status.PENDING, AutoOrderRun.Status.RUNNING)
 LAPTOP_SCOPE = 'order-bot'
 ONLINE_SECONDS = 120
+
+
+# The Tracking Bot and the order bot are two agents on the same laptop that open the same Chrome profiles.
+# Chrome allows one window per profile, so a job is not handed out while the other agent's job runs on the
+# same purchase account. A run claimed longer ago than this is assumed dead and no longer holds the profile.
+PROFILE_LOCK_MINUTES = 90
+
+
+def busy_accounts(kind: str, user_id=None) -> set:
+    """Purchase accounts in use by the *other* agent (tracking vs. order bot), for a job of ``kind``."""
+    tracking = AutoOrderRun.Kind.TRACKING
+    qs = AutoOrderRun.objects.filter(
+        status=AutoOrderRun.Status.RUNNING,
+        claimed_at__gte=timezone.now() - timedelta(minutes=PROFILE_LOCK_MINUTES),
+    ).exclude(account_name='')
+    qs = qs.exclude(kind=tracking) if kind == tracking else qs.filter(kind=tracking)
+    if user_id:
+        qs = qs.filter(store__user_id=user_id)
+    return set(qs.values_list('account_name', flat=True))
 
 
 def laptop_online(user) -> bool:
@@ -210,6 +233,10 @@ def expire_stale(runs) -> None:
             from listings.auto_purchase_jobs import mark_stale_purchase
 
             mark_stale_purchase(r)
+        elif r.kind == AutoOrderRun.Kind.TRACKING:
+            from listings.order_tracking import mark_stale_tracking
+
+            mark_stale_tracking(r)
 
 
 # ---- saved files: mapping is kept until replaced, the order export is kept for one day -----------------

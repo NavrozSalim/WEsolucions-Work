@@ -75,6 +75,11 @@ app.conf.beat_schedule = {
         'task': 'listings.fetch_au_store_orders',
         'schedule': crontab(minute=20),
     },
+    # Tracking Bot: every 3 hours, queue tracking jobs for purchased auto-buy orders (the laptop runs them).
+    'queue-order-tracking': {
+        'task': 'listings.queue_order_tracking',
+        'schedule': crontab(minute=40, hour='*/3'),
+    },
 }
 
 
