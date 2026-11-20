@@ -1525,7 +1525,6 @@ export default function Orders() {
             })
             .finally(() => setSavingTracking(false));
     };
-    const showTracking = !!selectedStoreData?.auto_buy_vendor;
 
     // Process all: every order that is ready to buy (in profit, no errors, not bought yet).
     const readyToBuy = orders.filter((o) => !o.is_history && o.purchase_check?.status === 'buyable'
@@ -1669,6 +1668,8 @@ export default function Orders() {
         () => stores.find((s) => s.id === selectedStore),
         [stores, selectedStore]
     );
+    // Tracking column (Tracking Bot) on auto-buy stores. Must come after selectedStoreData is set.
+    const showTracking = !!selectedStoreData?.auto_buy_vendor;
 
     // Process all by vendor. The vendor an order is bought from (same rule as the server):
     // its lines' vendor, else the store's.
