@@ -305,6 +305,29 @@ def replace_tracking(order, user, number: str, carrier: str = '', tracking_id=No
     return new
 
 
+def last_tracking_run(store) -> dict | None:
+    """The store's latest tracking job for the status line: status, when, orders and numbers read."""
+    from stores.models import AutoOrderRun
+
+    run = AutoOrderRun.objects.filter(store=store, kind=AutoOrderRun.Kind.TRACKING).order_by('-started_at').first()
+    if run is None:
+        return None
+    rows = run.done_rows or []
+    from .models import OrderPurchaseCheck
+
+    return {
+        'id': str(run.id),
+        'status': run.status,
+        'laptop': run.laptop or '',
+        'started_at': run.started_at.isoformat() if run.started_at else None,
+        'finished_at': run.finished_at.isoformat() if run.finished_at else None,
+        'orders': OrderPurchaseCheck.objects.filter(tracking_run_id=run.id).count(),
+        'found': sum(1 for r in rows if r.get('status') == 'found' and r.get('tracking_number')),
+        'error': (run.stdout or '').strip().splitlines()[-1][:300] if run.status in ('failed', 'rejected') and
+        (run.stdout or '').strip() else '',
+    }
+
+
 def tracking_payload(order, check=None) -> dict:
     """What the Orders page shows: current numbers, replaced ones, and the bot's status for the order."""
     rows = list(order.trackings.all())

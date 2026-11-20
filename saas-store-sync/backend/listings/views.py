@@ -1423,12 +1423,10 @@ class StoreOrderFetchView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, store_pk):
-        from stores.auto_order_bot import laptop_online
-
         from .auto_purchase_jobs import latest_fetch, run_payload
 
         store = _get_store(request, store_pk)
-        return Response({'fetch': run_payload(latest_fetch(store)), 'laptop_online': laptop_online(store.user or request.user)})
+        return Response({'fetch': run_payload(latest_fetch(store)), **_bots_payload(store, request.user)})
 
     def post(self, request, store_pk):
         from stores.auto_order_bot import laptop_online
@@ -1444,8 +1442,19 @@ class StoreOrderFetchView(APIView):
         msg = 'Fetch sent to the worker laptop.' if created else 'A fetch is already waiting for the laptop.'
         if not online:
             msg += ' No laptop is online right now; it starts when the laptop agent is running.'
-        return Response({'fetch': run_payload(run), 'laptop_online': online, 'message': msg},
+        return Response({'fetch': run_payload(run), **_bots_payload(store, request.user), 'message': msg},
                         status=status.HTTP_202_ACCEPTED if created else status.HTTP_200_OK)
+
+
+def _bots_payload(store, user) -> dict:
+    """Orders page status line: which bots are online and the store's last tracking job."""
+    from stores.auto_order_bot import bots_status
+
+    from .order_tracking import last_tracking_run
+
+    bots = bots_status(store.user or user)
+    # laptop_online: the order bot (kept for older pages); the Tracking Bot may share its token.
+    return {'laptop_online': bots['order']['online'], 'bots': bots, 'tracking_run': last_tracking_run(store)}
 
 
 class StoreOrderProcessView(APIView):
@@ -1540,7 +1549,7 @@ class StoreOrdersGetTrackingView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, store_pk):
-        from stores.auto_order_bot import laptop_online
+        from stores.auto_order_bot import bots_status
 
         from .order_tracking import due_checks, start_tracking
 
@@ -1554,8 +1563,8 @@ class StoreOrdersGetTrackingView(APIView):
             return Response({'detail': "No purchase account for these orders' vendor on the store's Auto "
                                        'Purchasing step.'}, status=status.HTTP_400_BAD_REQUEST)
         msg = f'Getting tracking for {len(due)} order(s) on the laptop (Tracking Bot).'
-        if not laptop_online(store.user or request.user):
-            msg += ' No laptop is online right now; it runs when the Tracking Bot is running.'
+        if not bots_status(store.user or request.user)['tracking']['online']:
+            msg += ' The Tracking Bot is not online right now; it runs when the Tracking Bot agent is running.'
         return Response({'message': msg, 'queued': len(due)}, status=status.HTTP_202_ACCEPTED)
 
 
@@ -1564,7 +1573,7 @@ class StoreOrderGetTrackingView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, store_pk, pk):
-        from stores.auto_order_bot import laptop_online
+        from stores.auto_order_bot import bots_status
 
         from .auto_purchase_jobs import AutoPurchaseError
         from .order_tracking import start_order_tracking
@@ -1578,8 +1587,8 @@ class StoreOrderGetTrackingView(APIView):
         except AutoPurchaseError as exc:
             return Response({'detail': str(exc)}, status=exc.status_code)
         msg = f'Getting the tracking of {order.invoice_number} on the laptop (Tracking Bot).'
-        if not laptop_online(store.user or request.user):
-            msg += ' No laptop is online right now; it runs when the Tracking Bot is running.'
+        if not bots_status(store.user or request.user)['tracking']['online']:
+            msg += ' The Tracking Bot is not online right now; it runs when the Tracking Bot agent is running.'
         return _tracking_response(order, msg, status.HTTP_202_ACCEPTED)
 
 

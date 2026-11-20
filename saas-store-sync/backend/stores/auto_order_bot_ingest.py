@@ -67,6 +67,7 @@ class NextJobView(_Base):
     def get(self, request):
         token = self.token(request)
         kinds = _agent_kinds(request)
+        bot.note_poll(token, kinds)  # the Orders page shows which agent is online
         with transaction.atomic():
             qs = AutoOrderRun.objects.select_for_update(skip_locked=True).filter(
                 status=AutoOrderRun.Status.PENDING, kind__in=kinds,

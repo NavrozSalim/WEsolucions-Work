@@ -51,7 +51,7 @@ import {
 } from '../../services/listingService';
 import ConfirmModal from '../../components/ui/ConfirmModal';
 import { AttentionNote, PurchaseCheckBadge, PurchaseCheckPanel, purchaseLocked } from './PurchaseCheck';
-import { ReplaceTrackingModal, TrackingCell } from './OrderTracking';
+import { BotStatusLine, ReplaceTrackingModal, TrackingCell } from './OrderTracking';
 
 const STATUS_STYLES = {
     new: 'bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300',
@@ -1501,6 +1501,11 @@ export default function Orders() {
                     return null;
                 }
                 if (!res.data?.queued) return null;
+                getOrdersFetch(store).then((r) => {
+                    if (!isCurrentStore(store)) return;
+                    takeBotStatus(r.data);
+                    trackingRunRef.current = r.data?.tracking_run || null;
+                }).catch(() => {});
                 return getOrders(store).then((r) => {
                     if (isCurrentStore(store) && Array.isArray(r?.data?.orders)) setOrders(r.data.orders);
                 });
@@ -1697,21 +1702,60 @@ export default function Orders() {
     // Auto Purchasing: Fetch (laptop downloads the marketplace orders file).
     const [fetchJob, setFetchJob] = useState(null);
     const [laptopOnline, setLaptopOnline] = useState(null);
+    const [bots, setBots] = useState(null);
+    const [trackingRun, setTrackingRun] = useState(null);
     const [startingFetch, setStartingFetch] = useState(false);
     const fetchActive = ['pending', 'running'].includes(fetchJob?.status);
+    const takeBotStatus = (data) => {
+        setLaptopOnline(!!data?.laptop_online);
+        if (data && 'bots' in data) setBots(data.bots || null);
+        if (data && 'tracking_run' in data) setTrackingRun(data.tracking_run || null);
+    };
     useEffect(() => {
         setFetchJob(null);
         setLaptopOnline(null);
+        setBots(null);
+        setTrackingRun(null);
         if (!selectedStore || !isAutoPurchaseOnly) return;
         const store = selectedStore;
         getOrdersFetch(store)
             .then((res) => {
                 if (!isCurrentStore(store)) return;
                 setFetchJob(res.data?.fetch || null);
-                setLaptopOnline(!!res.data?.laptop_online);
+                takeBotStatus(res.data);
             })
             .catch(() => {});
     }, [selectedStore, isAutoPurchaseOnly]);
+    // Every 30 s: which bots are online and the last tracking job; when a tracking job ends, reload the
+    // orders so the numbers it read show up.
+    const trackingRunRef = useRef(null);
+    useEffect(() => {
+        trackingRunRef.current = null;
+        if (!selectedStore || !isAutoPurchaseOnly) return undefined;
+        const store = selectedStore;
+        const timer = setInterval(() => {
+            getOrdersFetch(store)
+                .then((res) => {
+                    if (!isCurrentStore(store)) return;
+                    takeBotStatus(res.data);
+                    const run = res.data?.tracking_run || null;
+                    const before = trackingRunRef.current;
+                    trackingRunRef.current = run;
+                    const ended = before && run && before.id === run.id
+                        && ['pending', 'running'].includes(before.status) && !['pending', 'running'].includes(run.status);
+                    if (ended) {
+                        getOrders(store).then((r) => {
+                            if (isCurrentStore(store) && Array.isArray(r.data?.orders)) setOrders(r.data.orders);
+                        }).catch(() => {});
+                    }
+                })
+                .catch(() => {});
+        }, 30000);
+        return () => clearInterval(timer);
+    }, [selectedStore, isAutoPurchaseOnly]);
+    useEffect(() => {
+        if (trackingRunRef.current === null) trackingRunRef.current = trackingRun;
+    }, [trackingRun]);
     useEffect(() => {
         if (!fetchActive || !selectedStore) return undefined;
         const storeAtStart = selectedStore;
@@ -1720,7 +1764,7 @@ export default function Orders() {
                 .then((res) => {
                     if (!isCurrentStore(storeAtStart)) return;
                     const job = res.data?.fetch || null;
-                    setLaptopOnline(!!res.data?.laptop_online);
+                    takeBotStatus(res.data);
                     setFetchJob(job);
                     if (job && !['pending', 'running'].includes(job.status)) {
                         setMessage({
@@ -1746,7 +1790,7 @@ export default function Orders() {
             .then((res) => {
                 if (!isCurrentStore(store)) return;
                 setFetchJob(res.data?.fetch || null);
-                setLaptopOnline(!!res.data?.laptop_online);
+                takeBotStatus(res.data);
                 setMessage({ text: res.data?.message || 'Fetch sent to the worker laptop.', variant: res.data?.laptop_online ? 'success' : 'warning' });
             })
             .catch((err) => {
@@ -2019,21 +2063,18 @@ export default function Orders() {
                 )}
             </div>
 
-            {selectedStore && isAutoPurchaseOnly && (fetchJob || laptopOnline !== null) && (
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                    <span className={`mr-1 inline-block h-2 w-2 rounded-full ${laptopOnline ? 'bg-emerald-500' : 'bg-slate-400'}`} />
-                    {laptopOnline ? 'Worker laptop online.' : 'No worker laptop online.'}
-                    {fetchJob && (
-                        <>
-                            {' '}Last fetch: {fetchJob.status === 'pending' ? 'waiting for the laptop'
-                                : fetchJob.status === 'running' ? `running${fetchJob.laptop ? ` on ${fetchJob.laptop}` : ''}`
-                                    : fetchJob.status}
-                            {fetchJob.finished_at ? ` · ${new Date(fetchJob.finished_at).toLocaleString()}` : ''}
-                            {fetchJob.status !== 'finished' && (fetchJob.message || fetchJob.error) && !fetchActive
-                                ? ` · ${fetchJob.message || fetchJob.error}` : ''}
-                        </>
-                    )}
-                </p>
+            {selectedStore && isAutoPurchaseOnly && (fetchJob || bots || trackingRun) && (
+                <BotStatusLine
+                    bots={bots}
+                    trackingRun={trackingRun}
+                    fetchText={fetchJob ? [
+                        fetchJob.status === 'pending' ? 'waiting for the laptop'
+                            : fetchJob.status === 'running' ? `running${fetchJob.laptop ? ` on ${fetchJob.laptop}` : ''}`
+                                : fetchJob.status,
+                        fetchJob.finished_at ? new Date(fetchJob.finished_at).toLocaleString() : '',
+                        fetchJob.status !== 'finished' && !fetchActive ? (fetchJob.message || fetchJob.error || '') : '',
+                    ].filter(Boolean).join(' · ') : ''}
+                />
             )}
             {selectedStore && isAutoPurchaseOnly && fetchActive && fetchJob?.attention && (
                 <AttentionNote text={fetchJob.attention} />

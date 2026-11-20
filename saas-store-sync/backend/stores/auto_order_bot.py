@@ -173,6 +173,65 @@ LAPTOP_SCOPE = 'order-bot'
 ONLINE_SECONDS = 120
 
 
+# ---- which bots are online (Orders page status line) -------------------------------------------------
+# The order bot and the Tracking Bot may use the same token, so the token's last use cannot tell them apart:
+# each job request (next-job) is remembered per agent. The inventory bot has its own token scope.
+POLL_KEY = 'bot-poll:{user}:{agent}'
+POLL_KEEP_SECONDS = 24 * 3600
+INVENTORY_SCOPE = 'inventory-bot'
+
+
+def poll_agent(kinds) -> str:
+    return 'tracking' if set(kinds) == {AutoOrderRun.Kind.TRACKING} else 'order'
+
+
+def note_poll(token, kinds) -> None:
+    from django.core.cache import cache
+
+    key = POLL_KEY.format(user=token.created_by_id or 'any', agent=poll_agent(kinds))
+    try:
+        cache.set(key, {'at': timezone.now().isoformat(), 'laptop': token.label or ''}, POLL_KEEP_SECONDS)
+    except Exception:
+        log.exception('could not record the %s agent poll', poll_agent(kinds))
+
+
+def _status(seen_at, laptop):
+    online = bool(seen_at and timezone.now() - seen_at <= timedelta(seconds=ONLINE_SECONDS))
+    return {'online': online, 'laptop': laptop or '', 'seen_at': seen_at.isoformat() if seen_at else None}
+
+
+def bots_status(user) -> dict:
+    """{'order' | 'tracking' | 'inventory': {online, laptop, seen_at}} for the Orders page status line."""
+    from datetime import datetime
+
+    from django.core.cache import cache
+
+    from catalog.models import IngestToken
+
+    out = {}
+    for agent in ('order', 'tracking'):
+        best = (None, '')
+        for owner in (getattr(user, 'id', None), 'any'):
+            try:
+                hit = cache.get(POLL_KEY.format(user=owner, agent=agent))
+            except Exception:
+                hit = None
+            if not hit:
+                continue
+            try:
+                at = datetime.fromisoformat(hit['at'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if best[0] is None or at > best[0]:
+                best = (at, hit.get('laptop', ''))
+        out[agent] = _status(*best)
+    tokens = [t for t in IngestToken.objects.filter(is_active=True, last_used_at__isnull=False)
+              if INVENTORY_SCOPE in (t.scopes or []) and t.created_by_id in (None, getattr(user, 'id', None))]
+    last = max(tokens, key=lambda t: t.last_used_at, default=None)
+    out['inventory'] = _status(last.last_used_at if last else None, last.label if last else '')
+    return out
+
+
 # The Tracking Bot and the order bot are two agents on the same laptop that open the same Chrome profiles.
 # Chrome allows one window per profile, so a job is not handed out while the other agent's job runs on the
 # same purchase account. A run claimed longer ago than this is assumed dead and no longer holds the profile.

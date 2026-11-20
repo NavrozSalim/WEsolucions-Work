@@ -41,7 +41,7 @@ def done_xlsx(rows):
 
 @override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_RUNNER='laptop', DEBUG=True,
                    ENCRYPTION_KEY=Fernet.generate_key().decode())
-class OrderTrackingTests(TestCase):
+class TrackingTestBase(TestCase):
     @classmethod
     def tearDownClass(cls):
         super().tearDownClass()
@@ -92,6 +92,8 @@ class OrderTrackingTests(TestCase):
             'done': SimpleUploadedFile('kogan-done.xlsx', done_xlsx(rows)),
         }, format='multipart')
 
+
+class OrderTrackingTests(TrackingTestBase):
     # ------------------------------------------------------------------ which orders
 
     def test_due_orders(self):
@@ -261,3 +263,56 @@ class OrderTrackingTests(TestCase):
         self.purchased('A')
         start_tracking(self.store)
         self.assertEqual(self.laptop.get(NEXT, TRACKING).data['kind'], 'tracking')
+
+
+@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_RUNNER='laptop', DEBUG=True,
+                   ENCRYPTION_KEY=Fernet.generate_key().decode())
+class BotStatusTests(TrackingTestBase):
+    """The Orders page status line: order bot, Tracking Bot and inventory bot online, and the last tracking job."""
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        super().setUp()
+
+    def status(self):
+        return self.c.get(self.url('fetch-file/')).data
+
+    def test_each_bot_is_seen_on_its_own(self):
+        data = self.status()
+        self.assertEqual({k: v['online'] for k, v in data['bots'].items()},
+                         {'order': False, 'tracking': False, 'inventory': False})
+        self.laptop.get(NEXT, TRACKING)
+        data = self.status()
+        self.assertTrue(data['bots']['tracking']['online'])
+        self.assertEqual(data['bots']['tracking']['laptop'], 'laptop-1')
+        self.assertFalse(data['bots']['order']['online'])
+        self.assertFalse(data['laptop_online'])
+        self.laptop.get(NEXT, ORDER_BOT)
+        data = self.status()
+        self.assertTrue(data['bots']['order']['online'] and data['laptop_online'])
+
+    def test_inventory_bot_token(self):
+        raw = 'inv-1-' + 'q' * 30
+        IngestToken.objects.create(label='inventory-pc', token_hash=hashlib.sha256(raw.encode()).hexdigest(),
+                                   token_prefix=raw[:8], scopes=['inventory-bot'], created_by=self.user,
+                                   last_used_at=timezone.now() - timedelta(seconds=30))
+        inv = self.status()['bots']['inventory']
+        self.assertEqual((inv['online'], inv['laptop']), (True, 'inventory-pc'))
+        IngestToken.objects.filter(label='inventory-pc').update(last_used_at=timezone.now() - timedelta(minutes=10))
+        inv = self.status()['bots']['inventory']
+        self.assertFalse(inv['online'])
+        self.assertIsNotNone(inv['seen_at'])
+
+    def test_last_tracking_run(self):
+        self.assertIsNone(self.status()['tracking_run'])
+        a = self.purchased('A')
+        b = self.purchased('B')
+        start_tracking(self.store)
+        self.assertEqual(self.status()['tracking_run']['status'], 'pending')
+        job = self.laptop.get(NEXT, TRACKING).data
+        self.complete(job, [{'order_ref': a.id, 'status': 'found', 'tracking_number': 'TB1'},
+                            {'order_ref': b.id, 'status': 'not_shipped'}])
+        run = self.status()['tracking_run']
+        self.assertEqual((run['status'], run['orders'], run['found']), ('finished', 2, 1))
