@@ -1375,8 +1375,12 @@ class StoreListingInventoryExportView(APIView):
 class StoreOrderFileImportView(APIView):
     """Auto Purchasing: import a Kogan / BigW orders file (``file``) into this store's orders.
 
-    ``history=1`` (the store wizard's "Upload old orders"): the orders are kept for the record
-    only. They are not checked or bought, and BigW rows in every status are kept.
+    ``history=1`` (Upload order history, also the store wizard's "Upload old orders"): complete
+    orders kept for the record only. They are not checked, bought or tracked, BigW rows in every
+    status are kept, and Vendor Order ID / Tracking Number / Carrier columns are saved.
+
+    ``today=1`` (Upload today's orders): the whole marketplace file is uploaded and only the orders
+    dated today in the store's time are added and checked; orders already on the store are skipped.
     """
     permission_classes = [IsAuthenticated]
 
@@ -1392,11 +1396,15 @@ class StoreOrderFileImportView(APIView):
         upload = request.FILES.get('file')
         if not upload:
             return Response({'detail': 'Choose the orders file to upload.'}, status=status.HTTP_400_BAD_REQUEST)
-        history = str(request.data.get('history') or request.query_params.get('history') or '').lower() in (
-            '1', 'true', 'yes',
-        )
+        def flag(name):
+            return str(request.data.get(name) or request.query_params.get(name) or '').lower() in ('1', 'true', 'yes')
+
+        history = flag('history')
+        today_only = flag('today')
         try:
-            result = import_order_file(store, request.user, upload.name, upload.read(), history=history)
+            result = import_order_file(
+                store, request.user, upload.name, upload.read(), history=history, today_only=today_only,
+            )
         except OrderFileError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         if history:

@@ -359,11 +359,16 @@ export const recheckOrderPurchase = (storeId, orderId = null) =>
     api.post(orderId
         ? `/stores/${storeId}/orders/${orderId}/purchase-check/`
         : `/stores/${storeId}/orders/purchase-check/`);
-/** Auto Purchasing: upload a Kogan (.xlsx) or BigW (.csv) orders file into this store's orders. */
-export const importOrdersFile = (storeId, file, { history = false } = {}) => {
+/**
+ * Auto Purchasing: upload a Kogan (.xlsx) or BigW (.csv) orders file into this store's orders.
+ * ``history``: complete orders kept for the record (with Vendor Order ID / Tracking Number / Carrier).
+ * ``today``: the whole marketplace file; only orders dated today in the store's time are added.
+ */
+export const importOrdersFile = (storeId, file, { history = false, today = false } = {}) => {
     const fd = new FormData();
     fd.append('file', file);
     if (history) fd.append('history', '1');
+    if (today) fd.append('today', '1');
     return api.post(`/stores/${storeId}/orders/import-file/`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
     });

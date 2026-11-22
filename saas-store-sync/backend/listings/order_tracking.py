@@ -91,6 +91,8 @@ def can_get_tracking(check) -> bool:
 
     if check is None or check.purchase_status != PurchaseStatus.PURCHASED or not vendor_numbers(check):
         return False
+    if check.order.is_history:  # complete order uploaded for the record
+        return False
     if check.order.status in (OrderStatus.CANCELLED, OrderStatus.REFUNDED):
         return False
     return order_vendor(check, check.order.store) in TRACKING_VENDORS
@@ -313,7 +315,8 @@ def is_vendor_own_number(number) -> bool:
 
 
 def can_upload(order, tracking) -> bool:
-    return bool(upload_marketplace(order.store) and (order.invoice_number or '').strip()
+    return bool(upload_marketplace(order.store) and not order.is_history and (order.invoice_number or '').strip()
+                and tracking.upload_status != 'manual'
                 and tracking.replaced_at is None and tracking.tracking_number
                 and not is_vendor_own_number(tracking.tracking_number))
 
@@ -356,6 +359,10 @@ def start_upload(order, user, tracking_id):
         raise AutoPurchaseError("Amazon's own TBA numbers are not uploaded to the marketplace.", 409)
     if not (order.invoice_number or '').strip():
         raise AutoPurchaseError('This order has no marketplace order number to upload to.', 409)
+    if order.is_history:
+        raise AutoPurchaseError('This is an old order uploaded for the record; its tracking is not uploaded.', 409)
+    if tracking.upload_status == 'manual':
+        raise AutoPurchaseError('This number is already marked as uploaded on the marketplace.', 409)
     if upload_pending(tracking):
         raise AutoPurchaseError('The Tracking Bot is already uploading this number.', 409)
     label = UPLOAD_MARKETPLACES[mp]

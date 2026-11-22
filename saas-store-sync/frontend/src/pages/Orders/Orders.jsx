@@ -17,6 +17,7 @@ import {
     Store as StoreIcon,
     Truck,
     ShoppingCart,
+    Upload,
     X,
 } from 'lucide-react';
 import Button from '../../components/ui/Button';
@@ -46,6 +47,7 @@ import {
     getOrderTracking,
     uploadOrderTracking,
     getStoreTracking,
+    importOrdersFile,
     saveOrderTracking,
     startOrdersFetch,
     submitOrderShipping,
@@ -939,7 +941,7 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateT
         <div className="space-y-6">
             {order.is_history && (
                 <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-800/40 dark:text-slate-300">
-                    Old order uploaded on the store wizard. Kept for the record; it is not checked or bought.
+                    History order (uploaded with Upload order history). Kept for the record; no bot checks, buys, tracks or uploads it.
                 </p>
             )}
             {!order.is_history && (order.purchase_check || isFileOrder(order)) && onRecheck && (
@@ -1402,6 +1404,41 @@ export default function Orders() {
                 setMessage({ text: err.response?.data?.detail || 'Could not start the check.', variant: 'error' });
             })
             .finally(() => setRecheckingId(null));
+    };
+
+    // Upload orders (when the Fetch bot is not working, or to keep old orders on this page):
+    // 'today' = the whole marketplace file, only today's orders are added and checked;
+    // 'history' = complete orders kept for the record (never checked, bought or tracked).
+    const [uploadMenu, setUploadMenu] = useState(false);
+    const [uploadingFile, setUploadingFile] = useState(false);
+    const uploadModeRef = useRef('today');
+    const uploadInputRef = useRef(null);
+    const pickUploadFile = (mode) => {
+        setUploadMenu(false);
+        uploadModeRef.current = mode;
+        if (uploadInputRef.current) {
+            uploadInputRef.current.value = '';
+            uploadInputRef.current.click();
+        }
+    };
+    const handleUploadFile = (e) => {
+        const file = e.target.files?.[0];
+        if (!file || !selectedStore) return;
+        const store = selectedStore;
+        const mode = uploadModeRef.current;
+        setUploadingFile(true);
+        importOrdersFile(store, file, { today: mode === 'today', history: mode === 'history' })
+            .then((res) => {
+                setMessage({ text: res.data?.message || 'Orders file uploaded.', variant: 'success' });
+                return getOrders(store);
+            })
+            .then((res) => {
+                if (isCurrentStore(store) && Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
+            })
+            .catch((err) => {
+                setMessage({ text: err.response?.data?.detail || 'Could not upload the orders file.', variant: 'error' });
+            })
+            .finally(() => setUploadingFile(false));
     };
 
     // Auto Purchasing: Process (buy one order) after the user confirms.
@@ -1981,6 +2018,58 @@ export default function Orders() {
                             </Button>
                         )}
                         {selectedStoreData?.auto_buy_vendor && (
+                            <div className="relative w-full sm:w-auto">
+                                <input
+                                    ref={uploadInputRef}
+                                    type="file"
+                                    accept=".xlsx,.csv"
+                                    className="hidden"
+                                    onChange={handleUploadFile}
+                                />
+                                <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    className="w-full justify-center sm:w-auto"
+                                    onClick={() => setUploadMenu((v) => !v)}
+                                    disabled={uploadingFile}
+                                    title="Upload the marketplace orders file yourself"
+                                    aria-expanded={uploadMenu}
+                                >
+                                    <Upload className={`mr-1.5 h-4 w-4 ${uploadingFile ? 'animate-pulse' : ''}`} />
+                                    {uploadingFile ? 'Uploading…' : 'Upload orders'}
+                                    <ChevronDown className="ml-1 h-4 w-4" />
+                                </Button>
+                                {uploadMenu && (
+                                    <>
+                                        <div className="fixed inset-0 z-30" onClick={() => setUploadMenu(false)} />
+                                        <div className="absolute left-0 top-full z-40 mt-1 w-72 overflow-hidden rounded-md border border-slate-200 bg-white py-1 text-sm shadow-lg dark:border-slate-700 dark:bg-slate-800">
+                                            <button
+                                                type="button"
+                                                className="block w-full px-3 py-2 text-left hover:bg-slate-100 dark:hover:bg-slate-700"
+                                                onClick={() => pickUploadFile('today')}
+                                            >
+                                                <span className="block font-medium text-slate-800 dark:text-slate-100">Upload today&apos;s orders</span>
+                                                <span className="block text-xs text-slate-500 dark:text-slate-400">
+                                                    The full orders file from the marketplace. Only today&apos;s orders are added and checked.
+                                                </span>
+                                            </button>
+                                            <div className="my-1 border-t border-slate-200 dark:border-slate-700" />
+                                            <button
+                                                type="button"
+                                                className="block w-full px-3 py-2 text-left hover:bg-slate-100 dark:hover:bg-slate-700"
+                                                onClick={() => pickUploadFile('history')}
+                                            >
+                                                <span className="block font-medium text-slate-800 dark:text-slate-100">Upload order history</span>
+                                                <span className="block text-xs text-slate-500 dark:text-slate-400">
+                                                    Completed orders, kept as records. Add Vendor Order ID, Tracking Number and Carrier columns. No bot works on them.
+                                                </span>
+                                            </button>
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        )}
+                        {selectedStoreData?.auto_buy_vendor && (
                             <>
                                 <div className="relative flex w-full sm:w-auto">
                                     <Button
@@ -2169,7 +2258,7 @@ export default function Orders() {
                         <p className="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">
                             {orders.length === 0
                                 ? isAutoPurchaseOnly
-                                    ? `No orders yet. This is an auto-purchase store (Auto buy: ${autoBuyVendorsLabel(selectedStoreData?.auto_buy_vendors?.length ? selectedStoreData.auto_buy_vendors : [selectedStoreData?.auto_buy_vendor])}). Click Fetch to download the orders file with the worker laptop. Old orders can be uploaded on the store's Auto Purchasing step.`
+                                    ? `No orders yet. This is an auto-purchase store (Auto buy: ${autoBuyVendorsLabel(selectedStoreData?.auto_buy_vendors?.length ? selectedStoreData.auto_buy_vendors : [selectedStoreData?.auto_buy_vendor])}). Click Fetch to download the orders file with the worker laptop, or use Upload orders to upload today's orders or your order history.`
                                     : 'No orders yet. Use “Fetch from marketplace” to pull the latest orders.'
                                 : customerSearch.trim() && statusFilter && statusFilter !== 'all'
                                   ? `No orders match “${customerSearch.trim()}” with this status filter.`
@@ -2332,7 +2421,7 @@ export default function Orders() {
                                                     <tr className="border-t border-slate-100 dark:border-slate-800">
                                                         <td className="whitespace-nowrap px-4 py-2.5 text-xs text-slate-600 dark:text-slate-300">
                                                             {formatDate(orderedAt, orderDateTz)}
-                                                            {o.is_history && <p className="text-[10px] text-slate-400">Old order</p>}
+                                                            {o.is_history && <span className="mt-0.5 inline-block rounded-full bg-slate-100 px-1.5 py-px text-[10px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">History</span>}
                                                         </td>
                                                         <td className="px-4 py-2.5 font-medium text-slate-900 dark:text-slate-100">
                                                             {o.invoice_number || o.external_order_key || '—'}

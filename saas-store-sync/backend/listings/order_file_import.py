@@ -31,6 +31,16 @@ REQUIRED = {
     ],
 }
 FORMAT_LABEL = {'kogan': 'Kogan', 'bigw': 'BigW'}
+# Order history files: optional columns with what was done for the order (first name found is used).
+# BigW exports already carry Tracking Code / Courier.
+HISTORY_COLUMNS = {
+    'vendor_order': ['Vendor Order ID', 'Vendor Order Number', 'Vendor Order No', 'Amazon Order ID',
+                     'Supplier Order ID'],
+    'tracking': ['Tracking Number', 'Tracking Code', 'Tracking No', 'Tracking'],
+    'carrier': ['Carrier', 'Courier'],
+}
+# "Upload today's orders": today is the store's own day (store region).
+STORE_TIMEZONES = {'AU': 'Australia/Sydney', 'USA': 'America/New_York'}
 # Marketplace kinds (stores.credentials.marketplace_kind) each file format belongs to.
 # BigW orders come from MyDeal stores (MyDeal lists on BigW and Everyday Market).
 FORMAT_MARKETPLACES = {'kogan': ('kogan',), 'bigw': ('mydeal', 'bigw')}
@@ -53,6 +63,9 @@ class ParsedOrder:
     ordered_at: str | None = None
     status_raw: str = ''
     extra: dict = field(default_factory=dict)
+    # Order history files only: vendor order numbers and (tracking, carrier) pairs, in file order.
+    vendor_orders: list = field(default_factory=list)
+    trackings: list = field(default_factory=list)
 
     @property
     def subtotal(self) -> Decimal:
@@ -194,6 +207,7 @@ def parse_order_file(filename: str, data: bytes, *, all_statuses: bool = False) 
     missing = [c for c in REQUIRED[fmt] if c.casefold() not in index]
     if missing:
         raise OrderFileError(f'{FORMAT_LABEL[fmt]} orders file is missing columns: {", ".join(missing)}.')
+    history_cols = _history_columns(index) if all_statuses else {}
 
     orders: dict[str, ParsedOrder] = {}
     skipped: list = []
@@ -217,7 +231,34 @@ def parse_order_file(filename: str, data: bytes, *, all_statuses: bool = False) 
             order = orders[order_id] = ParsedOrder(order_id=order_id, **base)
         order.lines.append(line)
         line_count += 1
+        _add_history_values(order, g, history_cols)
     return ParsedFile(file_format=fmt, orders=list(orders.values()), line_count=line_count, skipped=skipped)
+
+
+def _history_columns(index: dict) -> dict:
+    """The history columns present in the file: {'vendor_order': 'Vendor Order ID', ...}."""
+    found = {}
+    for key, names in HISTORY_COLUMNS.items():
+        for name in names:
+            if name.casefold() in index:
+                found[key] = name
+                break
+    return found
+
+
+def _add_history_values(order: ParsedOrder, g, cols: dict) -> None:
+    """Collect the vendor order numbers and tracking numbers of one file row (no duplicates)."""
+    if not cols:
+        return
+    if 'vendor_order' in cols:
+        number = ' '.join(g(cols['vendor_order']).split())[:255]
+        if number and number not in order.vendor_orders:
+            order.vendor_orders.append(number)
+    if 'tracking' in cols:
+        number = ' '.join(g(cols['tracking']).split())[:255]
+        carrier = ' '.join(g(cols['carrier']).split())[:255] if 'carrier' in cols else ''
+        if number and number.casefold() not in (t.casefold() for t, _ in order.trackings):
+            order.trackings.append((number, carrier))
 
 
 def _kogan_row(g, rownum, skipped):
@@ -366,20 +407,110 @@ def check_file_fits_store(fmt: str, store) -> None:
         )
 
 
-def import_order_file(store, user, filename: str, data: bytes, *, history: bool = False) -> dict:
+def store_today(store, now=None) -> date:
+    """Today's date in the store's own time (AU: Sydney, USA: New York)."""
+    from zoneinfo import ZoneInfo
+
+    from django.utils import timezone
+
+    tz = ZoneInfo(STORE_TIMEZONES.get((store.region or '').strip().upper(), STORE_TIMEZONES['AU']))
+    return (now or timezone.now()).astimezone(tz).date()
+
+
+def _history_status(order: ParsedOrder) -> str:
+    """Old orders are complete; a cancelled or refunded one (BigW status) keeps that status."""
+    from .models import OrderStatus
+
+    raw = (order.status_raw or '').casefold()
+    if 'refund' in raw:
+        return OrderStatus.REFUNDED
+    if 'cancel' in raw:
+        return OrderStatus.CANCELLED
+    return OrderStatus.SHIPPING_COMPLETE
+
+
+def _save_history_done(row, order: ParsedOrder, user) -> tuple[bool, int]:
+    """Order history file: save the vendor order number and tracking numbers it carries.
+
+    Returns (vendor number saved, tracking numbers added). The order shows as purchased with its
+    tracking, and the tracking as already on the marketplace, so no bot ever works on it.
+    """
+    from django.utils import timezone
+
+    from .models import OrderPurchaseCheck, OrderTracking, PurchaseCheckStatus, PurchaseStatus, TrackingStatus
+
+    saved_number = False
+    added = 0
+    check = None
+    if order.vendor_orders:
+        check, _ = OrderPurchaseCheck.objects.get_or_create(
+            order=row, defaults={'store': row.store, 'status': PurchaseCheckStatus.BUYABLE},
+        )
+        number = ', '.join(order.vendor_orders)[:255]
+        if check.purchase_status != PurchaseStatus.PURCHASED or check.vendor_order_number != number:
+            check.purchase_status = PurchaseStatus.PURCHASED
+            check.vendor_order_number = number
+            check.purchase_error = ''
+            if check.status == PurchaseCheckStatus.CHECKING:
+                check.status = PurchaseCheckStatus.BUYABLE
+            check.save()
+            saved_number = True
+    if order.trackings:
+        now = timezone.now()
+        have = {
+            t.casefold() for t in OrderTracking.objects.filter(order=row, replaced_at__isnull=True)
+            .values_list('tracking_number', flat=True)
+        }
+        for number, carrier in order.trackings:
+            if number.casefold() in have:
+                continue
+            OrderTracking.objects.create(
+                order=row, tracking_number=number, carrier=carrier,
+                vendor_order_number=order.vendor_orders[0] if order.vendor_orders else '',
+                source=OrderTracking.Source.USER, created_by=user,
+                upload_status='manual', upload_note='From the order history file.', upload_checked_at=now,
+            )
+            have.add(number.casefold())
+            added += 1
+        if added and check is not None and check.tracking_status != TrackingStatus.FOUND:
+            check.tracking_status = TrackingStatus.FOUND
+            check.tracking_note = 'From the order history file.'
+            check.save(update_fields=['tracking_status', 'tracking_note', 'updated_at'])
+    return saved_number, added
+
+
+def import_order_file(store, user, filename: str, data: bytes, *, history: bool = False,
+                      today_only: bool = False) -> dict:
     """Parse the file and upsert one MarketplaceOrder per order ID. Returns counts for the UI.
 
-    ``history``: old orders uploaded on the store wizard. New rows are marked history (shown,
-    never checked or bought). Orders already on the store keep how they came in. Nothing is deleted.
+    ``history`` (Upload order history): already complete orders kept for the record. New rows are
+    marked history and complete (never checked, bought, tracked or uploaded); a Vendor Order ID /
+    Tracking Number / Carrier column is saved on them. Orders already on the store keep how they came in.
+
+    ``today_only`` (Upload today's orders): the user uploads the whole marketplace file; only orders
+    dated today in the store's time are added. Orders already on the store are left as they are.
+
+    Nothing is deleted.
     """
     from django.db import transaction
 
     from .models import Environment, MarketplaceOrder, OrderStatus
 
+    if history and today_only:
+        raise OrderFileError("Choose either order history or today's orders, not both.")
     parsed = parse_order_file(filename, data, all_statuses=history)
     check_file_fits_store(parsed.file_format, store)
 
-    created = updated = 0
+    in_file = len(parsed.orders)
+    orders = parsed.orders
+    today = None
+    undated = 0
+    if today_only:
+        today = store_today(store)
+        orders = [o for o in parsed.orders if o.ordered_at == today.isoformat()]
+        undated = sum(1 for o in parsed.orders if not o.ordered_at)
+
+    created = updated = already = numbers_saved = trackings_added = 0
     order_ids: list[str] = []
     with transaction.atomic():
         existing = {
@@ -387,10 +518,14 @@ def import_order_file(store, user, filename: str, data: bytes, *, history: bool 
             for o in MarketplaceOrder.objects.select_for_update().filter(
                 store=store,
                 environment=Environment.PRODUCTION,
-                external_order_key__in=[o.order_id for o in parsed.orders],
+                external_order_key__in=[o.order_id for o in orders],
             )
         }
-        for order in parsed.orders:
+        for order in orders:
+            row = existing.get(order.order_id)
+            if row is not None and today_only:
+                already += 1
+                continue
             fields = {
                 'invoice_number': order.order_id,
                 'customer_info_json': order.customer,
@@ -398,15 +533,14 @@ def import_order_file(store, user, filename: str, data: bytes, *, history: bool 
                 'total_amount_cents': _cents(order.total),
                 'raw_response_json': _raw_order(order, parsed.file_format, filename),
             }
-            row = existing.get(order.order_id)
             if row is None:
                 row = MarketplaceOrder.objects.create(
                     store=store,
                     user=user,
                     external_order_key=order.order_id,
                     environment=Environment.PRODUCTION,
-                    # Customer has paid; the order waits to be bought and shipped.
-                    status=OrderStatus.PAID,
+                    # Live orders: the customer has paid and the order waits to be bought and shipped.
+                    status=_history_status(order) if history else OrderStatus.PAID,
                     is_history=history,
                     **fields,
                 )
@@ -417,22 +551,43 @@ def import_order_file(store, user, filename: str, data: bytes, *, history: bool 
                     setattr(row, k, v)
                 row.save(update_fields=[*fields.keys(), 'updated_at'])
                 updated += 1
+            if history and row.is_history:
+                saved, added = _save_history_done(row, order, user)
+                numbers_saved += int(saved)
+                trackings_added += added
             order_ids.append(str(row.id))
 
     label = FORMAT_LABEL[parsed.file_format]
-    msg = (
-        f'{label} orders file: {len(parsed.orders)} order(s), {parsed.line_count} line(s). '
-        f'{created} new, {updated} updated.'
-    )
+    if today_only:
+        msg = (
+            f'{label} orders file: {in_file} order(s) in the file, {len(orders)} from today '
+            f'({today.strftime("%d/%m/%Y")}). {created} new, {already} already here. '
+            f'{in_file - len(orders)} from other days skipped.'
+        )
+        if undated:
+            msg += f' ({undated} had no order date.)'
+    else:
+        msg = (
+            f'{label} orders file: {len(parsed.orders)} order(s), {parsed.line_count} line(s). '
+            f'{created} new, {updated} updated.'
+        )
     if parsed.skipped:
         msg += f' {len(parsed.skipped)} row(s) skipped (not open orders).'
+    if history and (numbers_saved or trackings_added):
+        msg += f' Saved {numbers_saved} vendor order ID(s) and {trackings_added} tracking number(s).'
     return {
         'ok': True,
         'format': parsed.file_format,
-        'orders': len(parsed.orders),
+        'orders': len(orders),
+        'in_file': in_file,
         'lines': parsed.line_count,
         'created': created,
         'updated': updated,
+        'already': already,
+        'other_days': in_file - len(orders) if today_only else 0,
+        'today': today.isoformat() if today else None,
+        'vendor_numbers_saved': numbers_saved,
+        'trackings_added': trackings_added,
         'skipped': [{'row': r, 'reason': why} for r, why in parsed.skipped],
         'order_ids': order_ids,
         'message': msg,

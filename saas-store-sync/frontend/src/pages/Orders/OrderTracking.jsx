@@ -104,6 +104,15 @@ const UPLOAD_PROBLEM = ['failed', 'not_verified'];
 
 /** Upload to the marketplace (Kogan / Big W): what the Tracking Bot did with this number, and the Upload button. */
 export function UploadStatus({ row, uploadTo, onUpload, uploading }) {
+    // Uploaded on the marketplace by the user (or from the order history file): on every marketplace.
+    if (row.upload_status === 'manual') {
+        return (
+            <p className="flex items-center gap-1 pl-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400" title={row.upload_note || ''}>
+                <CheckCircle2 className="h-3 w-3" />
+                On {uploadTo || 'marketplace'}
+            </p>
+        );
+    }
     if (!uploadTo || row.vendor_own_number) return null;
     const note = row.upload_note || '';
     if (uploading || row.upload_pending) {

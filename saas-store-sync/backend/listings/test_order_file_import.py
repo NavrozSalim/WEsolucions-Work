@@ -209,3 +209,138 @@ class ImportApiTests(TestCase):
         )
         res = self._upload(store, 'a.xlsx', kogan_xlsx())
         self.assertEqual(res.status_code, 404)
+
+
+class StoreTodayTests(TestCase):
+    """Upload today's orders: today is the store's own day."""
+
+    def test_sydney_and_new_york_days_around_midnight(self):
+        from datetime import date, datetime, timezone as dt_tz
+
+        from listings.order_file_import import store_today
+
+        au, us = Store(region='AU'), Store(region='USA')
+        # 2026-11-21 13:30 UTC = 22 Nov 00:30 in Sydney, 21 Nov 08:30 in New York.
+        now = datetime(2026, 11, 21, 13, 30, tzinfo=dt_tz.utc)
+        self.assertEqual(store_today(au, now), date(2026, 11, 22))
+        self.assertEqual(store_today(us, now), date(2026, 11, 21))
+        # 2026-11-22 04:30 UTC = 22 Nov 15:30 in Sydney, 21 Nov 23:30 in New York.
+        now = datetime(2026, 11, 22, 4, 30, tzinfo=dt_tz.utc)
+        self.assertEqual(store_today(au, now), date(2026, 11, 22))
+        self.assertEqual(store_today(us, now), date(2026, 11, 21))
+
+
+@override_settings(DEBUG=True, ENCRYPTION_KEY=Fernet.generate_key().decode())
+class UploadTodayAndHistoryTests(TestCase):
+    """Orders page Upload orders: today's orders from the full file, and order history."""
+
+    setUp = ImportApiTests.setUp
+    _store = ImportApiTests._store
+
+    def _today_rows(self, store):
+        from listings.order_file_import import store_today
+
+        today = store_today(store).strftime('%d-%m-%Y')
+        rows = [list(r) for r in KOGAN_ROWS]
+        rows[1][17] = rows[2][17] = today  # order TJPQ6RDG (two lines) is today's
+        return rows
+
+    def _post(self, store, name, data, **flags):
+        return self.client.post(
+            f'/api/v1/stores/{store.id}/orders/import-file/',
+            {'file': SimpleUploadedFile(name, data), **flags},
+            format='multipart',
+        )
+
+    def test_today_upload_keeps_only_todays_orders(self):
+        store = self._store(self.kogan)
+        res = self._post(store, 'all.xlsx', kogan_xlsx(self._today_rows(store)), today='1')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual((res.data['in_file'], res.data['orders'], res.data['created'], res.data['other_days']),
+                         (3, 1, 1, 2))
+        self.assertEqual(list(MarketplaceOrder.objects.filter(store=store).values_list('invoice_number', flat=True)),
+                         ['TJPQ6RDG'])
+        o = MarketplaceOrder.objects.get(store=store)
+        self.assertEqual((o.status, o.is_history), (OrderStatus.PAID, False))
+        self.assertIn('1 from today', res.data['message'])
+        self.assertIn('2 from other days skipped', res.data['message'])
+
+    def test_today_upload_skips_orders_already_here(self):
+        store = self._store(self.kogan)
+        rows = self._today_rows(store)
+        self._post(store, 'all.xlsx', kogan_xlsx(rows), today='1')
+        MarketplaceOrder.objects.filter(store=store).update(status=OrderStatus.SHIPPING_SUBMITTED)
+        rows[1][1] = 'Changed Name'
+        res = self._post(store, 'all.xlsx', kogan_xlsx(rows), today='1')
+        self.assertEqual((res.data['created'], res.data['already'], res.data['order_ids']), (0, 1, []))
+        o = MarketplaceOrder.objects.get(store=store)
+        self.assertEqual(o.status, OrderStatus.SHIPPING_SUBMITTED)
+        self.assertEqual(o.customer_info_json['name'], 'Jason Oakley')
+
+    def test_today_upload_with_no_todays_orders_adds_nothing(self):
+        store = self._store(self.kogan)
+        res = self._post(store, 'all.xlsx', kogan_xlsx(), today='1')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual((res.data['orders'], res.data['created']), (0, 0))
+        self.assertFalse(MarketplaceOrder.objects.filter(store=store).exists())
+
+    def test_today_and_history_together_rejected(self):
+        store = self._store(self.kogan)
+        res = self._post(store, 'all.xlsx', kogan_xlsx(), today='1', history='1')
+        self.assertEqual(res.status_code, 400)
+
+    def test_history_saves_vendor_order_id_and_tracking(self):
+        from listings.models import OrderPurchaseCheck, OrderTracking, PurchaseStatus
+        from listings.order_tracking import can_get_tracking, can_upload
+
+        store = self._store(self.kogan)
+        headers = KOGAN_HEADERS + ['Vendor Order ID', 'Tracking Number', 'Carrier']
+        rows = [list(r) for r in KOGAN_ROWS]
+        rows[0] += ['503-1111111-1111111', 'TRK1', 'AusPost']
+        rows[1] += ['503-2222222-2222222', 'TRK2', 'StarTrack']
+        rows[2] += ['503-2222222-2222222', 'TRK3', 'StarTrack']
+        rows[3] += ['', '', '']
+        res = self._post(store, 'history.xlsx', kogan_xlsx(rows, headers), history='1')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual((res.data['vendor_numbers_saved'], res.data['trackings_added']), (2, 3))
+
+        o = MarketplaceOrder.objects.get(store=store, invoice_number='TJPQ6RDG')
+        self.assertTrue(o.is_history)
+        self.assertEqual(o.status, OrderStatus.SHIPPING_COMPLETE)
+        check = OrderPurchaseCheck.objects.get(order=o)
+        self.assertEqual((check.purchase_status, check.vendor_order_number),
+                         (PurchaseStatus.PURCHASED, '503-2222222-2222222'))
+        trackings = list(OrderTracking.objects.filter(order=o).order_by('tracking_number'))
+        self.assertEqual([(t.tracking_number, t.carrier, t.source, t.upload_status) for t in trackings], [
+            ('TRK2', 'StarTrack', 'user', 'manual'), ('TRK3', 'StarTrack', 'user', 'manual'),
+        ])
+        # No bot works on a history order.
+        self.assertFalse(can_get_tracking(check))
+        self.assertFalse(can_upload(o, trackings[0]))
+        # The order without numbers is history but has no purchase check.
+        plain = MarketplaceOrder.objects.get(store=store, invoice_number='Q9F32X9C')
+        self.assertFalse(OrderPurchaseCheck.objects.filter(order=plain).exists())
+
+        # Uploading the same history file again adds nothing twice.
+        res = self._post(store, 'history.xlsx', kogan_xlsx(rows, headers), history='1')
+        self.assertEqual((res.data['created'], res.data['vendor_numbers_saved'], res.data['trackings_added']),
+                         (0, 0, 0))
+        self.assertEqual(OrderTracking.objects.filter(order__store=store).count(), 3)
+
+    def test_bigw_history_reads_tracking_code_and_keeps_cancelled_status(self):
+        from listings.models import OrderTracking
+
+        store = self._store(self.mydeal, name='BW-P&P')
+        csv_text = BIGW_CSV.replace(
+            '1,10.00,0,10.00,1.65,FREE,,,,,,1,No,Dispatched,BigW',
+            '1,10.00,0,10.00,1.65,FREE,,TRK-BW,Australia Post,,,1,No,Dispatched,BigW',
+        ).replace('50.9300,FLAT RATE,,,,,,361720928,No,Purchased',
+                  '50.9300,FLAT RATE,,,,,,361720928,No,Cancelled')
+        res = self._post(store, 'old.csv', csv_text.encode(), history='1')
+        self.assertEqual(res.status_code, 200, res.data)
+        old = MarketplaceOrder.objects.get(store=store, invoice_number='1000000001')
+        self.assertEqual(old.status, OrderStatus.SHIPPING_COMPLETE)
+        t = OrderTracking.objects.get(order=old)
+        self.assertEqual((t.tracking_number, t.carrier, t.upload_status), ('TRK-BW', 'Australia Post', 'manual'))
+        cancelled = MarketplaceOrder.objects.get(store=store, invoice_number='1023815960')
+        self.assertEqual(cancelled.status, OrderStatus.CANCELLED)
