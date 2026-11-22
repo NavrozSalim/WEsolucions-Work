@@ -354,6 +354,8 @@ class OrderPurchaseCheck(models.Model):
     purchase_requested_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
     )
+    # Mark as purchased: the user bought the order by hand (the order bot was not used) and typed the number.
+    purchased_manually = models.BooleanField(default=False)
     # Force process: bought although the check showed a loss (recorded with the loss at that time).
     forced_at = models.DateTimeField(null=True, blank=True)
     forced_loss_cents = models.IntegerField(null=True, blank=True)
@@ -403,6 +405,10 @@ class OrderTracking(models.Model):
     upload_note = models.TextField(blank=True, default='')
     upload_checked_at = models.DateTimeField(null=True, blank=True)
     upload_run_id = models.UUIDField(null=True, blank=True, help_text='stores.AutoOrderRun that uploads it.')
+    # "Uploaded on marketplace" tickbox (upload_status 'manual'): who ticked it.
+    upload_marked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

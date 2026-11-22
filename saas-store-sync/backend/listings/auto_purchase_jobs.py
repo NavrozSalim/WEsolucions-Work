@@ -384,6 +384,44 @@ def set_vendor_order_number(order, number: str):
     return check
 
 
+def mark_purchased(order, user, number: str):
+    """Mark as purchased: the user bought the order by hand (order bot not working) and types the vendor's
+    order number. The order is then Purchased, the same as after the bot, so tracking can follow."""
+    from django.utils import timezone
+
+    from .models import (
+        OrderPurchaseCheck, OrderStatus, PurchaseCheckStatus, PurchaseStatus,
+    )
+
+    number = ' '.join(str(number or '').split())[:255]
+    if not number:
+        raise AutoPurchaseError('Enter the vendor order number.')
+    if order.is_history:
+        raise AutoPurchaseError('This is an old order uploaded for the record.', 409)
+    if order.status in (OrderStatus.CANCELLED, OrderStatus.REFUNDED):
+        raise AutoPurchaseError(f'This order is {order.get_status_display().lower()}.', 409)
+    with transaction.atomic():
+        check = OrderPurchaseCheck.objects.select_for_update().filter(order=order).first()
+        if check is None:
+            check = OrderPurchaseCheck.objects.create(
+                order=order, store=order.store, status=PurchaseCheckStatus.BLOCKED, reasons=[],
+            )
+        if check.purchase_status in (PurchaseStatus.QUEUED, PurchaseStatus.PURCHASING):
+            raise AutoPurchaseError('The laptop is buying this order. Stop it first.', 409)
+        if check.purchase_status == PurchaseStatus.PURCHASED:
+            raise AutoPurchaseError('This order is already purchased. Edit its vendor order number instead.', 409)
+        check.purchase_status = PurchaseStatus.PURCHASED
+        check.purchased_manually = True
+        check.vendor_order_number = number
+        check.purchase_error = ''
+        check.purchased_at = timezone.now()
+        check.purchase_requested_by = user
+        if check.status == PurchaseCheckStatus.CHECKING:
+            check.status = PurchaseCheckStatus.BLOCKED
+        check.save()
+    return check
+
+
 LOOKUP_NOTE = 'Order ID recheck'
 
 

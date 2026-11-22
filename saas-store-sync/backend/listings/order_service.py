@@ -40,7 +40,48 @@ def _require_lasoo(store):
 
 
 def fetch(user, store, page: int = 1, take: int = 50) -> dict:
-    """Pull orders from the store's marketplace and upsert them locally."""
+    """Pull orders from the store's marketplace and upsert them locally.
+
+    Auto-buy stores (an Auto buying vendor is set): new open orders then go to the stock and profit
+    check, the same as orders fetched by the worker laptop.
+    """
+    result = _fetch_from_marketplace(user, store, page=page, take=take)
+    if getattr(store, "is_auto_purchase", False):
+        try:
+            queued = queue_new_order_checks(store)
+            if queued and isinstance(result, dict):
+                result["checking"] = queued
+        except Exception:  # noqa: BLE001 - the fetch itself worked; the check can be started with Recheck
+            logger.exception("Auto purchase check after API fetch failed store=%s", store.id)
+    return result
+
+
+# New API orders older than this are not checked automatically (Recheck all still checks them).
+AUTO_CHECK_ORDER_DAYS = 3
+
+
+def queue_new_order_checks(store) -> int:
+    """Auto-buy store fed by a marketplace API: check the open orders that were never checked."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from .auto_purchase_check import queue_purchase_checks
+    from .models import MarketplaceOrder, OrderStatus
+
+    since = timezone.now() - timedelta(days=AUTO_CHECK_ORDER_DAYS)
+    ids = list(
+        MarketplaceOrder.objects.filter(
+            store=store, is_history=False, purchase_check__isnull=True,
+            status__in=[OrderStatus.NEW, OrderStatus.PAID], created_at__gte=since,
+        ).values_list("id", flat=True)
+    )
+    if not ids:
+        return 0
+    return int(queue_purchase_checks(store, ids).get("queued") or 0)
+
+
+def _fetch_from_marketplace(user, store, page: int = 1, take: int = 50) -> dict:
     kind = marketplace_kind(store.marketplace)
     if kind == "reverb":
         from .reverb import orders as reverb_orders

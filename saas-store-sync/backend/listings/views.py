@@ -1600,6 +1600,63 @@ class StoreOrderGetTrackingView(APIView):
         return _tracking_response(order, msg, status.HTTP_202_ACCEPTED)
 
 
+class StoreOrderMarkUploadedView(APIView):
+    """"Uploaded on marketplace" tickbox for one tracking number (``tracking_id``).
+
+    POST ticks it (the user pasted the number on the marketplace themselves); DELETE unticks it.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _set(self, request, store_pk, pk, uploaded):
+        from .auto_purchase_jobs import AutoPurchaseError
+        from .order_tracking import mark_uploaded
+
+        store = _get_store(request, store_pk)
+        order = MarketplaceOrder.objects.filter(store=store, id=pk).first()
+        if order is None:
+            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        tracking_id = str(request.data.get('tracking_id') or request.query_params.get('tracking_id') or '').strip()
+        from django.core.exceptions import ValidationError
+
+        try:
+            t = mark_uploaded(order, request.user, tracking_id or None, uploaded)
+        except AutoPurchaseError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        except ValidationError:
+            return Response({'detail': 'That tracking number was not found. Reload the page.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        msg = (f'{t.tracking_number} marked as uploaded on the marketplace.' if uploaded
+               else f'{t.tracking_number} marked as not uploaded.')
+        return _tracking_response(order, msg)
+
+    def post(self, request, store_pk, pk):
+        return self._set(request, store_pk, pk, True)
+
+    def delete(self, request, store_pk, pk):
+        return self._set(request, store_pk, pk, False)
+
+
+class StoreOrderMarkPurchasedView(APIView):
+    """Mark as purchased: the user bought the order by hand and types the vendor's order number."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk, pk):
+        from .auto_purchase_check import check_payload
+        from .auto_purchase_jobs import AutoPurchaseError, mark_purchased
+
+        store = _get_store(request, store_pk)
+        order = MarketplaceOrder.objects.filter(store=store, id=pk).first()
+        if order is None:
+            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            check = mark_purchased(order, request.user, request.data.get('vendor_order_number'))
+        except AutoPurchaseError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        return Response({'message': f'{order.invoice_number} marked as purchased (vendor order '
+                                    f'{check.vendor_order_number}).',
+                         'purchase_check': check_payload(check)})
+
+
 class StoreOrderUploadTrackingView(APIView):
     """Upload button: the Tracking Bot uploads one tracking number (``tracking_id``) to the marketplace order
     (Kogan / Big W) and searches the order again to check it."""

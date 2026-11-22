@@ -48,6 +48,8 @@ import {
     uploadOrderTracking,
     getStoreTracking,
     importOrdersFile,
+    markOrderPurchased,
+    markTrackingUploaded,
     saveOrderTracking,
     startOrdersFetch,
     submitOrderShipping,
@@ -102,6 +104,58 @@ function money(cents, currency = 'AUD') {
 }
 
 const MYDEAL_TZ = 'Australia/Sydney';
+
+// ---- Status filter for auto-buy stores: what the bots (or the user) did with each order ----
+
+/** Buying state: not_checked / checking / buyable / blocked / queued / purchasing / purchased / failed. */
+function buyingState(o) {
+    const pc = o.purchase_check;
+    if (!pc) return 'not_checked';
+    if (['queued', 'purchasing', 'purchased', 'failed'].includes(pc.purchase_status)) return pc.purchase_status;
+    return pc.status || 'not_checked';
+}
+const hasVendorNumber = (o) => {
+    const n = (o.purchase_check?.vendor_order_number || '').trim();
+    return !!n && !/UNREAD/i.test(n);
+};
+const currentTracking = (o) => o.tracking?.current || [];
+/** Tracking state of a purchased order: has / not_shipped / failed / not_checked. */
+function trackingState(o) {
+    if (buyingState(o) !== 'purchased') return '';
+    if (currentTracking(o).length) return 'has';
+    const s = o.tracking?.status;
+    if (s === 'not_shipped' || s === 'partly') return 'not_shipped';
+    if (s === 'failed' || s === 'cancelled') return 'failed';
+    return 'not_checked';
+}
+/** Marketplace upload of an order's tracking: done (bot or by you) / failed / not (has tracking, not uploaded). */
+function uploadState(o) {
+    const rows = currentTracking(o);
+    if (!rows.length) return '';
+    if (rows.some((r) => ['manual', 'verified', 'already'].includes(r.upload_status))) return 'done';
+    if (rows.some((r) => ['failed', 'not_verified'].includes(r.upload_status))) return 'failed';
+    return 'not';
+}
+const live = (o) => !o.is_history;
+const BOT_FILTERS = {
+    'buy:not_checked': { group: 'Buying', label: 'Not checked', match: (o) => live(o) && buyingState(o) === 'not_checked' },
+    'buy:checking': { group: 'Buying', label: 'Checking', match: (o) => live(o) && buyingState(o) === 'checking' },
+    'buy:buyable': { group: 'Buying', label: 'Ready to buy', match: (o) => live(o) && buyingState(o) === 'buyable' },
+    'buy:blocked': { group: 'Buying', label: 'Blocked (loss, stock, mapping…)', match: (o) => live(o) && buyingState(o) === 'blocked' },
+    'buy:queued': { group: 'Buying', label: 'Waiting for laptop', match: (o) => live(o) && buyingState(o) === 'queued' },
+    'buy:purchasing': { group: 'Buying', label: 'Buying', match: (o) => live(o) && buyingState(o) === 'purchasing' },
+    'buy:purchased': { group: 'Buying', label: 'Purchased', match: (o) => live(o) && buyingState(o) === 'purchased' },
+    'buy:no_number': { group: 'Buying', label: 'Purchased – no order ID', match: (o) => live(o) && buyingState(o) === 'purchased' && !hasVendorNumber(o) },
+    'buy:failed': { group: 'Buying', label: 'Purchase failed', match: (o) => live(o) && buyingState(o) === 'failed' },
+    'trk:not_checked': { group: 'Tracking', label: 'Tracking not checked yet', match: (o) => live(o) && trackingState(o) === 'not_checked' },
+    'trk:not_shipped': { group: 'Tracking', label: 'Not shipped', match: (o) => live(o) && trackingState(o) === 'not_shipped' },
+    'trk:has': { group: 'Tracking', label: 'Has tracking', match: (o) => live(o) && trackingState(o) === 'has' },
+    'trk:failed': { group: 'Tracking', label: "Couldn't read tracking", match: (o) => live(o) && trackingState(o) === 'failed' },
+    'up:not': { group: 'Marketplace upload', label: 'Tracking not uploaded yet', match: (o) => live(o) && uploadState(o) === 'not' },
+    'up:done': { group: 'Marketplace upload', label: 'Uploaded (bot or by you)', match: (o) => live(o) && uploadState(o) === 'done' },
+    'up:failed': { group: 'Marketplace upload', label: 'Upload failed', match: (o) => live(o) && uploadState(o) === 'failed' },
+    history: { group: 'History', label: 'History orders', match: (o) => !!o.is_history },
+};
 
 const BUNNINGS_FALLBACK_CARRIERS = [
     { code: 'AUSPOST', name: 'Australia Post' },
@@ -925,7 +979,7 @@ function InfoRow({ label, children }) {
     );
 }
 
-function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone, onRecheck, recheckingId, onProcess, onForce, processingId, onStop, stoppingId, onSaveVendorNumber, savingVendorNumberId, onRecheckOrderId, recheckingOrderIdId, onReplaceTracking, onUploadTracking, uploadingTrackingId }) {
+function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone, onRecheck, recheckingId, onProcess, onForce, processingId, onStop, stoppingId, onSaveVendorNumber, savingVendorNumberId, onRecheckOrderId, recheckingOrderIdId, onReplaceTracking, onUploadTracking, uploadingTrackingId, onMarkPurchased, markingPurchasedId, onMarkUploaded, markingUploadedId }) {
     const d = orderDetails(order);
     const customer = d.customer || {};
     const shippingAddr = formatAddress(d.shippingAddress);
@@ -944,7 +998,7 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateT
                     History order (uploaded with Upload order history). Kept for the record; no bot checks, buys, tracks or uploads it.
                 </p>
             )}
-            {!order.is_history && (order.purchase_check || isFileOrder(order)) && onRecheck && (
+            {!order.is_history && onRecheck && (
                 <PurchaseCheckPanel
                     check={order.purchase_check}
                     onRecheck={() => onRecheck(order)}
@@ -958,6 +1012,8 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateT
                     savingVendorNumber={savingVendorNumberId === order.id}
                     onRecheckOrderId={onRecheckOrderId ? () => onRecheckOrderId(order) : null}
                     recheckingOrderId={recheckingOrderIdId === order.id}
+                    onMarkPurchased={onMarkPurchased && !['cancelled', 'refunded'].includes(order.status) ? (n) => onMarkPurchased(order, n) : null}
+                    markingPurchased={markingPurchasedId === order.id}
                 />
             )}
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -1163,6 +1219,9 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateT
                             onReplace={onReplaceTracking ? (t) => onReplaceTracking(order, t) : null}
                             onUpload={onUploadTracking ? (t) => onUploadTracking(order, t) : null}
                             uploadingId={uploadingTrackingId}
+                            onMarkUploaded={onMarkUploaded ? (t, v) => onMarkUploaded(order, t, v) : null}
+                            markingId={markingUploadedId}
+                            canEnter={order.purchase_check?.purchase_status === 'purchased'}
                         />
                     )}
                     <p className="mb-1.5 text-xs font-medium text-slate-500 dark:text-slate-400">Submitted to the marketplace from this app</p>
@@ -1277,6 +1336,7 @@ export default function Orders() {
     const [statusFilter, setStatusFilter] = useState(() => {
         if (initialStatus === 'open' || initialStatus === 'all') return initialStatus === 'open' ? 'open' : 'all';
         if (Object.prototype.hasOwnProperty.call(STATUS_LABELS, initialStatus)) return initialStatus;
+        if (BOT_FILTERS[initialStatus]) return initialStatus;
         return 'all';
     });
     const [customerSearch, setCustomerSearch] = useState('');
@@ -1313,7 +1373,8 @@ export default function Orders() {
                     setOrders(list);
                     const r = res.data?.refresh;
                     if (refresh && r) {
-                        setMessage({ text: r.message || 'Orders refreshed.', variant: r.ok ? 'success' : 'error' });
+                        const checking = r.checking ? ` Checking stock and profit for ${r.checking} new order(s).` : '';
+                        setMessage({ text: (r.message || 'Orders refreshed.') + checking, variant: r.ok ? 'success' : 'error' });
                     }
                     if (initialOrderKey) {
                         const match = list.find((o) => {
@@ -1511,6 +1572,41 @@ export default function Orders() {
                 return false;
             })
             .finally(() => setSavingVendorNumberId(null));
+    };
+
+    // Mark as purchased: the user bought the order by hand (order bot not working) and types the number.
+    const [markingPurchasedId, setMarkingPurchasedId] = useState(null);
+    const markPurchased = (order, number) => {
+        if (!selectedStore) return false;
+        setMarkingPurchasedId(order.id);
+        return markOrderPurchased(selectedStore, order.id, number)
+            .then((res) => {
+                setMessage({ text: res.data?.message || 'Order marked as purchased.', variant: 'success' });
+                const pc = res.data?.purchase_check;
+                if (pc) setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, purchase_check: pc } : o)));
+                return true;
+            })
+            .catch((err) => {
+                setMessage({ text: err.response?.data?.detail || 'Could not mark the order as purchased.', variant: 'error' });
+                return false;
+            })
+            .finally(() => setMarkingPurchasedId(null));
+    };
+
+    // "Uploaded on marketplace" tickbox on a tracking number.
+    const [markingUploadedId, setMarkingUploadedId] = useState(null);
+    const handleMarkUploaded = (order, row, uploaded) => {
+        if (!selectedStore) return;
+        setMarkingUploadedId(row.id);
+        markTrackingUploaded(selectedStore, order.id, row.id, uploaded)
+            .then((res) => {
+                const tr = res.data?.tracking;
+                if (tr) setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, tracking: tr } : o)));
+            })
+            .catch((err) => {
+                setMessage({ text: err.response?.data?.detail || 'Could not save the tickbox.', variant: 'error' });
+            })
+            .finally(() => setMarkingUploadedId(null));
     };
 
     // Recheck order ID: the laptop finds the vendor order number of a processed order that has none.
@@ -1760,6 +1856,8 @@ export default function Orders() {
     // its orders are fetched by the worker laptop, so the API fetch button is replaced.
     const isAutoPurchaseOnly = !!selectedStoreData?.auto_buy_vendor
         && selectedStoreData?.management_mode !== 'full_store';
+    // Any store with an Auto buying vendor (also API-connected ones): bot status line and Tracking Bot.
+    const isAutoBuyStore = !!selectedStoreData?.auto_buy_vendor;
 
     // Auto Purchasing: Fetch (laptop downloads the marketplace orders file).
     const [fetchJob, setFetchJob] = useState(null);
@@ -1778,7 +1876,7 @@ export default function Orders() {
         setLaptopOnline(null);
         setBots(null);
         setTrackingRun(null);
-        if (!selectedStore || !isAutoPurchaseOnly) return;
+        if (!selectedStore || !isAutoBuyStore) return;
         const store = selectedStore;
         getOrdersFetch(store)
             .then((res) => {
@@ -1787,13 +1885,13 @@ export default function Orders() {
                 takeBotStatus(res.data);
             })
             .catch(() => {});
-    }, [selectedStore, isAutoPurchaseOnly]);
+    }, [selectedStore, isAutoBuyStore]);
     // Every 30 s: which bots are online and the last tracking job; when a tracking job ends, reload the
     // orders so the numbers it read show up.
     const trackingRunRef = useRef(null);
     useEffect(() => {
         trackingRunRef.current = null;
-        if (!selectedStore || !isAutoPurchaseOnly) return undefined;
+        if (!selectedStore || !isAutoBuyStore) return undefined;
         const store = selectedStore;
         const timer = setInterval(() => {
             getOrdersFetch(store)
@@ -1814,7 +1912,7 @@ export default function Orders() {
                 .catch(() => {});
         }, 30000);
         return () => clearInterval(timer);
-    }, [selectedStore, isAutoPurchaseOnly]);
+    }, [selectedStore, isAutoBuyStore]);
     useEffect(() => {
         if (trackingRunRef.current === null) trackingRunRef.current = trackingRun;
     }, [trackingRun]);
@@ -1875,6 +1973,8 @@ export default function Orders() {
         if (statusFilter && statusFilter !== 'all') {
             if (statusFilter === 'open') {
                 list = list.filter((o) => o.status === 'new' || o.status === 'paid');
+            } else if (BOT_FILTERS[statusFilter]) {
+                list = list.filter(BOT_FILTERS[statusFilter].match);
             } else {
                 list = list.filter((o) => o.status === statusFilter);
             }
@@ -1904,17 +2004,27 @@ export default function Orders() {
                 opts.push({ value: key, label: key });
             }
         });
+        // Auto-buy stores: buying, tracking, marketplace upload and history, with how many orders each matches.
+        if (selectedStoreData?.auto_buy_vendor) {
+            opts.forEach((opt) => { opt.group = 'Marketplace status'; });
+            Object.entries(BOT_FILTERS).forEach(([value, f]) => {
+                const n = orders.filter(f.match).length;
+                opts.push({ value, label: `${f.label} (${n})`, group: f.group });
+            });
+        }
         return opts;
-    }, [orders, statusFilter]);
+    }, [orders, statusFilter, selectedStoreData?.auto_buy_vendor]);
 
     const handleExportExcel = () => {
         if (!selectedStore || exporting) return;
         setExporting(true);
+        // Bot filters (buying / tracking / upload) are only on this page: the Excel then has every order.
+        const exportStatus = statusFilter === 'all' || BOT_FILTERS[statusFilter] ? undefined : statusFilter;
         exportOrdersExcel(selectedStore, selectedStoreData?.name || '', {
-            status: statusFilter === 'all' ? undefined : statusFilter,
+            status: exportStatus,
         })
             .then(() => {
-                const scope = statusFilter === 'all'
+                const scope = !exportStatus
                     ? 'all orders'
                     : `status “${STATUS_LABELS[statusFilter] || statusFilter}”`;
                 setMessage({ text: `Excel downloaded (${scope}).`, variant: 'success' });
@@ -1982,7 +2092,7 @@ export default function Orders() {
                     </div>
                 )}
                 {selectedStore && (
-                    <div className="w-full sm:max-w-44">
+                    <div className="w-full sm:max-w-56">
                         <Select
                             label="Status"
                             value={statusFilter}
@@ -2177,7 +2287,7 @@ export default function Orders() {
                 )}
             </div>
 
-            {selectedStore && isAutoPurchaseOnly && (fetchJob || bots || trackingRun) && (
+            {selectedStore && isAutoBuyStore && (fetchJob || bots || trackingRun) && (
                 <BotStatusLine
                     bots={bots}
                     trackingRun={trackingRun}
@@ -2302,7 +2412,7 @@ export default function Orders() {
                                                     </p>
                                                     {showTracking && o.tracking && (
                                                         <div className="mt-2">
-                                                            <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} onUpload={handleUploadTracking} uploadingId={uploadingTrackingId} />
+                                                            <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} onUpload={handleUploadTracking} uploadingId={uploadingTrackingId} onMarkUploaded={handleMarkUploaded} markingUploadedId={markingUploadedId} />
                                                         </div>
                                                     )}
                                                 </div>
@@ -2385,7 +2495,7 @@ export default function Orders() {
                                             </div>
                                             {expandedId === o.id && (
                                                 <div className="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} onRecheckOrderId={selectedStoreData?.auto_buy_vendor ? handleRecheckOrderId : null} recheckingOrderIdId={recheckingOrderIdId} onReplaceTracking={(ord, t) => setTrackingEdit({ order: ord, tracking: t })} onUploadTracking={handleUploadTracking} uploadingTrackingId={uploadingTrackingId} />
+                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} onRecheckOrderId={selectedStoreData?.auto_buy_vendor ? handleRecheckOrderId : null} recheckingOrderIdId={recheckingOrderIdId} onReplaceTracking={(ord, t) => setTrackingEdit({ order: ord, tracking: t })} onUploadTracking={handleUploadTracking} uploadingTrackingId={uploadingTrackingId} onMarkPurchased={selectedStoreData?.auto_buy_vendor ? markPurchased : null} markingPurchasedId={markingPurchasedId} onMarkUploaded={handleMarkUploaded} markingUploadedId={markingUploadedId} />
                                                 </div>
                                             )}
                                         </li>
@@ -2464,7 +2574,7 @@ export default function Orders() {
                                                         </td>
                                                         {showTracking && (
                                                             <td className="px-4 py-2.5 align-top">
-                                                                <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} onUpload={handleUploadTracking} uploadingId={uploadingTrackingId} />
+                                                                <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} onUpload={handleUploadTracking} uploadingId={uploadingTrackingId} onMarkUploaded={handleMarkUploaded} markingUploadedId={markingUploadedId} />
                                                             </td>
                                                         )}
                                                         <td className="px-4 py-2.5">
@@ -2545,7 +2655,7 @@ export default function Orders() {
                                                     {expandedId === o.id && (
                                                         <tr className="border-t border-slate-100 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/40">
                                                             <td colSpan={showTracking ? 10 : 9} className="px-4 py-4">
-                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} onRecheckOrderId={selectedStoreData?.auto_buy_vendor ? handleRecheckOrderId : null} recheckingOrderIdId={recheckingOrderIdId} onReplaceTracking={(ord, t) => setTrackingEdit({ order: ord, tracking: t })} onUploadTracking={handleUploadTracking} uploadingTrackingId={uploadingTrackingId} />
+                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} onRecheckOrderId={selectedStoreData?.auto_buy_vendor ? handleRecheckOrderId : null} recheckingOrderIdId={recheckingOrderIdId} onReplaceTracking={(ord, t) => setTrackingEdit({ order: ord, tracking: t })} onUploadTracking={handleUploadTracking} uploadingTrackingId={uploadingTrackingId} onMarkPurchased={selectedStoreData?.auto_buy_vendor ? markPurchased : null} markingPurchasedId={markingPurchasedId} onMarkUploaded={handleMarkUploaded} markingUploadedId={markingUploadedId} />
                                                             </td>
                                                         </tr>
                                                     )}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AlertTriangle, Check, CheckCircle2, Copy, History, Loader2, MoreHorizontal, Pencil, RefreshCw, UploadCloud, X } from 'lucide-react';
+import { AlertTriangle, Check, CheckCircle2, Copy, History, Loader2, Pencil, RefreshCw, UploadCloud, X } from 'lucide-react';
 import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 
@@ -59,63 +59,62 @@ function IconButton({ title, onClick, children, disabled = false }) {
     );
 }
 
-function ActionsMenu({ items }) {
-    // Placed against the window (fixed), so the table's scroll box never cuts it off on the last rows.
-    const [pos, setPos] = useState(null);
-    if (!items.length) return null;
-    const toggle = (e) => {
-        if (pos) {
-            setPos(null);
-            return;
-        }
-        const r = e.currentTarget.getBoundingClientRect();
-        const below = window.innerHeight - r.bottom > 100;
-        setPos({ left: Math.max(8, r.right - 176), top: below ? r.bottom + 4 : undefined,
-            bottom: below ? undefined : window.innerHeight - r.top + 4 });
-    };
+function SmallButton({ title, onClick, children, disabled = false }) {
     return (
-        <span className="inline-flex">
-            <IconButton title="Tracking actions" onClick={toggle}>
-                <MoreHorizontal className="h-4 w-4" />
-            </IconButton>
-            {pos && (
-                <>
-                    <span className="fixed inset-0 z-30" onClick={() => setPos(null)} onWheel={() => setPos(null)} aria-hidden="true" />
-                    <span style={pos} className="fixed z-40 w-44 overflow-hidden rounded-md border border-slate-200 bg-white py-1 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-800">
-                        {items.map((it) => (
-                            <button
-                                key={it.label}
-                                type="button"
-                                className="block w-full px-3 py-2 text-left text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
-                                onClick={() => { setPos(null); it.onClick(); }}
-                            >
-                                {it.label}
-                            </button>
-                        ))}
-                    </span>
-                </>
-            )}
-        </span>
+        <button
+            type="button"
+            title={title}
+            onClick={onClick}
+            disabled={disabled}
+            className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+        >
+            {children}
+        </button>
     );
 }
 
 const UPLOAD_DONE = ['verified', 'already'];
 const UPLOAD_PROBLEM = ['failed', 'not_verified'];
 
-/** Upload to the marketplace (Kogan / Big W): what the Tracking Bot did with this number, and the Upload button. */
-export function UploadStatus({ row, uploadTo, onUpload, uploading }) {
-    // Uploaded on the marketplace by the user (or from the order history file): on every marketplace.
+/** "Uploaded on marketplace" tickbox: the user pasted the number on the marketplace order themselves. */
+function UploadedTick({ row, onMarkUploaded, marking }) {
+    const manual = row.upload_status === 'manual';
+    if (!onMarkUploaded || !(row.can_mark_uploaded || manual)) return null;
+    return (
+        <label
+            className="inline-flex cursor-pointer items-center gap-1 text-[11px] text-slate-600 dark:text-slate-300"
+            title={manual ? (row.upload_note || 'Uploaded on the marketplace') : 'Tick after you paste this number on the marketplace order yourself'}
+        >
+            <input
+                type="checkbox"
+                className="h-3.5 w-3.5 rounded border-slate-300 accent-emerald-600"
+                checked={manual}
+                disabled={marking}
+                onChange={(e) => onMarkUploaded(e.target.checked)}
+            />
+            {marking ? 'Saving…' : 'Uploaded on marketplace'}
+        </label>
+    );
+}
+
+/** Upload to the marketplace: what the Tracking Bot did with this number, the Upload button (Kogan / Big W),
+ *  and the "Uploaded on marketplace" tickbox (every marketplace). */
+export function UploadStatus({ row, uploadTo, onUpload, uploading, onMarkUploaded, marking }) {
+    const note = row.upload_note || '';
+    const tick = <UploadedTick row={row} onMarkUploaded={onMarkUploaded} marking={marking} />;
     if (row.upload_status === 'manual') {
         return (
-            <p className="flex items-center gap-1 pl-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400" title={row.upload_note || ''}>
-                <CheckCircle2 className="h-3 w-3" />
-                On {uploadTo || 'marketplace'}
-            </p>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-0.5">
+                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400" title={note}>
+                    <CheckCircle2 className="h-3 w-3" />
+                    On {uploadTo || 'marketplace'}{/by you|marked uploaded/i.test(note) ? ' · by you' : ''}
+                </span>
+                {tick}
+            </div>
         );
     }
-    if (!uploadTo || row.vendor_own_number) return null;
-    const note = row.upload_note || '';
-    if (uploading || row.upload_pending) {
+    const botCan = uploadTo && !row.vendor_own_number;
+    if (botCan && (uploading || row.upload_pending)) {
         return (
             <p className="flex items-center gap-1 pl-0.5 text-[11px] text-sky-600 dark:text-sky-400" title={note}>
                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -123,7 +122,7 @@ export function UploadStatus({ row, uploadTo, onUpload, uploading }) {
             </p>
         );
     }
-    if (UPLOAD_DONE.includes(row.upload_status)) {
+    if (botCan && UPLOAD_DONE.includes(row.upload_status)) {
         return (
             <p className="flex items-center gap-1 pl-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400" title={note}>
                 <CheckCircle2 className="h-3 w-3" />
@@ -131,11 +130,11 @@ export function UploadStatus({ row, uploadTo, onUpload, uploading }) {
             </p>
         );
     }
-    const problem = UPLOAD_PROBLEM.includes(row.upload_status);
-    const label = problem ? 'Upload failed' : row.upload_status === 'skipped' ? 'Not uploaded'
+    const problem = botCan && UPLOAD_PROBLEM.includes(row.upload_status);
+    const label = !botCan ? '' : problem ? 'Upload failed' : row.upload_status === 'skipped' ? 'Not uploaded'
         : row.upload_status === 'dry_run' ? 'Dry run only' : '';
     return (
-        <p className="flex flex-wrap items-center gap-x-1.5 pl-0.5 text-[11px]">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-0.5 text-[11px]">
             {label && (
                 <span
                     title={note}
@@ -144,7 +143,7 @@ export function UploadStatus({ row, uploadTo, onUpload, uploading }) {
                     {label}
                 </span>
             )}
-            {row.can_upload && onUpload && (
+            {botCan && row.can_upload && onUpload && (
                 <button
                     type="button"
                     onClick={onUpload}
@@ -155,11 +154,41 @@ export function UploadStatus({ row, uploadTo, onUpload, uploading }) {
                     {problem ? 'Try again' : `Upload to ${uploadTo}`}
                 </button>
             )}
-        </p>
+            {tick}
+        </div>
     );
 }
 
-export function TrackingCell({ order, onReplace, onGet, gettingId, onUpload, uploadingId }) {
+const CELL_STATUS = {
+    not_shipped: { label: 'Not shipped', cls: 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
+    failed: { label: "Couldn't read", cls: 'bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' },
+    cancelled: { label: 'Cancelled at Amazon', cls: 'bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' },
+    partly: { label: 'More packages to ship', cls: 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
+};
+const CELL_NOT_CHECKED = { label: 'Not checked yet', cls: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300' };
+
+/** Get tracking / Enter tracking, always visible under the state (no hidden menu). */
+function TrackingActions({ order, t, purchased, hasNumber, onGet, onReplace }) {
+    const canGet = t.can_get && onGet;
+    const canEnter = purchased && !hasNumber && onReplace;
+    if (!canGet && !canEnter) return null;
+    return (
+        <div className="flex flex-wrap items-center gap-1">
+            {canGet && (
+                <SmallButton title="The Tracking Bot reads the tracking from Amazon now" onClick={() => onGet(order)}>
+                    <RefreshCw className="h-3 w-3" /> Get tracking
+                </SmallButton>
+            )}
+            {canEnter && (
+                <SmallButton title="Type the tracking number yourself" onClick={() => onReplace(order, null)}>
+                    <Pencil className="h-3 w-3" /> Enter tracking
+                </SmallButton>
+            )}
+        </div>
+    );
+}
+
+export function TrackingCell({ order, onReplace, onGet, gettingId, onUpload, uploadingId, onMarkUploaded, markingUploadedId }) {
     const t = order.tracking;
     if (!t) return <span className="text-xs text-slate-400">—</span>;
     const current = t.current || [];
@@ -168,10 +197,6 @@ export function TrackingCell({ order, onReplace, onGet, gettingId, onUpload, upl
     const purchased = order.purchase_check?.purchase_status === 'purchased';
     const warning = nameWarning(t.note);
     const checked = shortTime(t.checked_at);
-    const menu = [
-        ...(t.can_get && !busy ? [{ label: 'Get tracking now', onClick: () => onGet(order) }] : []),
-        ...(purchased && current.length === 0 ? [{ label: 'Enter tracking', onClick: () => onReplace(order, null) }] : []),
-    ];
 
     if (busy) {
         return (
@@ -183,25 +208,17 @@ export function TrackingCell({ order, onReplace, onGet, gettingId, onUpload, upl
     }
 
     if (current.length === 0) {
-        const label = {
-            not_shipped: `Not shipped${checked ? ` · checked ${checked}` : ''}`,
-            failed: "Couldn't read",
-            cancelled: 'Cancelled at Amazon',
-        }[t.status] || 'Not checked yet';
+        if (!purchased && !order.is_history) {
+            return <span className="text-xs text-slate-400 dark:text-slate-500" title="Tracking comes after the order is bought">Not bought yet</span>;
+        }
+        const state = CELL_STATUS[t.status] || CELL_NOT_CHECKED;
+        const tip = [t.note, checked ? `Checked ${checked}` : ''].filter(Boolean).join(' · ');
         return (
-            <div className="flex items-center gap-1">
-                <span
-                    className={`text-xs ${t.status === 'failed' ? 'font-medium text-rose-600 dark:text-rose-400' : 'text-slate-500 dark:text-slate-400'}`}
-                    title={t.note || ''}
-                >
-                    {label}
+            <div className="flex flex-col items-start gap-1">
+                <span className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-medium ${state.cls}`} title={tip}>
+                    {state.label}
                 </span>
-                {t.status === 'failed' && t.can_get && (
-                    <IconButton title="Try again" onClick={() => onGet(order)}>
-                        <RefreshCw className="h-3.5 w-3.5" />
-                    </IconButton>
-                )}
-                <ActionsMenu items={menu} />
+                <TrackingActions order={order} t={t} purchased={purchased} hasNumber={false} onGet={onGet} onReplace={onReplace} />
             </div>
         );
     }
@@ -217,9 +234,11 @@ export function TrackingCell({ order, onReplace, onGet, gettingId, onUpload, upl
                                 <AlertTriangle className="h-3.5 w-3.5" />
                             </span>
                         )}
-                        <IconButton title="Replace tracking" onClick={() => onReplace(order, row)}>
-                            <Pencil className="h-3.5 w-3.5" />
-                        </IconButton>
+                        {onReplace && (
+                            <IconButton title="Replace tracking" onClick={() => onReplace(order, row)}>
+                                <Pencil className="h-3.5 w-3.5" />
+                            </IconButton>
+                        )}
                     </div>
                     <p className="mt-0.5 flex items-center gap-1 pl-0.5 text-[11px] text-slate-500 dark:text-slate-400">
                         <span>{row.carrier || 'Carrier not shown'}</span>
@@ -238,14 +257,18 @@ export function TrackingCell({ order, onReplace, onGet, gettingId, onUpload, upl
                         uploadTo={t.upload_to}
                         uploading={uploadingId === row.id}
                         onUpload={onUpload ? () => onUpload(order, row) : null}
+                        onMarkUploaded={onMarkUploaded ? (v) => onMarkUploaded(order, row, v) : null}
+                        marking={markingUploadedId === row.id}
                     />
                 </div>
             ))}
             {t.status === 'partly' && (
-                <p className="flex items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400" title={t.note || ''}>
-                    More packages not shipped yet
-                    <ActionsMenu items={menu} />
-                </p>
+                <div className="flex flex-col items-start gap-1">
+                    <span className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-medium ${CELL_STATUS.partly.cls}`} title={t.note || ''}>
+                        {CELL_STATUS.partly.label}
+                    </span>
+                    <TrackingActions order={order} t={t} purchased={purchased} hasNumber onGet={onGet} onReplace={onReplace} />
+                </div>
             )}
         </div>
     );
@@ -261,7 +284,7 @@ const DETAIL_STATUS = {
 };
 
 /** Order details (Shipping / tracking card): the vendor's tracking numbers, where each came from, history. */
-export function TrackingDetails({ tracking, formatDate, onReplace, onUpload, uploadingId }) {
+export function TrackingDetails({ tracking, formatDate, onReplace, onUpload, uploadingId, onMarkUploaded, markingId, canEnter = false }) {
     const t = tracking;
     if (!t) return null;
     const current = t.current || [];
@@ -288,6 +311,8 @@ export function TrackingDetails({ tracking, formatDate, onReplace, onUpload, upl
                                 uploadTo={t.upload_to}
                                 uploading={uploadingId === row.id}
                                 onUpload={onUpload ? () => onUpload(row) : null}
+                                onMarkUploaded={onMarkUploaded ? (v) => onMarkUploaded(row, v) : null}
+                                marking={markingId === row.id}
                             />
                             {onReplace && (
                                 <button
@@ -303,7 +328,14 @@ export function TrackingDetails({ tracking, formatDate, onReplace, onUpload, upl
                     ))}
                 </ul>
             ) : (
-                <p className="text-slate-500 dark:text-slate-400">No vendor tracking yet.</p>
+                <p className="flex flex-wrap items-center gap-2 text-slate-500 dark:text-slate-400">
+                    No vendor tracking yet.
+                    {canEnter && onReplace && (
+                        <SmallButton title="Type the tracking number yourself" onClick={() => onReplace(null)}>
+                            <Pencil className="h-3 w-3" /> Enter tracking
+                        </SmallButton>
+                    )}
+                </p>
             )}
             {replaced.length > 0 && (
                 <ul className="mt-1.5 space-y-0.5 text-xs text-slate-500 dark:text-slate-400">

@@ -404,6 +404,32 @@ def mark_stale_upload(run) -> None:
 
 # ---- user: Replace / add a tracking number ---------------------------------------------------------------
 
+def mark_uploaded(order, user, tracking_id, uploaded: bool = True):
+    """"Uploaded on marketplace" tickbox: the user pasted this number on the marketplace order themselves.
+
+    Ticked: the number counts as uploaded (``upload_status`` 'manual'), the Upload button goes and no bot
+    uploads it. Unticked: back to not uploaded. Works on every marketplace.
+    """
+    tracking = current_trackings(order).filter(id=tracking_id).first() if tracking_id else None
+    if tracking is None:
+        raise AutoPurchaseError('That tracking number was replaced or removed. Reload the page.', 409)
+    if uploaded:
+        if upload_pending(tracking):
+            raise AutoPurchaseError('The Tracking Bot is uploading this number right now.', 409)
+        who = (getattr(user, 'get_full_name', lambda: '')() or getattr(user, 'username', '') or 'you').strip()
+        tracking.upload_status = 'manual'
+        tracking.upload_note = f"marked uploaded by {who} {timezone.localtime().strftime('%d/%m/%Y %H:%M')}"
+        tracking.upload_checked_at = timezone.now()
+        tracking.upload_marked_by = user
+    elif tracking.upload_status == 'manual':
+        tracking.upload_status = ''
+        tracking.upload_note = ''
+        tracking.upload_checked_at = None
+        tracking.upload_marked_by = None
+    tracking.save(update_fields=['upload_status', 'upload_note', 'upload_checked_at', 'upload_marked_by'])
+    return tracking
+
+
 def replace_tracking(order, user, number: str, carrier: str = '', tracking_id=None):
     """The user types a tracking number: it replaces ``tracking_id`` (kept as history) or is added.
     The Tracking Bot does not change an order that has a number the user entered."""
@@ -476,6 +502,7 @@ def tracking_payload(order, check=None) -> dict:
                 'upload_status': t.upload_status, 'upload_note': t.upload_note,
                 'upload_checked_at': t.upload_checked_at.isoformat() if t.upload_checked_at else None,
                 'upload_pending': upload_pending(t), 'can_upload': bool(mp) and can_upload(order, t),
+                'can_mark_uploaded': t.replaced_at is None and not upload_pending(t),
                 'vendor_own_number': is_vendor_own_number(t.tracking_number)}
 
     return {

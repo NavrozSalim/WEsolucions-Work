@@ -348,6 +348,13 @@ export const saveOrderTracking = (storeId, orderId, data) => api.post(`/stores/$
 /** Tracking Bot: upload one tracking number (tracking_id) to the Kogan / Big W order and check it there. */
 export const uploadOrderTracking = (storeId, orderId, trackingId) =>
     api.post(`/stores/${storeId}/orders/${orderId}/upload-tracking/`, { tracking_id: trackingId });
+/** Mark as purchased: the user bought the order by hand and types the vendor order number. */
+export const markOrderPurchased = (storeId, orderId, vendorOrderNumber) =>
+    api.post(`/stores/${storeId}/orders/${orderId}/mark-purchased/`, { vendor_order_number: vendorOrderNumber });
+/** "Uploaded on marketplace" tickbox: tick (uploaded = true) or untick one tracking number. */
+export const markTrackingUploaded = (storeId, orderId, trackingId, uploaded = true) => (uploaded
+    ? api.post(`/stores/${storeId}/orders/${orderId}/mark-uploaded/`, { tracking_id: trackingId })
+    : api.delete(`/stores/${storeId}/orders/${orderId}/mark-uploaded/`, { params: { tracking_id: trackingId } }));
 /** Auto Purchasing: buy every order that is in profit with no errors. */
 export const processAllOrders = (storeId, vendor = '') => api.post(`/stores/${storeId}/orders/process-all/`, vendor ? { vendor } : {});
 /** Orders of the user's deleted stores (kept 7 days) and linking them to this store. */

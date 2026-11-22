@@ -563,6 +563,7 @@ def check_payload(check) -> dict | None:
         'purchase_error': check.purchase_error or '',
         'purchase_requested_at': check.purchase_requested_at.isoformat() if check.purchase_requested_at else None,
         'purchased_at': check.purchased_at.isoformat() if check.purchased_at else None,
+        'purchased_manually': bool(check.purchased_manually),
         'delivery': delivery_summary(check),
         **_order_id_lookup(check),
     }

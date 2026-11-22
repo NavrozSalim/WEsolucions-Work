@@ -449,6 +449,7 @@ def _save_history_done(row, order: ParsedOrder, user) -> tuple[bool, int]:
         number = ', '.join(order.vendor_orders)[:255]
         if check.purchase_status != PurchaseStatus.PURCHASED or check.vendor_order_number != number:
             check.purchase_status = PurchaseStatus.PURCHASED
+            check.purchased_manually = True
             check.vendor_order_number = number
             check.purchase_error = ''
             if check.status == PurchaseCheckStatus.CHECKING:

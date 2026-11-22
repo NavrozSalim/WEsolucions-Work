@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { AlertTriangle, ExternalLink, Loader2, Pencil, RefreshCw, ScanSearch, ShoppingCart, Square } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ExternalLink, Loader2, Pencil, RefreshCw, ScanSearch, ShoppingCart, Square } from 'lucide-react';
 
 /** Auto Purchasing: stock / profit check for one order, with Process and Force process. */
 
@@ -73,7 +73,7 @@ export function PurchaseCheckBadge({ check }) {
                     title={check.purchase_error || undefined}
                     className="mt-1 inline-block rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200"
                 >
-                    Purchased{check.vendor_order_number ? ` · ${check.vendor_order_number}` : ''}{check.purchase_error ? ' (!)' : ''}
+                    Purchased{check.vendor_order_number ? ` · ${check.vendor_order_number}` : ''}{check.purchased_manually ? ' · by you' : ''}{check.purchase_error ? ' (!)' : ''}
                 </span>
                 {delivery && (
                     <span
@@ -244,7 +244,7 @@ function PurchaseStatusNote({ check, onStop, stopping, onSaveVendorNumber, savin
         return (
             <div className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:border-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-200">
                 <p className="font-semibold">
-                    Purchased{check.vendor_order_number ? ` · vendor order ${check.vendor_order_number}` : ''}
+                    Purchased{check.purchased_manually ? ' by you' : ''}{check.vendor_order_number ? ` · vendor order ${check.vendor_order_number}` : ''}
                     {check.purchased_at && <span className="font-normal opacity-75"> · {when(check.purchased_at)}</span>}
                 </p>
                 <DeliveryNote delivery={check.delivery} />
@@ -262,8 +262,44 @@ function PurchaseStatusNote({ check, onStop, stopping, onSaveVendorNumber, savin
     );
 }
 
+/** Mark as purchased: the vendor order number of an order the user bought by hand. */
+function MarkPurchasedForm({ onSave, onCancel, saving }) {
+    const [value, setValue] = useState('');
+    const submit = (e) => {
+        e.preventDefault();
+        if (value.trim()) onSave(value.trim());
+    };
+    return (
+        <form onSubmit={submit} className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 dark:border-emerald-800 dark:bg-emerald-900/20">
+            <label htmlFor="mark-purchased-number" className="text-xs font-medium text-emerald-900 dark:text-emerald-100">
+                Vendor order number
+            </label>
+            <input
+                id="mark-purchased-number"
+                autoFocus
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                placeholder="e.g. 503-7159982-8255043"
+                className="min-h-8 w-60 rounded-md border border-emerald-300 bg-white px-2 text-xs text-slate-900 dark:border-emerald-700 dark:bg-slate-900 dark:text-slate-100"
+            />
+            <button
+                type="submit"
+                disabled={saving || !value.trim()}
+                className="inline-flex min-h-8 items-center rounded-md bg-emerald-600 px-2.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
+            >
+                {saving ? 'Saving…' : 'Save as purchased'}
+            </button>
+            <button type="button" onClick={onCancel} className="text-xs text-slate-600 dark:text-slate-300">Cancel</button>
+            <p className="w-full text-[11px] text-emerald-800 dark:text-emerald-200">
+                The order is saved as purchased by you and the order bot will not buy it. Tracking can then be read or entered.
+            </p>
+        </form>
+    );
+}
+
 export function PurchaseCheckPanel({ check, onRecheck, rechecking, onProcess, onForce, processing, onStop, stopping,
-    onSaveVendorNumber, savingVendorNumber, onRecheckOrderId, recheckingOrderId }) {
+    onSaveVendorNumber, savingVendorNumber, onRecheckOrderId, recheckingOrderId, onMarkPurchased, markingPurchased }) {
+    const [markOpen, setMarkOpen] = useState(false);
     const lines = check?.lines || [];
     const checking = check?.status === 'checking';
     const buyable = check?.status === 'buyable';
@@ -315,8 +351,26 @@ export function PurchaseCheckPanel({ check, onRecheck, rechecking, onProcess, on
                             <AlertTriangle className="h-3.5 w-3.5" /> {processing ? 'Sending…' : 'Force process'}
                         </button>
                     )}
+                    {!locked && onMarkPurchased && (
+                        <button
+                            type="button"
+                            onClick={() => setMarkOpen((v) => !v)}
+                            className="inline-flex min-h-8 items-center gap-1 rounded-md border border-emerald-300 bg-white px-2.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50 dark:border-emerald-700 dark:bg-slate-900 dark:text-emerald-300"
+                            title="You bought this order yourself (the order bot was not used): enter the vendor order number"
+                            aria-expanded={markOpen}
+                        >
+                            <CheckCircle2 className="h-3.5 w-3.5" /> Mark as purchased
+                        </button>
+                    )}
                 </div>
             </div>
+            {!locked && onMarkPurchased && markOpen && (
+                <MarkPurchasedForm
+                    saving={markingPurchased}
+                    onCancel={() => setMarkOpen(false)}
+                    onSave={(n) => Promise.resolve(onMarkPurchased(n)).then((ok) => { if (ok !== false) setMarkOpen(false); })}
+                />
+            )}
 
             {!check ? (
                 <p className="text-sm text-slate-500 dark:text-slate-400">Not checked yet. Click Recheck.</p>
