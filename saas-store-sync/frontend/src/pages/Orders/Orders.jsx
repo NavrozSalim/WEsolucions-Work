@@ -1416,6 +1416,7 @@ export default function Orders() {
         setOrders([]);
         setMessage(null);
         setExpandedId(null);
+        setSelectedIds([]);
         // A load still running for the previous store no longer clears these itself.
         setRefreshing(false);
         setLoading(false);
@@ -1689,6 +1690,31 @@ export default function Orders() {
             .finally(() => setSavingTracking(false));
     };
 
+    // Selected orders (checkboxes): Process, Recheck or Get tracking on just those.
+    const [selectedIds, setSelectedIds] = useState([]);
+    const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+    const toggleSelected = (id) => setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+    const [bulkBusy, setBulkBusy] = useState('');
+    const runBulk = (kind, call, okText, errText) => {
+        if (!selectedStore || !selectedIds.length) return;
+        const store = selectedStore;
+        setBulkBusy(kind);
+        call(store, selectedIds)
+            .then((res) => {
+                setMessage({ text: res.data?.message || okText, variant: 'success' });
+                return getOrders(store);
+            })
+            .then((res) => {
+                if (isCurrentStore(store) && Array.isArray(res?.data?.orders)) setOrders(res.data.orders);
+            })
+            .catch((err) => setMessage({ text: err.response?.data?.detail || errText, variant: 'error' }))
+            .finally(() => setBulkBusy(''));
+    };
+    const recheckSelected = () => runBulk('recheck', (store, ids) => recheckOrderPurchase(store, null, ids),
+        'Checking the selected orders.', 'Could not start the check.');
+    const trackSelected = () => runBulk('tracking', (store, ids) => getStoreTracking(store, ids),
+        'Getting tracking for the selected orders.', 'Could not start Get tracking.');
+
     // Process all: every order that is ready to buy (in profit, no errors, not bought yet).
     const readyToBuy = orders.filter((o) => !o.is_history && o.purchase_check?.status === 'buyable'
         && !purchaseLocked(o.purchase_check));
@@ -1696,17 +1722,26 @@ export default function Orders() {
     const [processAllVendor, setProcessAllVendor] = useState('');
     const [processAllOpen, setProcessAllOpen] = useState(false);
     const [processingAll, setProcessingAll] = useState(false);
+    // Process selected: the same confirm box, limited to the ticked orders that are ready to buy.
+    const [processSelected, setProcessSelected] = useState(false);
     const askProcessAll = (vendor) => {
         setProcessAllMenu(false);
         setProcessAllVendor(vendor);
+        setProcessSelected(false);
+        setProcessAllOpen(true);
+    };
+    const askProcessSelected = () => {
+        setProcessAllVendor('');
+        setProcessSelected(true);
         setProcessAllOpen(true);
     };
     const confirmProcessAll = () => {
         if (!selectedStore) return;
         const store = selectedStore;
         setProcessingAll(true);
-        processAllOrders(store, processAllVendor)
+        processAllOrders(store, processAllVendor, processSelected ? selectedIds : null)
             .then((res) => {
+                if (processSelected) setSelectedIds([]);
                 const r = res.data || {};
                 setMessage({ text: r.message || 'Orders sent to the laptop to buy.', variant: r.not_sent?.length ? 'warning' : 'success' });
                 return getOrders(store);
@@ -1848,7 +1883,14 @@ export default function Orders() {
     }, {});
     const storeVendors = (selectedStoreData?.auto_buy_vendors || []).map((r) => r?.vendor || r).filter((v) => typeof v === 'string' && v);
     const vendorChoices = [...new Set([...storeVendors, ...Object.keys(readyByVendor)])];
-    const processAllList = processAllVendor ? readyToBuy.filter((o) => orderVendor(o) === processAllVendor) : readyToBuy;
+    const processAllList = processSelected
+        ? readyToBuy.filter((o) => selectedSet.has(o.id))
+        : processAllVendor ? readyToBuy.filter((o) => orderVendor(o) === processAllVendor) : readyToBuy;
+    // Checkbox selection (auto-buy stores): select all ticks every order the filter shows.
+    const canSelect = !!selectedStoreData?.auto_buy_vendor;
+    const selectedOrders = orders.filter((o) => selectedSet.has(o.id));
+    const selectedReady = readyToBuy.filter((o) => selectedSet.has(o.id)).length;
+    const selectedTrackable = selectedOrders.filter((o) => o.tracking?.can_get).length;
     const readyEarning = processAllList.reduce((sum, o) => sum + (Number(o.purchase_check?.earning_cents) || 0), 0);
 
     const marketplaceCode = (selectedStoreData?.marketplace_code || '').toLowerCase();
@@ -1986,6 +2028,14 @@ export default function Orders() {
         // Newest purchase date first; same date ordered by later time first.
         return [...list].sort(compareOrdersNewestFirst);
     }, [orders, statusFilter, customerSearch]);
+
+    // Select all: every order the filter shows.
+    const visibleIds = filteredOrders.map((o) => o.id);
+    const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedSet.has(id));
+    const someVisibleSelected = !allVisibleSelected && visibleIds.some((id) => selectedSet.has(id));
+    const toggleAllVisible = () => setSelectedIds((prev) => (allVisibleSelected
+        ? prev.filter((id) => !visibleIds.includes(id))
+        : [...new Set([...prev, ...visibleIds])]));
 
     const statusFilterOptions = useMemo(() => {
         const present = new Set(orders.map((o) => o.status).filter(Boolean));
@@ -2345,11 +2395,14 @@ export default function Orders() {
                 onConfirm={confirmProcessAll}
                 loading={processingAll}
                 variant="primary"
-                title={processAllVendor ? `Process all ${autoBuyVendorLabel(processAllVendor) || processAllVendor} orders?` : 'Process all orders?'}
+                title={processSelected ? `Process ${selectedIds.length} selected order${selectedIds.length === 1 ? '' : 's'}?`
+                    : processAllVendor ? `Process all ${autoBuyVendorLabel(processAllVendor) || processAllVendor} orders?` : 'Process all orders?'}
                 confirmLabel={`Process ${processAllList.length} order${processAllList.length === 1 ? '' : 's'}`}
                 message={`Buy ${processAllList.length} ${processAllVendor ? `${autoBuyVendorLabel(processAllVendor) || processAllVendor} ` : ''}order${processAllList.length === 1 ? '' : 's'} that ${processAllList.length === 1 ? 'is' : 'are'} in profit with no errors `
                     + `(total earning A$${(readyEarning / 100).toFixed(2)}). The worker laptop buys them one at a time and stops on any `
-                    + 'order whose vendor price went up. Orders at a loss or with errors are skipped.'}
+                    + 'order whose vendor price went up. Orders at a loss or with errors are skipped.'
+                    + (processSelected && processAllList.length < selectedIds.length
+                        ? ` ${selectedIds.length - processAllList.length} selected order(s) are not ready to buy and are skipped.` : '')}
             />
 
             {!storesLoading && stores.length === 0 && (
@@ -2358,6 +2411,52 @@ export default function Orders() {
                     title="No managed stores yet"
                     description='Create a store with the "Managed store" option, or choose an Auto buying vendor on a store’s Auto Purchasing step, to see its orders here.'
                 />
+            )}
+
+            {selectedStore && canSelect && selectedIds.length > 0 && (
+                <div className="sticky top-0 z-20 mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-accent-200 bg-accent-50 px-3 py-2 text-sm dark:border-accent-800 dark:bg-slate-800">
+                    <span className="font-medium text-slate-800 dark:text-slate-100">
+                        {selectedIds.length} selected
+                    </span>
+                    <Button
+                        variant="primary"
+                        size="sm"
+                        className="!bg-emerald-600 hover:!bg-emerald-700"
+                        onClick={askProcessSelected}
+                        disabled={processingAll || selectedReady === 0}
+                        title="Buy the selected orders that are ready to buy, one at a time on the worker laptop"
+                    >
+                        <ShoppingCart className="mr-1.5 h-4 w-4" />
+                        Process selected ({selectedReady})
+                    </Button>
+                    <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={recheckSelected}
+                        disabled={!!bulkBusy}
+                        title="Re-read vendor price and stock for the selected open orders"
+                    >
+                        <RefreshCw className={`mr-1.5 h-4 w-4 ${bulkBusy === 'recheck' ? 'animate-spin' : ''}`} />
+                        Recheck selected
+                    </Button>
+                    <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={trackSelected}
+                        disabled={!!bulkBusy || selectedTrackable === 0}
+                        title="The Tracking Bot reads tracking for the selected purchased orders"
+                    >
+                        <Truck className={`mr-1.5 h-4 w-4 ${bulkBusy === 'tracking' ? 'animate-pulse' : ''}`} />
+                        Get tracking ({selectedTrackable})
+                    </Button>
+                    <button
+                        type="button"
+                        onClick={() => setSelectedIds([])}
+                        className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white"
+                    >
+                        <X className="h-3.5 w-3.5" /> Clear selection
+                    </button>
+                </div>
             )}
 
             {selectedStore && (
@@ -2387,9 +2486,18 @@ export default function Orders() {
                                     const primaryTicket = tickets[0] || null;
                                     const terminal = ['cancelled', 'refunded', 'shipping_complete'].includes(o.status);
                                     return (
-                                        <li key={o.id} className="px-4 py-4">
+                                        <li key={o.id} className={`px-4 py-4 ${selectedSet.has(o.id) ? 'bg-accent-50/60 dark:bg-slate-800/60' : ''}`}>
                                             <div className="flex items-start justify-between gap-3">
-                                                <div className="min-w-0">
+                                                {canSelect && (
+                                                    <input
+                                                        type="checkbox"
+                                                        aria-label={`Select order ${o.invoice_number || o.external_order_key || ''}`}
+                                                        className="mt-1 h-4 w-4 shrink-0 rounded border-slate-300 accent-accent-600"
+                                                        checked={selectedSet.has(o.id)}
+                                                        onChange={() => toggleSelected(o.id)}
+                                                    />
+                                                )}
+                                                <div className="min-w-0 flex-1">
                                                     <p className="font-medium text-slate-900 dark:text-slate-100">
                                                         {o.invoice_number || o.external_order_key || '—'}
                                                     </p>
@@ -2508,6 +2616,19 @@ export default function Orders() {
                                 <table className="w-full text-left text-sm">
                                     <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-400">
                                         <tr>
+                                            {canSelect && (
+                                                <th className="w-8 py-2.5 pl-4 pr-1">
+                                                    <input
+                                                        type="checkbox"
+                                                        aria-label="Select all orders shown"
+                                                        title="Select all orders shown"
+                                                        className="h-4 w-4 rounded border-slate-300 accent-accent-600"
+                                                        checked={allVisibleSelected}
+                                                        ref={(el) => { if (el) el.indeterminate = someVisibleSelected; }}
+                                                        onChange={toggleAllVisible}
+                                                    />
+                                                </th>
+                                            )}
                                             <th className="px-4 py-2.5">Ordered</th>
                                             <th className="px-4 py-2.5">{orderIdLabel}</th>
                                             <th className="px-4 py-2.5">Customer</th>
@@ -2528,7 +2649,18 @@ export default function Orders() {
                                             const primaryTicket = tickets[0] || null;
                                             return (
                                                 <Fragment key={o.id}>
-                                                    <tr className="border-t border-slate-100 dark:border-slate-800">
+                                                    <tr className={`border-t border-slate-100 dark:border-slate-800 ${selectedSet.has(o.id) ? 'bg-accent-50/60 dark:bg-slate-800/60' : ''}`}>
+                                                        {canSelect && (
+                                                            <td className="w-8 py-2.5 pl-4 pr-1">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    aria-label={`Select order ${o.invoice_number || o.external_order_key || ''}`}
+                                                                    className="h-4 w-4 rounded border-slate-300 accent-accent-600"
+                                                                    checked={selectedSet.has(o.id)}
+                                                                    onChange={() => toggleSelected(o.id)}
+                                                                />
+                                                            </td>
+                                                        )}
                                                         <td className="whitespace-nowrap px-4 py-2.5 text-xs text-slate-600 dark:text-slate-300">
                                                             {formatDate(orderedAt, orderDateTz)}
                                                             {o.is_history && <span className="mt-0.5 inline-block rounded-full bg-slate-100 px-1.5 py-px text-[10px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">History</span>}
@@ -2654,7 +2786,7 @@ export default function Orders() {
                                                     </tr>
                                                     {expandedId === o.id && (
                                                         <tr className="border-t border-slate-100 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/40">
-                                                            <td colSpan={showTracking ? 10 : 9} className="px-4 py-4">
+                                                            <td colSpan={(showTracking ? 10 : 9) + (canSelect ? 1 : 0)} className="px-4 py-4">
                                                                 <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} onRecheckOrderId={selectedStoreData?.auto_buy_vendor ? handleRecheckOrderId : null} recheckingOrderIdId={recheckingOrderIdId} onReplaceTracking={(ord, t) => setTrackingEdit({ order: ord, tracking: t })} onUploadTracking={handleUploadTracking} uploadingTrackingId={uploadingTrackingId} onMarkPurchased={selectedStoreData?.auto_buy_vendor ? markPurchased : null} markingPurchasedId={markingPurchasedId} onMarkUploaded={handleMarkUploaded} markingUploadedId={markingUploadedId} />
                                                             </td>
                                                         </tr>

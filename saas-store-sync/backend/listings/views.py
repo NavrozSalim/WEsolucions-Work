@@ -1541,6 +1541,24 @@ class StoreOrderRecheckOrderIdView(APIView):
                         status=status.HTTP_202_ACCEPTED)
 
 
+def _selected_ids(request):
+    """``order_ids`` sent by the page for an action on the selected orders (None = whole store)."""
+    import uuid
+
+    raw = request.data.get('order_ids') if hasattr(request, 'data') else None
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = [x for x in raw.split(',') if x.strip()]
+    ids = []
+    for x in raw or []:
+        try:
+            ids.append(str(uuid.UUID(str(x).strip())))
+        except ValueError:
+            continue
+    return ids
+
+
 def _tracking_response(order, message, code=status.HTTP_200_OK):
     from .order_tracking import tracking_payload
 
@@ -1559,10 +1577,17 @@ class StoreOrdersGetTrackingView(APIView):
     def post(self, request, store_pk):
         from stores.auto_order_bot import bots_status
 
-        from .order_tracking import due_checks, start_tracking
+        from .order_tracking import due_checks, selected_tracking_checks, start_tracking
 
         store = _get_store(request, store_pk)
-        due = due_checks(store)
+        selected = _selected_ids(request)
+        if selected is not None:
+            due = selected_tracking_checks(store, selected)
+            if not due:
+                return Response({'message': 'None of the selected orders can get tracking (purchased orders with '
+                                            'an Amazon AU order number, not already being read).', 'queued': 0})
+        else:
+            due = due_checks(store)
         if not due:
             return Response({'message': 'No purchased orders are waiting for tracking (orders bought in the last '
                                         '30 days with an Amazon AU order number).', 'queued': 0})
@@ -1746,7 +1771,8 @@ class StoreOrderProcessAllView(APIView):
 
         store = _get_store(request, store_pk)
         try:
-            result = process_all(store, request.user, vendor=str(request.data.get('vendor') or ''))
+            result = process_all(store, request.user, vendor=str(request.data.get('vendor') or ''),
+                                 order_ids=_selected_ids(request))
         except AutoPurchaseError as exc:
             return Response({'detail': str(exc)}, status=exc.status_code)
         if result['queued'] and not laptop_online(store.user or request.user):
@@ -1804,6 +1830,9 @@ class StoreOrderPurchaseCheckView(APIView):
                 return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
         else:
             orders = orders.exclude(status__in=['cancelled', 'refunded', 'shipping_complete']).filter(is_history=False)
+            selected = _selected_ids(request)
+            if selected is not None:  # Recheck selected
+                orders = orders.filter(id__in=selected)
         queued = queue_purchase_checks(store, list(orders.values_list('id', flat=True)))
         return Response({
             'queued': queued.get('queued', 0),

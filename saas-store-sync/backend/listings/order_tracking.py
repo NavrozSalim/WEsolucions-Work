@@ -123,6 +123,18 @@ def due_checks(store, now=None):
     return out
 
 
+def selected_tracking_checks(store, order_ids):
+    """Get tracking on the selected orders: each purchased order that can get tracking and is not being read."""
+    from .models import OrderPurchaseCheck
+
+    out = []
+    for check in (OrderPurchaseCheck.objects.select_related('order', 'order__store')
+                  .filter(order__store=store, order_id__in=list(order_ids))):
+        if can_get_tracking(check) and active_tracking_run(check) is None:
+            out.append(check)
+    return out
+
+
 def write_tracking_file(checks, path: Path) -> None:
     wb = openpyxl.Workbook()
     ws = wb.active

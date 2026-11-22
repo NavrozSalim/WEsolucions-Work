@@ -314,7 +314,7 @@ def order_vendor(store, check) -> str:
     return '' if vendors else (store.auto_buy_vendor or '')
 
 
-def process_all(store, user, vendor: str = '') -> dict:
+def process_all(store, user, vendor: str = '', order_ids=None) -> dict:
     """Process all orders: queue every order that is ready to buy (in profit, no errors, check fresh).
 
     ``vendor`` (e.g. 'amazon_au') limits it to the orders bought from that vendor; '' = every vendor.
@@ -340,6 +340,11 @@ def process_all(store, user, vendor: str = '') -> dict:
     )
     if vendor:
         candidates = [o for o in candidates if order_vendor(store, o.purchase_check) == vendor]
+    not_ready = 0
+    if order_ids is not None:  # Process selected: only the ticked orders that are ready to buy
+        wanted = {str(i) for i in order_ids}
+        candidates = [o for o in candidates if str(o.id) in wanted]
+        not_ready = len(wanted) - len(candidates)
     queued, failed = [], []
     for order in candidates:
         try:
@@ -349,6 +354,8 @@ def process_all(store, user, vendor: str = '') -> dict:
             failed.append(f'{order.invoice_number or order.id}: {exc}')
     where = ' from ' + AUTO_BUY_LABELS.get(vendor, vendor) if vendor else ''
     msg = f'{len(queued)} order(s){where} sent to the laptop to buy.'
+    if not_ready:
+        msg += f' {not_ready} selected order(s) skipped (not ready to buy, already bought or closed).'
     if failed:
         msg += f' {len(failed)} not sent: ' + '; '.join(failed[:5]) + (' ...' if len(failed) > 5 else '')
     return {'queued': len(queued), 'not_sent': failed, 'message': msg}

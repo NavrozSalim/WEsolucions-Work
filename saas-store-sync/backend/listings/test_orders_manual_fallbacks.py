@@ -154,3 +154,42 @@ class ApiStoreAutoCheckTests(TestCase):
                 self.captureOnCommitCallbacks(execute=True):
             order_service.fetch(self.user, self.api_store)
         mock_async.assert_not_called()
+
+
+@SETTINGS
+class SelectedOrdersTests(TestCase):
+    """Checkbox selection: Process, Recheck and Get tracking on the selected orders only."""
+    setUp = _apj.AutoPurchaseJobTests.setUp
+    url = _apj.AutoPurchaseJobTests.url
+    buyable_order = _apj.AutoPurchaseJobTests.buyable_order
+
+    def test_process_selected_queues_only_the_selected_ready_orders(self):
+        a, b, c = self.buyable_order('A1'), self.buyable_order('B1'), self.buyable_order('C1')
+        OrderPurchaseCheck.objects.filter(order=c).update(status='blocked')
+        r = self.c.post(self.url('process-all/'), {'order_ids': [str(a.id), str(c.id)]}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data['queued'], 1)
+        self.assertIn('1 selected order(s) skipped', r.data['message'])
+        statuses = dict(OrderPurchaseCheck.objects.values_list('order__invoice_number', 'purchase_status'))
+        self.assertEqual(statuses, {'A1': PurchaseStatus.QUEUED, 'B1': '', 'C1': ''})
+
+    @mock.patch(_apj.ASYNC)
+    def test_recheck_selected_checks_only_the_selected_orders(self, mock_async):
+        a, b = self.buyable_order('A1'), self.buyable_order('B1')
+        with self.captureOnCommitCallbacks(execute=True):
+            r = self.c.post(self.url('purchase-check/'), {'order_ids': [str(b.id)]}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data['queued'], 1)
+        self.assertEqual(mock_async.call_args.kwargs['args'][1], [str(b.id)])
+
+    def test_get_tracking_selected_only_sends_trackable_orders(self):
+        a, b = self.buyable_order('A1'), self.buyable_order('B1')
+        OrderPurchaseCheck.objects.filter(order=a).update(
+            purchase_status=PurchaseStatus.PURCHASED, vendor_order_number='503-1', purchased_at=timezone.now(),
+        )
+        r = self.c.post(self.url('get-tracking/'), {'order_ids': [str(a.id), str(b.id)]}, format='json')
+        self.assertEqual(r.status_code, 202, r.data)
+        self.assertEqual(r.data['queued'], 1)
+        self.assertEqual(OrderPurchaseCheck.objects.get(order=a).tracking_status, 'queued')
+        r = self.c.post(self.url('get-tracking/'), {'order_ids': [str(b.id)]}, format='json')
+        self.assertEqual((r.status_code, r.data['queued']), (200, 0))
