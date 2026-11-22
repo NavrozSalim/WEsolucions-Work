@@ -316,3 +316,112 @@ class BotStatusTests(TrackingTestBase):
                             {'order_ref': b.id, 'status': 'not_shipped'}])
         run = self.status()['tracking_run']
         self.assertEqual((run['status'], run['orders'], run['found']), ('finished', 2, 1))
+
+
+UPLOAD_COLS = ['order_ref', 'vendor_order_number', 'status', 'tracking_number', 'carrier', 'upload_status',
+               'upload_note']
+TRACKING_AGENT = {'kinds': 'tracking,upload_tracking'}
+
+
+def upload_xlsx(rows):
+    wb = openpyxl.Workbook()
+    wb.active.append(UPLOAD_COLS)
+    for r in rows:
+        wb.active.append([str(r.get(c, '')) for c in UPLOAD_COLS])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@override_settings(MEDIA_ROOT=_MEDIA, AUTO_ORDER_BOT_RUNNER='laptop', DEBUG=True,
+                   ENCRYPTION_KEY=Fernet.generate_key().decode())
+class TrackingUploadTests(TrackingTestBase):
+    """Upload button: the Tracking Bot uploads one number to the Kogan / Big W order and checks it there."""
+
+    def finish(self, job, rows, code=0):
+        return self.laptop.post(job['complete_url'], {
+            'exit_code': code, 'stdout': '',
+            'done': SimpleUploadedFile('kogan-done.xlsx', upload_xlsx(rows)),
+        }, format='multipart')
+
+    def tracked(self, number='3697B306387401002010905', key='2QK9BJGC'):
+        order = self.purchased(key)
+        t = OrderTracking.objects.create(order=order, tracking_number=number, carrier='Amazon',
+                                         vendor_order_number='503-1')
+        return order, t
+
+    def test_upload_button_queues_a_job_and_keeps_the_outcome(self):
+        order, t = self.tracked()
+        res = self.c.post(self.url(f'{order.id}/upload-tracking/'), {'tracking_id': str(t.id)}, format='json')
+        self.assertEqual(res.status_code, 202, res.data)
+        row = res.data['tracking']['current'][0]
+        self.assertEqual((row['upload_status'], row['upload_pending']), ('queued', True))
+        self.assertEqual(res.data['tracking']['upload_to'], 'Kogan')
+        again = self.c.post(self.url(f'{order.id}/upload-tracking/'), {'tracking_id': str(t.id)}, format='json')
+        self.assertEqual(again.status_code, 409)
+
+        self.assertIsNone(self.laptop.get(NEXT, TRACKING).data['job_id'])  # an old agent does not take it
+        job = self.laptop.get(NEXT, TRACKING_AGENT).data
+        self.assertEqual((job['kind'], job['marketplace'], job['store_name']), ('upload_tracking', 'kogan', 'Kogan-TFS'))
+        rows = list(openpyxl.load_workbook(io.BytesIO(b''.join(
+            self.laptop.get(job['files']['orders']).streaming_content))).worksheets[0].iter_rows(values_only=True))
+        got = dict(zip(rows[0], rows[1]))
+        self.assertEqual((got['invoice'], got['tracking_number'], got['carrier']),
+                         ('2QK9BJGC', '3697B306387401002010905', 'Amazon'))
+        self.finish(job, [{'order_ref': order.id, 'status': 'found', 'tracking_number': t.tracking_number,
+                           'upload_status': 'verified', 'upload_note': 'Kogan shows it, carrier AUP'}])
+        t.refresh_from_db()
+        self.assertEqual((t.upload_status, t.upload_note), ('verified', 'Kogan shows it, carrier AUP'))
+        self.assertIsNotNone(t.upload_checked_at)
+        # The tracking status of the order is not touched by an upload job.
+        self.assertEqual(self.check(order).tracking_status, '')
+
+    def test_job_that_reports_nothing_marks_the_upload_failed(self):
+        order, t = self.tracked()
+        self.c.post(self.url(f'{order.id}/upload-tracking/'), {'tracking_id': str(t.id)}, format='json')
+        job = self.laptop.get(NEXT, TRACKING_AGENT).data
+        self.finish(job, [], code=1)
+        t.refresh_from_db()
+        self.assertEqual(t.upload_status, 'failed')
+        self.assertIn('before uploading', t.upload_note)
+
+    def test_tba_replaced_and_other_marketplaces_are_refused(self):
+        order, t = self.tracked('TBAU317439766')
+        res = self.c.post(self.url(f'{order.id}/upload-tracking/'), {'tracking_id': str(t.id)}, format='json')
+        self.assertEqual(res.status_code, 409)
+        self.assertIn('TBA', res.data['detail'])
+        payload = self.c.post(self.url(f'{order.id}/upload-tracking/'), {'tracking_id': 'nope'}, format='json')
+        self.assertEqual(payload.status_code, 404)
+        order2, t2 = self.tracked('36QT1', key='K2')
+        t2.replaced_at = timezone.now()
+        t2.save()
+        self.assertEqual(self.c.post(self.url(f'{order2.id}/upload-tracking/'), {'tracking_id': str(t2.id)},
+                                     format='json').status_code, 409)
+        reverb = Marketplace.objects.get_or_create(code='reverb', defaults={'name': 'Reverb'})[0]
+        Store.objects.filter(id=self.store.id).update(marketplace=reverb)
+        order3, t3 = self.tracked('36QT2', key='K3')
+        res = self.c.post(self.url(f'{order3.id}/upload-tracking/'), {'tracking_id': str(t3.id)}, format='json')
+        self.assertEqual(res.status_code, 409)
+        self.assertFalse(AutoOrderRun.objects.filter(kind='upload_tracking').exists())
+
+    def test_tracking_job_keeps_the_automatic_upload_outcome(self):
+        order = self.purchased('2QK9BJGC')
+        start_tracking(self.store)
+        job = self.laptop.get(NEXT, TRACKING_AGENT).data
+        self.assertEqual(job['kind'], 'tracking')
+        self.finish(job, [{'order_ref': order.id, 'status': 'found', 'tracking_number': '36QT5', 'carrier': 'AusPost',
+                           'upload_status': 'verified', 'upload_note': 'Kogan shows 36QT5'},
+                          {'order_ref': order.id, 'status': 'found', 'tracking_number': 'TBAU1',
+                           'upload_status': 'skipped', 'upload_note': 'Amazon TBA number'}])
+        by_number = {t.tracking_number: t for t in OrderTracking.objects.filter(order=order)}
+        self.assertEqual(by_number['36QT5'].upload_status, 'verified')
+        self.assertEqual(by_number['TBAU1'].upload_status, 'skipped')
+
+    def test_tracking_agent_with_both_kinds_is_the_tracking_bot(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        self.laptop.get(NEXT, TRACKING_AGENT)
+        bots = self.c.get(self.url('fetch-file/')).data['bots']
+        self.assertTrue(bots['tracking']['online'])
+        self.assertFalse(bots['order']['online'])

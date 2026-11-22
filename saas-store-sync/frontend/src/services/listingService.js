@@ -345,6 +345,9 @@ export const getStoreTracking = (storeId) => api.post(`/stores/${storeId}/orders
 export const getOrderTracking = (storeId, orderId) => api.post(`/stores/${storeId}/orders/${orderId}/get-tracking/`);
 /** Replace a tracking number (tracking_id) or add one: { tracking_id, tracking_number, carrier }. */
 export const saveOrderTracking = (storeId, orderId, data) => api.post(`/stores/${storeId}/orders/${orderId}/tracking/`, data);
+/** Tracking Bot: upload one tracking number (tracking_id) to the Kogan / Big W order and check it there. */
+export const uploadOrderTracking = (storeId, orderId, trackingId) =>
+    api.post(`/stores/${storeId}/orders/${orderId}/upload-tracking/`, { tracking_id: trackingId });
 /** Auto Purchasing: buy every order that is in profit with no errors. */
 export const processAllOrders = (storeId, vendor = '') => api.post(`/stores/${storeId}/orders/process-all/`, vendor ? { vendor } : {});
 /** Orders of the user's deleted stores (kept 7 days) and linking them to this store. */

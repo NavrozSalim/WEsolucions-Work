@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AlertTriangle, Check, Copy, History, Loader2, MoreHorizontal, Pencil, RefreshCw, X } from 'lucide-react';
+import { AlertTriangle, Check, CheckCircle2, Copy, History, Loader2, MoreHorizontal, Pencil, RefreshCw, UploadCloud, X } from 'lucide-react';
 import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 
@@ -99,7 +99,58 @@ function ActionsMenu({ items }) {
     );
 }
 
-export function TrackingCell({ order, onReplace, onGet, gettingId }) {
+const UPLOAD_DONE = ['verified', 'already'];
+const UPLOAD_PROBLEM = ['failed', 'not_verified'];
+
+/** Upload to the marketplace (Kogan / Big W): what the Tracking Bot did with this number, and the Upload button. */
+export function UploadStatus({ row, uploadTo, onUpload, uploading }) {
+    if (!uploadTo || row.vendor_own_number) return null;
+    const note = row.upload_note || '';
+    if (uploading || row.upload_pending) {
+        return (
+            <p className="flex items-center gap-1 pl-0.5 text-[11px] text-sky-600 dark:text-sky-400" title={note}>
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Uploading to {uploadTo}…
+            </p>
+        );
+    }
+    if (UPLOAD_DONE.includes(row.upload_status)) {
+        return (
+            <p className="flex items-center gap-1 pl-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400" title={note}>
+                <CheckCircle2 className="h-3 w-3" />
+                On {uploadTo}
+            </p>
+        );
+    }
+    const problem = UPLOAD_PROBLEM.includes(row.upload_status);
+    const label = problem ? 'Upload failed' : row.upload_status === 'skipped' ? 'Not uploaded'
+        : row.upload_status === 'dry_run' ? 'Dry run only' : '';
+    return (
+        <p className="flex flex-wrap items-center gap-x-1.5 pl-0.5 text-[11px]">
+            {label && (
+                <span
+                    title={note}
+                    className={problem ? 'font-medium text-rose-600 dark:text-rose-400' : 'text-amber-600 dark:text-amber-400'}
+                >
+                    {label}
+                </span>
+            )}
+            {row.can_upload && onUpload && (
+                <button
+                    type="button"
+                    onClick={onUpload}
+                    title={`The Tracking Bot uploads this number to the ${uploadTo} order and checks it there`}
+                    className="inline-flex items-center gap-1 rounded px-1 py-0.5 font-medium text-accent-600 hover:bg-slate-100 dark:text-accent-400 dark:hover:bg-slate-800"
+                >
+                    <UploadCloud className="h-3 w-3" />
+                    {problem ? 'Try again' : `Upload to ${uploadTo}`}
+                </button>
+            )}
+        </p>
+    );
+}
+
+export function TrackingCell({ order, onReplace, onGet, gettingId, onUpload, uploadingId }) {
     const t = order.tracking;
     if (!t) return <span className="text-xs text-slate-400">—</span>;
     const current = t.current || [];
@@ -173,6 +224,12 @@ export function TrackingCell({ order, onReplace, onGet, gettingId }) {
                             </span>
                         )}
                     </p>
+                    <UploadStatus
+                        row={row}
+                        uploadTo={t.upload_to}
+                        uploading={uploadingId === row.id}
+                        onUpload={onUpload ? () => onUpload(order, row) : null}
+                    />
                 </div>
             ))}
             {t.status === 'partly' && (
@@ -195,7 +252,7 @@ const DETAIL_STATUS = {
 };
 
 /** Order details (Shipping / tracking card): the vendor's tracking numbers, where each came from, history. */
-export function TrackingDetails({ tracking, formatDate, onReplace }) {
+export function TrackingDetails({ tracking, formatDate, onReplace, onUpload, uploadingId }) {
     const t = tracking;
     if (!t) return null;
     const current = t.current || [];
@@ -217,6 +274,12 @@ export function TrackingDetails({ tracking, formatDate, onReplace }) {
                                 {row.vendor_order_number ? ` · order ${row.vendor_order_number}` : ''}
                                 {row.created_at ? ` · ${formatDate(row.created_at)}` : ''}
                             </span>
+                            <UploadStatus
+                                row={row}
+                                uploadTo={t.upload_to}
+                                uploading={uploadingId === row.id}
+                                onUpload={onUpload ? () => onUpload(row) : null}
+                            />
                             {onReplace && (
                                 <button
                                     type="button"

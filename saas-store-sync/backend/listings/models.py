@@ -397,6 +397,12 @@ class OrderTracking(models.Model):
     replaced_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
     )
+    # Upload to the marketplace (Kogan / Big W) by the Tracking Bot: after it reads the number, or with the
+    # Upload button. queued / verified / already / not_verified / skipped / failed / dry_run.
+    upload_status = models.CharField(max_length=20, blank=True, default='')
+    upload_note = models.TextField(blank=True, default='')
+    upload_checked_at = models.DateTimeField(null=True, blank=True)
+    upload_run_id = models.UUIDField(null=True, blank=True, help_text='stores.AutoOrderRun that uploads it.')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

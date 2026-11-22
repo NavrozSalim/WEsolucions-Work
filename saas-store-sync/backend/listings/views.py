@@ -1592,6 +1592,37 @@ class StoreOrderGetTrackingView(APIView):
         return _tracking_response(order, msg, status.HTTP_202_ACCEPTED)
 
 
+class StoreOrderUploadTrackingView(APIView):
+    """Upload button: the Tracking Bot uploads one tracking number (``tracking_id``) to the marketplace order
+    (Kogan / Big W) and searches the order again to check it."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, store_pk, pk):
+        from stores.auto_order_bot import bots_status
+
+        from .auto_purchase_jobs import AutoPurchaseError
+        from .order_tracking import UPLOAD_MARKETPLACES, start_upload
+
+        store = _get_store(request, store_pk)
+        order = MarketplaceOrder.objects.filter(store=store, id=pk).first()
+        if order is None:
+            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        from django.core.exceptions import ValidationError
+
+        try:
+            run = start_upload(order, request.user, (str(request.data.get('tracking_id') or '').strip()) or None)
+        except AutoPurchaseError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        except ValidationError:
+            return Response({'detail': 'That tracking number was not found. Reload the page.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        msg = (f'Uploading the tracking of {order.invoice_number} to '
+               f'{UPLOAD_MARKETPLACES.get(run.marketplace, run.marketplace)} on the laptop (Tracking Bot).')
+        if not bots_status(store.user or request.user)['tracking']['online']:
+            msg += ' The Tracking Bot is not online right now; it runs when the Tracking Bot agent is running.'
+        return _tracking_response(order, msg, status.HTTP_202_ACCEPTED)
+
+
 class StoreOrderTrackingView(APIView):
     """Replace a tracking number (or add one): ``tracking_id`` of the number to replace, ``tracking_number``,
     optional ``carrier``. The old number is kept as history; the bot no longer changes this order."""

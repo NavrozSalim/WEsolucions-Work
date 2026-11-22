@@ -9,6 +9,11 @@ Its result file comes back through the order-bot ingest endpoints and is saved a
 * Only orders bought in the last ``TRACKING_DAYS`` days, with a real vendor order number and no tracking
   the user entered; an order whose packages all have tracking is not checked again by the schedule.
 * A number the user typed (Replace) is never changed by the bot.
+
+Upload to the marketplace (Kogan, Big W / MyDeal stores): after reading, the Tracking Bot uploads the number to
+the marketplace order and searches the order again to check it; the **Upload** button next to a number does the
+same for that number alone (an ``upload_tracking`` job). The outcome is kept on the ``OrderTracking`` row
+(``upload_status``). Amazon's own TBA numbers are never uploaded.
 """
 from __future__ import annotations
 
@@ -31,6 +36,9 @@ TRACKING_DAYS = 30
 ORDER_COLUMNS = ['order_ref', 'invoice', 'vendor', 'vendor_order_number', 'customer_name', 'purchased_at']
 # Statuses the schedule checks again (found / cancelled orders are left alone).
 RECHECK_STATUSES = ('', 'not_shipped', 'partly', 'failed', 'queued')
+# Marketplaces the Tracking Bot uploads tracking to (bot marketplace code -> name shown).
+UPLOAD_MARKETPLACES = {'kogan': 'Kogan', 'bigw': 'Big W'}
+UPLOAD_COLUMNS = ORDER_COLUMNS + ['tracking_number', 'carrier', 'tracking_id']
 
 
 def _customer_name(order) -> str:
@@ -216,6 +224,18 @@ def _add_tracking(order, row, user=None) -> bool:
     return True
 
 
+def _number(value) -> str:
+    return ''.join(str(value or '').split()).upper()
+
+
+def _set_upload(tracking, row) -> None:
+    """Keep the bot's upload outcome for one number (from a result row of the laptop)."""
+    tracking.upload_status = str(row.get('upload_status') or '').strip()[:20] or 'failed'
+    tracking.upload_note = str(row.get('upload_note') or row.get('error') or '').strip()[:1000]
+    tracking.upload_checked_at = timezone.now()
+    tracking.save(update_fields=['upload_status', 'upload_note', 'upload_checked_at'])
+
+
 def apply_tracking_result(run) -> None:
     """Laptop finished a tracking job: save the numbers it read and each order's tracking status."""
     from .models import OrderPurchaseCheck, TrackingStatus
@@ -241,6 +261,14 @@ def apply_tracking_result(run) -> None:
                     added = sum(_add_tracking(order, r) for r in found)
                     if added:
                         notes.append(f'{added} tracking number(s) read')
+                # The bot uploaded the numbers it read to the marketplace: keep the outcome on each number.
+                for r in found:
+                    if not str(r.get('upload_status') or '').strip():
+                        continue
+                    t = next((x for x in current_trackings(order)
+                              if _number(x.tracking_number) == _number(r.get('tracking_number'))), None)
+                    if t is not None:
+                        _set_upload(t, r)
                 if found and 'not_shipped' in statuses:
                     status = TrackingStatus.PARTLY
                 elif found:
@@ -267,6 +295,104 @@ def apply_tracking_result(run) -> None:
 def mark_stale_tracking(run) -> None:
     """A tracking job that never reported back: the orders are checked again on the next schedule."""
     apply_tracking_result(run)
+
+
+# ---- Upload button: send one tracking number to the marketplace ------------------------------------------
+
+def upload_marketplace(store) -> str:
+    """'kogan' / 'bigw' when the Tracking Bot can upload tracking to this store's marketplace, else ''."""
+    if store is None:
+        return ''
+    mp = _bot().bot_marketplace(store) or ''
+    return mp if mp in UPLOAD_MARKETPLACES else ''
+
+
+def is_vendor_own_number(number) -> bool:
+    """Amazon's own delivery numbers (TBA...) are not uploaded to a marketplace."""
+    return _number(number).startswith('TBA')
+
+
+def can_upload(order, tracking) -> bool:
+    return bool(upload_marketplace(order.store) and (order.invoice_number or '').strip()
+                and tracking.replaced_at is None and tracking.tracking_number
+                and not is_vendor_own_number(tracking.tracking_number))
+
+
+def upload_pending(tracking) -> bool:
+    from stores.auto_order_bot import ACTIVE
+    from stores.models import AutoOrderRun
+
+    if tracking.upload_status != 'queued' or not tracking.upload_run_id:
+        return False
+    return AutoOrderRun.objects.filter(id=tracking.upload_run_id, kind=AutoOrderRun.Kind.UPLOAD_TRACKING,
+                                       status__in=ACTIVE).exists()
+
+
+def write_upload_file(order, tracking, path: Path) -> None:
+    from .models import OrderPurchaseCheck
+
+    check = OrderPurchaseCheck.objects.filter(order=order).first()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(UPLOAD_COLUMNS)
+    ws.append([str(order.id), order.invoice_number or order.external_order_key or '',
+               order_vendor(check, order.store) if check else '', tracking.vendor_order_number or '',
+               _customer_name(order), '', tracking.tracking_number, tracking.carrier or '', str(tracking.id)])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+
+
+def start_upload(order, user, tracking_id):
+    """Upload button: queue an ``upload_tracking`` job that uploads this number to the marketplace order and
+    checks it there. Returns the run."""
+    store = order.store
+    tracking = current_trackings(order).filter(id=tracking_id).first() if tracking_id else None
+    if tracking is None:
+        raise AutoPurchaseError('That tracking number was replaced or removed. Reload the page.', 409)
+    mp = upload_marketplace(store)
+    if not mp:
+        raise AutoPurchaseError('Upload to the marketplace is for Kogan and Big W stores.', 409)
+    if is_vendor_own_number(tracking.tracking_number):
+        raise AutoPurchaseError("Amazon's own TBA numbers are not uploaded to the marketplace.", 409)
+    if not (order.invoice_number or '').strip():
+        raise AutoPurchaseError('This order has no marketplace order number to upload to.', 409)
+    if upload_pending(tracking):
+        raise AutoPurchaseError('The Tracking Bot is already uploading this number.', 409)
+    label = UPLOAD_MARKETPLACES[mp]
+    run = _new_run(store, user or store.user, kind='upload_tracking', marketplace=mp,
+                   vendor=(store.auto_buy_vendor or 'marketplace')[:30])
+    run_dir = Path(run.run_dir)
+    write_upload_file(order, tracking, run_dir / 'orders.xlsx')
+    _bot().write_accounts_file(store.user, run_dir / 'accounts.json')
+    run.message = f'Upload {tracking.tracking_number} to {label} order {order.invoice_number}'
+    run.save(update_fields=['message'])
+    tracking.upload_status = 'queued'
+    tracking.upload_run_id = run.id
+    tracking.upload_note = f"sent to the laptop {timezone.localtime().strftime('%d/%m/%Y %H:%M')}"
+    tracking.save(update_fields=['upload_status', 'upload_run_id', 'upload_note'])
+    logger.info('Tracking upload queued: store %s run %s order %s number %s', store.id, run.id, order.id,
+                tracking.tracking_number)
+    return run
+
+
+def apply_upload_result(run) -> None:
+    """Laptop finished an upload job: keep the outcome on each number it was sent with."""
+    from .models import OrderTracking
+
+    rows = _rows_by_order(run)
+    tail = ' / '.join((run.stdout or '').strip().splitlines()[-2:])[:200]
+    for t in OrderTracking.objects.filter(upload_run_id=run.id, upload_status='queued'):
+        row = next((r for r in rows.get(str(t.order_id), [])
+                    if _number(r.get('tracking_number')) == _number(t.tracking_number)), None)
+        if row is None:
+            row = {'upload_status': 'failed',
+                   'upload_note': f'the laptop job {run.status}' + (f' ({tail})' if tail else '')
+                   + ' before uploading'}
+        _set_upload(t, row)
+
+
+def mark_stale_upload(run) -> None:
+    apply_upload_result(run)
 
 
 # ---- user: Replace / add a tracking number ---------------------------------------------------------------
@@ -332,14 +458,21 @@ def tracking_payload(order, check=None) -> dict:
     """What the Orders page shows: current numbers, replaced ones, and the bot's status for the order."""
     rows = list(order.trackings.all())
 
+    mp = upload_marketplace(order.store)
+
     def one(t):
         return {'id': str(t.id), 'tracking_number': t.tracking_number, 'carrier': t.carrier,
                 'ship_name': t.ship_name, 'source': t.source, 'vendor_order_number': t.vendor_order_number,
                 'created_at': t.created_at.isoformat() if t.created_at else None,
                 'replaced_at': t.replaced_at.isoformat() if t.replaced_at else None,
-                'replaces': str(t.replaces_id) if t.replaces_id else None}
+                'replaces': str(t.replaces_id) if t.replaces_id else None,
+                'upload_status': t.upload_status, 'upload_note': t.upload_note,
+                'upload_checked_at': t.upload_checked_at.isoformat() if t.upload_checked_at else None,
+                'upload_pending': upload_pending(t), 'can_upload': bool(mp) and can_upload(order, t),
+                'vendor_own_number': is_vendor_own_number(t.tracking_number)}
 
     return {
+        'upload_to': UPLOAD_MARKETPLACES.get(mp, ''),
         'current': [one(t) for t in rows if t.replaced_at is None],
         'replaced': [one(t) for t in rows if t.replaced_at is not None],
         'status': (check.tracking_status if check else '') or '',

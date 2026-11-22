@@ -44,6 +44,7 @@ import {
     recheckOrderId,
     recheckOrderPurchase,
     getOrderTracking,
+    uploadOrderTracking,
     getStoreTracking,
     saveOrderTracking,
     startOrdersFetch,
@@ -922,7 +923,7 @@ function InfoRow({ label, children }) {
     );
 }
 
-function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone, onRecheck, recheckingId, onProcess, onForce, processingId, onStop, stoppingId, onSaveVendorNumber, savingVendorNumberId, onRecheckOrderId, recheckingOrderIdId, onReplaceTracking }) {
+function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateTimeZone, onRecheck, recheckingId, onProcess, onForce, processingId, onStop, stoppingId, onSaveVendorNumber, savingVendorNumberId, onRecheckOrderId, recheckingOrderIdId, onReplaceTracking, onUploadTracking, uploadingTrackingId }) {
     const d = orderDetails(order);
     const customer = d.customer || {};
     const shippingAddr = formatAddress(d.shippingAddress);
@@ -1158,6 +1159,8 @@ function OrderDetailPanel({ order, onOpenTicket, orderIdLabel = 'Invoice', dateT
                             tracking={order.tracking}
                             formatDate={(v) => formatDate(v, dateTimeZone)}
                             onReplace={onReplaceTracking ? (t) => onReplaceTracking(order, t) : null}
+                            onUpload={onUploadTracking ? (t) => onUploadTracking(order, t) : null}
+                            uploadingId={uploadingTrackingId}
                         />
                     )}
                     <p className="mb-1.5 text-xs font-medium text-slate-500 dark:text-slate-400">Submitted to the marketplace from this app</p>
@@ -1366,7 +1369,8 @@ export default function Orders() {
     // Auto Purchasing: while any order is still being checked, refresh quietly every 5s.
     const anyChecking = orders.some((o) => o.purchase_check?.status === 'checking'
         || ['queued', 'purchasing'].includes(o.purchase_check?.purchase_status)
-        || o.purchase_check?.order_id_lookup_pending);
+        || o.purchase_check?.order_id_lookup_pending
+        || (o.tracking?.current || []).some((t) => t.upload_pending));
     useEffect(() => {
         if (!anyChecking || !selectedStore) return undefined;
         const storeAtStart = selectedStore;
@@ -1521,6 +1525,20 @@ export default function Orders() {
                 setMessage({ text: err.response?.data?.detail || 'Could not start Get tracking.', variant: 'error' });
             })
             .finally(() => setGettingTrackingId(null));
+    };
+    const [uploadingTrackingId, setUploadingTrackingId] = useState(null);
+    const handleUploadTracking = (order, row) => {
+        if (!selectedStore || !row) return;
+        setUploadingTrackingId(row.id);
+        uploadOrderTracking(selectedStore, order.id, row.id)
+            .then((res) => {
+                setMessage({ text: res.data?.message || 'Uploading the tracking on the laptop.', variant: 'success' });
+                setOrderTracking(order.id, res.data?.tracking);
+            })
+            .catch((err) => {
+                setMessage({ text: err.response?.data?.detail || 'Could not start the upload.', variant: 'error' });
+            })
+            .finally(() => setUploadingTrackingId(null));
     };
     const submitTracking = (data) => {
         const edit = trackingEdit;
@@ -2195,7 +2213,7 @@ export default function Orders() {
                                                     </p>
                                                     {showTracking && o.tracking && (
                                                         <div className="mt-2">
-                                                            <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} />
+                                                            <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} onUpload={handleUploadTracking} uploadingId={uploadingTrackingId} />
                                                         </div>
                                                     )}
                                                 </div>
@@ -2278,7 +2296,7 @@ export default function Orders() {
                                             </div>
                                             {expandedId === o.id && (
                                                 <div className="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} onRecheckOrderId={selectedStoreData?.auto_buy_vendor ? handleRecheckOrderId : null} recheckingOrderIdId={recheckingOrderIdId} onReplaceTracking={(ord, t) => setTrackingEdit({ order: ord, tracking: t })} />
+                                                    <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} onRecheckOrderId={selectedStoreData?.auto_buy_vendor ? handleRecheckOrderId : null} recheckingOrderIdId={recheckingOrderIdId} onReplaceTracking={(ord, t) => setTrackingEdit({ order: ord, tracking: t })} onUploadTracking={handleUploadTracking} uploadingTrackingId={uploadingTrackingId} />
                                                 </div>
                                             )}
                                         </li>
@@ -2357,7 +2375,7 @@ export default function Orders() {
                                                         </td>
                                                         {showTracking && (
                                                             <td className="px-4 py-2.5 align-top">
-                                                                <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} />
+                                                                <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} onUpload={handleUploadTracking} uploadingId={uploadingTrackingId} />
                                                             </td>
                                                         )}
                                                         <td className="px-4 py-2.5">
@@ -2438,7 +2456,7 @@ export default function Orders() {
                                                     {expandedId === o.id && (
                                                         <tr className="border-t border-slate-100 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/40">
                                                             <td colSpan={showTracking ? 10 : 9} className="px-4 py-4">
-                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} onRecheckOrderId={selectedStoreData?.auto_buy_vendor ? handleRecheckOrderId : null} recheckingOrderIdId={recheckingOrderIdId} onReplaceTracking={(ord, t) => setTrackingEdit({ order: ord, tracking: t })} />
+                                                                <OrderDetailPanel order={o} orderIdLabel={orderIdLabel} dateTimeZone={orderDateTz} onOpenTicket={openTicket} onRecheck={selectedStoreData?.auto_buy_vendor ? handleRecheck : null} recheckingId={recheckingId} onProcess={selectedStoreData?.auto_buy_vendor ? askProcess : null} onForce={selectedStoreData?.auto_buy_vendor ? askForce : null} processingId={processingId} onStop={setStopOrderRow} stoppingId={stoppingId} onSaveVendorNumber={selectedStoreData?.auto_buy_vendor ? saveVendorNumber : null} savingVendorNumberId={savingVendorNumberId} onRecheckOrderId={selectedStoreData?.auto_buy_vendor ? handleRecheckOrderId : null} recheckingOrderIdId={recheckingOrderIdId} onReplaceTracking={(ord, t) => setTrackingEdit({ order: ord, tracking: t })} onUploadTracking={handleUploadTracking} uploadingTrackingId={uploadingTrackingId} />
                                                             </td>
                                                         </tr>
                                                     )}

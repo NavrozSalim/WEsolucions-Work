@@ -142,6 +142,10 @@ def finish_run(run: AutoOrderRun, exit_code: int | None, stdout: str) -> None:
         from listings.order_tracking import apply_tracking_result
 
         apply_tracking_result(run)
+    elif run.kind == AutoOrderRun.Kind.UPLOAD_TRACKING:
+        from listings.order_tracking import apply_upload_result
+
+        apply_upload_result(run)
 
 
 def execute_run(run_id) -> None:
@@ -182,7 +186,8 @@ INVENTORY_SCOPE = 'inventory-bot'
 
 
 def poll_agent(kinds) -> str:
-    return 'tracking' if set(kinds) == {AutoOrderRun.Kind.TRACKING} else 'order'
+    tracking = {AutoOrderRun.Kind.TRACKING, AutoOrderRun.Kind.UPLOAD_TRACKING}
+    return 'tracking' if kinds and set(kinds) <= tracking else 'order'
 
 
 def note_poll(token, kinds) -> None:
@@ -296,6 +301,10 @@ def expire_stale(runs) -> None:
             from listings.order_tracking import mark_stale_tracking
 
             mark_stale_tracking(r)
+        elif r.kind == AutoOrderRun.Kind.UPLOAD_TRACKING:
+            from listings.order_tracking import mark_stale_upload
+
+            mark_stale_upload(r)
 
 
 # ---- saved files: mapping is kept until replaced, the order export is kept for one day -----------------
