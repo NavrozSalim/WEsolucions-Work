@@ -1713,6 +1713,83 @@ class StoreOrderUploadTrackingView(APIView):
         return _tracking_response(order, msg, status.HTTP_202_ACCEPTED)
 
 
+class StoreOrdersUploadTrackingView(APIView):
+    """Upload tracking (top of the Orders page).
+
+    GET: what is ready to upload to Kogan / Big W and what is not (TBA, courier not saved, other name), with why.
+    POST ``tracking_ids`` (the ready ones the user saw): one Tracking Bot job uploads them all and checks each.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, store_pk):
+        from .order_tracking import upload_plan
+
+        return Response(upload_plan(_get_store(request, store_pk)))
+
+    def post(self, request, store_pk):
+        from stores.auto_order_bot import bots_status
+
+        from .auto_purchase_jobs import AutoPurchaseError
+        from .order_tracking import UPLOAD_MARKETPLACES, start_store_upload
+
+        store = _get_store(request, store_pk)
+        ids = request.data.get('tracking_ids')
+        ids = [str(i) for i in ids] if isinstance(ids, list) else None
+        try:
+            run, count = start_store_upload(store, request.user, ids)
+        except AutoPurchaseError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        msg = (f'Uploading {count} tracking number(s) to {UPLOAD_MARKETPLACES.get(run.marketplace, run.marketplace)} '
+               'on the laptop (Tracking Bot). Each one is checked on the marketplace after it is saved.')
+        if not bots_status(store.user or request.user)['tracking']['online']:
+            msg += ' The Tracking Bot is not online right now; it runs when the Tracking Bot agent is running.'
+        return Response({'message': msg, 'queued': count}, status=status.HTTP_202_ACCEPTED)
+
+
+class StoreTrackingCouriersView(APIView):
+    """Couriers for Upload tracking: the Kogan / Big W courier to pick for each carrier Amazon shows.
+
+    GET: every known carrier (and any seen on this store's orders) with the saved courier and a suggestion.
+    POST ``rows`` [{carrier, courier}]: save them; a blank courier removes the carrier.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _setup(self, request, store_pk):
+        from .order_tracking import UPLOAD_MARKETPLACES, upload_marketplace
+
+        store = _get_store(request, store_pk)
+        mp = upload_marketplace(store)
+        return store, mp, UPLOAD_MARKETPLACES.get(mp, '')
+
+    def get(self, request, store_pk):
+        from .models import OrderTracking
+        from .tracking_couriers import carrier_name, courier_table
+
+        store, mp, label = self._setup(request, store_pk)
+        if not mp:
+            return Response({'detail': 'Upload to the marketplace is for Kogan and Big W stores.'},
+                            status=status.HTTP_409_CONFLICT)
+        seen = {carrier_name(c, n) for c, n in OrderTracking.objects.filter(
+            order__store=store, replaced_at__isnull=True).values_list('carrier', 'tracking_number')}
+        return Response({'marketplace': mp, 'label': label,
+                         'rows': courier_table(store.user or request.user, mp, sorted(s for s in seen if s))})
+
+    def post(self, request, store_pk):
+        from .tracking_couriers import courier_table, save_couriers
+
+        store, mp, label = self._setup(request, store_pk)
+        if not mp:
+            return Response({'detail': 'Upload to the marketplace is for Kogan and Big W stores.'},
+                            status=status.HTTP_409_CONFLICT)
+        rows = request.data.get('rows')
+        if not isinstance(rows, list):
+            return Response({'detail': 'rows is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        owner = store.user or request.user
+        count = save_couriers(owner, mp, rows)
+        return Response({'message': f'{count} {label} courier(s) saved.', 'marketplace': mp, 'label': label,
+                         'rows': courier_table(owner, mp)})
+
+
 class StoreOrderTrackingView(APIView):
     """Replace a tracking number (or add one): ``tracking_id`` of the number to replace, ``tracking_number``,
     optional ``carrier``. The old number is kept as history; the bot no longer changes this order."""

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { AlertTriangle, Check, CheckCircle2, Copy, History, Loader2, Pencil, RefreshCw, UploadCloud, X } from 'lucide-react';
+import { AlertTriangle, Check, CheckCircle2, Clock, Copy, History, Loader2, Pencil, RefreshCw, UploadCloud, X } from 'lucide-react';
 import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
+import { getTrackingCouriers, getUploadTrackingPlan, saveTrackingCouriers, startUploadTracking } from '../../services/listingService';
 
 // Tracking Bot: tracking numbers read from the vendor (Amazon "Track package"), with Replace for each,
 // and the status line of the three laptop bots (order bot, Tracking Bot, inventory bot).
@@ -114,6 +115,16 @@ export function UploadStatus({ row, uploadTo, onUpload, uploading, onMarkUploade
         );
     }
     const botCan = uploadTo && !row.vendor_own_number;
+    if (uploadTo && row.vendor_own_number) {
+        return (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-0.5 text-[11px]">
+                <span className="text-slate-500 dark:text-slate-400" title="Amazon's own TBA numbers can only be tracked on Amazon, so they are not uploaded to the marketplace">
+                    TBA – not uploaded
+                </span>
+                {tick}
+            </div>
+        );
+    }
     if (botCan && (uploading || row.upload_pending)) {
         return (
             <p className="flex items-center gap-1 pl-0.5 text-[11px] text-sky-600 dark:text-sky-400" title={note}>
@@ -188,7 +199,7 @@ function TrackingActions({ order, t, purchased, hasNumber, onGet, onReplace }) {
     );
 }
 
-export function TrackingCell({ order, onReplace, onGet, gettingId, onUpload, uploadingId, onMarkUploaded, markingUploadedId }) {
+export function TrackingCell({ order, onReplace, onGet, gettingId, onUpload, uploadingId, onMarkUploaded, markingUploadedId, trackingOnline = null }) {
     const t = order.tracking;
     if (!t) return <span className="text-xs text-slate-400">—</span>;
     const current = t.current || [];
@@ -199,6 +210,18 @@ export function TrackingCell({ order, onReplace, onGet, gettingId, onUpload, upl
     const checked = shortTime(t.checked_at);
 
     if (busy) {
+        if (t.run_state === 'waiting' && gettingId !== order.id) {
+            const offline = trackingOnline === false;
+            return (
+                <span
+                    className="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400"
+                    title={offline ? 'The Tracking Bot agent is not running: it starts this when it is.' : (t.note || 'Queued; the Tracking Bot starts it shortly')}
+                >
+                    <Clock className="h-3.5 w-3.5" />
+                    Waiting for the Tracking Bot{offline ? ' · bot offline' : ''}
+                </span>
+            );
+        }
         return (
             <span className="inline-flex items-center gap-1.5 text-xs text-sky-600 dark:text-sky-400" title={t.note || ''}>
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -461,6 +484,221 @@ export function ReplaceTrackingModal({ open, order, tracking, loading, onClose, 
                     </div>
                 </form>
             </div>
+        </div>
+    );
+}
+
+
+/** Couriers for Upload tracking: what to pick on Kogan / Big W for each carrier Amazon shows. */
+export function CouriersModal({ open, storeId, onClose, onSaved }) {
+    const [data, setData] = useState(null);
+    const [values, setValues] = useState({});
+    const [error, setError] = useState('');
+    const [saving, setSaving] = useState(false);
+
+    useEffect(() => {
+        if (!open || !storeId) return;
+        setData(null);
+        setError('');
+        getTrackingCouriers(storeId)
+            .then((res) => {
+                setData(res.data);
+                setValues(Object.fromEntries((res.data?.rows || []).map((r) => [r.carrier, r.courier || ''])));
+            })
+            .catch((err) => setError(err.response?.data?.detail || 'Could not load the couriers.'));
+    }, [open, storeId]);
+
+    if (!open) return null;
+    const rows = data?.rows || [];
+    const save = () => {
+        setSaving(true);
+        setError('');
+        saveTrackingCouriers(storeId, rows.map((r) => ({ carrier: r.carrier, courier: values[r.carrier] || '' })))
+            .then((res) => onSaved?.(res.data?.message || 'Couriers saved.'))
+            .catch((err) => setError(err.response?.data?.detail || 'Could not save the couriers.'))
+            .finally(() => setSaving(false));
+    };
+    return (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-xs" onClick={onClose} aria-hidden="true" />
+            <div className="relative flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900">
+                <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4 dark:border-slate-700">
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Couriers{data?.label ? ` for ${data.label}` : ''}</h2>
+                    <button type="button" className="rounded-md p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={onClose}>
+                        <X className="h-5 w-5" />
+                    </button>
+                </div>
+                <div className="space-y-3 overflow-y-auto px-6 py-4">
+                    <p className="text-sm text-slate-600 dark:text-slate-400">
+                        Type the courier exactly as it is in the {data?.label || 'marketplace'} courier list. Only carriers with a
+                        courier here are uploaded. Leave it blank to never upload that carrier.
+                    </p>
+                    {error && <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-300">{error}</p>}
+                    {!data && !error && <p className="text-sm text-slate-500">Loading…</p>}
+                    {rows.length > 0 && (
+                        <table className="w-full text-sm">
+                            <thead className="text-left text-xs uppercase text-slate-500 dark:text-slate-400">
+                                <tr><th className="pb-2 font-medium">Carrier on Amazon</th><th className="pb-2 font-medium">{data.label} courier</th></tr>
+                            </thead>
+                            <tbody>
+                                {rows.map((r) => (
+                                    <tr key={r.carrier} className="border-t border-slate-100 dark:border-slate-800">
+                                        <td className="py-1.5 pr-3 text-slate-700 dark:text-slate-300">{r.carrier}</td>
+                                        <td className="py-1.5">
+                                            <div className="flex items-center gap-1.5">
+                                                <input
+                                                    value={values[r.carrier] || ''}
+                                                    onChange={(e) => setValues((v) => ({ ...v, [r.carrier]: e.target.value }))}
+                                                    placeholder={r.suggestion ? `e.g. ${r.suggestion}` : 'not uploaded'}
+                                                    className="w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                                                />
+                                                {r.suggestion && !values[r.carrier] && (
+                                                    <button
+                                                        type="button"
+                                                        className="shrink-0 text-xs font-medium text-accent-600 hover:underline dark:text-accent-400"
+                                                        onClick={() => setValues((v) => ({ ...v, [r.carrier]: r.suggestion }))}
+                                                        title="Fill in the suggested name; check it is in the marketplace's list before saving"
+                                                    >
+                                                        Use {r.suggestion}
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+                <div className="flex justify-end gap-2 border-t border-slate-200 px-6 py-3 dark:border-slate-700">
+                    <Button variant="secondary" onClick={onClose} disabled={saving}>Cancel</Button>
+                    <Button variant="primary" onClick={save} disabled={saving || !rows.length}>{saving ? 'Saving…' : 'Save couriers'}</Button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+const SKIP_LABEL = { tba: 'TBA number', courier: 'Courier not saved', name: 'Name differs', extra: 'Second number' };
+
+/** Upload tracking: check what goes to Kogan / Big W, then one job uploads all the ready numbers. */
+export function UploadTrackingModal({ open, storeId, trackingOnline = null, onClose, onQueued }) {
+    const [plan, setPlan] = useState(null);
+    const [error, setError] = useState('');
+    const [sending, setSending] = useState(false);
+    const [couriersOpen, setCouriersOpen] = useState(false);
+    const [note, setNote] = useState('');
+
+    const load = () => {
+        setPlan(null);
+        setError('');
+        getUploadTrackingPlan(storeId)
+            .then((res) => setPlan(res.data))
+            .catch((err) => setError(err.response?.data?.detail || 'Could not load the tracking to upload.'));
+    };
+    useEffect(() => {
+        if (open && storeId) {
+            setNote('');
+            load();
+        }
+    }, [open, storeId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    if (!open) return null;
+    const ready = plan?.ready || [];
+    const skipped = plan?.skipped || [];
+    const label = plan?.label || 'the marketplace';
+    const confirm = () => {
+        setSending(true);
+        setError('');
+        startUploadTracking(storeId, ready.map((r) => r.tracking_id))
+            .then((res) => onQueued?.(res.data?.message || 'Uploading the tracking on the laptop.'))
+            .catch((err) => setError(err.response?.data?.detail || 'Could not start the upload.'))
+            .finally(() => setSending(false));
+    };
+    const section = 'mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400';
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-xs" onClick={onClose} aria-hidden="true" />
+            <div className="relative flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900">
+                <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4 dark:border-slate-700">
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Upload tracking to {label}</h2>
+                    <button type="button" className="rounded-md p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={onClose}>
+                        <X className="h-5 w-5" />
+                    </button>
+                </div>
+                <div className="space-y-4 overflow-y-auto px-6 py-4 text-sm">
+                    {note && <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300">{note}</p>}
+                    {error && <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-300">{error}</p>}
+                    {!plan && !error && <p className="text-slate-500">Loading…</p>}
+                    {plan && (
+                        <>
+                            <div>
+                                <p className={section}>Ready to upload ({ready.length})</p>
+                                {ready.length ? (
+                                    <ul className="divide-y divide-slate-100 rounded-md border border-slate-200 dark:divide-slate-800 dark:border-slate-700">
+                                        {ready.map((r) => (
+                                            <li key={r.tracking_id} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-1.5">
+                                                <span className="w-28 font-medium text-slate-900 dark:text-slate-100">{r.invoice}</span>
+                                                <span className="font-mono text-xs text-slate-700 dark:text-slate-300">{r.tracking_number}</span>
+                                                <span className="ml-auto text-xs text-slate-500 dark:text-slate-400">
+                                                    {r.carrier_name} → <span className="font-medium text-slate-700 dark:text-slate-200">{r.courier}</span>
+                                                    {r.failed_before ? ' · failed before' : ''}
+                                                </span>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                ) : (
+                                    <p className="text-slate-500 dark:text-slate-400">Nothing is ready to upload.</p>
+                                )}
+                            </div>
+                            {skipped.length > 0 && (
+                                <div>
+                                    <p className={section}>Not uploaded ({skipped.length})</p>
+                                    <ul className="divide-y divide-slate-100 rounded-md border border-slate-200 dark:divide-slate-800 dark:border-slate-700">
+                                        {skipped.map((r) => (
+                                            <li key={r.tracking_id} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-1.5">
+                                                <span className="w-28 font-medium text-slate-900 dark:text-slate-100">{r.invoice}</span>
+                                                <span className="font-mono text-xs text-slate-700 dark:text-slate-300">{r.tracking_number}</span>
+                                                <span className="ml-auto text-xs">
+                                                    <span className={r.kind === 'courier' ? 'font-medium text-amber-600 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400'}>
+                                                        {SKIP_LABEL[r.kind] || 'Not uploaded'}
+                                                    </span>
+                                                    <span className="text-slate-500 dark:text-slate-400"> · {r.reason}</span>
+                                                </span>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+                            {(plan.already > 0 || plan.uploading > 0) && (
+                                <p className="text-xs text-slate-500 dark:text-slate-400">
+                                    {plan.already > 0 ? `${plan.already} order(s) already on ${label}. ` : ''}
+                                    {plan.uploading > 0 ? `${plan.uploading} order(s) being uploaded now.` : ''}
+                                </p>
+                            )}
+                            {trackingOnline === false && (
+                                <p className="text-xs text-amber-600 dark:text-amber-400">The Tracking Bot is offline: the upload starts when its agent runs.</p>
+                            )}
+                        </>
+                    )}
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 px-6 py-3 dark:border-slate-700">
+                    <Button variant="secondary" size="sm" onClick={() => setCouriersOpen(true)}>Couriers</Button>
+                    <div className="flex gap-2">
+                        <Button variant="secondary" onClick={onClose} disabled={sending}>Cancel</Button>
+                        <Button variant="primary" onClick={confirm} disabled={sending || !ready.length}>
+                            <UploadCloud className="mr-1.5 h-4 w-4" />
+                            {sending ? 'Sending…' : `Upload ${ready.length}`}
+                        </Button>
+                    </div>
+                </div>
+            </div>
+            <CouriersModal
+                open={couriersOpen}
+                storeId={storeId}
+                onClose={() => setCouriersOpen(false)}
+                onSaved={(msg) => { setCouriersOpen(false); setNote(msg); load(); }}
+            />
         </div>
     );
 }

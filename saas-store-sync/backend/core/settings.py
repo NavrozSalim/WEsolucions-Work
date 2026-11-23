@@ -518,6 +518,7 @@ CELERY_TASK_ROUTES = (
         'listings.fetch_all_reverb_orders': {'queue': 'light'},
         'listings.lookup_marketplace_skus': {'queue': 'sync'},
         'listings.queue_order_tracking': {'queue': 'light'},
+        'listings.clear_stuck_tracking_jobs': {'queue': 'light'},
         'vendor.prune_old_vendor_prices': {'queue': 'celery'},
         # Scraping → Reverb / Etsy listing file: copies images to Bunny.
         'discovery.build_listing_export': {'queue': 'light'},

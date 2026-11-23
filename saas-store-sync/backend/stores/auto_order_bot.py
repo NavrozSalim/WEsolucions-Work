@@ -237,23 +237,44 @@ def bots_status(user) -> dict:
     return out
 
 
-# The Tracking Bot and the order bot are two agents on the same laptop that open the same Chrome profiles.
-# Chrome allows one window per profile, so a job is not handed out while the other agent's job runs on the
-# same purchase account. A run claimed longer ago than this is assumed dead and no longer holds the profile.
-PROFILE_LOCK_MINUTES = 90
+# ---- Tracking Bot jobs that stopped halfway ------------------------------------------------------------
+# The Tracking Bot reports on its job every few seconds (status check every 5 s, progress every 20 s). A job it
+# has not reported on for this long is ended, so the Orders page stops showing "Getting tracking" and the orders
+# are checked again (the 3-hour schedule queues nothing for a store while it has a job that looks active).
+STUCK_MINUTES = 15
+TRACKING_BOT_KINDS = (AutoOrderRun.Kind.TRACKING, AutoOrderRun.Kind.UPLOAD_TRACKING)
 
 
-def busy_accounts(kind: str, user_id=None) -> set:
-    """Purchase accounts in use by the *other* agent (tracking vs. order bot), for a job of ``kind``."""
-    tracking = AutoOrderRun.Kind.TRACKING
-    qs = AutoOrderRun.objects.filter(
-        status=AutoOrderRun.Status.RUNNING,
-        claimed_at__gte=timezone.now() - timedelta(minutes=PROFILE_LOCK_MINUTES),
-    ).exclude(account_name='')
-    qs = qs.exclude(kind=tracking) if kind == tracking else qs.filter(kind=tracking)
-    if user_id:
-        qs = qs.filter(store__user_id=user_id)
-    return set(qs.values_list('account_name', flat=True))
+def seen(run_id) -> None:
+    """The laptop reported on this job (claim, status check, progress)."""
+    AutoOrderRun.objects.filter(pk=run_id).update(last_seen_at=timezone.now())
+
+
+def clear_stuck_tracking_jobs(now=None) -> int:
+    """End Tracking Bot jobs that are 'running' but silent for STUCK_MINUTES. Returns how many were ended."""
+    now = now or timezone.now()
+    cutoff = now - timedelta(minutes=STUCK_MINUTES)
+    ended = 0
+    for run in AutoOrderRun.objects.filter(status=AutoOrderRun.Status.RUNNING, kind__in=TRACKING_BOT_KINDS):
+        last = run.last_seen_at or run.claimed_at or run.started_at
+        if last is None or last >= cutoff:
+            continue
+        run.status = AutoOrderRun.Status.FAILED
+        run.finished_at = now
+        run.stdout = ((run.stdout or '') + f"\nThe Tracking Bot stopped reporting on this job (last seen "
+                      f"{timezone.localtime(last):%d/%m %H:%M}); it was ended so the orders are checked again.")
+        run.save(update_fields=['status', 'finished_at', 'stdout'])
+        if run.kind == AutoOrderRun.Kind.TRACKING:
+            from listings.order_tracking import mark_stale_tracking
+
+            mark_stale_tracking(run)
+        else:
+            from listings.order_tracking import mark_stale_upload
+
+            mark_stale_upload(run)
+        log.warning('Tracking Bot job %s (%s) silent since %s: ended', run.id, run.kind, last)
+        ended += 1
+    return ended
 
 
 def laptop_online(user) -> bool:

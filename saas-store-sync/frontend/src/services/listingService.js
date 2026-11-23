@@ -349,6 +349,14 @@ export const saveOrderTracking = (storeId, orderId, data) => api.post(`/stores/$
 /** Tracking Bot: upload one tracking number (tracking_id) to the Kogan / Big W order and check it there. */
 export const uploadOrderTracking = (storeId, orderId, trackingId) =>
     api.post(`/stores/${storeId}/orders/${orderId}/upload-tracking/`, { tracking_id: trackingId });
+/** Upload tracking (top of the Orders page): what is ready to upload and what is not, with the reason. */
+export const getUploadTrackingPlan = (storeId) => api.get(`/stores/${storeId}/orders/upload-tracking/`);
+/** Upload tracking: one Tracking Bot job uploads these ready numbers (tracking ids) to Kogan / Big W. */
+export const startUploadTracking = (storeId, trackingIds) =>
+    api.post(`/stores/${storeId}/orders/upload-tracking/`, { tracking_ids: trackingIds });
+/** Couriers for Upload tracking: the marketplace courier for each carrier Amazon shows. */
+export const getTrackingCouriers = (storeId) => api.get(`/stores/${storeId}/orders/tracking-couriers/`);
+export const saveTrackingCouriers = (storeId, rows) => api.post(`/stores/${storeId}/orders/tracking-couriers/`, { rows });
 /** Mark as purchased: the user bought the order by hand and types the vendor order number. */
 export const markOrderPurchased = (storeId, orderId, vendorOrderNumber) =>
     api.post(`/stores/${storeId}/orders/${orderId}/mark-purchased/`, { vendor_order_number: vendorOrderNumber });

@@ -18,6 +18,7 @@ import {
     Truck,
     ShoppingCart,
     Upload,
+    UploadCloud,
     X,
 } from 'lucide-react';
 import Button from '../../components/ui/Button';
@@ -56,7 +57,7 @@ import {
 } from '../../services/listingService';
 import ConfirmModal from '../../components/ui/ConfirmModal';
 import { AttentionNote, PurchaseCheckBadge, PurchaseCheckPanel, purchaseLocked } from './PurchaseCheck';
-import { BotStatusLine, ReplaceTrackingModal, TrackingCell, TrackingDetails } from './OrderTracking';
+import { BotStatusLine, ReplaceTrackingModal, TrackingCell, TrackingDetails, UploadTrackingModal } from './OrderTracking';
 
 const STATUS_STYLES = {
     new: 'bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300',
@@ -1627,6 +1628,8 @@ export default function Orders() {
             .finally(() => setRecheckingOrderIdId(null));
     };
 
+    // Upload tracking (top button): the window that checks what is ready, then one upload job.
+    const [uploadAllOpen, setUploadAllOpen] = useState(false);
     // Tracking Bot: Get tracking (one order or the whole store) and Replace / Add a tracking number.
     const [gettingTrackingId, setGettingTrackingId] = useState(null);
     const [trackingEdit, setTrackingEdit] = useState(null); // { order, tracking } (tracking null = add)
@@ -2309,6 +2312,18 @@ export default function Orders() {
                                     <Truck className={`mr-1.5 h-4 w-4 ${gettingTrackingId === 'all' ? 'animate-pulse' : ''}`} />
                                     {gettingTrackingId === 'all' ? 'Sending…' : 'Get tracking'}
                                 </Button>
+                                {['kogan', 'mydeal'].includes((selectedStoreData?.marketplace_code || '').toLowerCase()) && (
+                                    <Button
+                                        variant="secondary"
+                                        size="sm"
+                                        className="w-full justify-center sm:w-auto"
+                                        onClick={() => setUploadAllOpen(true)}
+                                        title="Check the tracking that is ready, then the Tracking Bot uploads it to the marketplace (TBA numbers are never uploaded)"
+                                    >
+                                        <UploadCloud className="mr-1.5 h-4 w-4" />
+                                        Upload tracking
+                                    </Button>
+                                )}
                             </>
                         )}
                         <Button
@@ -2520,7 +2535,7 @@ export default function Orders() {
                                                     </p>
                                                     {showTracking && o.tracking && (
                                                         <div className="mt-2">
-                                                            <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} onUpload={handleUploadTracking} uploadingId={uploadingTrackingId} onMarkUploaded={handleMarkUploaded} markingUploadedId={markingUploadedId} />
+                                                            <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} onUpload={handleUploadTracking} uploadingId={uploadingTrackingId} onMarkUploaded={handleMarkUploaded} markingUploadedId={markingUploadedId} trackingOnline={bots ? !!bots.tracking?.online : null} />
                                                         </div>
                                                     )}
                                                 </div>
@@ -2706,7 +2721,7 @@ export default function Orders() {
                                                         </td>
                                                         {showTracking && (
                                                             <td className="px-4 py-2.5 align-top">
-                                                                <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} onUpload={handleUploadTracking} uploadingId={uploadingTrackingId} onMarkUploaded={handleMarkUploaded} markingUploadedId={markingUploadedId} />
+                                                                <TrackingCell order={o} onReplace={(order, tracking) => setTrackingEdit({ order, tracking })} onGet={handleGetTracking} gettingId={gettingTrackingId} onUpload={handleUploadTracking} uploadingId={uploadingTrackingId} onMarkUploaded={handleMarkUploaded} markingUploadedId={markingUploadedId} trackingOnline={bots ? !!bots.tracking?.online : null} />
                                                             </td>
                                                         )}
                                                         <td className="px-4 py-2.5">
@@ -2802,6 +2817,20 @@ export default function Orders() {
                 </div>
             )}
 
+            <UploadTrackingModal
+                open={uploadAllOpen}
+                storeId={selectedStore}
+                trackingOnline={bots ? !!bots.tracking?.online : null}
+                onClose={() => setUploadAllOpen(false)}
+                onQueued={(msg) => {
+                    setUploadAllOpen(false);
+                    setMessage({ text: msg, variant: 'success' });
+                    const store = selectedStore;
+                    getOrders(store).then((r) => {
+                        if (isCurrentStore(store) && Array.isArray(r.data?.orders)) setOrders(r.data.orders);
+                    }).catch(() => {});
+                }}
+            />
             <ReplaceTrackingModal
                 open={!!trackingEdit}
                 order={trackingEdit?.order}

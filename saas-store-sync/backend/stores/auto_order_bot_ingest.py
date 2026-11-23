@@ -74,17 +74,12 @@ class NextJobView(_Base):
             )
             if token.created_by_id:
                 qs = qs.filter(store__user_id=token.created_by_id)
-            # The other agent on the laptop has the account's Chrome profile open: wait for it.
-            for kind in kinds:
-                busy = bot.busy_accounts(kind, token.created_by_id)
-                if busy:
-                    qs = qs.exclude(kind=kind, account_name__in=busy)
             run = qs.select_related('store').order_by('started_at').first()
             if run is not None:
                 run.status = AutoOrderRun.Status.RUNNING
-                run.claimed_at = timezone.now()
+                run.claimed_at = run.last_seen_at = timezone.now()
                 run.laptop = token.label
-                run.save(update_fields=['status', 'claimed_at', 'laptop'])
+                run.save(update_fields=['status', 'claimed_at', 'last_seen_at', 'laptop'])
                 if run.kind == AutoOrderRun.Kind.PURCHASE:
                     from listings.auto_purchase_jobs import mark_purchasing
 
@@ -97,7 +92,8 @@ class NextJobView(_Base):
             'job_id': str(run.id),
             'kind': run.kind,
             'region': bot.REGIONS[run.store.region][1],     # 'us' or 'au' -> run_us.py / run_au.py
-            'marketplace': run.marketplace,
+            # A tracking job only reads tracking: no marketplace, so no Tracking Bot version uploads from it.
+            'marketplace': '' if run.kind == AutoOrderRun.Kind.TRACKING else run.marketplace,
             'account': run.account_name,
             'place': run.place,
             'store_name': run.store.name,
@@ -117,7 +113,10 @@ class NextJobView(_Base):
 class JobStatusView(_Base):
     def get(self, request, run_id):
         run = self.owned_run(run_id, self.token(request))
-        return _not_found() if run is None else Response({'status': run.status})
+        if run is None:
+            return _not_found()
+        bot.seen(run.id)  # the laptop is still on this job
+        return Response({'status': run.status})
 
 
 class JobFileView(_Base):
@@ -168,6 +167,7 @@ class JobProgressView(_Base):
         if run is None:
             return _not_found()
         if run.status in (AutoOrderRun.Status.RUNNING, AutoOrderRun.Status.CANCELLED):
+            bot.seen(run.id)
             bot.save_laptop_files(run, _files(request))
             if 'attention' in request.data:  # the bot is waiting for the person at the laptop ('' = done)
                 run.attention = str(request.data.get('attention') or '').strip()[:300]

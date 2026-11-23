@@ -421,10 +421,22 @@ def check_auto_purchase_orders(store_id: str, order_ids: list):
     return counts
 
 
+@shared_task(name="listings.clear_stuck_tracking_jobs", ignore_result=True)
+def clear_stuck_tracking_jobs():
+    """Every 5 minutes: end Tracking Bot jobs the laptop stopped reporting on (their orders are checked again)."""
+    from stores.auto_order_bot import clear_stuck_tracking_jobs as clear
+
+    return clear()
+
+
 @shared_task(name="listings.queue_order_tracking", ignore_result=True)
 def queue_order_tracking():
     """Every few hours: a Tracking Bot job for each auto-purchase store with purchased orders not yet tracked."""
+    from stores.auto_order_bot import clear_stuck_tracking_jobs as clear
+
     from .order_tracking import start_tracking
+
+    clear()
 
     queued = 0
     for store in Store.objects.filter(is_active=True, user__isnull=False).exclude(auto_buy_vendor=""):

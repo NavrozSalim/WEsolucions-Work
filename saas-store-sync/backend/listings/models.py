@@ -375,6 +375,29 @@ class OrderPurchaseCheck(models.Model):
         return f"Purchase check {self.status} for order {self.order_id}"
 
 
+class TrackingCourier(models.Model):
+    """Upload tracking: the courier to pick on a marketplace (Kogan / Big W) for a carrier Amazon shows.
+
+    Saved by the user on the Orders page (Upload tracking > Couriers). Only carriers saved here are uploaded;
+    the built-in names are suggestions until the user saves them.
+    """
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='tracking_couriers')
+    marketplace = models.CharField(max_length=20, help_text='Tracking Bot marketplace code: kogan / bigw.')
+    carrier = models.CharField(max_length=100, help_text='Carrier name, e.g. Australia Post.')
+    courier = models.CharField(max_length=255, help_text="What to pick in the marketplace's courier list.")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'listings_trackingcourier'
+        ordering = ['marketplace', 'carrier']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'marketplace', 'carrier'], name='uq_tracking_courier'),
+        ]
+
+    def __str__(self):
+        return f"{self.marketplace}: {self.carrier} -> {self.courier}"
+
+
 class OrderTracking(models.Model):
     """A vendor tracking number of a purchased order: read by the Tracking Bot or typed by the user (Replace).
 
