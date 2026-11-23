@@ -14,7 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from core.throttles import LoginRateThrottle, OTPRateThrottle
+from core.throttles import FailedLoginThrottleMixin, LoginRateThrottle, OTPRateThrottle
 from users.email_utils import send_otp_email, validate_real_email
 from users.models import EmailOTP, Membership, Organization
 from users.permissions_defs import (
@@ -225,7 +225,7 @@ class SuperUserSignupVerifyView(APIView):
         return Response(_tokens_for(user), status=status.HTTP_201_CREATED)
 
 
-class TypedLoginView(APIView):
+class TypedLoginView(FailedLoginThrottleMixin, APIView):
     """
     Login with account_type gate:
       - account_type=super_user → only Super Users

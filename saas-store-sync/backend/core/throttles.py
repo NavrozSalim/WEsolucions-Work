@@ -5,7 +5,46 @@ from rest_framework.throttling import AnonRateThrottle, SimpleRateThrottle, User
 
 
 class LoginRateThrottle(AnonRateThrottle):
+    """Limit failed sign-in attempts per client IP.
+
+    ``allow_request`` only checks the bucket; it does not add to it. Views using
+    ``FailedLoginThrottleMixin`` call ``record_failure`` after a rejected
+    sign-in, so successful logins never use up the ``login`` rate.
+    """
+
     scope = 'login'
+
+    def throttle_success(self):
+        return True
+
+    def record_failure(self, request, view):
+        if self.rate is None:
+            return
+        key = self.get_cache_key(request, view)
+        if key is None:
+            return
+        now = self.timer()
+        history = [t for t in self.cache.get(key, []) if t > now - self.duration]
+        history.insert(0, now)
+        self.cache.set(key, history, self.duration)
+
+
+class FailedLoginThrottleMixin:
+    """Count a request against ``LoginRateThrottle`` only when it fails (4xx).
+
+    A 429 from the throttle itself is not counted again, so waiting out the
+    shown time always unblocks the next attempt.
+    """
+
+    throttle_classes = [LoginRateThrottle]
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        code = getattr(response, 'status_code', 200)
+        if 400 <= code < 500 and code != 429:
+            for throttle in self.get_throttles():
+                if isinstance(throttle, LoginRateThrottle):
+                    throttle.record_failure(request, self)
+        return super().finalize_response(request, response, *args, **kwargs)
 
 
 class OTPRateThrottle(AnonRateThrottle):

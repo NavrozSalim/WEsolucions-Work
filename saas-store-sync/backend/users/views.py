@@ -12,13 +12,13 @@ from rest_framework.views import APIView
 from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
 from users.serializers import UserSerializer
-from core.throttles import LoginRateThrottle
+from core.throttles import FailedLoginThrottleMixin, LoginRateThrottle
 from vendor.models import GoogleOAuthCredentials
 
 User = get_user_model()
 
 
-class LoginView(APIView):
+class LoginView(FailedLoginThrottleMixin, APIView):
     """Login with email + password; returns JWT access and refresh tokens."""
     permission_classes = (AllowAny,)
     throttle_classes = [LoginRateThrottle]
