@@ -1341,6 +1341,8 @@ export default function Orders() {
         return 'all';
     });
     const [customerSearch, setCustomerSearch] = useState('');
+    // Vendor filter (auto-buy stores): 'all', a vendor code (amazon_au), or other / unmapped / unchecked / mixed.
+    const [vendorFilter, setVendorFilter] = useState('all');
 
     useEffect(() => {
         getCatalogStores()
@@ -1641,7 +1643,13 @@ export default function Orders() {
         if (!selectedStore) return;
         const store = selectedStore;
         setGettingTrackingId(order ? order.id : 'all');
-        (order ? getOrderTracking(store, order.id) : getStoreTracking(store))
+        const shownIds = !order && vendorFiltered ? filteredOrders.filter((o) => o.tracking?.can_get).map((o) => o.id) : null;
+        if (shownIds && !shownIds.length) {
+            setGettingTrackingId(null);
+            setMessage({ text: 'None of the orders shown can get tracking (bought Amazon AU orders with an order number).', variant: 'warning' });
+            return;
+        }
+        (order ? getOrderTracking(store, order.id) : getStoreTracking(store, shownIds))
             .then((res) => {
                 setMessage({ text: res.data?.message || 'Getting tracking on the laptop.', variant: 'success' });
                 if (order) {
@@ -1879,6 +1887,51 @@ export default function Orders() {
         if (vs.length === 1) return vs[0];
         return vs.length ? '' : (selectedStoreData?.auto_buy_vendor || '');
     };
+    // Vendor filter: the vendor an order is bought from, or why it has none.
+    const vendorKey = (o) => {
+        const lines = o.purchase_check?.lines || [];
+        const vs = [...new Set(lines.map((l) => l.auto_buy_vendor).filter(Boolean))];
+        if (vs.length > 1) return 'mixed';
+        if (vs.length === 1) return vs[0];
+        if (!o.purchase_check) return 'unchecked';
+        if (lines.some((l) => l.status === 'other_vendor')) return 'other';
+        if (!lines.length || lines.some((l) => l.status === 'not_mapped')) return 'unmapped';
+        return selectedStoreData?.auto_buy_vendor || 'unmapped';
+    };
+    const showVendorFilter = !!selectedStoreData?.auto_buy_vendor;
+    const VENDOR_SPECIAL = { other: 'Other vendor', unmapped: 'Not mapped', unchecked: 'Not checked yet', mixed: 'Two vendors' };
+    const vendorFilterOptions = useMemo(() => {
+        if (!showVendorFilter) return [];
+        const counts = {};
+        orders.forEach((o) => { const k = vendorKey(o); counts[k] = (counts[k] || 0) + 1; });
+        const storeCodes = (selectedStoreData?.auto_buy_vendors || []).map((r) => r?.vendor || r).filter((v) => typeof v === 'string' && v);
+        const codes = [...new Set([...storeCodes, ...Object.keys(counts).filter((k) => !VENDOR_SPECIAL[k])])];
+        const opts = [{ value: 'all', label: `All vendors (${orders.length})` }];
+        codes.forEach((c) => opts.push({ value: c, label: `${autoBuyVendorLabel(c) || c} (${counts[c] || 0})` }));
+        Object.keys(VENDOR_SPECIAL).forEach((k) => {
+            if (counts[k] || vendorFilter === k) opts.push({ value: k, label: `${VENDOR_SPECIAL[k]} (${counts[k] || 0})` });
+        });
+        return opts;
+    }, [orders, selectedStoreData, vendorFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+    const vendorStoreKey = selectedStore ? `ordersVendorFilter:${selectedStore}` : '';
+    useEffect(() => {
+        if (!showVendorFilter || !vendorStoreKey) {
+            setVendorFilter('all');
+            return;
+        }
+        let saved = '';
+        try { saved = window.localStorage.getItem(vendorStoreKey) || ''; } catch { saved = ''; }
+        const codes = (selectedStoreData?.auto_buy_vendors || []).map((r) => r?.vendor || r);
+        const fallback = codes.includes('amazon_au') || selectedStoreData?.auto_buy_vendor === 'amazon_au' ? 'amazon_au' : 'all';
+        setVendorFilter(saved || fallback);
+    }, [vendorStoreKey, showVendorFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+    const chooseVendorFilter = (v) => {
+        setVendorFilter(v);
+        try { if (vendorStoreKey) window.localStorage.setItem(vendorStoreKey, v); } catch { /* not saved: fine */ }
+    };
+    const vendorFiltered = showVendorFilter && vendorFilter !== 'all';
+    // Process all follows the vendor filter: only the ready orders of the vendor shown.
+    const readyShown = vendorFiltered ? readyToBuy.filter((o) => vendorKey(o) === vendorFilter) : readyToBuy;
     const readyByVendor = readyToBuy.reduce((acc, o) => {
         const v = orderVendor(o);
         if (v) acc[v] = (acc[v] || 0) + 1;
@@ -2024,13 +2077,16 @@ export default function Orders() {
                 list = list.filter((o) => o.status === statusFilter);
             }
         }
+        if (vendorFiltered) {
+            list = list.filter((o) => vendorKey(o) === vendorFilter);
+        }
         const query = customerSearch.trim();
         if (query) {
             list = list.filter((o) => orderMatchesCustomerSearch(o, query));
         }
         // Newest purchase date first; same date ordered by later time first.
         return [...list].sort(compareOrdersNewestFirst);
-    }, [orders, statusFilter, customerSearch]);
+    }, [orders, statusFilter, customerSearch, vendorFiltered, vendorFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Select all: every order the filter shows.
     const visibleIds = filteredOrders.map((o) => o.id);
@@ -2144,6 +2200,16 @@ export default function Orders() {
                         />
                     </div>
                 )}
+                {selectedStore && showVendorFilter && (
+                    <div className="w-full sm:max-w-52">
+                        <Select
+                            label="Vendor"
+                            value={vendorFilter}
+                            onChange={(e) => chooseVendorFilter(e.target.value)}
+                            options={vendorFilterOptions}
+                        />
+                    </div>
+                )}
                 {selectedStore && (
                     <div className="w-full sm:max-w-56">
                         <Select
@@ -2239,12 +2305,14 @@ export default function Orders() {
                                         variant="primary"
                                         size="sm"
                                         className="flex-1 justify-center rounded-r-none !bg-emerald-600 hover:!bg-emerald-700 sm:flex-none"
-                                        onClick={() => askProcessAll('')}
-                                        disabled={processingAll || readyToBuy.length === 0}
-                                        title="Buy every order that is in profit with no errors, one at a time on the worker laptop"
+                                        onClick={() => askProcessAll(vendorFiltered && !VENDOR_SPECIAL[vendorFilter] ? vendorFilter : '')}
+                                        disabled={processingAll || readyShown.length === 0}
+                                        title={vendorFiltered
+                                            ? `Buy every ${autoBuyVendorLabel(vendorFilter) || 'shown'} order that is in profit with no errors, one at a time on the worker laptop`
+                                            : 'Buy every order that is in profit with no errors, one at a time on the worker laptop'}
                                     >
                                         <ShoppingCart className="mr-1.5 h-4 w-4" />
-                                        {processingAll ? 'Sending…' : `Process all${readyToBuy.length ? ` (${readyToBuy.length})` : ''}`}
+                                        {processingAll ? 'Sending…' : `Process all${readyShown.length ? ` (${readyShown.length})` : ''}`}
                                     </Button>
                                     <Button
                                         variant="primary"
@@ -2820,6 +2888,7 @@ export default function Orders() {
             <UploadTrackingModal
                 open={uploadAllOpen}
                 storeId={selectedStore}
+                orderIds={vendorFiltered ? filteredOrders.map((o) => o.id) : null}
                 trackingOnline={bots ? !!bots.tracking?.online : null}
                 onClose={() => setUploadAllOpen(false)}
                 onQueued={(msg) => {

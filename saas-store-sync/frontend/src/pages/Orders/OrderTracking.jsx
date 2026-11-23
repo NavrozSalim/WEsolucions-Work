@@ -582,7 +582,7 @@ export function CouriersModal({ open, storeId, onClose, onSaved }) {
 const SKIP_LABEL = { tba: 'TBA number', courier: 'Courier not saved', name: 'Name differs', extra: 'Second number' };
 
 /** Upload tracking: check what goes to Kogan / Big W, then one job uploads all the ready numbers. */
-export function UploadTrackingModal({ open, storeId, trackingOnline = null, onClose, onQueued }) {
+export function UploadTrackingModal({ open, storeId, orderIds = null, trackingOnline = null, onClose, onQueued }) {
     const [plan, setPlan] = useState(null);
     const [error, setError] = useState('');
     const [sending, setSending] = useState(false);
@@ -604,8 +604,10 @@ export function UploadTrackingModal({ open, storeId, trackingOnline = null, onCl
     }, [open, storeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
     if (!open) return null;
-    const ready = plan?.ready || [];
-    const skipped = plan?.skipped || [];
+    // With the Vendor filter on, only the orders the page shows.
+    const shown = orderIds ? new Set(orderIds) : null;
+    const ready = (plan?.ready || []).filter((r) => !shown || shown.has(r.order_id));
+    const skipped = (plan?.skipped || []).filter((r) => !shown || shown.has(r.order_id));
     const label = plan?.label || 'the marketplace';
     const confirm = () => {
         setSending(true);
