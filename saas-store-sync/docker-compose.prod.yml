@@ -43,9 +43,11 @@ services:
       resources:
         limits:
           cpus: "2.0"
-          memory: 1G
+          # Every server's workers share this database. 1G let the kernel kill Postgres
+          # backends under load (Nov 2026); the main host has ~40 GB free.
+          memory: 4G
         reservations:
-          memory: 256M
+          memory: 512M
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
