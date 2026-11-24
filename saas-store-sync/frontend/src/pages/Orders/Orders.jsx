@@ -1646,7 +1646,7 @@ export default function Orders() {
         const shownIds = !order && vendorFiltered ? filteredOrders.filter((o) => o.tracking?.can_get).map((o) => o.id) : null;
         if (shownIds && !shownIds.length) {
             setGettingTrackingId(null);
-            setMessage({ text: 'None of the orders shown can get tracking (bought Amazon AU orders with an order number).', variant: 'warning' });
+            setMessage({ text: 'None of the orders shown can get tracking (bought Amazon AU or Costway AU orders with an order number).', variant: 'warning' });
             return;
         }
         (order ? getOrderTracking(store, order.id) : getStoreTracking(store, shownIds))
@@ -2375,7 +2375,7 @@ export default function Orders() {
                                     className="w-full justify-center sm:w-auto"
                                     onClick={() => handleGetTracking(null)}
                                     disabled={gettingTrackingId === 'all'}
-                                    title="The Tracking Bot reads Amazon tracking for every purchased order that has none yet (also runs every 3 hours)"
+                                    title="The Tracking Bot reads Amazon AU and Costway AU tracking for every purchased order that has none yet (also runs every 3 hours)"
                                 >
                                     <Truck className={`mr-1.5 h-4 w-4 ${gettingTrackingId === 'all' ? 'animate-pulse' : ''}`} />
                                     {gettingTrackingId === 'all' ? 'Sending…' : 'Get tracking'}

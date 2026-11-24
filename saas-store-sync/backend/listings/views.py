@@ -1585,12 +1585,12 @@ class StoreOrdersGetTrackingView(APIView):
             due = selected_tracking_checks(store, selected)
             if not due:
                 return Response({'message': 'None of the selected orders can get tracking (purchased orders with '
-                                            'an Amazon AU order number, not already being read).', 'queued': 0})
+                                            'an Amazon AU or Costway AU order number, not already being read).', 'queued': 0})
         else:
             due = due_checks(store)
         if not due:
             return Response({'message': 'No purchased orders are waiting for tracking (orders bought in the last '
-                                        '30 days with an Amazon AU order number).', 'queued': 0})
+                                        '30 days with an Amazon AU or Costway AU order number).', 'queued': 0})
         runs = start_tracking(store, request.user, due)
         if not runs:
             return Response({'detail': "No purchase account for these orders' vendor on the store's Auto "

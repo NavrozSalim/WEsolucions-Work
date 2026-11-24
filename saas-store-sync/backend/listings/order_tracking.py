@@ -33,8 +33,8 @@ from .tracking_couriers import carrier_name, is_tba, names_differ, saved_courier
 
 logger = logging.getLogger(__name__)
 
-# Purchase-account vendors the Tracking Bot can read (Amazon AU first; others later).
-TRACKING_VENDORS = ('amazon_au',)
+# Purchase-account vendors the Tracking Bot can read: Amazon AU (Track package) and Costway AU (shipments page).
+TRACKING_VENDORS = ('amazon_au', 'costway_au')
 TRACKING_DAYS = 30
 ORDER_COLUMNS = ['order_ref', 'invoice', 'vendor', 'vendor_order_number', 'customer_name', 'purchased_at']
 # Statuses the schedule checks again (found / cancelled orders are left alone).
@@ -203,7 +203,8 @@ def start_order_tracking(order, user):
 
     check = OrderPurchaseCheck.objects.select_related('order', 'order__store').filter(order=order).first()
     if check is None or not can_get_tracking(check):
-        raise AutoPurchaseError('Get tracking is for purchased Amazon AU orders that have a vendor order number.',
+        raise AutoPurchaseError('Get tracking is for purchased Amazon AU and Costway AU orders that have a vendor '
+                                'order number.',
                                 409)
     if active_tracking_run(check) is not None:
         raise AutoPurchaseError('The Tracking Bot is already reading this order.', 409)

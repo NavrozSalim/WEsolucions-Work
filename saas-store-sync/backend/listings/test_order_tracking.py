@@ -108,6 +108,17 @@ class OrderTrackingTests(TrackingTestBase):
         OrderPurchaseCheck.objects.filter(order=found).update(tracking_status='found')
         self.assertEqual([c.order_id for c in due_checks(self.store)], [due.id])
 
+    def test_costway_orders_get_their_own_job(self):
+        PurchaseAccount.objects.create(user=self.user, name='Costway AU', vendor='costway_au', region='AU',
+                                       chrome_profile='Profile 1')
+        amazon = self.purchased('A1')
+        costway = self.purchased('C1', number='AU000469713', vendor='costway_au')
+        self.assertEqual({c.order_id for c in due_checks(self.store)}, {amazon.id, costway.id})
+        runs = {r.account_name: r for r in start_tracking(self.store)}
+        self.assertEqual(set(runs), {'Amazon AU', 'Costway AU'})
+        self.assertEqual(runs['Costway AU'].vendor, 'costway_au')
+        self.assertEqual(self.check(costway).tracking_run_id, runs['Costway AU'].id)
+
     def test_get_tracking_queues_one_job_with_the_orders_file(self):
         a = self.purchased('A')
         b = self.purchased('B', number='503-1, 503-2')
