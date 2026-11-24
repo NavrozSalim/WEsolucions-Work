@@ -52,24 +52,23 @@ def ebay_au_proxy_disabled() -> bool:
 
 
 def load_ebay_au_proxy_urls(env: dict | None = None) -> list[str]:
-    """Proxy URLs for eBay AU — eBay-specific list first, then Costco/shared."""
-    if env is None:
-        ebay_only = _split_env_urls(_env("EBAY_AU_PROXY_URLS"))
-        if ebay_only:
-            return ebay_only
-        return load_proxy_urls()
-    get = env.get
-    ebay_only = _split_env_urls(get("EBAY_AU_PROXY_URLS", ""))
-    if ebay_only:
-        from . import costco_au_proxies as cap
+    """Proxy URLs for eBay AU — eBay-specific list first, then Costco/shared.
 
+    Every entry is normalised, so the provider's ``host:port:user:pass`` lines
+    become ``http://user:pass@host:port``. curl rejects the raw form.
+    """
+    from . import costco_au_proxies as cap
+
+    source = os.environ if env is None else env
+    ebay_only = _split_env_urls((source.get("EBAY_AU_PROXY_URLS") or "").strip())
+    if ebay_only:
         out: list[str] = []
         for raw in ebay_only:
             norm = cap._normalize_proxy(  # noqa: SLF001 — shared normaliser
                 raw,
-                (get("PROXY_SCHEME") or "http").lower(),
-                get("PROXY_USER", ""),
-                get("PROXY_PASS", ""),
+                (source.get("PROXY_SCHEME") or "http").lower(),
+                source.get("PROXY_USER", ""),
+                source.get("PROXY_PASS", ""),
             )
             if norm:
                 out.append(norm)

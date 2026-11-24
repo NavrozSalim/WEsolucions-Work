@@ -38,6 +38,9 @@ services:
       - "${POSTGRES_PUBLISH_PORT:-5432}:5432"
     restart: always
     stop_grace_period: 60s
+    # Docker's default /dev/shm is 64 MB. Parallel queries over the listing tables
+    # ran out of it ("could not resize shared memory segment ... No space left on device").
+    shm_size: 1g
     logging: *default-logging
     deploy:
       resources:

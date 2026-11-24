@@ -29,6 +29,19 @@ class TestEbayAuProxies(unittest.TestCase):
         self.assertEqual(len(urls), 1)
         self.assertIn("ebay-proxy.example", urls[0])
 
+    def test_provider_lines_from_environment_are_normalised(self):
+        # Webshare's download format, read from the real environment (the
+        # worker's path). curl rejects "host:port:user:pass" as a proxy.
+        with patch.dict(
+            os.environ,
+            {"EBAY_AU_PROXY_URLS": "1.2.3.4:6715:alice:secret,5.6.7.8:5934:alice:secret"},
+        ):
+            urls = proxies.load_ebay_au_proxy_urls()
+        self.assertEqual(
+            urls,
+            ["http://alice:secret@1.2.3.4:6715", "http://alice:secret@5.6.7.8:5934"],
+        )
+
     def test_falls_back_to_costco_urls(self):
         env = {"COSTCO_AU_PROXY_URLS": "http://u:p@shared.example:8080"}
         urls = proxies.load_ebay_au_proxy_urls(env)
