@@ -32,16 +32,17 @@ def _stop_stale_timedelta() -> timedelta:
 def _stop_idle_timedelta() -> timedelta:
     """How long a stopped scrape can sit without writing a listing before the UI unlocks.
 
-    One Costco page can retry for about a minute. After this quiet period the
-    current page has either finished or the worker is gone, so Start Scraping
-    should come back instead of waiting out the 20-minute stale cap.
+    Scrapers check for Stop between retries, so a lane leaves its listing within
+    seconds of Stop. After this quiet period the current page has either finished
+    or the worker is gone, so Start Scraping should come back instead of waiting
+    out the 20-minute stale cap.
     """
     from django.conf import settings
 
     try:
-        seconds = int(getattr(settings, 'CATALOG_SCRAPE_STOP_IDLE_SECONDS', 120) or 120)
+        seconds = int(getattr(settings, 'CATALOG_SCRAPE_STOP_IDLE_SECONDS', 45) or 45)
     except (TypeError, ValueError):
-        seconds = 120
+        seconds = 45
     seconds = max(30, min(600, seconds))
     return timedelta(seconds=seconds)
 

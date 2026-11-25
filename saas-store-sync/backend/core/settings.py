@@ -92,13 +92,15 @@ except ValueError:
     CATALOG_SCRAPE_STOP_STALE_MINUTES = 20
 
 # After Stop, if no listing is scraped for this many seconds, the workers have
-# gone quiet. Drop the stopping banner so Start Scraping comes back.
+# gone quiet. Drop the stopping banner so Start Scraping comes back. Scrapers
+# check for Stop between retries (scrapers/stop_signal.py), so a lane ends within
+# seconds and a short quiet period is enough.
 try:
     CATALOG_SCRAPE_STOP_IDLE_SECONDS = max(
-        30, min(600, int(os.getenv('CATALOG_SCRAPE_STOP_IDLE_SECONDS', '120'))),
+        30, min(600, int(os.getenv('CATALOG_SCRAPE_STOP_IDLE_SECONDS', '45'))),
     )
 except ValueError:
-    CATALOG_SCRAPE_STOP_IDLE_SECONDS = 120
+    CATALOG_SCRAPE_STOP_IDLE_SECONDS = 45
 
 # Auto Order Bot page: the old "upload today's order export + mapping, then Dry run / Place orders"
 # flow. Off by default: orders are fetched, checked and bought one at a time from the Orders page

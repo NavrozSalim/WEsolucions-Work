@@ -43,6 +43,7 @@ from urllib.parse import quote
 
 from bs4 import BeautifulSoup
 
+from .stop_signal import raise_if_scrape_stopped
 from .core import ScrapeResult
 from .costco_au_proxies import (
     CostcoAuProxyPool,
@@ -1087,6 +1088,7 @@ def scrape_costco_au(
     last_html_saved = False
 
     for attempt in range(attempts):
+        raise_if_scrape_stopped()
         assignment = _acquire_costco_proxy(
             active_pool,
             force_rotate=attempt > 0,

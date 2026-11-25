@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
+from .stop_signal import raise_if_scrape_stopped
 from .core import (
     random_delay,
     backoff_delay,
@@ -1690,6 +1691,7 @@ class EbayHTTP:
         attempts = proxies.http_retry_limit()
 
         for attempt in range(attempts):
+            raise_if_scrape_stopped()
             assignment = proxies.acquire_proxy(session_dict, force_rotate=attempt > 0)
             if assignment is None:
                 break
@@ -2813,6 +2815,7 @@ def scrape_ebay_for_market(
     for attempt in range(attempts):
         if give_up:
             break
+        raise_if_scrape_stopped()
         if attempt > 0:
             backoff_delay(attempt, base=2.0, jitter=1.5)
             if market == EBAY_MARKET_AU:

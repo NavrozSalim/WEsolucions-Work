@@ -14,6 +14,8 @@ from django.db import transaction
 from django.db.models import Q
 from decimal import Decimal
 
+from scrapers.stop_signal import ScrapeStopped, scrape_stop_check
+
 logger = logging.getLogger(__name__)
 
 # If no server-scrapable listing leaves ``pending`` (scraped or failed) within this
@@ -1166,6 +1168,9 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
             nora_map = None
         wallkoala_feed, wallkoala_vendor_pk = _load_wallkoala_store_feed(store)
 
+        def stop_requested() -> bool:
+            return should_abort_celery_scrape(str(store.id), root_task_id=scrape_root_id)
+
         for row in rows:
             _refresh_db_connection()
             if should_abort_celery_scrape(str(store.id), root_task_id=scrape_root_id):
@@ -1283,17 +1288,22 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
                 )
                 try:
                     if url:
-                        result = get_price_and_stock(
-                            url,
-                            store.region or '',
-                            session,
-                            vendor_code=product.vendor.code if product.vendor else None,
-                        )
+                        with scrape_stop_check(stop_requested):
+                            result = get_price_and_stock(
+                                url,
+                                store.region or '',
+                                session,
+                                vendor_code=product.vendor.code if product.vendor else None,
+                            )
                         vendor_price = result.get('price')
                         inv = _inventory_from_scrape_result(result)
                         vendor_stock = 0 if inv is None or inv < 0 else inv
                         if isinstance(result, dict):
                             scrape_title = (result.get('title') or '').strip()[:500]
+                except ScrapeStopped:
+                    # Stop came while this listing was retrying: leave it Pending.
+                    user_cancelled = True
+                    break
                 except Exception as scrape_err:
                     _refresh_db_connection()
                     if uses_nora:
@@ -1942,6 +1952,9 @@ def _process_store_wide_scrape_mappings(
             nora_map = None
         wallkoala_feed, wallkoala_vendor_pk = _load_wallkoala_store_feed(store)
 
+        def stop_requested() -> bool:
+            return should_abort_celery_scrape(str(store.id), root_task_id=scrape_root_id)
+
         for pm in mappings:
             _refresh_db_connection()
             if should_abort_celery_scrape(str(store.id), root_task_id=scrape_root_id):
@@ -2050,12 +2063,13 @@ def _process_store_wide_scrape_mappings(
             else:
                 try:
                     if url:
-                        result = get_price_and_stock(
-                            url,
-                            store.region or '',
-                            session,
-                            vendor_code=product.vendor.code if product.vendor else None,
-                        )
+                        with scrape_stop_check(stop_requested):
+                            result = get_price_and_stock(
+                                url,
+                                store.region or '',
+                                session,
+                                vendor_code=product.vendor.code if product.vendor else None,
+                            )
                         vendor_price = result.get('price')
                         vendor_stock = _inventory_from_scrape_result(result)
                         scrape_title = (result.get('title') or '').strip()[:500]
@@ -2063,6 +2077,10 @@ def _process_store_wide_scrape_mappings(
                         raise ValueError('Product has no vendor_url or resolvable SKU')
                 except SoftTimeLimitExceeded:
                     raise
+                except ScrapeStopped:
+                    # Stop came while this listing was retrying: leave it Pending.
+                    user_cancelled = True
+                    break
                 except Exception as e:
                     _refresh_db_connection()
                     if uses_nora:
@@ -3016,8 +3034,24 @@ def revive_stalled_store_scrape(state, *, now=None) -> dict:
 
 @shared_task(ignore_result=True)
 def catalog_scrape_watchdog():
-    """Beat: restart store-wide scrapes whose workers stopped without finishing."""
+    """Beat: restart store-wide scrapes whose workers stopped without finishing.
+
+    Also ends stopped scrapes whose workers have gone quiet. The Catalog page does
+    that while someone has it open; without this a Stop on a store nobody is
+    watching left the scrape listed as running for hours.
+    """
     from django.db.models.functions import Coalesce, Greatest
+
+    from .celery_scrape_state import heal_stale_celery_scrape_state
+
+    stopping = StoreCatalogCeleryScrapeState.objects.filter(
+        cancel_requested=True,
+    ).values_list('store_id', flat=True)
+    for stopped_store_id in list(stopping):
+        try:
+            heal_stale_celery_scrape_state(str(stopped_store_id))
+        except Exception:
+            logger.exception('Could not end the stopped scrape for store %s', stopped_store_id)
 
     now = timezone.now()
     cutoff = now - _scrape_watchdog_idle_timedelta()

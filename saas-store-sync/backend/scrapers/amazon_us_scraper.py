@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 import requests
 from bs4 import BeautifulSoup
 
+from .stop_signal import raise_if_scrape_stopped
 from .core import (
     ScrapeResult, detect_block, is_amazon_captcha_page, is_amazon_dog_page,
     save_debug_html, random_delay, backoff_delay, parse_price_text, classify_failure, should_retry_failure,
@@ -1058,6 +1059,7 @@ class AmazonHTTP:
         last_result = None
         rotated = False
         for attempt in range(RETRY_LIMIT):
+            raise_if_scrape_stopped()
             if attempt > 0 and not rotated:
                 backoff_delay(attempt, base=2.0, jitter=1.5)
                 logger.info("HTTP retry %d/%d for %s", attempt + 1, RETRY_LIMIT, url)
@@ -1524,6 +1526,7 @@ class AmazonScraper:
     def scrape_with_retry(cls, url: str, driver) -> ScrapeResult:
         last_result = None
         for attempt in range(RETRY_LIMIT):
+            raise_if_scrape_stopped()
             if attempt > 0:
                 backoff_delay(attempt, base=3.0, jitter=2.0)
             result = cls.fetch_and_parse(url, driver)

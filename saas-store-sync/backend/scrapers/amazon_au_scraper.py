@@ -15,6 +15,7 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
+from .stop_signal import raise_if_scrape_stopped
 from .core import (
     ScrapeResult, detect_block, is_amazon_captcha_page, is_amazon_dog_page,
     save_debug_html, random_delay, backoff_delay, parse_price_text,
@@ -447,6 +448,7 @@ class AmazonAUHTTP:
         use_proxies = is_au and proxies_configured()
         last_result = None
         for attempt in range(RETRY_LIMIT):
+            raise_if_scrape_stopped()
             result = cls.fetch(url, session_dict, is_au)
             assignment = (session_dict or {}).get(_SESSION_PROXY_KEY)
             if result.success:
@@ -680,6 +682,7 @@ def scrape_amazon_au(vendor_url: str, region: str, session: dict = None) -> dict
 
         last_result = None
         for attempt in range(SELENIUM_ATTEMPTS):
+            raise_if_scrape_stopped()
             if attempt > 0:
                 backoff_delay(attempt, base=2.5, jitter=2.0)
             result = _selenium_scrape_page(vendor_url, driver)
