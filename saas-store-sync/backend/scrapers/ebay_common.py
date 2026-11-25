@@ -2107,7 +2107,7 @@ class EbayDriver:
         if google_chrome:
             from .ebay_chrome_profiles import google_chrome_paths
 
-            google = google_chrome_paths()
+            google = google_chrome_paths(wanted=True)
             if google:
                 chrome_bin, chromedriver_path = google
         if chrome_bin:
@@ -2258,17 +2258,19 @@ class EbayDriver:
 
         native = us_browser and ebay_us_chrome_native_ua()
         profile = None
+        setup = None
         if us_browser:
-            from .ebay_chrome_profiles import acquire_proxy_profile, google_chrome_enabled
+            from .ebay_chrome_profiles import acquire_proxy_profile, choose_chrome_setup, setup_name
 
-            profile = acquire_proxy_profile(proxy_url)
+            setup = choose_chrome_setup()
+            profile = acquire_proxy_profile(proxy_url, wanted=setup.profile)
         try:
             driver = EbayDriver._create_driver(
                 proxy_url=proxy_url,
                 native_ua=native,
                 us_profile=us_browser and not native,
                 profile_dir=profile.path if profile else None,
-                google_chrome=us_browser and google_chrome_enabled(),
+                google_chrome=bool(setup and setup.google),
             )
         except Exception:
             if profile:
@@ -2276,6 +2278,10 @@ class EbayDriver:
             raise
         if us_browser:
             _bind_us_profile(driver, profile)
+            if session_dict is not None:
+                # The setup this Chrome really runs (a busy profile means none): each
+                # try's log line and the mix's counts name it.
+                session_dict[_ebay_sk(market, "chrome_setup")] = setup_name(setup.google, profile is not None)
         if session_dict is not None:
             session_dict[key] = driver
             if proxy_url:
@@ -2928,12 +2934,18 @@ def scrape_ebay_for_market(
                     force_proxy_rotate=attempt > 0,
                 )
                 if browser_first:
+                    chrome_setup = session.get(_ebay_sk(market, "chrome_setup")) if market == EBAY_MARKET_US else None
                     logger.info(
-                        "eBay Chrome attempt=%s via=%s result=%s",
+                        "eBay Chrome attempt=%s via=%s result=%s setup=%s",
                         attempt + 1,
                         "proxy" if session.get(_ebay_sk(market, "selenium_proxy_url")) else "server IP",
                         browser_err or "page loaded",
+                        chrome_setup or "-",
                     )
+                    if chrome_setup and browser_err in (None, "", "browser_blocked"):
+                        from .ebay_chrome_profiles import record_setup_result
+
+                        record_setup_result(chrome_setup, loaded=not browser_err)
                 if browser_html:
                     last_browser_html = browser_html
                     if market == EBAY_MARKET_AU:

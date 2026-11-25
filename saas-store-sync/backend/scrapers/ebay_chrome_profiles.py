@@ -24,7 +24,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from typing import Optional
+import random
+import time
+from typing import NamedTuple, Optional
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -53,13 +55,26 @@ def google_chrome_enabled() -> bool:
     return _env_on("EBAY_US_GOOGLE_CHROME")
 
 
-def google_chrome_paths() -> Optional[tuple[str, str]]:
-    """(chrome binary, matching chromedriver) when Google Chrome is switched on and installed."""
-    if not google_chrome_enabled():
-        return None
+def _google_chrome_files() -> tuple[str, str]:
     chrome = (os.environ.get("GOOGLE_CHROME_BIN") or DEFAULT_GOOGLE_CHROME_BIN).strip()
     driver = (os.environ.get("GOOGLE_CHROMEDRIVER_PATH") or DEFAULT_GOOGLE_CHROMEDRIVER).strip()
-    if os.path.isfile(chrome) and os.path.isfile(driver):
+    return chrome, driver
+
+
+def google_chrome_installed() -> bool:
+    chrome, driver = _google_chrome_files()
+    return os.path.isfile(chrome) and os.path.isfile(driver)
+
+
+def google_chrome_paths(*, wanted: Optional[bool] = None) -> Optional[tuple[str, str]]:
+    """(chrome binary, matching chromedriver) when Google Chrome is wanted and installed.
+
+    ``wanted`` None follows ``EBAY_US_GOOGLE_CHROME``; a Chrome setup mix passes it.
+    """
+    if not (google_chrome_enabled() if wanted is None else wanted):
+        return None
+    chrome, driver = _google_chrome_files()
+    if google_chrome_installed():
         return chrome, driver
     _warn_once(
         "google_chrome_missing",
@@ -170,9 +185,12 @@ class ProxyProfile:
         self.lock.release()
 
 
-def acquire_proxy_profile(proxy_url: Optional[str]) -> Optional[ProxyProfile]:
-    """A free profile folder for this proxy, or None (switch off, folder unusable or every slot busy)."""
-    if not profiles_enabled():
+def acquire_proxy_profile(proxy_url: Optional[str], *, wanted: Optional[bool] = None) -> Optional[ProxyProfile]:
+    """A free profile folder for this proxy, or None (not wanted, folder unusable or every slot busy).
+
+    ``wanted`` None follows ``EBAY_US_PROFILE_PER_PROXY``; a Chrome setup mix passes it.
+    """
+    if not (profiles_enabled() if wanted is None else wanted):
         return None
     root = _profile_root()
     key = proxy_profile_key(proxy_url)
@@ -204,3 +222,131 @@ def acquire_proxy_profile(proxy_url: Optional[str]) -> Optional[ProxyProfile]:
         return ProxyProfile(path, lock)
     logger.info("eBay US: every profile of proxy %s is in use; using a throwaway profile.", key)
     return None
+
+
+# --- Chrome setup mix --------------------------------------------------------
+#
+# ``EBAY_US_CHROME_MIX`` lets each new eBay US Chrome pick one of several setups,
+# so the browsers eBay sees are not all identical and each setup's loaded/blocked
+# count shows which one works best. Every try's log line names its setup.
+#
+#   EBAY_US_CHROME_MIX=all            every setup below
+#   EBAY_US_CHROME_MIX=google,google+profile
+#   (empty)                           no mix: EBAY_US_GOOGLE_CHROME / EBAY_US_PROFILE_PER_PROXY decide
+#
+# ``EBAY_US_CHROME_MIX_ADAPTIVE=1`` picks more often the setups that got through
+# more in the last ``EBAY_US_CHROME_MIX_HOURS`` (default 3) hours, counted across
+# all workers. ``EBAY_US_CHROME_MIX_EXPLORE`` (default 0.1) of the picks stay
+# random so a setup that fell behind keeps getting tried. Off = an even pick.
+
+SETUPS: dict[str, tuple[bool, bool]] = {
+    # name: (Google Chrome, saved profile per proxy)
+    "google+profile": (True, True),
+    "google": (True, False),
+    "chromium+profile": (False, True),
+    "chromium": (False, False),
+}
+
+
+class ChromeSetup(NamedTuple):
+    name: str
+    google: bool
+    profile: bool
+
+
+def setup_name(google: bool, profile: bool) -> str:
+    return ("google" if google else "chromium") + ("+profile" if profile else "")
+
+
+def mix_setup_names() -> list[str]:
+    """The setups ``EBAY_US_CHROME_MIX`` asks for that can run here (Google ones need Chrome installed)."""
+    raw = (os.environ.get("EBAY_US_CHROME_MIX") or "").strip().lower()
+    if not raw:
+        return []
+    wanted = list(SETUPS) if raw == "all" else [n.strip() for n in raw.split(",") if n.strip()]
+    names: list[str] = []
+    for name in wanted:
+        if name not in SETUPS:
+            _warn_once(f"mix_unknown_{name}", "eBay US: unknown Chrome setup %r in EBAY_US_CHROME_MIX (use %s).",
+                       name, ", ".join(SETUPS))
+            continue
+        if SETUPS[name][0] and not google_chrome_installed():
+            _warn_once("mix_no_google", "eBay US: Google Chrome is not installed; the mix leaves out its setups.")
+            continue
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _stats_hours() -> int:
+    try:
+        return max(1, min(24, int(os.environ.get("EBAY_US_CHROME_MIX_HOURS") or "3")))
+    except ValueError:
+        return 3
+
+
+def _explore_share() -> float:
+    """Share of adaptive picks made at random (``EBAY_US_CHROME_MIX_EXPLORE``, default 0.1).
+
+    Without it a setup that fell behind would never be picked again, so it
+    could not show that it had recovered.
+    """
+    try:
+        return max(0.0, min(1.0, float(os.environ.get("EBAY_US_CHROME_MIX_EXPLORE") or "0.1")))
+    except ValueError:
+        return 0.1
+
+
+def _stat_key(name: str, kind: str, hour: int) -> str:
+    return f"ebayus:chromemix:{name}:{kind}:{hour}"
+
+
+def record_setup_result(name: Optional[str], loaded: bool) -> None:
+    """Count one Chrome try (page loaded or blocked) for ``name``, shared by all workers."""
+    if not name:
+        return
+    try:
+        from django.core.cache import cache
+
+        key = _stat_key(name, "ok" if loaded else "blocked", int(time.time() // 3600))
+        cache.add(key, 0, timeout=(_stats_hours() + 1) * 3600)
+        cache.incr(key)
+    except Exception as exc:  # noqa: BLE001 - a missing count must not cost the listing
+        logger.debug("eBay US Chrome mix count failed: %s", exc)
+
+
+def setup_stats(names) -> dict[str, tuple[int, int]]:
+    """{setup: (loaded, blocked)} over the last ``EBAY_US_CHROME_MIX_HOURS`` hours."""
+    out = {name: (0, 0) for name in names}
+    try:
+        from django.core.cache import cache
+
+        now_hour = int(time.time() // 3600)
+        hours = range(now_hour - _stats_hours() + 1, now_hour + 1)
+        keys = [_stat_key(n, k, h) for n in names for k in ("ok", "blocked") for h in hours]
+        got = cache.get_many(keys)
+        for name in names:
+            ok = sum(int(got.get(_stat_key(name, "ok", h)) or 0) for h in hours)
+            blocked = sum(int(got.get(_stat_key(name, "blocked", h)) or 0) for h in hours)
+            out[name] = (ok, blocked)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("eBay US Chrome mix stats unavailable: %s", exc)
+    return out
+
+
+def choose_chrome_setup() -> ChromeSetup:
+    """The setup for the next eBay US Chrome."""
+    names = mix_setup_names()
+    if not names:
+        google = google_chrome_enabled() and google_chrome_installed()
+        profile = profiles_enabled()
+        return ChromeSetup(setup_name(google, profile), google, profile)
+    if len(names) > 1 and _env_on("EBAY_US_CHROME_MIX_ADAPTIVE") and random.random() >= _explore_share():
+        stats = setup_stats(names)
+        # Draw a likely pass rate for each setup from its own counts and take the
+        # best draw: winners get picked more, the rest still get tried.
+        name = max(names, key=lambda n: random.betavariate(stats[n][0] + 1, stats[n][1] + 1))
+    else:
+        name = random.choice(names)
+    google, profile = SETUPS[name]
+    return ChromeSetup(name, google, profile)

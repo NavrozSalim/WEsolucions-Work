@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase
 
 from scrapers import ebay_chrome_profiles as profiles
-from scrapers.ebay_common import EBAY_MARKET_US, EbayDriver, _bind_us_profile
+from scrapers.ebay_common import EBAY_MARKET_US, EbayDriver, _bind_us_profile, _ebay_sk
 
 
 class ProxyProfileTests(SimpleTestCase):
@@ -126,11 +126,13 @@ class DriverProfileBindingTests(SimpleTestCase):
             driver.quit()
         profile.release.assert_called_once()
 
+    @patch('scrapers.ebay_chrome_profiles.google_chrome_installed', return_value=True)
     @patch('scrapers.ebay_common.ebay_us_browser_first', return_value=True)
     @patch('scrapers.ebay_common.EbayDriver._us_proxy_url', return_value='http://1.2.3.4:8000')
-    def test_us_chrome_launch_gets_profile_and_google_chrome(self, _proxy, _browser_first):
+    def test_us_chrome_launch_gets_profile_and_google_chrome(self, _proxy, _browser_first, _installed):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
             'EBAY_US_PROFILE_PER_PROXY': '1', 'EBAY_US_PROFILE_DIR': tmp, 'EBAY_US_GOOGLE_CHROME': '1',
+            'EBAY_US_CHROME_MIX': '',
         }), patch.object(EbayDriver, '_create_driver', return_value=MagicMock()) as create:
             session = {}
             driver = EbayDriver.get_or_create(session, EBAY_MARKET_US)
@@ -138,6 +140,7 @@ class DriverProfileBindingTests(SimpleTestCase):
             self.assertTrue(kwargs['google_chrome'])
             self.assertTrue(kwargs['profile_dir'].startswith(tmp))
             self.assertIsNotNone(driver._ebay_us_profile)
+            self.assertEqual(session[_ebay_sk(EBAY_MARKET_US, 'chrome_setup')], 'google+profile')
             driver.quit()
 
     @patch('scrapers.ebay_common.ebay_us_browser_first', return_value=True)
@@ -149,3 +152,72 @@ class DriverProfileBindingTests(SimpleTestCase):
             kwargs = create.call_args.kwargs
             self.assertFalse(kwargs['google_chrome'])
             self.assertIsNone(kwargs['profile_dir'])
+
+
+class ChromeSetupMixTests(SimpleTestCase):
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+
+    def test_no_mix_follows_the_two_switches(self):
+        with patch.dict(os.environ, {'EBAY_US_CHROME_MIX': '', 'EBAY_US_GOOGLE_CHROME': '0',
+                                     'EBAY_US_PROFILE_PER_PROXY': '1'}):
+            self.assertEqual(profiles.choose_chrome_setup(), profiles.ChromeSetup('chromium+profile', False, True))
+
+    @patch('scrapers.ebay_chrome_profiles.google_chrome_installed', return_value=True)
+    def test_all_means_every_setup(self, _installed):
+        with patch.dict(os.environ, {'EBAY_US_CHROME_MIX': 'all'}):
+            self.assertEqual(profiles.mix_setup_names(), list(profiles.SETUPS))
+
+    @patch('scrapers.ebay_chrome_profiles.google_chrome_installed', return_value=False)
+    def test_google_setups_left_out_without_google_chrome(self, _installed):
+        with patch.dict(os.environ, {'EBAY_US_CHROME_MIX': 'all'}):
+            self.assertEqual(profiles.mix_setup_names(), ['chromium+profile', 'chromium'])
+
+    @patch('scrapers.ebay_chrome_profiles.google_chrome_installed', return_value=True)
+    def test_unknown_names_are_ignored(self, _installed):
+        with patch.dict(os.environ, {'EBAY_US_CHROME_MIX': 'google, firefox ,chromium,google'}):
+            self.assertEqual(profiles.mix_setup_names(), ['google', 'chromium'])
+
+    @patch('scrapers.ebay_chrome_profiles.google_chrome_installed', return_value=True)
+    def test_even_mix_uses_every_setup(self, _installed):
+        with patch.dict(os.environ, {'EBAY_US_CHROME_MIX': 'all', 'EBAY_US_CHROME_MIX_ADAPTIVE': '0'}):
+            seen = {profiles.choose_chrome_setup().name for _ in range(200)}
+        self.assertEqual(seen, set(profiles.SETUPS))
+
+    def test_results_are_counted_per_setup(self):
+        for _ in range(3):
+            profiles.record_setup_result('google', loaded=True)
+        profiles.record_setup_result('google', loaded=False)
+        profiles.record_setup_result('chromium', loaded=False)
+        self.assertEqual(profiles.setup_stats(['google', 'chromium']), {'google': (3, 1), 'chromium': (0, 1)})
+
+    @patch('scrapers.ebay_chrome_profiles.google_chrome_installed', return_value=True)
+    def test_adaptive_mix_prefers_the_winner_but_still_tries_others(self, _installed):
+        for _ in range(60):
+            profiles.record_setup_result('google', loaded=True)
+            profiles.record_setup_result('chromium', loaded=False)
+        for _ in range(20):
+            profiles.record_setup_result('google', loaded=False)
+            profiles.record_setup_result('chromium', loaded=True)
+        with patch.dict(os.environ, {'EBAY_US_CHROME_MIX': 'google,chromium', 'EBAY_US_CHROME_MIX_ADAPTIVE': '1'}):
+            picks = [profiles.choose_chrome_setup().name for _ in range(400)]
+        self.assertGreater(picks.count('google'), 300)
+        self.assertGreater(picks.count('chromium'), 0)
+
+    @patch('scrapers.ebay_chrome_profiles.google_chrome_installed', return_value=True)
+    @patch('scrapers.ebay_common.ebay_us_browser_first', return_value=True)
+    @patch('scrapers.ebay_common.EbayDriver._us_proxy_url', return_value='http://1.2.3.4:8000')
+    def test_busy_profile_is_logged_as_the_setup_without_profile(self, _proxy, _browser_first, _installed):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            'EBAY_US_CHROME_MIX': 'google+profile', 'EBAY_US_PROFILE_DIR': tmp, 'EBAY_US_PROFILE_SLOTS': '1',
+        }), patch.object(EbayDriver, '_create_driver', side_effect=lambda **kw: MagicMock()) as create:
+            first_session, second_session = {}, {}
+            first = EbayDriver.get_or_create(first_session, EBAY_MARKET_US)
+            EbayDriver.get_or_create(second_session, EBAY_MARKET_US)
+            key = _ebay_sk(EBAY_MARKET_US, 'chrome_setup')
+            self.assertEqual(first_session[key], 'google+profile')
+            self.assertEqual(second_session[key], 'google')
+            self.assertIsNone(create.call_args.kwargs['profile_dir'])
+            first.quit()

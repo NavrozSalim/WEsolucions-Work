@@ -122,6 +122,16 @@ services:
       - EBAY_US_PROFILE_PER_PROXY=${EBAY_US_PROFILE_PER_PROXY:-0}
       - EBAY_US_PROFILE_DIR=/app/chrome-profiles/ebay-us
       - EBAY_US_PROFILE_SLOTS=${EBAY_US_PROFILE_SLOTS:-4}
+      # Mix Chrome setups across new eBay US Chromes: "all", or a list of
+      # google+profile, google, chromium+profile, chromium. Each try's log line ends
+      # with setup=<name>. Empty = no mix (the two switches above decide).
+      - EBAY_US_CHROME_MIX=${EBAY_US_CHROME_MIX:-}
+      # 1 = pick more often the setups that got through more in the last
+      # EBAY_US_CHROME_MIX_HOURS hours (all workers), still trying the others.
+      - EBAY_US_CHROME_MIX_ADAPTIVE=${EBAY_US_CHROME_MIX_ADAPTIVE:-0}
+      - EBAY_US_CHROME_MIX_HOURS=${EBAY_US_CHROME_MIX_HOURS:-3}
+      # Share of adaptive picks left random, so a setup that fell behind is still tried.
+      - EBAY_US_CHROME_MIX_EXPLORE=${EBAY_US_CHROME_MIX_EXPLORE:-0.1}
       - ALIEXPRESS_APP_KEY=${ALIEXPRESS_APP_KEY:-}
       - ALIEXPRESS_APP_SECRET=${ALIEXPRESS_APP_SECRET:-}
       - ALIEXPRESS_TRACKING_ID=${ALIEXPRESS_TRACKING_ID:-}
