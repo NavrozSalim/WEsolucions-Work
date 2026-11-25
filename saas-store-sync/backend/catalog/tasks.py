@@ -2268,22 +2268,87 @@ def _process_store_wide_scrape_mappings(
     }
 
 
-def _schedule_store_scrape_lanes(store_id: str, chunks: list, vendor_id: str) -> None:
+def _deal_chunks(chunks: list, lane_count: int) -> list[list]:
+    """Hand ``chunks`` out to ``lane_count`` lanes in turn; empty lanes are dropped."""
+    lanes: list[list] = [[] for _ in range(max(1, lane_count))]
+    for index, chunk in enumerate(chunks):
+        lanes[index % len(lanes)].append([str(x) for x in chunk])
+    return [lane for lane in lanes if lane]
+
+
+def _plan_store_scrape_lanes(pairs, chunk_size: int, lane_total: int) -> list[list]:
+    """Split a store scrape into lanes, giving each vendor lanes of its own.
+
+    ``pairs`` is ``(mapping_id, vendor_id)`` in scrape order. Every batch holds
+    one vendor's listings. With enough lanes each vendor gets at least one, and
+    the rest go to the vendors with the most batches per lane.
+
+    A lane works through its listings one at a time. When eBay pages are being
+    blocked, one eBay listing retries for minutes while an Amazon listing takes
+    seconds, so lanes that mixed both vendors spent nearly all their time on
+    eBay and Amazon barely moved in an all-vendors scrape.
+
+    With fewer lanes than vendors, the batches alternate between vendors and are
+    dealt out in turn, so no vendor waits for another to finish.
+    """
+    chunk_size = max(1, int(chunk_size))
+    lane_total = max(1, int(lane_total))
+    by_vendor: dict = {}
+    for mapping_id, vendor_id in pairs:
+        by_vendor.setdefault(vendor_id, []).append(str(mapping_id))
+    vendor_chunks = {
+        vendor_id: [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
+        for vendor_id, ids in by_vendor.items()
+    }
+    if len(vendor_chunks) <= 1:
+        only = next(iter(vendor_chunks.values()), [])
+        return _deal_chunks(only, lane_total)
+
+    if lane_total < len(vendor_chunks):
+        interleaved = []
+        queues = [list(chunks) for chunks in vendor_chunks.values()]
+        while any(queues):
+            for queue in queues:
+                if queue:
+                    interleaved.append(queue.pop(0))
+        return _deal_chunks(interleaved, lane_total)
+
+    counts = {vendor_id: len(chunks) for vendor_id, chunks in vendor_chunks.items()}
+    alloc = {vendor_id: 1 for vendor_id in counts}
+    spare = lane_total - len(counts)
+    while spare > 0:
+        candidates = [v for v in counts if counts[v] > alloc[v]]
+        if not candidates:
+            break
+        busiest = max(candidates, key=lambda v: counts[v] / alloc[v])
+        alloc[busiest] += 1
+        spare -= 1
+
+    lanes: list[list] = []
+    for vendor_id, chunks in vendor_chunks.items():
+        lanes.extend(_deal_chunks(chunks, alloc[vendor_id]))
+    return lanes
+
+
+def _schedule_store_scrape_lanes(store_id: str, chunks: list, vendor_id: str, *, lanes: list | None = None) -> None:
     """Start ``CATALOG_SCRAPE_LANES`` lanes. Each lane sends its own next batch when the current one finishes.
 
     A group of every batch was left unfinished: the two running batches completed
     and the batches waiting in the queue were never started. The next batch is
     now sent by the worker that just finished, so the Pending list is walked
     through to the end.
+
+    ``lanes`` (from ``_plan_store_scrape_lanes``) replaces the plain round-robin
+    over ``chunks``.
     """
     from django.core.cache import cache
 
     root_task_id = current_celery_scrape_root_task_id(str(store_id))
     lane_total = max(1, int(getattr(settings, 'CATALOG_SCRAPE_LANES', 2) or 2))
-    lanes: list[list] = [[] for _ in range(lane_total)]
-    for index, chunk in enumerate(chunks):
-        lanes[index % lane_total].append([str(x) for x in chunk])
-    lanes = [lane for lane in lanes if lane]
+    if lanes is None:
+        lanes = _deal_chunks(chunks, lane_total)
+    else:
+        lanes = [[[str(x) for x in chunk] for chunk in lane] for lane in lanes if lane]
     cache.set(_scrape_lane_counter_key(store_id, root_task_id), 0, timeout=_SCRAPE_LANE_COUNTER_TTL)
     _pop_scrape_run_totals(store_id, root_task_id)
     for lane in lanes:
@@ -2458,7 +2523,8 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False, vend
     if ingest_ids:
         base_qs = base_qs.exclude(product__vendor_id__in=ingest_ids)
 
-    mapping_ids = list(base_qs.values_list('id', flat=True))
+    id_vendor_pairs = list(base_qs.values_list('id', 'product__vendor_id'))
+    mapping_ids = [mapping_id for mapping_id, _vendor in id_vendor_pairs]
     if not mapping_ids:
         append_catalog_log(
             store.id,
@@ -2490,8 +2556,10 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False, vend
         }
 
     if use_parallel:
-        chunks = [mapping_ids[i : i + chunk_sz] for i in range(0, len(mapping_ids), chunk_sz)]
-        _schedule_store_scrape_lanes(str(store_id), chunks, vendor_id or '')
+        lane_total = max(1, int(getattr(settings, 'CATALOG_SCRAPE_LANES', 2) or 2))
+        lanes = _plan_store_scrape_lanes(id_vendor_pairs, chunk_sz, lane_total)
+        chunks = [chunk for lane in lanes for chunk in lane]
+        _schedule_store_scrape_lanes(str(store_id), chunks, vendor_id or '', lanes=lanes)
         return {
             'store_id': str(store_id),
             'scope': 'store',
