@@ -23,6 +23,9 @@ x-backend-image: &backend-image
   build:
     context: ./backend
     dockerfile: Dockerfile
+    args:
+      # Real Google Chrome next to Chromium, used by eBay US when EBAY_US_GOOGLE_CHROME=1.
+      INSTALL_GOOGLE_CHROME: ${INSTALL_GOOGLE_CHROME:-1}
 
 x-logging: &default-logging
   driver: json-file
@@ -111,6 +114,14 @@ services:
       # 1 = windowed Chrome on a virtual screen (Xvfb); 0 = headless (default: it got
       # through no more often than headless and started slower).
       - EBAY_US_CHROME_HEADFUL=${EBAY_US_CHROME_HEADFUL:-0}
+      # 1 = eBay US uses real Google Chrome (installed by INSTALL_GOOGLE_CHROME=1)
+      # instead of Debian Chromium, which lacks the video codecs a real Chrome has.
+      - EBAY_US_GOOGLE_CHROME=${EBAY_US_GOOGLE_CHROME:-0}
+      # 1 = each eBay US proxy keeps its own Chrome profile (cookies eBay gave that
+      # address) between listings and runs. Saved in the ebay_us_chrome_profiles volume.
+      - EBAY_US_PROFILE_PER_PROXY=${EBAY_US_PROFILE_PER_PROXY:-0}
+      - EBAY_US_PROFILE_DIR=/app/chrome-profiles/ebay-us
+      - EBAY_US_PROFILE_SLOTS=${EBAY_US_PROFILE_SLOTS:-4}
       - ALIEXPRESS_APP_KEY=${ALIEXPRESS_APP_KEY:-}
       - ALIEXPRESS_APP_SECRET=${ALIEXPRESS_APP_SECRET:-}
       - ALIEXPRESS_TRACKING_ID=${ALIEXPRESS_TRACKING_ID:-}
@@ -124,6 +135,7 @@ services:
     volumes:
       - catalog_media_us_worker:/app/media
       - ${EBAY_US_SECRETS_DIR:-./secrets}:/app/secrets:ro
+      - ebay_us_chrome_profiles:/app/chrome-profiles
     restart: always
     stop_grace_period: 90s
     logging: *default-logging
@@ -137,3 +149,4 @@ services:
 
 volumes:
   catalog_media_us_worker:
+  ebay_us_chrome_profiles:

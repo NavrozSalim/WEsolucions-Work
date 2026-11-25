@@ -2031,10 +2031,27 @@ def _apply_us_windows_profile(driver) -> None:
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": _US_PROFILE_SCRIPT})
 
 
+def _bind_us_profile(driver, profile) -> None:
+    """Remember an eBay US Chrome's saved profile; quitting that Chrome frees the profile."""
+    driver._ebay_us_profile = profile
+    if profile is None:
+        return
+    original_quit = driver.quit
+
+    def quit_and_release():
+        try:
+            original_quit()
+        finally:
+            profile.release()
+
+    driver.quit = quit_and_release
+
+
 class EbayDriver:
     @staticmethod
     def _create_driver(
         *, proxy_url: str | None = None, native_ua: bool = False, us_profile: bool = False,
+        profile_dir: str | None = None, google_chrome: bool = False,
     ):
         """Headless Chrome for eBay.
 
@@ -2079,11 +2096,23 @@ class EbayDriver:
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
 
+        if profile_dir:
+            # A saved profile per proxy (EBAY_US_PROFILE_PER_PROXY); a small cache
+            # keeps the profile folders from growing without limit.
+            options.add_argument(f"--user-data-dir={profile_dir}")
+            options.add_argument("--disk-cache-size=67108864")
+
         chrome_bin = os.environ.get("CHROME_BIN")
+        chromedriver_path = os.environ.get("CHROMEDRIVER_PATH")
+        if google_chrome:
+            from .ebay_chrome_profiles import google_chrome_paths
+
+            google = google_chrome_paths()
+            if google:
+                chrome_bin, chromedriver_path = google
         if chrome_bin:
             options.binary_location = chrome_bin
 
-        chromedriver_path = os.environ.get("CHROMEDRIVER_PATH")
         service_env = {**os.environ, "DISPLAY": display} if display else None
         if chromedriver_path and os.path.isfile(chromedriver_path):
             service = Service(executable_path=chromedriver_path, env=service_env)
@@ -2228,9 +2257,25 @@ class EbayDriver:
                     session_dict.pop(key, None)
 
         native = us_browser and ebay_us_chrome_native_ua()
-        driver = EbayDriver._create_driver(
-            proxy_url=proxy_url, native_ua=native, us_profile=us_browser and not native,
-        )
+        profile = None
+        if us_browser:
+            from .ebay_chrome_profiles import acquire_proxy_profile, google_chrome_enabled
+
+            profile = acquire_proxy_profile(proxy_url)
+        try:
+            driver = EbayDriver._create_driver(
+                proxy_url=proxy_url,
+                native_ua=native,
+                us_profile=us_browser and not native,
+                profile_dir=profile.path if profile else None,
+                google_chrome=us_browser and google_chrome_enabled(),
+            )
+        except Exception:
+            if profile:
+                profile.release()
+            raise
+        if us_browser:
+            _bind_us_profile(driver, profile)
         if session_dict is not None:
             session_dict[key] = driver
             if proxy_url:
@@ -2595,7 +2640,13 @@ class EbayBrowserSession:
                     EbayDriver.close(session_dict, market)
                     return None, "browser_proxy_error"
                 if market == EBAY_MARKET_US:
-                    _add_us_saved_cookies(driver)
+                    # A saved per-proxy profile keeps the cookies eBay gave that
+                    # address; the shared cookie file only seeds a new profile.
+                    profile = getattr(driver, "_ebay_us_profile", None)
+                    if profile is None or not profile.seeded(home_host):
+                        _add_us_saved_cookies(driver)
+                        if profile is not None:
+                            profile.mark_seeded(home_host)
                 if session_dict is not None:
                     session_dict[warmed_key] = home_host if market == EBAY_MARKET_US else True
 
