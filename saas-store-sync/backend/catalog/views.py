@@ -1957,8 +1957,9 @@ _RESET_PENDING_SCOPE_LABELS = {
 class CatalogResetListingsPendingView(APIView):
     """Set store listings to Pending (clears scrape retry state).
 
-    Body: ``{"confirm": true, "scope": "all"|"failed"|"scraped"|"needs_attention"}`` (scope defaults to ``all``).
-    Does not start a scrape — use Start Scraping afterward.
+    Body: ``{"confirm": true, "scope": "all"|"failed"|"scraped"|"needs_attention", "vendor_id": "<id>"}``
+    (scope defaults to ``all``; ``vendor_id`` empty or ``all`` = every vendor, otherwise
+    only that vendor's listings). Does not start a scrape — use Start Scraping afterward.
     """
     permission_classes = [IsAuthenticated]
 
@@ -1983,12 +1984,31 @@ class CatalogResetListingsPendingView(APIView):
         elif scope == 'needs_attention':
             qs = qs.filter(sync_status='needs_attention')
 
+        vendor_id = str(request.data.get('vendor_id') or '').strip()
+        if vendor_id.lower() == 'all':
+            vendor_id = ''
+        vendor_name = ''
+        if vendor_id:
+            from django.core.exceptions import ValidationError
+
+            from vendor.models import Vendor
+
+            try:
+                vendor = Vendor.objects.filter(pk=vendor_id).only('id', 'name', 'code').first()
+            except (ValueError, ValidationError):
+                vendor = None
+            if vendor is None:
+                return Response({'error': 'Unknown vendor.'}, status=status.HTTP_400_BAD_REQUEST)
+            vendor_id = str(vendor.pk)
+            vendor_name = (vendor.name or vendor.code or '').strip()
+            qs = qs.filter(product__vendor_id=vendor.pk)
+
         log_action(
             request.user,
             'catalog_reset_pending',
             'store',
             str(store.id),
-            metadata={'store_name': store.name, 'scope': scope},
+            metadata={'store_name': store.name, 'scope': scope, 'vendor_id': vendor_id or None},
             request=request,
         )
         n = qs.update(
@@ -1996,20 +2016,28 @@ class CatalogResetListingsPendingView(APIView):
             failed_sync_count=0,
             scrape_error=None,
         )
-        if scope == 'all':
+        if scope == 'all' and not vendor_id:
+            # Store-wide markers belong to a reset of the whole catalog, not one vendor's part.
             Store.objects.filter(id=store.id).update(
                 catalog_pending_reset_at=None,
                 catalog_zero_pending_at=None,
             )
         from catalog.activity_log import append_catalog_log
         scope_label = _RESET_PENDING_SCOPE_LABELS[scope]
+        vendor_part = f' from {vendor_name}' if vendor_name else ''
         append_catalog_log(
             store.id,
-            f'{n} {scope_label} were set to Pending for a fresh vendor check.',
+            f'{n} {scope_label}{vendor_part} were set to Pending for a fresh vendor check.',
             action_type='catalog_manual_pending_reset',
-            metadata={'rows_reset': n, 'scope': scope},
+            metadata={'rows_reset': n, 'scope': scope, 'vendor_id': vendor_id or None},
         )
-        return Response({'status': 'ok', 'listings_reset': n, 'scope': scope})
+        return Response({
+            'status': 'ok',
+            'listings_reset': n,
+            'scope': scope,
+            'vendor_id': vendor_id or None,
+            'vendor_name': vendor_name or None,
+        })
 
 
 class StoreCriticalZeroView(APIView):

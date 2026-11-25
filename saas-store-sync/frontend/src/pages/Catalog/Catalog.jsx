@@ -1104,6 +1104,8 @@ export default function Catalog() {
     const [resetPendingChoice, setResetPendingChoice] = useState(
         () => RESET_PENDING_OPTIONS.find((opt) => opt.scope === 'all'),
     );
+    // '' = all vendors; otherwise one vendor id (Reset status window).
+    const [resetPendingVendorId, setResetPendingVendorId] = useState('');
     const [activityLogs, setActivityLogs] = useState([]);
     const [logsLoading, setLogsLoading] = useState(false);
     const [liveRefreshUntil, setLiveRefreshUntil] = useState(0);
@@ -2525,14 +2527,16 @@ export default function Catalog() {
 
     const handleResetPendingOption = (option) => {
         setResetPendingChoice(option);
+        setResetPendingVendorId('');
         setResetPendingModalOpen(true);
     };
 
     const handleResetAllPendingConfirm = () => {
         if (!selectedStore || !resetPendingChoice) return;
         const scope = resetPendingChoice.scope;
+        const vendorId = resetPendingVendorId || null;
         setResetPendingLoading(true);
-        resetCatalogListingsPending(selectedStore, scope)
+        resetCatalogListingsPending(selectedStore, scope, vendorId)
             .then((res) => {
                 const n = res.data?.listings_reset ?? 0;
                 setResetPendingModalOpen(false);
@@ -2544,8 +2548,9 @@ export default function Catalog() {
                         : scope === 'scraped'
                             ? 'scraped listing'
                             : 'needs-attention listing';
+                const vendorHint = res.data?.vendor_name ? ` from ${res.data.vendor_name}` : '';
                 setMessage(
-                    `${n.toLocaleString()} ${scopeHint}${n === 1 ? '' : 's'} set to Pending. `
+                    `${n.toLocaleString()} ${scopeHint}${n === 1 ? '' : 's'}${vendorHint} set to Pending. `
                     + 'Run Start Scraping when you want fresh vendor prices.',
                 );
                 if (viewMode === 'products') {
@@ -3901,7 +3906,31 @@ export default function Catalog() {
                 loading={resetPendingLoading}
                 onConfirm={handleResetAllPendingConfirm}
                 onCancel={() => !resetPendingLoading && setResetPendingModalOpen(false)}
-            />
+            >
+                {storeVendors.length > 1 ? (
+                    <label className="block space-y-1">
+                        <span className="text-xs font-medium text-slate-700 dark:text-slate-300">Vendor</span>
+                        <select
+                            className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                            value={resetPendingVendorId}
+                            onChange={(e) => setResetPendingVendorId(e.target.value)}
+                            disabled={resetPendingLoading}
+                        >
+                            <option value="">All vendors</option>
+                            {storeVendors.map((v) => (
+                                <option key={String(v.id || v.code)} value={String(v.id)}>
+                                    {v.name || v.code || 'Vendor'}
+                                </option>
+                            ))}
+                        </select>
+                        <span className="block text-xs text-slate-500 dark:text-slate-400">
+                            {resetPendingVendorId
+                                ? 'Only this vendor\'s listings are reset; other vendors stay as they are.'
+                                : 'Listings from every vendor on this store are reset.'}
+                        </span>
+                    </label>
+                ) : null}
+            </ConfirmModal>
         </div>
     );
 }
