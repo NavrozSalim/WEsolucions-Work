@@ -38,6 +38,7 @@ from .parsers import (
 )
 from scrapers.stop_signal import ScrapeStopped, raise_if_scrape_stopped, scrape_stop_check
 
+from .crawl_proxies import crawl_retries, use_crawl_proxy
 from .locks import lock_owner_var, refresh_discovery_lock
 from .rules import normalize_rules, row_has_rule_fields, row_removed
 from .sample_data import sample_by_key, sample_catalog
@@ -89,18 +90,57 @@ def _with_ebay_zip(url: str, zip_code: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), ''))
 
 
-def _browser_session():
-    """Chrome-like client. eBay rejects a plain HTTP client with 403."""
+def _browser_session(marketplace: str | None = None):
+    """Chrome-like client. eBay rejects a plain HTTP client with 403.
+
+    With ``marketplace`` the session goes through that marketplace's catalog
+    proxy pool when the server has one (see ``discovery.crawl_proxies``).
+    """
     try:
         from curl_cffi import requests as curl_requests
-        return curl_requests.Session(impersonate='chrome131')
+        session = curl_requests.Session(impersonate='chrome131')
     except Exception:
         session = requests.Session()
         session.headers['User-Agent'] = _UA
-        return session
+    use_crawl_proxy(session, marketplace)
+    return session
+
+
+def _fetch_error_is_missing_page(exc: Exception) -> bool:
+    return '404' in str(exc) or '410' in str(exc)
 
 
 def _fetch(url: str, session: requests.Session | None = None) -> str:
+    """One crawl page. A session on a proxy rests a blocking proxy and tries the next one."""
+    proxy = getattr(session, '_crawl_proxy', None) if session is not None else None
+    tries = 1 + (crawl_retries() if proxy is not None else 0)
+    for attempt in range(tries):
+        last_try = attempt + 1 >= tries
+        try:
+            text = _fetch_once(url, session)
+        except requests.RequestException as exc:
+            if proxy is None or last_try or _fetch_error_is_missing_page(exc):
+                raise
+            proxy.blocked()
+            if not proxy.attach(session, rotate=True):
+                raise
+            logger.info('discovery %s crawl: %s on a proxy; trying another (%s)', proxy.marketplace, exc, url)
+            continue
+        if proxy is not None and _blocked(text):
+            if last_try:
+                return text
+            proxy.blocked()
+            if not proxy.attach(session, rotate=True):
+                return text
+            logger.info('discovery %s crawl: blocked page on a proxy; trying another (%s)', proxy.marketplace, url)
+            continue
+        if proxy is not None:
+            proxy.worked()
+        return text
+    return ''
+
+
+def _fetch_once(url: str, session: requests.Session | None = None) -> str:
     client = session or requests
     headers = {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -122,7 +162,7 @@ def _fetch(url: str, session: requests.Session | None = None) -> str:
 def _amazon_session(marketplace: str, zip_code: str):
     """Open Amazon and set the delivery zip so prices match that location."""
     host = HOSTS.get(marketplace) or HOSTS['amazon_us']
-    session = _browser_session()
+    session = _browser_session(marketplace)
     session.headers['Accept-Language'] = 'en-US,en;q=0.9'
     if 'amazon.com.au' in host:
         session.cookies.set('i18n-prefs', 'AUD', domain='.amazon.com.au')
@@ -192,7 +232,7 @@ def _thread_amazon_session(parent, marketplace: str):
     current = getattr(_amazon_thread_sessions, 'session', None)
     if current is not None and getattr(_amazon_thread_sessions, 'parent_id', None) == parent_id:
         return current
-    current = _browser_session()
+    current = _browser_session(marketplace)
     current._marketplace = marketplace
     current._amazon_blocks = 0
     host = HOSTS.get(marketplace) or HOSTS['amazon_us']
@@ -257,7 +297,7 @@ def _thread_ebay_session(parent):
         if parent is not None:
             _copy_session_cookies(parent, current)
         return current
-    current = _browser_session()
+    current = _browser_session(marketplace)
     current._parent_session = parent
     current._marketplace = marketplace
     _apply_ebay_cookies(current, marketplace, parent=parent)
@@ -268,7 +308,7 @@ def _thread_ebay_session(parent):
 
 def _ebay_session(marketplace: str):
     """Browser-style eBay session. A normal request is answered with 403."""
-    session = _browser_session()
+    session = _browser_session(marketplace)
     session._marketplace = marketplace
     session._browser_state = {}
     session._browser_failures = 0
