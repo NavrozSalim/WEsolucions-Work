@@ -10,6 +10,9 @@ x-us-image: &us-image
   build:
     context: ./backend
     dockerfile: Dockerfile
+    args:
+      # Real Google Chrome next to Chromium, for the eBay US Chrome setup mix.
+      INSTALL_GOOGLE_CHROME: ${INSTALL_GOOGLE_CHROME:-1}
 
 x-logging: &default-logging
   driver: json-file
@@ -54,6 +57,23 @@ x-us-env: &us-env
   - EBAY_US_HTTP_RETRIES=${EBAY_US_HTTP_RETRIES:-2}
   - EBAY_US_PROXY_BLOCK_COOLDOWN_SEC=${EBAY_US_PROXY_BLOCK_COOLDOWN_SEC:-300}
   - EBAY_US_FULL_ENGINE_SELENIUM=${EBAY_US_FULL_ENGINE_SELENIUM:-}
+  # When this server uses the same eBay US proxies as the US Scraper, set this to 1
+  # on both: proxy rest and use go through the shared Redis, so one server does
+  # not keep using a proxy the other just rested.
+  - EBAY_US_PROXY_SHARED=${EBAY_US_PROXY_SHARED:-0}
+  - EBAY_US_PROXY_HOLD_SEC=${EBAY_US_PROXY_HOLD_SEC:-120}
+  - EBAY_US_PROXY_MAX_WAIT_SEC=${EBAY_US_PROXY_MAX_WAIT_SEC:-240}
+  # Chrome goes through the eBay US proxies; needs this server's IP on the proxy allowlist.
+  - EBAY_US_BROWSER_PROXIES=${EBAY_US_BROWSER_PROXIES:-1}
+  # eBay US Chrome, same switches as the US Scraper (see docker-compose.us-scraper.prod.yml).
+  - EBAY_US_GOOGLE_CHROME=${EBAY_US_GOOGLE_CHROME:-0}
+  - EBAY_US_PROFILE_PER_PROXY=${EBAY_US_PROFILE_PER_PROXY:-0}
+  - EBAY_US_CHROME_MIX=${EBAY_US_CHROME_MIX:-}
+  - EBAY_US_CHROME_MIX_ADAPTIVE=${EBAY_US_CHROME_MIX_ADAPTIVE:-0}
+  - EBAY_US_CHROME_MIX_HOURS=${EBAY_US_CHROME_MIX_HOURS:-3}
+  - EBAY_US_CHROME_MIX_EXPLORE=${EBAY_US_CHROME_MIX_EXPLORE:-0.1}
+  # This server's tries are counted apart from the US Scraper's: different proxies.
+  - EBAY_US_CHROME_MIX_GROUP=${EBAY_US_CHROME_MIX_GROUP:-discovery}
 
 services:
   celery_worker_us:

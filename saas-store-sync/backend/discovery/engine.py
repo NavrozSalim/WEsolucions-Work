@@ -36,6 +36,8 @@ from .parsers import (
     parse_ebay_product,
     with_page,
 )
+from scrapers.stop_signal import ScrapeStopped, raise_if_scrape_stopped, scrape_stop_check
+
 from .locks import lock_owner_var, refresh_discovery_lock
 from .rules import normalize_rules, row_has_rule_fields, row_removed
 from .sample_data import sample_by_key, sample_catalog
@@ -880,6 +882,29 @@ def _discovery_ebay_html_ok(html: str | None, url: str) -> bool:
     return bool(parsed.get('title') or parsed.get('price') is not None)
 
 
+def _note_discovery_ebay_try(state: dict, attempt: int, loaded: bool, html: str | None, err: str | None) -> None:
+    """Log one eBay US Chrome try with its Chrome setup and count it for the setup mix.
+
+    Same line shape as the catalog scraper, so the per-setup monitor reads both.
+    A try that neither loaded nor hit eBay's block page (a timeout, a broken
+    proxy) is logged but not counted.
+    """
+    from scrapers.ebay_common import EBAY_MARKET_US, _ebay_sk
+
+    setup = state.get(_ebay_sk(EBAY_MARKET_US, 'chrome_setup')) if state else None
+    blocked = not loaded and (err == 'browser_blocked' or bool(html and _blocked(html)))
+    result = 'page loaded' if loaded else ('browser_blocked' if blocked else (err or 'no_page'))
+    via = 'proxy' if state and state.get(_ebay_sk(EBAY_MARKET_US, 'selenium_proxy_url')) else 'server IP'
+    logger.info(
+        'discovery eBay Chrome attempt=%s via=%s result=%s setup=%s',
+        attempt + 1, via, result, setup or '-',
+    )
+    if setup and (loaded or blocked):
+        from scrapers.ebay_chrome_profiles import record_setup_result
+
+        record_setup_result(setup, loaded=loaded)
+
+
 def _ebay_catalog_http(url: str, region: str, state: dict, market: str) -> tuple[str | None, str]:
     from scrapers.ebay_common import EbayHTTP, _ebay_http_first_enabled
 
@@ -937,6 +962,7 @@ def _load_ebay_product_html(url: str, marketplace: str, state: dict) -> tuple[st
 
     last_err = 'unknown_error'
     for attempt in range(RETRY_LIMIT):
+        raise_if_scrape_stopped()
         if attempt > 0:
             backoff_delay(attempt, base=2.0, jitter=1.5)
             if marketplace == 'ebay_au':
@@ -969,7 +995,10 @@ def _load_ebay_product_html(url: str, marketplace: str, state: dict) -> tuple[st
             )
         except Exception as exc:
             browser_html, browser_err = None, str(exc)
-        if _discovery_ebay_html_ok(browser_html, url):
+        browser_ok = _discovery_ebay_html_ok(browser_html, url)
+        if market == EBAY_MARKET_US:
+            _note_discovery_ebay_try(state, attempt, browser_ok, browser_html, browser_err)
+        if browser_ok:
             return browser_html, ''
         # The browser visit updates cookies on the HTTP client in ``state``.
         html2, err2 = _ebay_catalog_http(url, region, state, market)
@@ -1154,20 +1183,27 @@ def _load_amazon_product_html(
     last_err = 'unknown_error'
     is_au = marketplace == 'amazon_au'
     use_proxies = False
-    if is_au:
-        try:
+    try:
+        if is_au:
             from scrapers.amazon_au_proxies import proxies_configured
+        else:
+            from scrapers.amazon_us_proxies import proxies_configured
 
-            use_proxies = bool(proxies_configured())
-        except Exception:
-            use_proxies = False
+        use_proxies = bool(proxies_configured())
+    except Exception:
+        use_proxies = False
     for attempt in range(RETRY_LIMIT):
+        raise_if_scrape_stopped()
         html, err = _amazon_http_once(url, marketplace, http_state, zip_code)
         if not err:
-            if is_au:
+            if use_proxies:
                 try:
-                    from scrapers.amazon_au_proxies import mark_success
-                    from scrapers.amazon_au_scraper import _SESSION_PROXY_KEY
+                    if is_au:
+                        from scrapers.amazon_au_proxies import mark_success
+                        from scrapers.amazon_au_scraper import _SESSION_PROXY_KEY
+                    else:
+                        from scrapers.amazon_us_proxies import mark_success
+                        from scrapers.amazon_us_scraper import _SESSION_PROXY_KEY
 
                     mark_success(http_state.get(_SESSION_PROXY_KEY))
                 except Exception:
@@ -1182,16 +1218,26 @@ def _load_amazon_product_html(
             last_err.startswith(('blocked', 'http_5', 'http_403', 'http_429', 'request_error'))
             or last_err in ('timeout',)
         )
-        if is_au and use_proxies and ip_problem:
+        if use_proxies and ip_problem:
+            # Rest the blocked proxy and move this page to the next one, the way
+            # the catalog scraper does. The new IP gets a fresh session, so the
+            # delivery zip is set again.
             try:
-                from scrapers.amazon_au_proxies import mark_blocked
-                from scrapers.amazon_au_scraper import AmazonAUHTTP, _SESSION_PROXY_KEY
+                if is_au:
+                    from scrapers.amazon_au_proxies import mark_blocked
+                    from scrapers.amazon_au_scraper import AmazonAUHTTP, _SESSION_PROXY_KEY
 
-                mark_blocked(http_state.get(_SESSION_PROXY_KEY))
-                AmazonAUHTTP._get_session(http_state, True, rotate=True)
+                    mark_blocked(http_state.get(_SESSION_PROXY_KEY))
+                    AmazonAUHTTP._get_session(http_state, True, rotate=True)
+                else:
+                    from scrapers.amazon_us_proxies import mark_blocked
+                    from scrapers.amazon_us_scraper import AmazonHTTP, _SESSION_PROXY_KEY
+
+                    mark_blocked(http_state.get(_SESSION_PROXY_KEY))
+                    AmazonHTTP._get_session(http_state, rotate=True)
                 http_state.pop('_discovery_zip_set', None)
             except Exception:
-                logger.warning('discovery amazon au proxy did not rotate')
+                logger.warning('discovery amazon %s proxy did not rotate', 'au' if is_au else 'us')
             continue
         backoff_delay(attempt + 1, base=2.0, jitter=1.5)
         if last_err.startswith('blocked'):
@@ -1245,9 +1291,15 @@ def _fetch_amazon_products(rows, marketplace, errors, session, table, stop, zip_
 
     def one(row):
         local_errors = []
-        parsed = _catalog_amazon_product(
-            row, marketplace, local_errors, zip_code, browser_state,
-        )
+        try:
+            # The pool waits for running pages before Stop can finish, so each
+            # page also checks for Stop between its retries.
+            with scrape_stop_check(stop):
+                parsed = _catalog_amazon_product(
+                    row, marketplace, local_errors, zip_code, browser_state,
+                )
+        except ScrapeStopped:
+            return row, None, []
         if parsed:
             fill_image_columns(parsed)
         return row, parsed, local_errors
@@ -1332,7 +1384,12 @@ def _fetch_ebay_products(rows, marketplace, errors, session, table, stop) -> Non
                 table.scraped += 1
                 table.publish()
                 continue
-            html, err = _load_ebay_product_html(url, marketplace, state)
+            try:
+                # Stop takes effect between this product's retries too.
+                with scrape_stop_check(stop):
+                    html, err = _load_ebay_product_html(url, marketplace, state)
+            except ScrapeStopped:
+                raise DiscoveryCancelled()
             parsed = parse_ebay_product(html, url) if html else None
             if parsed and (parsed.get('title') or parsed.get('price') is not None):
                 fill_image_columns(parsed)

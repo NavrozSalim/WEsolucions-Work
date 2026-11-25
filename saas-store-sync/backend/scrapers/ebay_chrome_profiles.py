@@ -298,7 +298,12 @@ def _explore_share() -> float:
 
 
 def _stat_key(name: str, kind: str, hour: int) -> str:
-    return f"ebayus:chromemix:{name}:{kind}:{hour}"
+    # ``EBAY_US_CHROME_MIX_GROUP`` keeps servers with different proxies apart
+    # (the Discovery server counts separately from the US Scraper). Empty keeps
+    # the original keys.
+    group = "".join(ch for ch in (os.environ.get("EBAY_US_CHROME_MIX_GROUP") or "") if ch.isalnum() or ch in "-_")
+    prefix = f"ebayus:chromemix:{group}:" if group else "ebayus:chromemix:"
+    return f"{prefix}{name}:{kind}:{hour}"
 
 
 def record_setup_result(name: Optional[str], loaded: bool) -> None:
