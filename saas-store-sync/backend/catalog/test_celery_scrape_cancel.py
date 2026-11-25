@@ -98,12 +98,12 @@ class CeleryScrapeCancelTests(TestCase):
         self.assertTrue(should_abort_celery_scrape(str(self.store.id)))
 
     @patch(
-        'catalog.models.StoreCatalogCeleryScrapeState.objects.get',
+        'catalog.celery_scrape_state._runs',
         side_effect=OperationalError('server closed the connection'),
     )
-    def test_db_blip_does_not_abort_running_scrape(self, _get):
+    def test_db_blip_does_not_abort_running_scrape(self, _runs):
         self.assertFalse(should_abort_celery_scrape(str(self.store.id)))
-        self.assertGreaterEqual(_get.call_count, 2)
+        self.assertGreaterEqual(_runs.call_count, 2)
 
     def test_should_abort_only_after_cancel_flag(self):
         self._state()

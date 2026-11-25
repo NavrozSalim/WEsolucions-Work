@@ -856,21 +856,50 @@ function VendorProgressStrip({ vendor, tracking, onStopScrape, stopping }) {
 /**
  * Server-side catalog scrape for the **current store only** (`state.store_id` must match).
  */
-function ServerCeleryScrapeStrip({ state, progressStoreId, selectedStoreId }) {
-    if (!state?.active || !selectedStoreId) return null;
-    if (progressStoreId && progressStoreId !== selectedStoreId) return null;
-    if (state.store_id && state.store_id !== selectedStoreId) return null;
+/** Running server scrapes of the store: one per vendor at most (null vendor_id = all vendors). */
+function serverScrapeRuns(progress) {
+    if (Array.isArray(progress?.server_celery_scrapes)) return progress.server_celery_scrapes;
+    return progress?.server_celery_scrape?.active ? [progress.server_celery_scrape] : [];
+}
 
+function ServerCeleryScrapeStrip({ state, runs, progressStoreId, selectedStoreId, onStopRun, stopping }) {
+    if (!selectedStoreId) return null;
+    if (progressStoreId && progressStoreId !== selectedStoreId) return null;
+    const list = (Array.isArray(runs) && runs.length ? runs : (state?.active ? [state] : []))
+        .filter((r) => r?.active && (!r.store_id || r.store_id === selectedStoreId));
+    if (!list.length) return null;
+    // One run for all vendors: the single strip as before.
+    if (list.length === 1 && !list[0].vendor_id) {
+        return <ServerCeleryScrapeRun run={list[0]} />;
+    }
+    return (
+        <div className="mb-4 space-y-2">
+            {list.map((run) => (
+                <ServerCeleryScrapeRun
+                    key={run.task_id || run.vendor_id || 'all'}
+                    run={run}
+                    compact
+                    onStop={onStopRun ? () => onStopRun(run.vendor_id || null, run.vendor_name || null) : null}
+                    stopping={stopping}
+                />
+            ))}
+        </div>
+    );
+}
+
+function ServerCeleryScrapeRun({ run, compact = false, onStop = null, stopping = false }) {
+    const state = run;
     const isStopping = state.phase === 'stopping' || Boolean(state.cancel_requested);
+    const who = state.vendor_name ? `${state.vendor_name} scrape` : 'vendor scrape';
     const headline = isStopping
-        ? 'Stopping vendor scrape'
-        : 'Live vendor scrape (server) running';
+        ? `Stopping ${who}`
+        : (state.vendor_name ? `${state.vendor_name} scrape (server) running` : 'Live vendor scrape (server) running');
     const pillClass = isStopping
         ? 'bg-rose-200 text-rose-950 dark:bg-rose-900/40 dark:text-rose-100'
         : 'bg-sky-200 text-sky-900 dark:bg-sky-800 dark:text-sky-200';
 
     return (
-        <div className={`rounded-lg border p-4 mb-4 shadow-xs ${
+        <div className={`rounded-lg border shadow-xs ${compact ? 'p-3' : 'p-4 mb-4'} ${
             isStopping
                 ? 'border-rose-200 dark:border-rose-800 bg-rose-50/80 dark:bg-rose-950/30'
                 : 'border-sky-200 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-950/30'
@@ -879,7 +908,7 @@ function ServerCeleryScrapeStrip({ state, progressStoreId, selectedStoreId }) {
                 <span className={`mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full ${
                     isStopping ? 'bg-rose-500' : 'bg-sky-500 animate-pulse'
                 }`} />
-                <div>
+                <div className="min-w-0 flex-1">
                     <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                         {headline}
                         <span className={`ml-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${pillClass}`}>
@@ -889,9 +918,22 @@ function ServerCeleryScrapeStrip({ state, progressStoreId, selectedStoreId }) {
                     <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
                         {isStopping
                             ? 'The page currently being fetched may finish. Remaining listings stay Pending. Start Scraping comes back once this goes quiet.'
-                            : 'You can leave this page; product rows update as each item finishes. Use “Stop Scraping” to cancel.'}
+                            : (compact
+                                ? 'Other vendors can be started or stopped on their own.'
+                                : 'You can leave this page; product rows update as each item finishes. Use “Stop Scraping” to cancel.')}
                     </p>
                 </div>
+                {onStop && !isStopping ? (
+                    <button
+                        type="button"
+                        onClick={onStop}
+                        disabled={stopping}
+                        className="shrink-0 rounded-md border border-rose-200 bg-white px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-900 dark:bg-slate-800 dark:text-rose-300 dark:hover:bg-rose-950/40"
+                        title={state.vendor_name ? `Stop only the ${state.vendor_name} scrape` : 'Stop this scrape'}
+                    >
+                        {state.vendor_name ? `Stop ${state.vendor_name}` : 'Stop'}
+                    </button>
+                ) : null}
             </div>
         </div>
     );
@@ -2359,14 +2401,17 @@ export default function Catalog() {
             });
     };
 
-    const handleStopScrape = () => {
+    // ``vendorId`` stops one vendor's scrape; null stops every running scrape of the store.
+    const handleStopScrape = (vendorId = null, vendorName = null) => {
         if (!selectedStore || stoppingScrape) return;
         setStoppingScrape(true);
         const activeVendor = getActiveVendor(getVendorSummaries(scrapeProgress));
-        const vendorLabel = activeVendor?.label
+        const vendorLabel = vendorName
+            || (vendorId ? 'vendor' : null)
+            || activeVendor?.label
             || (activeVendor?.code || 'desktop').toUpperCase();
         setMessage(`Stopping the ${vendorLabel} price check…`);
-        cancelCatalogScrape(selectedStore)
+        cancelCatalogScrape(selectedStore, vendorId || null)
             .then((res) => {
                 const hebStopped = Array.isArray(res?.data?.cancelled) && res.data.cancelled.length > 0;
                 const serverStopped = Boolean(res?.data?.server_scrape_stopped);
@@ -2381,13 +2426,19 @@ export default function Catalog() {
                     const sid = selectedStore;
                     setScrapeProgress((prev) => {
                         if (!prev || (prev.store_id && prev.store_id !== sid)) return prev;
+                        const stopped = (run) => !vendorId || String(run.vendor_id || '') === String(vendorId);
+                        const runs = serverScrapeRuns(prev).map((run) => (
+                            stopped(run) ? { ...run, phase: 'stopping', cancel_requested: true } : run
+                        ));
+                        const allStopping = runs.length > 0 && runs.every((run) => run.cancel_requested);
                         return {
                             ...prev,
+                            server_celery_scrapes: runs,
                             server_celery_scrape: {
                                 ...(prev.server_celery_scrape || {}),
                                 active: true,
-                                phase: 'stopping',
-                                cancel_requested: true,
+                                phase: allStopping ? 'stopping' : (prev.server_celery_scrape?.phase || 'running'),
+                                cancel_requested: allStopping,
                                 store_id: sid,
                             },
                         };
@@ -3192,8 +3243,11 @@ export default function Catalog() {
             {catalogProductsReady && viewMode === 'products' && (
                 <ServerCeleryScrapeStrip
                     state={scrapeProgress?.server_celery_scrape}
+                    runs={serverScrapeRuns(scrapeProgress)}
                     progressStoreId={scrapeProgress?.store_id}
                     selectedStoreId={selectedStore}
+                    onStopRun={(vendorId, vendorName) => handleStopScrape(vendorId, vendorName)}
+                    stopping={stoppingScrape}
                 />
             )}
 
@@ -3216,7 +3270,7 @@ export default function Catalog() {
                         key={vendor.code}
                         vendor={vendor}
                         tracking={trackingScrape}
-                        onStopScrape={handleStopScrape}
+                        onStopScrape={() => handleStopScrape()}
                         stopping={stoppingScrape}
                     />
                 ))}
@@ -3353,16 +3407,35 @@ export default function Catalog() {
                                     titleText = 'Refresh vendor price and stock for all active listings.';
                                 }
 
-                                const showVendorMenu = !isActive && !scraping && storeVendors.length > 1;
+                                // A store runs one server scrape per vendor at once: while
+                                // vendor scrapes run, the others can still be started. An
+                                // all-vendors run covers every vendor, so it blocks the menu.
+                                const serverRuns = serverScrapeRuns(scrapeProgress);
+                                const allVendorsRunning = serverRuns.some((run) => !run.vendor_id);
+                                const runningVendorIds = serverRuns
+                                    .filter((run) => run.vendor_id)
+                                    .map((run) => String(run.vendor_id));
+                                const vendorRunsOnly = serverRuns.length > 0 && !allVendorsRunning;
+                                const showVendorMenu = storeVendors.length > 1
+                                    && !scraping
+                                    && !desktopRunnerBusy
+                                    && (!isActive || vendorRunsOnly);
+                                const menuDisabledKeys = runningVendorIds.length
+                                    ? ['all', ...runningVendorIds]
+                                    : [];
                                 return (
                                     <>
                                         {showVendorMenu ? (
                                             <VendorScopeMenu
                                                 label="Start Scraping"
-                                                title={titleText}
+                                                title={vendorRunsOnly
+                                                    ? 'Start another vendor. Vendors already running are greyed out.'
+                                                    : titleText}
                                                 disabled={scraping || !selectedStore}
                                                 icon={RefreshCw}
                                                 vendors={storeVendors}
+                                                disabledKeys={menuDisabledKeys}
+                                                disabledNote="running"
                                                 onSelect={(vendor) => handleScrape(null, vendor?.id || null)}
                                             />
                                         ) : (
@@ -3381,12 +3454,14 @@ export default function Catalog() {
                                             <Button
                                                 variant="secondary"
                                                 size="sm"
-                                                onClick={handleStopScrape}
+                                                onClick={() => handleStopScrape()}
                                                 disabled={stoppingScrape}
                                                 className="border-rose-200 text-rose-700 hover:bg-rose-50 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/40"
-                                                title="Stop the price check. Anything running on your computer or our servers should wind down in a few seconds."
+                                                title={serverRuns.length > 1
+                                                    ? 'Stop every running vendor scrape. To stop one vendor, use its Stop button above.'
+                                                    : 'Stop the price check. Anything running on your computer or our servers should wind down in a few seconds.'}
                                             >
-                                                {stoppingScrape ? 'Stopping…' : 'Stop Scraping'}
+                                                {stoppingScrape ? 'Stopping…' : (serverRuns.length > 1 ? 'Stop all' : 'Stop Scraping')}
                                             </Button>
                                         )}
                                     </>

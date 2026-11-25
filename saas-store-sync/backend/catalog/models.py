@@ -468,21 +468,25 @@ class HebScrapeJob(models.Model):
 
 
 class StoreCatalogCeleryScrapeState(models.Model):
-    """At most one active Celery-backed catalog scrape per store (server-side Amazon/eBay).
+    """One running server-side catalog scrape (Amazon/eBay/...) of a store.
 
-    Rows are created when ``catalog_scrape_store_task`` / ``catalog_scrape_task`` is
-    queued and removed when the scrape finishes (including parallel chord callbacks).
+    A store can run one scrape per vendor at the same time. ``scrape_vendor_id``
+    empty means every vendor (or an upload-scoped scrape); that run excludes any
+    other run on the store. ``root_task_id`` identifies the run: its batches,
+    lanes and finalize step carry it.
+
+    Rows are created when the scrape is queued and removed when it finishes.
     """
 
     class Scope(models.TextChoices):
         STORE = 'store', 'Store-wide'
         UPLOAD = 'upload', 'Upload-scoped'
 
-    store = models.OneToOneField(
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    store = models.ForeignKey(
         Store,
         on_delete=models.CASCADE,
-        related_name='catalog_celery_scrape_state',
-        primary_key=True,
+        related_name='catalog_celery_scrape_states',
     )
     scope = models.CharField(max_length=16, choices=Scope.choices, default=Scope.STORE)
     upload = models.ForeignKey(
@@ -516,7 +520,7 @@ class StoreCatalogCeleryScrapeState(models.Model):
     enqueued_at = models.DateTimeField(auto_now_add=True)
     scrape_vendor_id = models.CharField(
         max_length=64,
-        null=True,
+        default='',
         blank=True,
         help_text='Vendor the scrape is limited to; empty means every live-scrape vendor.',
     )
@@ -530,10 +534,14 @@ class StoreCatalogCeleryScrapeState(models.Model):
     )
 
     class Meta:
-        db_table = 'catalog_storeceleryscrapestate'
+        db_table = 'catalog_scraperun'
+        constraints = [
+            models.UniqueConstraint(fields=['store', 'scrape_vendor_id'], name='catalog_scraperun_one_per_vendor'),
+        ]
+        indexes = [models.Index(fields=['store', 'root_task_id'], name='catalog_scraperun_root')]
 
     def __str__(self) -> str:
-        return f'CeleryScrape[{self.scope}] {self.store_id}'
+        return f'CeleryScrape[{self.scope}] {self.store_id} vendor={self.scrape_vendor_id or "all"}'
 
 
 class ReverbUpdateLog(models.Model):

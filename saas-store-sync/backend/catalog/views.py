@@ -1008,16 +1008,43 @@ class CatalogScrapeTriggerView(APIView):
         return cls._maybe_enqueue_vendor_job(store, user, 'heb')
 
     @staticmethod
-    def _reject_if_server_scrape_active(store) -> Response | None:
-        """Block a second server-side catalog scrape while one is queued/running (same store).
+    def _reject_if_server_scrape_active(store, vendor_id: str = '') -> Response | None:
+        """Block a server-side scrape that would overlap one already queued/running.
+
+        A store runs one scrape per vendor at once: a vendor scrape is blocked by
+        the same vendor's run or an all-vendors run; an all-vendors scrape
+        (``vendor_id`` '') by any run.
 
         Stuck Stop flags and never-started queued rows are expired by
         ``heal_stale_celery_scrape_state`` so Start Scraping is not blocked forever.
         """
+        from catalog.celery_scrape_state import scrape_conflict
+
         heal_stale_celery_scrape_state(str(store.id))
-        st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
+        st = scrape_conflict(store.id, vendor_id)
         if not st:
             return None
+        running_name = ''
+        if st.scrape_vendor_id:
+            from vendor.models import Vendor
+
+            running_name = (
+                Vendor.objects.filter(pk=st.scrape_vendor_id).values_list('name', flat=True).first() or ''
+            )
+        if running_name and not vendor_id:
+            return Response(
+                {
+                    'error': 'catalog_scrape_already_running',
+                    'detail': (
+                        f'A {running_name} scrape is running for this store. Start other vendors on '
+                        f'their own, or stop the {running_name} scrape before scraping all vendors.'
+                    ),
+                    'active_task_id': (st.root_task_id or '')[:128],
+                    'active_vendor_id': st.scrape_vendor_id,
+                    'stopping': bool(st.cancel_requested),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
         if st.cancel_requested:
             return Response(
                 {
@@ -1053,19 +1080,27 @@ class CatalogScrapeTriggerView(APIView):
             store_has_scrapeable_pending_mappings,
         )
         store = get_store_for_user(request.user, store_pk)
-        dup = self._reject_if_server_scrape_active(store)
-        if dup is not None:
-            append_catalog_log(
-                store.id,
-                'Vendor scrape not started: one is already queued or running for this store.',
-                action_type='scrape_rejected_duplicate',
-                user_id=request.user.id,
-            )
-            return dup
         selected_vendor, vendor_err = _selected_store_vendor(store, request.data.get('vendor_id'))
         if vendor_err is not None:
             return vendor_err
         desktop_vendor_keys, browser_vendor_id = _scrape_vendor_scope(self, selected_vendor)
+        upload_scoped = bool(request.data.get('upload_id')) or (
+            (request.data.get('scope') or '').strip().lower() == 'upload'
+        )
+        # A desktop-runner vendor alone (HEB, Costco) starts no server scrape.
+        desktop_only = selected_vendor is not None and browser_vendor_id is None and not upload_scoped
+        if not desktop_only:
+            dup = self._reject_if_server_scrape_active(
+                store, '' if upload_scoped else (browser_vendor_id or ''),
+            )
+            if dup is not None:
+                append_catalog_log(
+                    store.id,
+                    'Vendor scrape not started: one is already queued or running that covers it.',
+                    action_type='scrape_rejected_duplicate',
+                    user_id=request.user.id,
+                )
+                return dup
         vendor_name = ((selected_vendor.name if selected_vendor else '') or '').strip()
         append_catalog_log(
             store.id,
@@ -1148,7 +1183,7 @@ class CatalogScrapeTriggerView(APIView):
                     scope=StoreCatalogCeleryScrapeState.Scope.UPLOAD,
                     upload=upload,
                 )
-                mark_celery_scrape_worker_started(str(store.id))
+                mark_celery_scrape_worker_started(str(store.id), celery_task_id)
                 schedule_desktop_jobs_after_commit()
             try:
                 catalog_scrape_task.apply_async(
@@ -1156,7 +1191,7 @@ class CatalogScrapeTriggerView(APIView):
                     task_id=celery_task_id,
                 )
             except Exception:
-                clear_celery_scrape_state(str(store.id))
+                clear_celery_scrape_state(str(store.id), root_task_id=celery_task_id)
                 raise
             return Response({
                 "job_id": celery_task_id,
@@ -1198,7 +1233,7 @@ class CatalogScrapeTriggerView(APIView):
                     scope=StoreCatalogCeleryScrapeState.Scope.UPLOAD,
                     upload=upload,
                 )
-                mark_celery_scrape_worker_started(str(store.id))
+                mark_celery_scrape_worker_started(str(store.id), celery_task_id)
                 schedule_desktop_jobs_after_commit()
             try:
                 catalog_scrape_task.apply_async(
@@ -1206,7 +1241,7 @@ class CatalogScrapeTriggerView(APIView):
                     task_id=celery_task_id,
                 )
             except Exception:
-                clear_celery_scrape_state(str(store.id))
+                clear_celery_scrape_state(str(store.id), root_task_id=celery_task_id)
                 raise
             return Response({
                 "job_id": celery_task_id,
@@ -1254,7 +1289,7 @@ class CatalogScrapeTriggerView(APIView):
                     upload=None,
                     vendor_id=browser_vendor_id,
                 )
-                mark_celery_scrape_worker_started(str(store.id))
+                mark_celery_scrape_worker_started(str(store.id), celery_task_id)
             schedule_desktop_jobs_after_commit()
         if not has_browser_scrape:
             if vendor_name and not desktop_jobs_payload:
@@ -1295,7 +1330,7 @@ class CatalogScrapeTriggerView(APIView):
                 task_id=celery_task_id,
             )
         except Exception:
-            clear_celery_scrape_state(str(store.id))
+            clear_celery_scrape_state(str(store.id), root_task_id=celery_task_id)
             raise
         return Response({
             "job_id": celery_task_id,
@@ -1306,7 +1341,13 @@ class CatalogScrapeTriggerView(APIView):
 
 
 class CatalogScrapeCancelView(APIView):
-    """Stop desktop vendor jobs (HEB, etc.) and/or server-side catalog scrapes for a store."""
+    """Stop desktop vendor jobs (HEB, etc.) and/or server-side catalog scrapes for a store.
+
+    ``vendor_id`` (body or query) stops only that vendor's scrape: its server run,
+    or its desktop-runner jobs for a desktop vendor. Without it every running
+    scrape of the store stops. ``vendor`` (query, desktop code like ``heb``)
+    limits the desktop jobs as before.
+    """
 
     permission_classes = [IsAuthenticated]
 
@@ -1323,6 +1364,29 @@ class CatalogScrapeCancelView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        run_vendor = str(request.data.get('vendor_id') or request.query_params.get('vendor_id') or '').strip()
+        if run_vendor.lower() == 'all':
+            run_vendor = ''
+        skip_desktop = False
+        if run_vendor:
+            from django.core.exceptions import ValidationError
+
+            from vendor.models import Vendor
+
+            try:
+                stop_vendor = Vendor.objects.filter(pk=run_vendor).first()
+            except (ValueError, ValidationError):
+                stop_vendor = None
+            if stop_vendor is None:
+                return Response({'error': 'Unknown vendor.'}, status=status.HTTP_400_BAD_REQUEST)
+            run_vendor = str(stop_vendor.pk)
+            desktop_key = ingest_vendor_key_for_code(getattr(stop_vendor, 'code', None))
+            if desktop_key and desktop_key in SUPPORTED_VENDORS:
+                vendor_filter = desktop_key
+            else:
+                # A browser vendor: its desktop jobs do not exist; leave other vendors' jobs alone.
+                skip_desktop = True
+
         qs = HebScrapeJob.objects.filter(
             store=store,
             status__in=[
@@ -1333,7 +1397,7 @@ class CatalogScrapeCancelView(APIView):
         if vendor_filter:
             qs = qs.filter(vendor_code=vendor_filter)
 
-        jobs = list(qs)
+        jobs = [] if skip_desktop else list(qs)
         now = timezone.now()
         from catalog.scrape_progress import invalidate_scrape_progress_cache
 
@@ -1366,11 +1430,15 @@ class CatalogScrapeCancelView(APIView):
             })
 
         server_stopped = False
+        stopped_vendor_ids: list[str] = []
         resume_scope = StoreCatalogCeleryScrapeState.Scope.STORE
         resume_upload_id = None
-        st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
-        if st:
+        runs = StoreCatalogCeleryScrapeState.objects.filter(store=store)
+        if run_vendor:
+            runs = runs.filter(scrape_vendor_id=run_vendor)
+        for st in list(runs.order_by('enqueued_at')):
             server_stopped = True
+            stopped_vendor_ids.append(st.scrape_vendor_id or '')
             resume_scope = st.scope
             resume_upload_id = str(st.upload_id) if st.upload_id else None
             root_tid = (st.root_task_id or '').strip()
@@ -1384,7 +1452,9 @@ class CatalogScrapeCancelView(APIView):
                     app.control.revoke(root_tid, terminate=False)
                 except Exception:
                     pass
-            request_celery_scrape_cancel(str(store.id))
+            request_celery_scrape_cancel(
+                str(store.id), root_task_id=root_tid or None, vendor_id=st.scrape_vendor_id or '',
+            )
 
         resume_scheduled = False
         resume_after_sec = None
@@ -1433,6 +1503,7 @@ class CatalogScrapeCancelView(APIView):
         }
         if server_stopped:
             payload['server_scrape_stopping'] = True
+            payload['stopped_vendor_ids'] = [v or None for v in stopped_vendor_ids]
         if resume_scheduled and resume_after_sec is not None:
             payload['server_resume_scheduled'] = True
             payload['server_resume_after_seconds'] = resume_after_sec

@@ -1,9 +1,17 @@
 """Track in-flight Celery catalog scrapes (Amazon/eBay server-side) for the UI.
 
 Desktop vendors (HEB, Costco) use ``HebScrapeJob``. Server-side store/upload
-scrapes use Celery task IDs; this table marks a store while a chord or
-single-task scrape is still running so ``/scrape/progress/`` can show
-\"in queue / running\" like desktop queue strips.
+scrapes use Celery task IDs; a row marks one running scrape so
+``/scrape/progress/`` can show \"in queue / running\" like desktop queue strips.
+
+A store can run one scrape per vendor at the same time. A row's
+``scrape_vendor_id`` is that vendor's id, or ``''`` for a scrape of every vendor
+(and for upload-scoped scrapes). An every-vendor run excludes any other run on
+the store. A run is identified by its ``root_task_id``: its batches, lanes and
+finalize step carry it, so each touches only its own row.
+
+``vendor_id`` arguments: ``None`` means "not given"; ``''`` (or None where noted)
+is the every-vendor run.
 """
 from __future__ import annotations
 
@@ -47,6 +55,38 @@ def _stop_idle_timedelta() -> timedelta:
     return timedelta(seconds=seconds)
 
 
+def vendor_key(vendor_id) -> str:
+    """The row key for a vendor: its id as text, or '' for every vendor."""
+    return (str(vendor_id).strip()[:64] if vendor_id else '')
+
+
+def _runs(store_id):
+    from catalog.models import StoreCatalogCeleryScrapeState
+
+    return StoreCatalogCeleryScrapeState.objects.filter(store_id=store_id)
+
+
+def _invalidate(store_id) -> None:
+    from catalog.scrape_progress import invalidate_scrape_progress_cache
+
+    invalidate_scrape_progress_cache(str(store_id))
+
+
+def scrape_conflict(store_id, vendor_id=None):
+    """The running scrape that blocks starting one for ``vendor_id`` ('' / None = every vendor), or None.
+
+    An every-vendor scrape needs the store to itself; a vendor scrape is blocked
+    by the same vendor's run or by an every-vendor run.
+    """
+    if not store_id:
+        return None
+    key = vendor_key(vendor_id)
+    runs = _runs(store_id)
+    if key:
+        runs = runs.filter(scrape_vendor_id__in=[key, ''])
+    return runs.order_by('enqueued_at').first()
+
+
 def set_celery_scrape_state(
     store: Store,
     *,
@@ -58,9 +98,10 @@ def set_celery_scrape_state(
     from catalog.models import StoreCatalogCeleryScrapeState
 
     tid = (task_id or '')[:255]
-    vendor = (str(vendor_id).strip()[:64] if vendor_id else '') or None
+    key = vendor_key(vendor_id)
     st, created = StoreCatalogCeleryScrapeState.objects.get_or_create(
         store=store,
+        scrape_vendor_id=key,
         defaults={
             'scope': scope,
             'upload': upload,
@@ -68,14 +109,11 @@ def set_celery_scrape_state(
             'cancel_requested': False,
             'cancel_requested_at': None,
             'first_worker_started_at': None,
-            'scrape_vendor_id': vendor,
             'last_heartbeat_at': None,
         },
     )
     if created:
-        from catalog.scrape_progress import invalidate_scrape_progress_cache
-
-        invalidate_scrape_progress_cache(str(store.id))
+        _invalidate(store.id)
         return
     prev_tid = (st.root_task_id or '')[:255]
     st.scope = scope
@@ -83,7 +121,6 @@ def set_celery_scrape_state(
     st.root_task_id = tid
     st.cancel_requested = False
     st.cancel_requested_at = None
-    st.scrape_vendor_id = vendor
     # update_or_create always reapplied None here, so a transient duplicate POST or
     # client retry cleared first_worker_started_at and the UI stuck on "queued".
     if prev_tid != tid:
@@ -97,31 +134,26 @@ def set_celery_scrape_state(
             'cancel_requested',
             'cancel_requested_at',
             'first_worker_started_at',
-            'scrape_vendor_id',
             'last_heartbeat_at',
         ]
     )
-    from catalog.scrape_progress import invalidate_scrape_progress_cache
-
-    invalidate_scrape_progress_cache(str(store.id))
+    _invalidate(store.id)
 
 
-def mark_celery_scrape_worker_started(store_id: str | None) -> None:
+def mark_celery_scrape_worker_started(store_id: str | None, root_task_id: str | None = None) -> None:
     """Set first_worker_started_at so /scrape/progress/ shows running (vs queued).
 
-    Called from the Catalog scrape API immediately after persisting scrape state, and
-    from Celery workers once they begin processing — safe to call multiple times.
+    ``root_task_id`` limits it to that run; without it every queued run of the
+    store is marked. Safe to call multiple times.
     """
     if not store_id:
         return
     from django.utils import timezone
 
-    from catalog.models import StoreCatalogCeleryScrapeState
-
-    StoreCatalogCeleryScrapeState.objects.filter(
-        store_id=store_id,
-        first_worker_started_at__isnull=True,
-    ).update(first_worker_started_at=timezone.now())
+    runs = _runs(store_id).filter(first_worker_started_at__isnull=True)
+    if root_task_id:
+        runs = runs.filter(root_task_id=root_task_id)
+    runs.update(first_worker_started_at=timezone.now())
 
 
 def touch_celery_scrape_heartbeat(store_id: str | None, root_task_id: str | None) -> None:
@@ -136,45 +168,46 @@ def touch_celery_scrape_heartbeat(store_id: str | None, root_task_id: str | None
         return
     from django.utils import timezone
 
-    from catalog.models import StoreCatalogCeleryScrapeState
-
     try:
-        StoreCatalogCeleryScrapeState.objects.filter(
-            store_id=store_id,
-            root_task_id=root_task_id,
-        ).update(last_heartbeat_at=timezone.now())
+        _runs(store_id).filter(root_task_id=root_task_id).update(last_heartbeat_at=timezone.now())
     except Exception:
         logger.exception('Could not record scrape heartbeat for store %s', store_id)
 
 
-def current_celery_scrape_root_task_id(store_id: str | None) -> str:
-    """Root task id observed at the start of a worker loop, or '' when none."""
+def current_celery_scrape_root_task_id(store_id: str | None, vendor_id=None) -> str:
+    """Run id of the store's scrape for ``vendor_id`` ('' / None = every vendor), or '' when none."""
     if not store_id:
         return ''
-    from catalog.models import StoreCatalogCeleryScrapeState
-
     tid = (
-        StoreCatalogCeleryScrapeState.objects.filter(store_id=store_id)
+        _runs(store_id).filter(scrape_vendor_id=vendor_key(vendor_id))
         .values_list('root_task_id', flat=True)
         .first()
     )
     return tid or ''
 
 
+def scrape_run_exists(store_id, root_task_id: str | None) -> bool:
+    """True while the run ``root_task_id`` still owns a row (not finished, cleared or replaced)."""
+    if not store_id or not root_task_id:
+        return False
+    return _runs(store_id).filter(root_task_id=root_task_id).exists()
+
+
 def should_abort_celery_scrape(
     store_id: str | None,
     *,
     root_task_id: str | None = None,
+    vendor_id=None,
 ) -> bool:
     """True when workers must stop after the current vendor URL.
 
-    Stop sets ``cancel_requested`` and keeps this row so the UI can show
-    ``phase=stopping`` until chunks drain. A missing row still means abort
-    (job finished, crashed, or an older Stop path that deleted state) so a
-    leftover worker does not keep going after finalize.
+    ``root_task_id`` names the run (its row); without it ``vendor_id`` picks the
+    row ('' / None = the every-vendor run).
 
-    ``root_task_id`` is the id the loop saw when it started. A newer scrape
-    replaces that id; the old loop must exit instead of joining the new run.
+    Stop sets ``cancel_requested`` and keeps the row so the UI can show
+    ``phase=stopping`` until chunks drain. A missing row still means abort
+    (job finished, crashed, replaced by a newer run, or an older Stop path that
+    deleted state) so a leftover worker does not keep going after finalize.
 
     A dropped database connection is not a cancel. Costco requests sit idle
     on the DB for minutes; treating that blip as Stop left the rest of the
@@ -184,14 +217,15 @@ def should_abort_celery_scrape(
         return False
     from django.db import InterfaceError, OperationalError, close_old_connections
 
-    from catalog.models import StoreCatalogCeleryScrapeState
-
     close_old_connections()
     for attempt in (1, 2):
         try:
-            st = StoreCatalogCeleryScrapeState.objects.get(store_id=store_id)
-        except StoreCatalogCeleryScrapeState.DoesNotExist:
-            return True
+            runs = _runs(store_id)
+            if root_task_id is not None:
+                runs = runs.filter(root_task_id=root_task_id)
+            else:
+                runs = runs.filter(scrape_vendor_id=vendor_key(vendor_id))
+            cancel = runs.values_list('cancel_requested', flat=True).first()
         except (OperationalError, InterfaceError):
             close_old_connections()
             if attempt == 1:
@@ -202,76 +236,113 @@ def should_abort_celery_scrape(
                 store_id,
             )
             return False
-        if root_task_id is not None and (st.root_task_id or '') != root_task_id:
+        if cancel is None:
             return True
-        return bool(st.cancel_requested)
+        return bool(cancel)
     return False
 
 
-def request_celery_scrape_cancel(store_id: str | None) -> bool:
+def _pick_runs(store_id, *, vendor_id=None, root_task_id=None):
+    runs = _runs(store_id)
+    if root_task_id:
+        return runs.filter(root_task_id=root_task_id)
+    if vendor_id is not None:
+        return runs.filter(scrape_vendor_id=vendor_key(vendor_id))
+    return runs
+
+
+def request_celery_scrape_cancel(store_id: str | None, *, vendor_id=None, root_task_id=None) -> bool:
     """Ask in-flight catalog scrape workers to stop after the current URL.
 
-    Keeps the state row so ``/scrape/progress/`` stays active with
-    ``phase=stopping`` until finalize or the quiet-period heal clears it.
-    Returns True when this store is stopping. A repeat call does not move
+    ``vendor_id`` stops that vendor's run ('' = the every-vendor run); None stops
+    every run of the store. Keeps the rows so ``/scrape/progress/`` shows
+    ``phase=stopping`` until finalize or the quiet-period heal clears them.
+    Returns True when a chosen run is stopping. A repeat call does not move
     ``cancel_requested_at``.
     """
     if not store_id:
         return False
     from django.utils import timezone
 
-    from catalog.models import StoreCatalogCeleryScrapeState
-    from catalog.scrape_progress import invalidate_scrape_progress_cache
-
     # A second Stop must not move cancel_requested_at. That timestamp is the
     # clock for releasing a stuck "stopping" banner, and the button stays
     # visible while the row does.
-    now = timezone.now()
-    updated = StoreCatalogCeleryScrapeState.objects.filter(
-        store_id=store_id,
-        cancel_requested=False,
-    ).update(
+    chosen = _pick_runs(store_id, vendor_id=vendor_id, root_task_id=root_task_id)
+    updated = chosen.filter(cancel_requested=False).update(
         cancel_requested=True,
-        cancel_requested_at=now,
+        cancel_requested_at=timezone.now(),
     )
     if updated:
-        invalidate_scrape_progress_cache(str(store_id))
+        _invalidate(store_id)
         return True
-    return StoreCatalogCeleryScrapeState.objects.filter(
-        store_id=store_id,
-        cancel_requested=True,
-    ).exists()
+    return chosen.filter(cancel_requested=True).exists()
 
 
-def _scrape_wrote_since(store_id: str, since) -> bool:
-    """True when a listing on this store was scraped inside the quiet window."""
+def _scrape_wrote_since(store_id: str, since, vendor: str = '') -> bool:
+    """True when a listing of this run (the vendor's, or any for '') was scraped inside the quiet window.
+
+    Only the stopped run's own vendor counts: another vendor's scrape running at
+    the same time must not keep this one stuck on "stopping".
+    """
     from catalog.models import ProductMapping
 
-    return ProductMapping.objects.filter(
-        store_id=store_id,
-        last_scrape_time__gte=since,
-    ).exists()
+    rows = ProductMapping.objects.filter(store_id=store_id, last_scrape_time__gte=since)
+    if vendor:
+        rows = rows.filter(product__vendor_id=vendor)
+    return rows.exists()
 
 
-def _note_stop_cleared(store_id: str) -> None:
+def _note_stop_cleared(store_id: str, vendor: str = '') -> None:
     try:
         from catalog.activity_log import append_catalog_log
 
+        who = 'Vendor scrape'
+        if vendor:
+            from vendor.models import Vendor
+
+            name = Vendor.objects.filter(pk=vendor).values_list('name', flat=True).first()
+            if name:
+                who = f'{name} scrape'
         append_catalog_log(
             store_id,
-            'Vendor scrape stop finished. Start Scraping is available again. '
+            f'{who} stop finished. Start Scraping is available again. '
             'Remaining listings stay Pending.',
             action_type='scrape_stop_cleared',
+            metadata={'vendor_id': vendor or None},
         )
     except Exception:
         logger.exception('Could not log cleared scrape stop for store %s', store_id)
 
 
-def heal_stale_celery_scrape_state(store_id: str | None) -> bool:
-    """Clear leftover scrape-state rows that would block Start Scraping.
+def _heal_run(st, now) -> bool:
+    store_id = str(st.store_id)
+    vendor = st.scrape_vendor_id or ''
+    if st.cancel_requested:
+        marked_at = st.cancel_requested_at or st.enqueued_at
+        if not marked_at:
+            return False
+        age = now - marked_at
+        quiet = age >= _stop_idle_timedelta() and not _scrape_wrote_since(
+            store_id, now - _stop_idle_timedelta(), vendor,
+        )
+        if age >= _stop_stale_timedelta() or quiet:
+            clear_celery_scrape_state(store_id, root_task_id=st.root_task_id or None, vendor_id=vendor)
+            _note_stop_cleared(store_id, vendor)
+            return True
+        return False
+    if st.first_worker_started_at is None and (now - st.enqueued_at) > timedelta(minutes=30):
+        clear_celery_scrape_state(store_id, root_task_id=st.root_task_id or None, vendor_id=vendor)
+        return True
+    return False
 
-    - Stop clicked and the workers have gone quiet (no listing scraped inside
-      ``CATALOG_SCRAPE_STOP_IDLE_SECONDS``, default 120). The current page is
+
+def heal_stale_celery_scrape_state(store_id: str | None) -> bool:
+    """Clear leftover scrape rows of the store that would block Start Scraping.
+
+    For each running scrape of the store:
+
+    - Stop clicked and its workers have gone quiet (none of its vendor's listings
+      scraped inside ``CATALOG_SCRAPE_STOP_IDLE_SECONDS``). The current page is
       done or the worker died without finalize, so the stopping banner should
       drop and Start Scraping should come back.
     - Stop clicked but a worker is still writing: keep the row until
@@ -285,42 +356,22 @@ def heal_stale_celery_scrape_state(store_id: str | None) -> bool:
         return False
     from django.utils import timezone
 
-    from catalog.models import StoreCatalogCeleryScrapeState
-
-    try:
-        st = StoreCatalogCeleryScrapeState.objects.get(store_id=store_id)
-    except StoreCatalogCeleryScrapeState.DoesNotExist:
-        return False
-
     now = timezone.now()
-    if st.cancel_requested:
-        marked_at = st.cancel_requested_at or st.enqueued_at
-        if not marked_at:
-            return False
-        age = now - marked_at
-        if age >= _stop_stale_timedelta():
-            clear_celery_scrape_state(str(store_id))
-            _note_stop_cleared(str(store_id))
-            return True
-        if age >= _stop_idle_timedelta() and not _scrape_wrote_since(
-            str(store_id), now - _stop_idle_timedelta(),
-        ):
-            clear_celery_scrape_state(str(store_id))
-            _note_stop_cleared(str(store_id))
-            return True
-        return False
-    if st.first_worker_started_at is None and (now - st.enqueued_at) > timedelta(minutes=30):
-        clear_celery_scrape_state(str(store_id))
-        return True
-    return False
+    healed = False
+    for st in list(_runs(store_id)):
+        if _heal_run(st, now):
+            healed = True
+    return healed
 
 
-def clear_celery_scrape_state(store_id: str | None) -> None:
+def clear_celery_scrape_state(store_id: str | None, *, root_task_id=None, vendor_id=None) -> None:
+    """Remove a finished scrape's row.
+
+    ``root_task_id`` removes that run only; else ``vendor_id`` removes that
+    vendor's run ('' = the every-vendor run). With neither, every run of the
+    store is removed: only for whole-store resets, never at the end of one run.
+    """
     if not store_id:
         return
-    from catalog.models import StoreCatalogCeleryScrapeState
-
-    StoreCatalogCeleryScrapeState.objects.filter(store_id=store_id).delete()
-    from catalog.scrape_progress import invalidate_scrape_progress_cache
-
-    invalidate_scrape_progress_cache(str(store_id))
+    _pick_runs(store_id, vendor_id=vendor_id, root_task_id=root_task_id).delete()
+    _invalidate(store_id)

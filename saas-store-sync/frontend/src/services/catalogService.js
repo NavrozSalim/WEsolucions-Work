@@ -241,8 +241,9 @@ export const getPushListingsProgress = (storeId) =>
  * Stop running price checks: pending jobs from your computer (HEB, etc.) and/or
  * fetches running on our servers. Safe to call when nothing is running.
  */
-export const cancelCatalogScrape = (storeId) =>
-    api.post(`/stores/${storeId}/catalog/scrape/cancel/`, {});
+/** ``vendorId`` stops only that vendor's scrape; null stops every running scrape of the store. */
+export const cancelCatalogScrape = (storeId, vendorId = null) =>
+    api.post(`/stores/${storeId}/catalog/scrape/cancel/`, vendorId ? { vendor_id: vendorId } : {});
 
 /** Stop Manual sync (marketplace push). Safe to call when nothing is running. */
 export const cancelCatalogPushListings = (storeId) =>

@@ -903,7 +903,7 @@ def _run_browser_scrape_for_scheduled_update(store, source: str, on_poll=None) -
         scope=StoreCatalogCeleryScrapeState.Scope.STORE,
         upload=None,
     )
-    mark_celery_scrape_worker_started(str(store.id))
+    mark_celery_scrape_worker_started(str(store.id), task_id)
 
     try:
         from catalog.activity_log import append_catalog_log
@@ -922,7 +922,7 @@ def _run_browser_scrape_for_scheduled_update(store, source: str, on_poll=None) -
         catalog_scrape_store_task.apply_async(args=[str(store.id)], task_id=task_id)
     except Exception as exc:
         logger.exception('Failed to enqueue catalog_scrape_store_task for store %s', store.name)
-        clear_celery_scrape_state(str(store.id))
+        clear_celery_scrape_state(str(store.id), root_task_id=task_id)
         invalidate_scrape_progress_cache(str(store.id))
         return {'error': str(exc)[:500]}
 
@@ -932,7 +932,9 @@ def _run_browser_scrape_for_scheduled_update(store, source: str, on_poll=None) -
     saw_cancel = False
 
     while time.monotonic() - started < max_wait:
-        st = StoreCatalogCeleryScrapeState.objects.filter(store_id=store.id).first()
+        # This run's slot (every vendor). A follow-up pass keeps the slot with a
+        # new run id, so watch the slot, not the first run id.
+        st = StoreCatalogCeleryScrapeState.objects.filter(store_id=store.id, scrape_vendor_id='').first()
         if st is None:
             invalidate_scrape_progress_cache(str(store.id))
             if saw_cancel:

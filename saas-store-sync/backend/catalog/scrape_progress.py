@@ -284,19 +284,28 @@ def build_scrape_progress_payload(store) -> dict[str, Any]:
         'phase': None,
         'cancel_requested': False,
     }
+    # One entry per running scrape (a store runs one per vendor at once).
+    server_celery_scrapes: list[dict] = []
     try:
         from catalog.celery_scrape_state import heal_stale_celery_scrape_state
 
         heal_stale_celery_scrape_state(str(store.id))
-        st = StoreCatalogCeleryScrapeState.objects.filter(store=store).first()
-        if st:
+        runs = list(StoreCatalogCeleryScrapeState.objects.filter(store=store).order_by('enqueued_at'))
+        names = {}
+        vendor_pks = [r.scrape_vendor_id for r in runs if r.scrape_vendor_id]
+        if vendor_pks:
+            names = {
+                str(pk): (name or code or '')
+                for pk, name, code in Vendor.objects.filter(pk__in=vendor_pks).values_list('pk', 'name', 'code')
+            }
+        for st in runs:
             if st.cancel_requested:
                 phase = 'stopping'
             elif st.first_worker_started_at:
                 phase = 'running'
             else:
                 phase = 'queued'
-            server_celery_scrape = {
+            server_celery_scrapes.append({
                 'active': True,
                 'store_id': str(store.id),
                 'phase': phase,
@@ -305,15 +314,27 @@ def build_scrape_progress_payload(store) -> dict[str, Any]:
                 'enqueued_at': st.enqueued_at.isoformat(),
                 'task_id': st.root_task_id or '',
                 'cancel_requested': bool(st.cancel_requested),
-            }
+                'vendor_id': st.scrape_vendor_id or None,
+                'vendor_name': names.get(st.scrape_vendor_id) if st.scrape_vendor_id else None,
+            })
+        if server_celery_scrapes:
+            # The older single-scrape field: active while any runs; stopping only when all are.
+            first = dict(server_celery_scrapes[0])
+            if any(r['phase'] == 'running' for r in server_celery_scrapes):
+                first['phase'] = 'running'
+            first['cancel_requested'] = all(r['cancel_requested'] for r in server_celery_scrapes)
+            if not first['cancel_requested'] and first['phase'] == 'stopping':
+                first['phase'] = 'running'
+            server_celery_scrape = first
     except Exception:
-        pass
+        logger.exception('Scrape progress: running scrapes unavailable for store %s', store.id)
 
     return {
         'store_id': str(store.id),
         'total': total,
         'by_status': by_status,
         'server_celery_scrape': server_celery_scrape,
+        'server_celery_scrapes': server_celery_scrapes,
         'has_heb': bool(heb_total > 0),
         'heb_total': heb_total,
         'heb_scraped': heb_scraped,

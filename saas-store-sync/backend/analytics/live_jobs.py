@@ -98,15 +98,30 @@ def collect_live_jobs(user) -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
 
     # Server-side Celery catalog scrapes
-    for st in StoreCatalogCeleryScrapeState.objects.filter(store_id__in=store_ids).select_related('store'):
+    celery_runs = list(StoreCatalogCeleryScrapeState.objects.filter(store_id__in=store_ids).select_related('store'))
+    vendor_names: dict[str, str] = {}
+    run_vendor_ids = {st.scrape_vendor_id for st in celery_runs if st.scrape_vendor_id}
+    if run_vendor_ids:
+        from vendor.models import Vendor
+
+        vendor_names = {
+            str(pk): (vname or code or '')
+            for pk, vname, code in Vendor.objects.filter(pk__in=run_vendor_ids).values_list('pk', 'name', 'code')
+        }
+    for st in celery_runs:
         phase = 'running' if st.first_worker_started_at else 'queued'
         if st.cancel_requested:
             phase = 'stopping'
         name = store_name.get(st.store_id) or st.store.name
+        # A store can run one scrape per vendor; each gets its own entry.
+        vendor_part = ''
+        if st.scrape_vendor_id:
+            vendor_label = vendor_names.get(st.scrape_vendor_id)
+            vendor_part = f' · {vendor_label}' if vendor_label else ''
         jobs.append({
-            'id': f'celery-scrape-{st.store_id}',
+            'id': f'celery-scrape-{st.pk}',
             'kind': 'celery_scrape',
-            'title': f'Server scrape · {name}',
+            'title': f'Server scrape · {name}{vendor_part}',
             'description': f'{phase.capitalize()} · {st.scope} scope',
             'store_id': str(st.store_id),
             'store_name': name,

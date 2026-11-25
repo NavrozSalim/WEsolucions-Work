@@ -235,7 +235,7 @@ def _queue_scrape_continuation(
             upload=upload,
             vendor_id=vendor_id,
         )
-        mark_celery_scrape_worker_started(str(store.id))
+        mark_celery_scrape_worker_started(str(store.id), next_tid)
     try:
         if upload is not None:
             catalog_scrape_task.apply_async(args=[str(upload.id)], task_id=next_tid)
@@ -248,7 +248,7 @@ def _queue_scrape_continuation(
             meta = {'scope': 'store', 'pending_left': left_n}
     except Exception:
         logger.exception('Could not queue follow-up scrape for store %s', store.id)
-        clear_celery_scrape_state(str(store.id))
+        clear_celery_scrape_state(str(store.id), root_task_id=next_tid)
         return False
     append_catalog_log(
         store.id,
@@ -1150,8 +1150,9 @@ def _process_catalog_upload_scrape_rows(rows, *, upload, store, upload_id, sessi
     rows_visited = 0
     row_counter = 0
 
-    mark_celery_scrape_worker_started(str(store.id))
+    # Upload-scoped scrapes run in the store's every-vendor slot.
     scrape_root_id = current_celery_scrape_root_task_id(str(store.id))
+    mark_celery_scrape_worker_started(str(store.id), scrape_root_id or None)
 
     try:
         price_by_vid, price_fb, inv_by_vid, inv_fb = _build_store_vendor_pricing_inventory_caches(store)
@@ -1757,7 +1758,7 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
     try:
         run = ScrapeRun.objects.get(id=scrape_run_id, catalog_upload=upload)
     except ScrapeRun.DoesNotExist:
-        clear_celery_scrape_state(str(store.id))
+        clear_celery_scrape_state(str(store.id), vendor_id='')
         return {'error': 'ScrapeRun not found', 'upload_id': upload_id}
 
     try:
@@ -1883,7 +1884,8 @@ def catalog_scrape_upload_finalize(results, upload_id: str, scrape_run_id: str):
         }
     finally:
         if not locals().get('continued'):
-            clear_celery_scrape_state(str(store.id))
+            # Upload scrapes use the every-vendor slot.
+            clear_celery_scrape_state(str(store.id), vendor_id='')
 
 
 def _process_store_wide_scrape_mappings(
@@ -1933,8 +1935,8 @@ def _process_store_wide_scrape_mappings(
     last_progress_at = None
     fatal_error = None
 
-    mark_celery_scrape_worker_started(str(store.id))
     scrape_root_id = root_task_id or current_celery_scrape_root_task_id(str(store.id))
+    mark_celery_scrape_worker_started(str(store.id), scrape_root_id or None)
     last_heartbeat_mono = None
 
     try:
@@ -2343,7 +2345,7 @@ def _schedule_store_scrape_lanes(store_id: str, chunks: list, vendor_id: str, *,
     """
     from django.core.cache import cache
 
-    root_task_id = current_celery_scrape_root_task_id(str(store_id))
+    root_task_id = current_celery_scrape_root_task_id(str(store_id), vendor_id or None)
     lane_total = max(1, int(getattr(settings, 'CATALOG_SCRAPE_LANES', 2) or 2))
     if lanes is None:
         lanes = _deal_chunks(chunks, lane_total)
@@ -2428,10 +2430,16 @@ def _pop_scrape_run_totals(store_id, root_task_id: str | None) -> dict:
 
 
 def _scrape_run_replaced(store_id, root_task_id: str | None) -> bool:
-    """True when the store's scrape now belongs to a different run (or none)."""
+    """True when the run ``root_task_id`` no longer owns a row (finished, cleared or replaced).
+
+    A store runs one scrape per vendor at once, so this looks for the run's own
+    row, not "the store's" scrape.
+    """
     if not root_task_id:
         return False
-    return current_celery_scrape_root_task_id(str(store_id)) != root_task_id
+    from catalog.celery_scrape_state import scrape_run_exists
+
+    return not scrape_run_exists(str(store_id), root_task_id)
 
 
 def _advance_store_scrape_lane(store_id, rest, lane_count, vendor_id, stats, root_task_id=None) -> None:
@@ -2545,7 +2553,7 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False, vend
     chunk_sz = int(getattr(settings, 'CATALOG_SCRAPE_CHUNK_SIZE', 0) or 0)
     use_parallel = bool(parallel and chunk_sz > 0 and len(mapping_ids) > chunk_sz)
 
-    if should_abort_celery_scrape(str(store.id)):
+    if should_abort_celery_scrape(str(store.id), vendor_id=vendor_id):
         return {
             'store_id': str(store_id),
             'scope': 'store',
@@ -2579,6 +2587,7 @@ def run_store_wide_catalog_scrape(store_id: str, *, parallel: bool = False, vend
             store_id=store_id,
             session=session,
             emit_stall_log=True,
+            root_task_id=current_celery_scrape_root_task_id(str(store.id), vendor_id) or None,
         )
     finally:
         close_amazon_session(session)
@@ -2935,7 +2944,10 @@ def catalog_scrape_store_finalize(
         }
     finally:
         if not locals().get('continued'):
-            clear_celery_scrape_state(str(store_id))
+            # Only this run's row: other vendors' scrapes may still be running.
+            clear_celery_scrape_state(
+                str(store_id), root_task_id=root_task_id or None, vendor_id=vendor_id or '',
+            )
 
 
 @shared_task(bind=True, max_retries=3)
@@ -2950,17 +2962,18 @@ def catalog_scrape_task(self, upload_id: str):
     except Exception:
         pass
     # Progress UI: flip to "running" as soon as a worker executes this task (before chord/chunks).
-    mark_celery_scrape_worker_started(store_id)
+    # Upload scrapes use the store's every-vendor slot.
+    mark_celery_scrape_worker_started(store_id, getattr(self.request, 'id', None) or None)
     try:
         out = run_catalog_scrape(upload_id, parallel=True)
     except Exception:
-        clear_celery_scrape_state(store_id)
+        clear_celery_scrape_state(store_id, vendor_id='')
         raise
     if isinstance(out, dict) and out.get('status') == 'running' and (
         out.get('parallel') or out.get('continued')
     ):
         return out
-    clear_celery_scrape_state(store_id)
+    clear_celery_scrape_state(store_id, vendor_id='')
     return out
 
 
@@ -2981,9 +2994,9 @@ def catalog_scrape_store_task(self, store_id: str, vendor_id: str | None = None)
 
     def _clear_if_still_ours():
         if not _scrape_run_replaced(store_id, own_root):
-            clear_celery_scrape_state(store_id)
+            clear_celery_scrape_state(store_id, root_task_id=own_root, vendor_id=vendor_id or '')
 
-    mark_celery_scrape_worker_started(str(store_id))
+    mark_celery_scrape_worker_started(str(store_id), own_root)
     try:
         out = run_store_wide_catalog_scrape(store_id, parallel=True, vendor_id=vendor_id or None)
     except Exception:
@@ -3077,7 +3090,7 @@ def revive_stalled_store_scrape(state, *, now=None) -> dict:
         catalog_scrape_store_task.apply_async(args=task_args, task_id=new_root)
     except Exception:
         logger.exception('Watchdog could not restart vendor scrape for store %s', store_id)
-        clear_celery_scrape_state(store_id)
+        clear_celery_scrape_state(store_id, root_task_id=new_root)
         return {'store_id': store_id, 'action': 'enqueue_failed'}
     logger.warning(
         'Scrape watchdog: store %s quiet for %s min; restarted as %s (%s Pending).',
@@ -3757,11 +3770,11 @@ def resume_catalog_scrape_after_stop(
                 scope=StoreCatalogCeleryScrapeState.Scope.UPLOAD,
                 upload=upload,
             )
-            mark_celery_scrape_worker_started(str(store_id))
+            mark_celery_scrape_worker_started(str(store_id), celery_task_id)
         try:
             catalog_scrape_task.apply_async(args=[str(upload_id)], task_id=celery_task_id)
         except Exception:
-            clear_celery_scrape_state(str(store_id))
+            clear_celery_scrape_state(str(store_id), root_task_id=celery_task_id)
             raise
 
         append_catalog_log(
@@ -3788,11 +3801,11 @@ def resume_catalog_scrape_after_stop(
             scope=StoreCatalogCeleryScrapeState.Scope.STORE,
             upload=None,
         )
-        mark_celery_scrape_worker_started(str(store_id))
+        mark_celery_scrape_worker_started(str(store_id), celery_task_id)
     try:
         catalog_scrape_store_task.apply_async(args=[str(store_id)], task_id=celery_task_id)
     except Exception:
-        clear_celery_scrape_state(str(store_id))
+        clear_celery_scrape_state(str(store_id), root_task_id=celery_task_id)
         raise
 
     append_catalog_log(
