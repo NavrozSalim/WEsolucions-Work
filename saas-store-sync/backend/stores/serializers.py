@@ -238,12 +238,32 @@ class StoreSerializer(serializers.ModelSerializer):
                     raise ValidationError({'auto_buy_vendors': f'{label}: choose one of your own purchase accounts.'})
                 if account.vendor != vendor or account.region != region:
                     raise ValidationError({'auto_buy_vendors': f'{label}: that purchase account is for a different vendor or region.'})
-            clean.append({'vendor': vendor, 'account': account, 'new': new, 'region': region})
+            clean.append({
+                'vendor': vendor, 'account': account, 'new': new, 'region': region,
+                'schedule': self._auto_process_schedule(row, label, region),
+            })
         self._auto_buy_rows = clean
         self._new_auto_buy_account = None
         self._auto_buy_legacy_touched = False
         attrs['auto_buy_vendor'] = clean[0]['vendor'] if clean else ''
         attrs['auto_buy_account'] = clean[0]['account'] if clean else None
+
+    @staticmethod
+    def _auto_process_schedule(row, label, region):
+        """Scheduled ordering for one vendor row, or None when the request does not send it."""
+        from stores.auto_buy import default_timezone
+        from sync.run_schedules import KIND_UPDATE, normalize_run_times, normalize_timezone
+
+        if not any(k in row for k in ('auto_process', 'process_times', 'process_timezone')):
+            return None
+        on = str(row.get('auto_process')).strip().lower() in ('1', 'true', 'yes', 'on')
+        raw_times = row.get('process_times') or []
+        try:
+            times = normalize_run_times(raw_times, KIND_UPDATE) if (on or raw_times) else []
+            tz = normalize_timezone(row.get('process_timezone') or default_timezone(region))
+        except ValueError as exc:
+            raise ValidationError({'auto_buy_vendors': f'{label} order schedule: {exc}'}) from None
+        return {'auto_process': on, 'process_times': times, 'process_timezone': tz}
 
     def _account_owner(self):
         req = self.context.get('request')
@@ -318,7 +338,8 @@ class StoreSerializer(serializers.ModelSerializer):
                         store, r['vendor'], r['region'], r['new']['chrome_profile'], r['new']['email'],
                     )
                 entries.append((r['vendor'], account))
-            set_auto_buy_entries(store, entries)
+            schedules = {r['vendor']: r['schedule'] for r in rows if r.get('schedule') is not None}
+            set_auto_buy_entries(store, entries, schedules)
             return
         touched = getattr(self, '_auto_buy_legacy_touched', False)
         self._apply_new_auto_buy_account(store)

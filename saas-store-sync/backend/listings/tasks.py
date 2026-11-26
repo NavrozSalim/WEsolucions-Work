@@ -446,3 +446,11 @@ def queue_order_tracking():
             logger.exception("Tracking Bot schedule failed store=%s", store.id)
     logger.info("Tracking Bot schedule: %d job(s) queued", queued)
     return queued
+
+
+@shared_task(name="listings.run_auto_order_schedules", ignore_result=True, soft_time_limit=600, time_limit=660)
+def run_auto_order_schedules():
+    """Every minute: scheduled ordering per Auto Purchasing vendor (fetch, check, then send that vendor's orders)."""
+    from .auto_order_schedule import tick
+
+    return tick()

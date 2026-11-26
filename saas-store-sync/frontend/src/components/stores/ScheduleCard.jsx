@@ -234,7 +234,7 @@ export function formatLastRun(info, kind) {
     return parts.filter(Boolean).join(' · ');
 }
 
-function RunTimesEditor({ times, onChange, maxTimes, defaultTime, label = 'Run times', idPrefix }) {
+export function RunTimesEditor({ times, onChange, maxTimes, defaultTime, label = 'Run times', idPrefix }) {
     const setTime = (idx, part, value) => {
         onChange(times.map((t, i) => {
             if (i !== idx) return t;

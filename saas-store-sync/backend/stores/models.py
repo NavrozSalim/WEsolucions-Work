@@ -495,6 +495,18 @@ class StoreAutoBuyVendor(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Scheduled ordering: at each time the laptop fetches the orders, they are checked, then this
+    # vendor's ready-to-buy orders are sent to the laptop (as Process all for this vendor).
+    auto_process = models.BooleanField(default=False)
+    process_times = models.JSONField(default=list, blank=True, help_text='["HH:MM", ...] in process_timezone.')
+    process_timezone = models.CharField(max_length=64, blank=True, default='')
+    process_last_triggered_at = models.DateTimeField(null=True, blank=True)
+    # Set while a scheduled run waits for its fetch and checks; cleared once the orders are sent.
+    process_pending_since = models.DateTimeField(null=True, blank=True)
+    process_fetch_run_id = models.UUIDField(null=True, blank=True)
+    process_last_run_at = models.DateTimeField(null=True, blank=True)
+    process_last_message = models.TextField(blank=True, default='')
+
     class Meta:
         ordering = ['created_at', 'id']
         constraints = [models.UniqueConstraint(fields=['store', 'vendor'], name='uq_store_auto_buy_vendor')]

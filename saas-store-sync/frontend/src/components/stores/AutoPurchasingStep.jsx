@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { History, Plus, ShoppingCart, Trash2, Upload } from 'lucide-react';
+import { CalendarClock, History, Plus, ShoppingCart, Trash2, Upload } from 'lucide-react';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import Select from '../ui/Select';
+import { RunTimesEditor } from './ScheduleCard';
 import { getMyPurchaseAccounts } from '../../services/storeService';
 import { getDetachedOrders, importOrdersFile, linkDetachedOrders } from '../../services/listingService';
 
@@ -33,13 +34,54 @@ export const autoBuyVendorsLabel = (codes) => (codes || []).map(autoBuyVendorLab
 export const NEW_ACCOUNT = 'new';
 const emptyNewAccount = () => ({ chrome_profile: '', email: '' });
 
+/** Timezones for the order schedule, per store Region (same lists as Auto Scheduling). */
+const ORDER_TIMEZONES = {
+    USA: [
+        { value: 'America/New_York', label: 'Eastern (New York)' },
+        { value: 'America/Chicago', label: 'Central (Chicago)' },
+        { value: 'America/Denver', label: 'Mountain (Denver)' },
+        { value: 'America/Los_Angeles', label: 'Pacific (Los Angeles)' },
+    ],
+    AU: [
+        { value: 'Australia/Sydney', label: 'Sydney (AEST)' },
+        { value: 'Australia/Melbourne', label: 'Melbourne (AEST)' },
+        { value: 'Australia/Perth', label: 'Perth (AWST)' },
+        { value: 'Australia/Brisbane', label: 'Brisbane (AEST)' },
+    ],
+};
+const orderTimezones = (region) => ORDER_TIMEZONES[region] || ORDER_TIMEZONES.USA;
+const defaultOrderTimezone = (region) => orderTimezones(region)[0].value;
+const ORDER_MAX_TIMES = 12;
+const ORDER_DEFAULT_TIME = '09:00';
+
+const emptySchedule = (region) => ({
+    auto_process: false,
+    process_times: [ORDER_DEFAULT_TIME],
+    process_timezone: defaultOrderTimezone(region),
+});
+
 /** Form rows from a saved store (``store.auto_buy_vendors`` from the API). */
 export function autoBuyRowsFromStore(store) {
     return (store?.auto_buy_vendors || []).map((r) => ({
         vendor: r.vendor,
         account: r.account ? String(r.account.id) : '',
         account_new: emptyNewAccount(),
+        auto_process: !!r.auto_process,
+        process_times: r.process_times?.length ? r.process_times : [ORDER_DEFAULT_TIME],
+        process_timezone: r.process_timezone || defaultOrderTimezone(store?.region),
+        process_pending: !!r.process_pending,
+        process_last_run_at: r.process_last_run_at || null,
+        process_last_message: r.process_last_message || '',
     }));
+}
+
+/** Order schedule fields of one row for the request. */
+function schedulePayload(r, region) {
+    return {
+        auto_process: !!r.auto_process,
+        process_times: r.auto_process ? (r.process_times || []) : [],
+        process_timezone: r.process_timezone || defaultOrderTimezone(region),
+    };
 }
 
 /** ``auto_buy_vendors`` for the store create / update request. Rows not valid for the Region are dropped. */
@@ -48,13 +90,14 @@ export function buildAutoBuyPayload(form) {
     const rows = (form.auto_buy_vendors || []).filter((r) => r.vendor && allowed.includes(r.vendor));
     return {
         auto_buy_vendors: rows.map((r) => {
+            const schedule = schedulePayload(r, form.region);
             if (r.account === NEW_ACCOUNT) {
                 const profile = (r.account_new?.chrome_profile || '').trim();
                 return profile
-                    ? { vendor: r.vendor, account_new: { chrome_profile: profile, email: (r.account_new?.email || '').trim() } }
-                    : { vendor: r.vendor, account: null };
+                    ? { vendor: r.vendor, account_new: { chrome_profile: profile, email: (r.account_new?.email || '').trim() }, ...schedule }
+                    : { vendor: r.vendor, account: null, ...schedule };
             }
-            return { vendor: r.vendor, account: r.account || null };
+            return { vendor: r.vendor, account: r.account || null, ...schedule };
         }),
     };
 }
@@ -161,6 +204,72 @@ function OldOrdersSection({ storeId, historyFile, onHistoryFileChange }) {
 }
 
 
+/**
+ * One vendor's order schedule: at each time the laptop fetches the orders, they are checked for stock
+ * and profit, and this vendor's orders that are ready to buy are sent to the laptop to buy.
+ */
+function OrderScheduleSection({ row, region, onChange }) {
+    const label = autoBuyVendorLabel(row.vendor);
+    const times = row.process_times?.length ? row.process_times : [ORDER_DEFAULT_TIME];
+    const toggleId = `order-schedule-${row.vendor}`;
+    return (
+        <div className="mt-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+            <div className="flex items-start gap-3">
+                <CalendarClock className="mt-0.5 h-4 w-4 shrink-0 text-slate-500 dark:text-slate-400" aria-hidden />
+                <div className="min-w-0 flex-1">
+                    <label htmlFor={toggleId} className="text-sm font-medium text-slate-800 dark:text-slate-200">
+                        Buy {label} orders on a schedule
+                    </label>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                        At each time the laptop fetches the new orders, they are checked for stock and profit, then only
+                        the {label} orders that are ready to buy are sent to the laptop. Loss orders, orders with problems
+                        and other vendors&apos; orders wait for you.
+                    </p>
+                </div>
+                <label className="relative inline-flex shrink-0 cursor-pointer items-center">
+                    <input
+                        id={toggleId}
+                        type="checkbox"
+                        checked={!!row.auto_process}
+                        onChange={(e) => onChange({
+                            auto_process: e.target.checked,
+                            process_times: times,
+                            process_timezone: row.process_timezone || defaultOrderTimezone(region),
+                        })}
+                        className="peer sr-only"
+                    />
+                    <div className="peer h-5 w-9 rounded-full bg-slate-300 after:absolute after:inset-s-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:bg-accent-500 peer-checked:after:translate-x-full peer-checked:after:border-white peer-focus:ring-2 peer-focus:ring-accent-400 dark:bg-slate-600"></div>
+                </label>
+            </div>
+            {row.auto_process && (
+                <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,14rem)] sm:items-start">
+                    <RunTimesEditor
+                        times={times}
+                        onChange={(next) => onChange({ process_times: next })}
+                        maxTimes={ORDER_MAX_TIMES}
+                        defaultTime={ORDER_DEFAULT_TIME}
+                        label="Order times"
+                        idPrefix={`${label} order`}
+                    />
+                    <Select
+                        label="Timezone"
+                        value={row.process_timezone || defaultOrderTimezone(region)}
+                        onChange={(e) => onChange({ process_timezone: e.target.value })}
+                        options={orderTimezones(region)}
+                    />
+                </div>
+            )}
+            {(row.process_pending || row.process_last_message) && (
+                <p className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:bg-slate-800/50 dark:text-slate-300">
+                    {row.process_pending
+                        ? `Running now: ${row.process_last_message}`
+                        : `Last run${row.process_last_run_at ? ` (${new Date(row.process_last_run_at).toLocaleString()})` : ''}: ${row.process_last_message}`}
+                </p>
+            )}
+        </div>
+    );
+}
+
 function accountLabel(a) {
     const where = a.chrome_profile || a.user_data_dir;
     return `${a.name} · profile "${where}"${a.email ? ` · ${a.email}` : ''}`;
@@ -204,7 +313,7 @@ export default function AutoPurchasingStep({ region, rows, onRowsChange, storeId
     const add = () => {
         const vendor = free[0]?.value;
         if (!vendor) return;
-        onRowsChange([...visibleRows, { vendor, account: defaultAccount(vendor), account_new: emptyNewAccount() }]);
+        onRowsChange([...visibleRows, { vendor, account: defaultAccount(vendor), account_new: emptyNewAccount(), ...emptySchedule(region) }]);
     };
 
     return (
@@ -217,7 +326,7 @@ export default function AutoPurchasingStep({ region, rows, onRowsChange, storeId
                 <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
                     Vendors this store buys its orders from ({REGION_LABELS[region] || region || 'Region not set'}).
                     With at least one vendor the store appears on the Orders page, where orders are fetched, checked
-                    for stock and profit, and bought only when you click Process.
+                    for stock and profit, and bought when you click Process, or at the times you set for a vendor.
                 </p>
             </div>
 
@@ -241,7 +350,7 @@ export default function AutoPurchasingStep({ region, rows, onRowsChange, storeId
                                     <Select
                                         label="Vendor"
                                         value={row.vendor}
-                                        onChange={(e) => update(i, { vendor: e.target.value, account: defaultAccount(e.target.value), account_new: emptyNewAccount() })}
+                                        onChange={(e) => update(i, { vendor: e.target.value, account: defaultAccount(e.target.value), account_new: emptyNewAccount(), ...emptySchedule(region) })}
                                         options={vendorOptions.filter((v) => v.value === row.vendor || !used.includes(v.value))}
                                     />
                                     <Select
@@ -286,6 +395,7 @@ export default function AutoPurchasingStep({ region, rows, onRowsChange, storeId
                                         )}
                                     </div>
                                 )}
+                                <OrderScheduleSection row={row} region={region} onChange={(patch) => update(i, patch)} />
                             </div>
                         );
                     })}

@@ -89,6 +89,11 @@ app.conf.beat_schedule = {
         'task': 'listings.queue_order_tracking',
         'schedule': crontab(minute=40, hour='*/3'),
     },
+    # Scheduled ordering: each Auto Purchasing vendor's own times (fetch, check, then buy that vendor's orders).
+    'run-auto-order-schedules': {
+        'task': 'listings.run_auto_order_schedules',
+        'schedule': crontab(minute='*'),
+    },
 }
 
 
