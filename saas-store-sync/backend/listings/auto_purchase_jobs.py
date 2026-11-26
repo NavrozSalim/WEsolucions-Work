@@ -314,10 +314,48 @@ def order_vendor(store, check) -> str:
     return '' if vendors else (store.auto_buy_vendor or '')
 
 
-def process_all(store, user, vendor: str = '', order_ids=None) -> dict:
+def order_day(order, tz_name: str = ''):
+    """The day the customer placed ``order``, in ``tz_name`` (None when unknown).
+
+    The marketplace's own order date (orders file ``orderDate``, API ``orderedAt`` / ``createdAt``);
+    an order without one counts from the day it came into the app.
+    """
+    import re
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    from .order_service import _order_dates
+
+    try:
+        tz = ZoneInfo(tz_name or 'UTC')
+    except Exception:
+        tz = ZoneInfo('UTC')
+    raw = order.raw_response_json if isinstance(order.raw_response_json, dict) else {}
+    stamp = _order_dates(raw).get('orderedAt')
+    when = None
+    if isinstance(stamp, (int, float)) and stamp > 0:
+        when = datetime.fromtimestamp(stamp / 1000 if stamp > 1e11 else stamp, tz=ZoneInfo('UTC'))
+    elif isinstance(stamp, str) and stamp.strip():
+        text = stamp.strip()
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', text):
+            return date.fromisoformat(text)  # a day already (orders files)
+        try:
+            when = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        except ValueError:
+            when = None
+        if when is not None and when.tzinfo is None:
+            return when.date()  # marketplace local time
+    if when is None:
+        when = order.created_at
+    return when.astimezone(tz).date() if when else None
+
+
+def process_all(store, user, vendor: str = '', order_ids=None, *, ordered_on=None, tz_name: str = '') -> dict:
     """Process all orders: queue every order that is ready to buy (in profit, no errors, check fresh).
 
     ``vendor`` (e.g. 'amazon_au') limits it to the orders bought from that vendor; '' = every vendor.
+    ``ordered_on`` (a date, with ``tz_name``) limits it to the orders placed that day (scheduled ordering);
+    ready orders from other days are left for the person.
     Loss orders, blocked orders, old (history) orders and orders already queued or bought are skipped.
     The laptop buys the queued orders one at a time.
     """
@@ -340,6 +378,11 @@ def process_all(store, user, vendor: str = '', order_ids=None) -> dict:
     )
     if vendor:
         candidates = [o for o in candidates if order_vendor(store, o.purchase_check) == vendor]
+    other_days = 0
+    if ordered_on is not None:
+        same_day = [o for o in candidates if order_day(o, tz_name) == ordered_on]
+        other_days = len(candidates) - len(same_day)
+        candidates = same_day
     not_ready = 0
     if order_ids is not None:  # Process selected: only the ticked orders that are ready to buy
         wanted = {str(i) for i in order_ids}
@@ -353,12 +396,16 @@ def process_all(store, user, vendor: str = '', order_ids=None) -> dict:
         except AutoPurchaseError as exc:
             failed.append(f'{order.invoice_number or order.id}: {exc}')
     where = ' from ' + AUTO_BUY_LABELS.get(vendor, vendor) if vendor else ''
+    if ordered_on is not None:
+        where += f' placed on {ordered_on:%d/%m/%Y}'
     msg = f'{len(queued)} order(s){where} sent to the laptop to buy.'
+    if other_days:
+        msg += f' {other_days} ready order(s) from other days left for you to process.'
     if not_ready:
         msg += f' {not_ready} selected order(s) skipped (not ready to buy, already bought or closed).'
     if failed:
         msg += f' {len(failed)} not sent: ' + '; '.join(failed[:5]) + (' ...' if len(failed) > 5 else '')
-    return {'queued': len(queued), 'not_sent': failed, 'message': msg}
+    return {'queued': len(queued), 'not_sent': failed, 'other_days': other_days, 'message': msg}
 
 
 def mark_purchasing(run) -> None:

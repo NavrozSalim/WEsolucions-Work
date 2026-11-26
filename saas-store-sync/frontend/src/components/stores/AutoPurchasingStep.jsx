@@ -222,8 +222,8 @@ function OrderScheduleSection({ row, region, onChange }) {
                     </label>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
                         At each time the laptop fetches the new orders, they are checked for stock and profit, then only
-                        the {label} orders that are ready to buy are sent to the laptop. Loss orders, orders with problems
-                        and other vendors&apos; orders wait for you.
+                        the {label} orders placed that day that are ready to buy are sent to the laptop. Orders from
+                        earlier days, loss orders, orders with problems and other vendors&apos; orders wait for you.
                     </p>
                 </div>
                 <label className="relative inline-flex shrink-0 cursor-pointer items-center">

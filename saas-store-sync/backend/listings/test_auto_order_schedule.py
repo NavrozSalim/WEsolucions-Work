@@ -52,7 +52,7 @@ class ScheduledOrderingTests(TestCase):
         )
         self.costco_row = StoreAutoBuyVendor.objects.create(store=self.store, vendor='costco_au', account=costco)
 
-    def order(self, key, vendor='amazon_au', status='buyable'):
+    def order(self, key, vendor='amazon_au', status='buyable', **dates):
         lines = [{'sku': f'{key}-SKU', 'quantity': 1, 'priceCents': 5000, 'vendor_url': 'https://example.com/p',
                   'vendor_id': 'V1', 'vendor_price_cents': 3000, 'auto_buy_vendor': vendor}]
         order = MarketplaceOrder.objects.create(
@@ -60,7 +60,7 @@ class ScheduledOrderingTests(TestCase):
             environment=Environment.PRODUCTION, status=OrderStatus.PAID,
             customer_info_json={'name': 'A Buyer'},
             line_items_json=[{'sku': ln['sku'], 'title': ln['sku'], 'quantity': 1, 'priceCents': 5000} for ln in lines],
-            raw_response_json={'customer': {'name': 'A Buyer', 'shippingAddress': {'postcode': '2155'}}},
+            raw_response_json={'customer': {'name': 'A Buyer', 'shippingAddress': {'postcode': '2155'}}, **dates},
         )
         OrderPurchaseCheck.objects.create(
             order=order, store=self.store, status=status, lines_json=lines,
@@ -124,7 +124,33 @@ class ScheduledOrderingTests(TestCase):
         self.assertEqual(run.vendor, 'amazon_au')
         self.amazon_row.refresh_from_db()
         self.assertIsNone(self.amazon_row.process_pending_since)
-        self.assertIn('1 order(s) from Amazon AU sent to the laptop', self.amazon_row.process_last_message)
+        self.assertIn('1 order(s) from Amazon AU placed on', self.amazon_row.process_last_message)
+
+    def test_only_orders_placed_on_the_run_day_are_sent(self):
+        today = self.now.astimezone(SYDNEY).date()
+        yesterday = today - timedelta(days=1)
+        fresh = self.order('A1', orderDate=today.isoformat())
+        old_file = self.order('A2', orderDate=yesterday.isoformat())
+        # API order placed at 23:30 Sydney yesterday (12:30 UTC): yesterday, not today.
+        old_api = self.order('A3', orderedAt=yesterday.isoformat() + 'T12:30:00Z')
+        sched.tick(self.now)
+        self.finish_fetch()
+        sched.tick(self.now + timedelta(minutes=2))
+        self.assertEqual(self.purchase_status(fresh), 'queued')
+        self.assertEqual(self.purchase_status(old_file), '')
+        self.assertEqual(self.purchase_status(old_api), '')
+        self.amazon_row.refresh_from_db()
+        msg = self.amazon_row.process_last_message
+        self.assertIn(f'1 order(s) from Amazon AU placed on {today:%d/%m/%Y} sent', msg)
+        self.assertIn('2 ready order(s) from other days left for you', msg)
+
+    def test_manual_process_all_still_sends_every_day(self):
+        from listings.auto_purchase_jobs import process_all
+
+        yesterday = (self.now.astimezone(SYDNEY).date() - timedelta(days=1)).isoformat()
+        old = self.order('A2', orderDate=yesterday)
+        self.assertEqual(process_all(self.store, self.user, vendor='amazon_au')['queued'], 1)
+        self.assertEqual(self.purchase_status(old), 'queued')
 
     def test_waits_while_orders_are_being_checked(self):
         amazon = self.order('A1')
@@ -256,3 +282,34 @@ class BeatEntryTests(TestCase):
                 routes.update(part)
         self.assertEqual(routes['listings.run_auto_order_schedules'], {'queue': 'light'})
 
+
+class OrderDayTests(TestCase):
+    def _order(self, raw, created=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(raw_response_json=raw, created_at=created)
+
+    def day(self, raw, created=None, tz='Australia/Sydney'):
+        from listings.auto_purchase_jobs import order_day
+
+        return order_day(self._order(raw, created), tz)
+
+    def test_orders_file_day_is_used_as_is(self):
+        self.assertEqual(str(self.day({'orderDate': '2026-11-27'})), '2026-11-27')
+
+    def test_api_time_in_utc_is_turned_into_the_schedule_day(self):
+        self.assertEqual(str(self.day({'orderedAt': '2026-11-26T14:30:00Z'})), '2026-11-27')
+        self.assertEqual(str(self.day({'createdAt': '2026-11-26T12:30:00+00:00'})), '2026-11-26')
+
+    def test_marketplace_local_time_without_zone(self):
+        self.assertEqual(str(self.day({'orderedAt': '2026-11-26T23:50:00'})), '2026-11-26')
+
+    def test_epoch_milliseconds(self):
+        self.assertEqual(str(self.day({'orderedAt': 1795700000000})), '2026-11-27')
+
+    def test_no_date_uses_when_it_came_in(self):
+        from datetime import datetime, timezone as dt_tz
+
+        came = datetime(2026, 11, 26, 20, 0, tzinfo=dt_tz.utc)  # 07:00 on the 27th in Sydney
+        self.assertEqual(str(self.day({}, came)), '2026-11-27')
+        self.assertIsNone(self.day({'orderDate': 'not a date'}, None))

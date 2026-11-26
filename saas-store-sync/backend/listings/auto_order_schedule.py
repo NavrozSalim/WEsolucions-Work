@@ -4,7 +4,8 @@ At each time:
 1. the laptop fetches the marketplace orders file (as the Fetch button); the import checks every new
    order for stock and profit;
 2. once the fetch has finished and no order of the store is still being checked, the vendor's orders
-   that are ready to buy are sent to the laptop (as Process all for that vendor).
+   placed that day that are ready to buy are sent to the laptop (as Process all for that vendor).
+   Ready orders from earlier days are not sent: they wait for the person.
 
 Loss orders, blocked orders and orders from other vendors are left for the person, as with Process all.
 Vendors with the same time share one fetch. A time that comes while the previous run of that vendor is
@@ -138,7 +139,12 @@ def _fetch_note(row) -> str:
 
 
 def finish_ready(now=None) -> list[str]:
-    """Send the orders of every scheduled run whose fetch and checks are done."""
+    """Send the orders of every scheduled run whose fetch and checks are done: that vendor's ready
+    orders placed on the run's day. Older ready orders are left for the person."""
+    from zoneinfo import ZoneInfo
+
+    from stores.auto_buy import default_timezone
+
     from .auto_purchase_jobs import AutoPurchaseError, process_all
 
     now = now or timezone.now()
@@ -148,8 +154,11 @@ def finish_ready(now=None) -> list[str]:
             continue
         note = _fetch_note(row)
         store = row.store
+        # Only the orders placed on the day of this run (in the schedule's timezone).
+        tz_name = row.process_timezone or default_timezone(store.region)
+        day = row.process_pending_since.astimezone(ZoneInfo(tz_name)).date()
         try:
-            result = process_all(store, store.user, vendor=row.vendor)
+            result = process_all(store, store.user, vendor=row.vendor, ordered_on=day, tz_name=tz_name)
             message = note + result['message']
         except AutoPurchaseError as exc:
             message = note + f'Not sent: {exc}'
