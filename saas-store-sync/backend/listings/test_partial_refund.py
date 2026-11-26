@@ -15,6 +15,29 @@ from .models import MarketplaceOrder, OrderStatus
 from .mydeal.client import MyDealResult
 
 
+def lasoo_refund_send(create_result, *, before=(), after=None):
+    """side_effect for a mocked LasooClient.send in refund tests.
+
+    Refunds_Search answers with ``before`` (``after`` once Refunds_Create ran,
+    when given). Refunds_Create answers with ``create_result``.
+    """
+    state = {"created": False}
+
+    def send(endpoint, payload):
+        if endpoint == "refunds_search":
+            refunds = after if state["created"] and after is not None else before
+            return LasooResult(
+                ok=True,
+                data={"success": True, "results": {"success": True, "refunds": list(refunds), "hasNext": False}},
+                message="Success.",
+                status=200,
+            )
+        state["created"] = True
+        return create_result
+
+    return send
+
+
 class PartialRefundTests(TestCase):
     def _store(self, code, **extra):
         User = get_user_model()
@@ -62,6 +85,7 @@ class PartialRefundTests(TestCase):
             ok=True, data={"success": True, "results": {"success": True}}, message="Success.", status=200,
         )
         mock_client_cls.return_value = mock_client
+        mock_client.send.side_effect = lasoo_refund_send(mock_client.send.return_value)
 
         result = order_service.partial_refund(order, percent=15, reason="Pricing error")
         order.refresh_from_db()
@@ -77,12 +101,11 @@ class PartialRefundTests(TestCase):
         self.assertEqual(payload["data"]["refundAmountCents"], 750)
         item = payload["data"]["items"][0]
         self.assertEqual(item["itemId"], 55)
-        self.assertEqual(item["salePriceCents"], 2500)
+        self.assertEqual(set(item), set(order_service.LASOO_REFUND_ITEM_FIELDS))
         self.assertEqual(item["purchasePricePerItemCents"], 2500)
         self.assertEqual(item["purchasedQuantity"], 2)
         self.assertEqual(item["refundQuantity"], 0)
         self.assertEqual(item["refundAmountCents"], 750)
-        self.assertEqual(item["totalCents"], 5000)
         self.assertFalse(payload["data"]["refundPostage"])
 
     @patch("listings.order_service.LasooClient")
@@ -118,6 +141,7 @@ class PartialRefundTests(TestCase):
             ok=True, data={"success": True, "results": {"success": True}}, message="Success.", status=200,
         )
         mock_client_cls.return_value = mock_client
+        mock_client.send.side_effect = lasoo_refund_send(mock_client.send.return_value)
 
         result = order_service.partial_refund(order, percent=50, reason="Change of mind")
         order.refresh_from_db()
@@ -131,7 +155,6 @@ class PartialRefundTests(TestCase):
         self.assertEqual(item["itemId"], 1059023)
         self.assertEqual(item["purchasedQuantity"], 1)
         self.assertEqual(item["originalPricePerItemCents"], 40000)
-        self.assertEqual(item["salePriceCents"], 35530)
         self.assertEqual(item["purchasePricePerItemCents"], 35530)
         self.assertEqual(item["refundAmountCents"], 17765)
         self.assertEqual(item["refundQuantity"], 0)
@@ -149,6 +172,7 @@ class PartialRefundTests(TestCase):
             status=200,
         )
         mock_client_cls.return_value = mock_client
+        mock_client.send.side_effect = lasoo_refund_send(mock_client.send.return_value)
 
         result = order_service.partial_refund(order, percent="15", reason="Other")
         order.refresh_from_db()
@@ -168,6 +192,7 @@ class PartialRefundTests(TestCase):
             ok=True, data={"success": True, "results": {"success": True}}, message="Success.", status=200,
         )
         mock_client_cls.return_value = mock_client
+        mock_client.send.side_effect = lasoo_refund_send(mock_client.send.return_value)
 
         order_service.cancel(order, reason="Out of stock")
         _, payload = mock_client.send.call_args[0]
@@ -175,7 +200,7 @@ class PartialRefundTests(TestCase):
         self.assertEqual(payload["data"]["refundAmountCents"], 4250)
         item = payload["data"]["items"][0]
         self.assertEqual(item["itemId"], 55)
-        self.assertEqual(item["salePriceCents"], 2500)
+        self.assertEqual(item["purchasePricePerItemCents"], 2500)
         self.assertEqual(item["refundAmountCents"], 4250)
         self.assertEqual(item["refundQuantity"], 0)
 

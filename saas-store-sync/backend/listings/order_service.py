@@ -1518,6 +1518,122 @@ def _refund_line_items(order: MarketplaceOrder, reason: str) -> list[dict]:
     return out
 
 
+# The fields of a Lasoo refund item, as Refunds_Search returns them. Lasoo
+# writes each entry of ``items`` straight to its database after it has already
+# saved the refund, so one extra key fails the insert and leaves a refund with
+# no items behind (invoice 1077863 got two that way on 2026-11-26).
+LASOO_REFUND_ITEM_FIELDS = (
+    "itemId",
+    "purchasePricePerItemCents",
+    "originalPricePerItemCents",
+    "purchasedQuantity",
+    "refundQuantity",
+    "refundAmountCents",
+)
+
+# Refund statuses that no longer pay anything back.
+_LASOO_DEAD_REFUND_WORDS = ("VOID", "CANCEL", "REJECT", "DECLIN")
+
+
+def _lasoo_refund_items(lines: list[dict]) -> list[dict]:
+    return [{k: line[k] for k in LASOO_REFUND_ITEM_FIELDS if k in line} for line in lines]
+
+
+def _lasoo_invoice_refunds(client: LasooClient, order: MarketplaceOrder) -> list[dict] | None:
+    """Live refunds Lasoo has on this invoice, or None when Lasoo could not be asked."""
+    invoice_id = _invoice_id_for_api(order)
+    payload = build_payload(
+        "refunds_search",
+        data={"page": 1, "take": 50, "invoiceId": invoice_id},
+        auth=client.auth_key,
+    )
+    result = client.send("refunds_search", payload)
+    if not _lasoo_results_ok(result) or not isinstance(result.data, dict):
+        return None
+    results = result.data.get("results")
+    refunds = results.get("refunds") if isinstance(results, dict) else None
+    if not isinstance(refunds, list):
+        return None
+    live = []
+    for raw in refunds:
+        if not isinstance(raw, dict) or str(raw.get("invoiceId")) != str(invoice_id):
+            continue
+        status = str(raw.get("status") or "").upper()
+        if any(word in status for word in _LASOO_DEAD_REFUND_WORDS):
+            continue
+        live.append(raw)
+    return live
+
+
+def _describe_lasoo_refunds(order: MarketplaceOrder, refunds: list[dict]) -> str:
+    currency = _order_currency(order, "lasoo")
+    parts = []
+    for raw in refunds:
+        status = str(raw.get("status") or "").replace("_", " ").lower() or "unknown status"
+        amount = _money_label(_cents(raw.get("refundAmountCents")), currency)
+        parts.append(f"#{raw.get('id')} ({amount}, {status})")
+    return ", ".join(parts)
+
+
+def _lasoo_refund_block(order: MarketplaceOrder, refunds: list[dict] | None) -> str | None:
+    """Why a new Lasoo refund must not be sent, or None when it is safe to send.
+
+    Lasoo can save a refund and still answer with an error, so a retry would
+    pay the buyer twice. Refunds on Lasoo beyond what SellerPilot recorded mean
+    that happened (or someone refunded in the Lasoo portal), so stop.
+    """
+    if refunds is None:
+        return (
+            "Could not check Lasoo for refunds already on this invoice, so nothing was sent. "
+            "Try again in a minute."
+        )
+    on_lasoo = sum(_cents(r.get("refundAmountCents")) for r in refunds)
+    recorded = int(order.refunded_amount_cents or 0)
+    if on_lasoo > recorded:
+        return (
+            f"Lasoo already has refund {_describe_lasoo_refunds(order, refunds)} on invoice "
+            f"{order.invoice_number or order.external_order_key} that SellerPilot did not record. "
+            "Nothing was sent, so no new refund was made. Check the invoice in the Lasoo portal "
+            "and void any duplicate there."
+        )
+    return None
+
+
+def _send_lasoo_refund(
+    client: LasooClient, order: MarketplaceOrder, data: dict, refunds_before: list[dict]
+) -> tuple[bool, str]:
+    """Send Refunds_Create. Returns (accepted, error message for the user)."""
+    payload = build_payload("refunds_create", data=data, auth=client.auth_key)
+    result = client.send("refunds_create", payload)
+    if _lasoo_results_ok(result):
+        return True, ""
+    message = _lasoo_error_message(result)
+    reason = message.removeprefix("Lasoo refused the refund: ").removesuffix(" The order was left unchanged.")
+    before_ids = {r.get("id") for r in refunds_before}
+    after = _lasoo_invoice_refunds(client, order)
+    saved = [r for r in (after or []) if r.get("id") not in before_ids]
+    if saved:
+        message = (
+            f"Lasoo saved refund {_describe_lasoo_refunds(order, saved)} but then returned an "
+            f"error ({reason}). Do not retry. "
+            "Check the refund in the Lasoo portal and void it if this order should not be refunded. "
+            "The order was left unchanged here."
+        )
+    elif after is None:
+        message = (
+            f"{message.removesuffix(' The order was left unchanged.')} Lasoo may still have saved "
+            "the refund; check the invoice in the Lasoo portal before you retry. "
+            "The order was left unchanged here."
+        )
+    logger.warning(
+        "Lasoo refund rejected order=%s invoice=%s: %s",
+        order.external_order_key,
+        order.invoice_number,
+        message,
+    )
+    return False, message
+
+
 def _lasoo_results_ok(result) -> bool:
     """True when Lasoo HTTP layer succeeded and nested results.success is not false."""
     if not result.ok:
@@ -1544,11 +1660,56 @@ def _lasoo_error_message(result) -> str:
         text = str(candidate or "").strip()
         if not text or text.lower() == "no message":
             continue
-        # Trim huge Prisma/stack dumps from Lasoo staging errors.
+        # Lasoo passes database (Prisma) errors through as one long dump. Show
+        # the line that says what was wrong instead of the whole dump.
         if "prisma" in text.lower() or "Invalid `" in text:
+            reason = _prisma_error_reason(text)
+            if reason:
+                return f"Lasoo refused the refund: {reason}"
             return "Lasoo refund API failed (server error). The order was left unchanged."
         return text[:400]
     return "Lasoo cancel/refund request failed."
+
+
+_PRISMA_REASON_HINTS = (
+    "unknown arg",
+    "unknown field",
+    "argument",
+    "is missing",
+    "invalid value",
+    "got invalid",
+    "must not be null",
+    "constraint",
+    "not found",
+    "required",
+    "expected",
+    "no record",
+)
+
+
+def _prisma_error_reason(text: str) -> str:
+    """Return the useful line of a Prisma error, or "" when there is none.
+
+    A Prisma error repeats the whole query, then says what was wrong on the last
+    lines, for example "Unknown argument `itemId`" or "Argument `x` is missing.".
+    """
+    lines = [ln.strip() for ln in str(text).replace("\\n", "\n").splitlines()]
+    lines = [ln for ln in lines if ln]
+    found = []
+    for line in lines:
+        low = line.lower()
+        if low.startswith("invalid `") or "invocation" in low:
+            continue
+        # Lines of the echoed query are bits of JSON, not sentences.
+        if line[0] in "{}[]+~-→" or line.endswith((",", "{", "[")):
+            continue
+        if any(h in low for h in _PRISMA_REASON_HINTS):
+            found.append(line)
+    if not found and lines:
+        last = lines[-1]
+        if last[0] not in "{}[]" and not last.lower().startswith("invalid `"):
+            found.append(last)
+    return " ".join(found)[:300].strip()
 
 
 def _reason_option(label: str) -> dict:
@@ -1695,11 +1856,16 @@ def _cancel_lasoo(order: MarketplaceOrder, *, reason: str = "") -> dict:
         amount = max(0, amount - already)
         line_items = _scale_refund_lines(line_items, amount) if amount else []
 
+    refunds_before = _lasoo_invoice_refunds(client, order)
+    blocked = _lasoo_refund_block(order, refunds_before)
+    if blocked:
+        return {"ok": False, "marketplace_ok": False, "message": blocked}
+
     data = {
         "invoiceId": _invoice_id_for_api(order),
         "refundReason": reason_text,
-        "items": line_items,
-        "lineItemIds": [i["lineItemId"] for i in line_items],
+        "items": _lasoo_refund_items(line_items),
+        "lineItemIds": [i["itemId"] for i in line_items],
         "itemsToBeReturned": False,
         "partialRefund": already > 0,
         "refundAmountCents": amount,
@@ -1708,16 +1874,8 @@ def _cancel_lasoo(order: MarketplaceOrder, *, reason: str = "") -> dict:
         "partialRefundNote": "Remainder after a partial refund." if already > 0 else "",
         "notes": reason_text,
     }
-    payload = build_payload("refunds_create", data=data, auth=client.auth_key)
-    result = client.send("refunds_create", payload)
-    if not _lasoo_results_ok(result):
-        message = _lasoo_error_message(result)
-        logger.warning(
-            "Lasoo cancel/refund rejected order=%s invoice=%s: %s",
-            order.external_order_key,
-            order.invoice_number,
-            message,
-        )
+    accepted, message = _send_lasoo_refund(client, order, data, refunds_before)
+    if not accepted:
         if "left unchanged" not in message.lower():
             message = f"{message} The order was left unchanged."
         return {
@@ -1978,13 +2136,17 @@ def _partial_refund_lasoo(
 ) -> dict:
     _require_lasoo(order.store)
     client = LasooClient(order.store, order.environment)
+    refunds_before = _lasoo_invoice_refunds(client, order)
+    blocked = _lasoo_refund_block(order, refunds_before)
+    if blocked:
+        return {"ok": False, "marketplace_ok": False, "message": blocked}
     lines = _scale_refund_lines(_refund_line_items(order, reason), refund_cents)
     note_text = note or f"{format(percent, 'f')}% of the order total"
     data = {
         "invoiceId": _invoice_id_for_api(order),
         "refundReason": reason,
-        "items": lines,
-        "lineItemIds": [i["lineItemId"] for i in lines],
+        "items": _lasoo_refund_items(lines),
+        "lineItemIds": [i["itemId"] for i in lines],
         "itemsToBeReturned": False,
         "partialRefund": True,
         "refundAmountCents": int(refund_cents),
@@ -1993,12 +2155,7 @@ def _partial_refund_lasoo(
         "partialRefundNote": note_text,
         "notes": note_text,
     }
-    payload = build_payload("refunds_create", data=data, auth=client.auth_key)
-    result = client.send("refunds_create", payload)
-    if _lasoo_results_ok(result):
+    accepted, message = _send_lasoo_refund(client, order, data, refunds_before)
+    if accepted:
         return {"ok": True, "marketplace_ok": True}
-    return {
-        "ok": False,
-        "marketplace_ok": False,
-        "message": _lasoo_error_message(result),
-    }
+    return {"ok": False, "marketplace_ok": False, "message": message}

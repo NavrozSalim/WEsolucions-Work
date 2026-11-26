@@ -19,6 +19,7 @@ from . import csv_import, listing_service, order_service
 from .errors import MarketplaceError
 from .lasoo import mapper, validator
 from .lasoo.client import LasooResult
+from .test_partial_refund import lasoo_refund_send
 from .models import ListingAction, ListingStatus, ListingUpload, MarketplaceOrder, OrderStatus, StoreListing
 from .views import _listing_upload_csv_response
 
@@ -2207,21 +2208,27 @@ class OrderNormalizeTests(TestCase):
             status=200,
         )
         mock_client_cls.return_value = mock_client
+        mock_client.send.side_effect = lasoo_refund_send(mock_client.send.return_value)
 
         result = order_service.cancel(order, reason="Out of stock")
         order.refresh_from_db()
         self.assertTrue(result["ok"])
         self.assertTrue(result["marketplace_ok"])
         self.assertEqual(order.status, OrderStatus.CANCELLED)
-        mock_client.send.assert_called_once()
+        endpoints = [c[0][0] for c in mock_client.send.call_args_list]
+        self.assertEqual(endpoints, ["refunds_search", "refunds_create"])
+        search_payload = mock_client.send.call_args_list[0][0][1]
+        self.assertEqual(search_payload["data"]["invoiceId"], int(order.external_order_key))
         _, payload = mock_client.send.call_args[0]
         self.assertEqual(payload["query"], "Refunds_Create")
         self.assertEqual(payload["data"]["invoiceId"], int(order.external_order_key))
         self.assertEqual(payload["data"]["refundReason"], "Out of stock")
         item = payload["data"]["items"][0]
-        self.assertEqual(item["lineItemId"], 55)
+        self.assertEqual(set(item), set(order_service.LASOO_REFUND_ITEM_FIELDS))
+        self.assertEqual(payload["data"]["lineItemIds"], [55])
         self.assertEqual(item["itemId"], 55)
-        self.assertEqual(item["salePriceCents"], 2500)
+        self.assertEqual(item["purchasePricePerItemCents"], 2500)
+        self.assertEqual(item["purchasedQuantity"], 2)
         self.assertEqual(item["refundQuantity"], 2)
         self.assertEqual(item["refundAmountCents"], 5000)
         mock_shopify_cancel.assert_called_once()
@@ -2245,6 +2252,7 @@ class OrderNormalizeTests(TestCase):
             status=200,
         )
         mock_client_cls.return_value = mock_client
+        mock_client.send.side_effect = lasoo_refund_send(mock_client.send.return_value)
 
         result = order_service.cancel(order, reason="Damaged")
         order.refresh_from_db()
@@ -2255,6 +2263,146 @@ class OrderNormalizeTests(TestCase):
         self.assertEqual(order.status, OrderStatus.PAID)
         self.assertNotIn("_local_cancel", order.raw_response_json or {})
         mock_shopify_cancel.assert_not_called()
+
+    @patch("listings.shopify.orders.cancel_shopify_order")
+    @patch("listings.order_service.LasooClient")
+    def test_cancel_shows_the_reason_from_a_lasoo_prisma_error(self, mock_client_cls, mock_shopify_cancel):
+        order = self._make_cancel_order("4")
+        dump = (
+            "\nInvalid `prisma.refund.create()` invocation:\n\n{\n  data: {\n"
+            "    invoiceId: 1000994,\n    refundReason: \"Damaged\",\n  }\n}\n\n"
+            "Argument `refundItems` is missing."
+        )
+        mock_client = MagicMock()
+        mock_client.auth_key = "test-key"
+        mock_client.send.return_value = LasooResult(
+            ok=False,
+            data={"success": True, "results": {"success": False, "message": dump}},
+            message=dump,
+            status=200,
+        )
+        mock_client_cls.return_value = mock_client
+        mock_client.send.side_effect = lasoo_refund_send(mock_client.send.return_value)
+
+        result = order_service.cancel(order, reason="Damaged")
+        order.refresh_from_db()
+        self.assertFalse(result["marketplace_ok"])
+        self.assertEqual(
+            result["message"],
+            "Lasoo refused the refund: Argument `refundItems` is missing. The order was left unchanged.",
+        )
+        self.assertEqual(order.status, OrderStatus.PAID)
+        mock_shopify_cancel.assert_not_called()
+
+    def _lasoo_mock(self, mock_client_cls, create_result=None, **kwargs):
+        mock_client = MagicMock()
+        mock_client.auth_key = "test-key"
+        if create_result is None:
+            create_result = LasooResult(
+                ok=True, data={"success": True, "results": {"success": True}}, message="Success.", status=200,
+            )
+        mock_client.send.side_effect = lasoo_refund_send(create_result, **kwargs)
+        mock_client_cls.return_value = mock_client
+        return mock_client
+
+    @staticmethod
+    def _endpoints(mock_client):
+        return [c[0][0] for c in mock_client.send.call_args_list]
+
+    @patch("listings.shopify.orders.cancel_shopify_order")
+    @patch("listings.order_service.LasooClient")
+    def test_cancel_does_not_send_a_second_refund(self, mock_client_cls, mock_shopify_cancel):
+        order = self._make_cancel_order("5")
+        existing = {
+            "id": 1004245, "invoiceId": int(order.external_order_key),
+            "status": "PENDING_REFUND", "refundAmountCents": 5000, "refundItems": [],
+        }
+        mock_client = self._lasoo_mock(mock_client_cls, before=[existing])
+
+        result = order_service.cancel(order, reason="Out of stock")
+        order.refresh_from_db()
+        self.assertFalse(result["marketplace_ok"])
+        self.assertEqual(self._endpoints(mock_client), ["refunds_search"])
+        self.assertIn("#1004245", result["message"])
+        self.assertIn("pending refund", result["message"])
+        self.assertIn("no new refund", result["message"].lower())
+        self.assertEqual(order.status, OrderStatus.PAID)
+        mock_shopify_cancel.assert_not_called()
+
+    @patch("listings.shopify.orders.cancel_shopify_order")
+    @patch("listings.order_service.LasooClient")
+    def test_cancel_ignores_voided_refunds_and_other_invoices(self, mock_client_cls, mock_shopify_cancel):
+        order = self._make_cancel_order("6")
+        invoice = int(order.external_order_key)
+        mock_client = self._lasoo_mock(mock_client_cls, before=[
+            {"id": 1, "invoiceId": invoice, "status": "VOIDED", "refundAmountCents": 5000},
+            {"id": 2, "invoiceId": 4242, "status": "REFUNDED", "refundAmountCents": 9000},
+        ])
+
+        result = order_service.cancel(order, reason="Out of stock")
+        order.refresh_from_db()
+        self.assertTrue(result["marketplace_ok"])
+        self.assertEqual(self._endpoints(mock_client), ["refunds_search", "refunds_create"])
+        self.assertEqual(order.status, OrderStatus.CANCELLED)
+
+    @patch("listings.shopify.orders.cancel_shopify_order")
+    @patch("listings.order_service.LasooClient")
+    def test_cancel_says_so_when_lasoo_saved_the_refund_despite_an_error(self, mock_client_cls, mock_shopify_cancel):
+        order = self._make_cancel_order("7")
+        saved = {
+            "id": 1004246, "invoiceId": int(order.external_order_key),
+            "status": "PENDING_REFUND", "refundAmountCents": 5000, "refundItems": [],
+        }
+        failure = LasooResult(
+            ok=False,
+            data={"success": True, "results": {"success": False, "message": "Invalid `prisma.refundItem.create()` invocation:\n\nUnknown argument `lineItemId`."}},
+            message="x",
+            status=200,
+        )
+        mock_client = self._lasoo_mock(mock_client_cls, failure, before=[], after=[saved])
+
+        result = order_service.cancel(order, reason="Out of stock")
+        order.refresh_from_db()
+        self.assertFalse(result["marketplace_ok"])
+        self.assertEqual(
+            self._endpoints(mock_client), ["refunds_search", "refunds_create", "refunds_search"],
+        )
+        self.assertIn("Lasoo saved refund #1004246", result["message"])
+        self.assertIn("Unknown argument `lineItemId`.", result["message"])
+        self.assertIn("Do not retry", result["message"])
+        self.assertEqual(order.status, OrderStatus.PAID)
+        mock_shopify_cancel.assert_not_called()
+
+    @patch("listings.shopify.orders.cancel_shopify_order")
+    @patch("listings.order_service.LasooClient")
+    def test_cancel_sends_nothing_when_refunds_cannot_be_checked(self, mock_client_cls, mock_shopify_cancel):
+        order = self._make_cancel_order("8")
+        mock_client = MagicMock()
+        mock_client.auth_key = "test-key"
+        mock_client.send.return_value = LasooResult(ok=False, error="down", message="Could not reach Lasoo.", status=0)
+        mock_client_cls.return_value = mock_client
+
+        result = order_service.cancel(order, reason="Out of stock")
+        order.refresh_from_db()
+        self.assertFalse(result["marketplace_ok"])
+        self.assertEqual(self._endpoints(mock_client), ["refunds_search"])
+        self.assertIn("nothing was sent", result["message"].lower())
+        self.assertEqual(order.status, OrderStatus.PAID)
+
+    @patch("listings.shopify.orders.cancel_shopify_order")
+    @patch("listings.order_service.LasooClient")
+    def test_cancel_after_a_recorded_partial_refund_still_goes_through(self, mock_client_cls, mock_shopify_cancel):
+        order = self._make_cancel_order("9")
+        order.refunded_amount_cents = 750
+        order.save(update_fields=["refunded_amount_cents"])
+        mock_client = self._lasoo_mock(mock_client_cls, before=[
+            {"id": 3, "invoiceId": int(order.external_order_key), "status": "REFUNDED", "refundAmountCents": 750},
+        ])
+
+        result = order_service.cancel(order, reason="Out of stock")
+        self.assertTrue(result["marketplace_ok"])
+        _, payload = mock_client.send.call_args[0]
+        self.assertEqual(payload["data"]["refundAmountCents"], 4250)
 
     def test_cancel_reasons_reverb_returns_api_codes(self):
         User = get_user_model()
