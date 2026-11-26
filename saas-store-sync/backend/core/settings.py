@@ -524,6 +524,8 @@ CELERY_TASK_ROUTES = (
         'vendor.prune_old_vendor_prices': {'queue': 'celery'},
         # Scraping → Reverb / Etsy listing file: copies images to Bunny.
         'discovery.build_listing_export': {'queue': 'light'},
+        # Main server: finishes or resumes discovery jobs whose region worker died.
+        'discovery.revive_stalled_jobs': {'queue': 'light'},
     },
 )
 

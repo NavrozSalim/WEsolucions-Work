@@ -442,6 +442,20 @@ class DiscoveryJobCancelView(APIView):
             return Response({'detail': 'This scrape is not running.'}, status=status.HTTP_400_BAD_REQUEST)
         task_id = job.celery_task_id
         job.cancel_requested = True
+        if job.status == DiscoveryJob.Status.RUNNING:
+            from .watchdog import job_has_live_worker
+
+            if not job_has_live_worker(job.id):
+                # The worker that ran it is gone, so nothing would finish this
+                # Stop: finish it here, so Continue is available and the next
+                # file can start.
+                from .watchdog import close_stopped_job
+
+                job.save(update_fields=['cancel_requested'])
+                _revoke_task(task_id)
+                close_stopped_job(job)
+                job.refresh_from_db()
+                return Response(_job_payload(job, positions_for(request.user).get(job.id, 0)))
         if job.status == DiscoveryJob.Status.QUEUED:
             # Not on the worker yet. Close it here so the next file can start.
             job.status = DiscoveryJob.Status.CANCELLED

@@ -54,8 +54,14 @@ def refresh_discovery_lock(job_id, owner: str | None, *, force: bool = False) ->
         _refreshed_at[token] = now
     try:
         key = discovery_lock_key(job_id)
-        if cache.get(key) == owner:
+        current = cache.get(key)
+        if current == owner:
             cache.set(key, owner, LOCK_TTL_SEC)
+        elif current is None:
+            # Lapsed during a slow page while this worker is still alive: take
+            # it back, so the stalled-job watchdog does not resume the job
+            # beside it.
+            cache.add(key, owner, LOCK_TTL_SEC)
     except Exception:
         with _state_lock:
             _refreshed_at.pop(token, None)

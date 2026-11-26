@@ -76,6 +76,11 @@ app.conf.beat_schedule = {
         'schedule': crontab(minute=20),
     },
     # Tracking Bot: every 3 hours, queue tracking jobs for purchased auto-buy orders (the laptop runs them).
+    # Discovery: a running job whose worker died (deploy, crash) is finished or resumed.
+    'revive-stalled-discovery-jobs': {
+        'task': 'discovery.revive_stalled_jobs',
+        'schedule': crontab(minute='*/5'),
+    },
     'clear-stuck-tracking-jobs': {
         'task': 'listings.clear_stuck_tracking_jobs',
         'schedule': crontab(minute='*/5'),

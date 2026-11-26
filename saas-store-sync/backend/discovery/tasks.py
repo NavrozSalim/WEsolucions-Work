@@ -27,3 +27,11 @@ def build_listing_export(export_id: str):
     from .listing_export import run_export
 
     run_export(export_id)
+
+
+@shared_task(name='discovery.revive_stalled_jobs', ignore_result=True)
+def revive_stalled_jobs():
+    """Every few minutes: finish or resume running discovery jobs whose worker died."""
+    from .watchdog import revive_stalled_discovery_jobs
+
+    return revive_stalled_discovery_jobs()
