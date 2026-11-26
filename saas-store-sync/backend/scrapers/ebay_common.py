@@ -1702,6 +1702,10 @@ class EbayHTTP:
             if client is None:
                 return None, None, "curl_cffi_not_installed"
             proxies.bind_curl_client(client, assignment)
+            if market == EBAY_MARKET_AU:
+                from .ebay_au_location import ensure_http_postcode
+
+                ensure_http_postcode(client, url, headers)
 
             try:
                 resp = client.get(
@@ -1770,6 +1774,10 @@ class EbayHTTP:
             return None, None, "curl_cffi_not_installed"
 
         headers = cls._get_headers(url, region, session_dict, market)
+        if market == EBAY_MARKET_AU:
+            from .ebay_au_location import ensure_http_postcode
+
+            ensure_http_postcode(client, url, headers)
 
         try:
             resp = client.get(
@@ -2656,6 +2664,10 @@ class EbayBrowserSession:
                 if session_dict is not None:
                     session_dict[warmed_key] = home_host if market == EBAY_MARKET_US else True
 
+            if market == EBAY_MARKET_AU:
+                from .ebay_au_location import ensure_driver_postcode
+
+                ensure_driver_postcode(driver, url)
             driver.get(url)
             wait_timeout = _ebay_page_wait_timeout(region, url)
             if us_chrome:

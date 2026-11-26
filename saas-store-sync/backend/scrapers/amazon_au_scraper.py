@@ -41,9 +41,11 @@ SELENIUM_ATTEMPTS = max(1, _env_int("AMAZON_AU_SELENIUM_ATTEMPTS", 1))
 _SESSION_PROXY_KEY = "amazon_au_http_proxy"
 _ZIP_VALUE_KEY = "amazon_au_http_zip_value"
 
-# Default to Tallawong NSW so shipping-coverage errors match typical AU customer locations.
-# Override with AMAZON_AU_POSTCODE in the AU worker .env.prod.
-_DEFAULT_AU_POSTCODE = "2762"
+# Default deliver-to: North Kellyville NSW 2155 (the Amazon "Deliver to" box takes a
+# postcode and a suburb). Override with AMAZON_AU_POSTCODE / AMAZON_AU_SUBURB in the
+# AU worker .env.prod.
+_DEFAULT_AU_POSTCODE = "2155"
+_DEFAULT_AU_SUBURB = "NORTH KELLYVILLE"
 
 
 # Session key: deliver-to postcode for this scrape (Auto Purchasing check: the order's postcode).
@@ -68,6 +70,63 @@ def amazon_au_postcode(session: dict | None = None) -> str:
         _DEFAULT_AU_POSTCODE,
     )
     return _DEFAULT_AU_POSTCODE
+
+
+def amazon_au_suburb(postcode: str) -> str:
+    """Suburb sent with ``postcode`` ('' lets Amazon pick the postcode's first suburb).
+
+    Only the configured postcode has a known suburb: an order's own postcode
+    (Auto Purchasing) goes without one.
+    """
+    configured = re.sub(r"\D", "", (os.environ.get("AMAZON_AU_POSTCODE") or _DEFAULT_AU_POSTCODE))
+    if postcode != configured:
+        return ""
+    suburb = (os.environ.get("AMAZON_AU_SUBURB") or "").strip()
+    if suburb:
+        return suburb.upper()
+    return _DEFAULT_AU_SUBURB if postcode == _DEFAULT_AU_POSTCODE else ""
+
+
+def amazon_au_location_forms(postcode: str) -> list[dict]:
+    """Form bodies for Amazon AU's address-change call, best first.
+
+    With a suburb Amazon needs ``POSTAL_CODE_WITH_CITY``; the plain postcode form
+    is the fallback (Amazon then picks the postcode's first suburb).
+    """
+    plain = {"locationType": "LOCATION_INPUT", "zipCode": postcode}
+    suburb = amazon_au_suburb(postcode)
+    if not suburb:
+        return [plain]
+    return [{"locationType": "POSTAL_CODE_WITH_CITY", "zipCode": postcode, "city": suburb}, plain]
+
+
+def set_amazon_au_location(post, endpoint: str, referer: str, postcode: str, page_type: str = "Detail") -> bool:
+    """Set the deliver-to location with ``post`` (a requests-style ``post``). True when Amazon took it."""
+    for form in amazon_au_location_forms(postcode):
+        data = dict(form)
+        data.update({
+            "storeContext": "generic",
+            "deviceType": "web",
+            "pageType": page_type,
+            "actionSource": "glow",
+        })
+        resp = post(
+            endpoint,
+            data=data,
+            headers={"x-requested-with": "XMLHttpRequest", "referer": referer},
+            timeout=FETCH_TIMEOUT,
+        )
+        try:
+            body = resp.json() if resp.status_code == 200 else {}
+        except ValueError:
+            body = {}
+        if body.get("isAddressUpdated"):
+            logger.info(
+                "Amazon AU deliver-to set: %s %s",
+                postcode, data.get("city") or "(postcode only)",
+            )
+            return True
+    return False
 
 _AU_COOKIES = {
     "i18n-prefs": "AUD",
@@ -373,23 +432,26 @@ class AmazonAUHTTP:
         endpoint = cls._ZIP_CHANGE_URLS.get(is_au, cls._ZIP_CHANGE_URLS[False])
         try:
             s.get(seed_url, timeout=FETCH_TIMEOUT)
-            resp = s.post(
-                endpoint,
-                data={
-                    "locationType": "LOCATION_INPUT",
-                    "zipCode": zip_code,
-                    "storeContext": "generic",
-                    "deviceType": "web",
-                    "pageType": "Detail",
-                    "actionSource": "glow",
-                },
-                headers={
-                    "x-requested-with": "XMLHttpRequest",
-                    "referer": seed_url,
-                },
-                timeout=FETCH_TIMEOUT,
-            )
-            ok = resp.status_code == 200 and resp.json().get("isAddressUpdated")
+            if is_au:
+                ok = set_amazon_au_location(s.post, endpoint, seed_url, zip_code)
+            else:
+                resp = s.post(
+                    endpoint,
+                    data={
+                        "locationType": "LOCATION_INPUT",
+                        "zipCode": zip_code,
+                        "storeContext": "generic",
+                        "deviceType": "web",
+                        "pageType": "Detail",
+                        "actionSource": "glow",
+                    },
+                    headers={
+                        "x-requested-with": "XMLHttpRequest",
+                        "referer": seed_url,
+                    },
+                    timeout=FETCH_TIMEOUT,
+                )
+                ok = resp.status_code == 200 and resp.json().get("isAddressUpdated")
             if ok:
                 logger.info("Legacy HTTP session ZIP set to %s", zip_code)
         except Exception as exc:
@@ -482,6 +544,57 @@ class AmazonAUHTTP:
 # Selenium fallback (AU location setup)
 # ═══════════════════════════════════════════════════════════════════════════
 
+_BROWSER_POST_JS = """
+const done = arguments[arguments.length - 1];
+fetch(arguments[0], {
+  method: 'POST', credentials: 'include',
+  headers: {'content-type': 'application/x-www-form-urlencoded', 'x-requested-with': 'XMLHttpRequest'},
+  body: new URLSearchParams(arguments[1]).toString(),
+}).then(r => r.text().then(t => done({status: r.status, text: t})))
+  .catch(e => done({status: 0, text: String(e)}));
+"""
+
+
+class _BrowserPostResponse:
+    def __init__(self, raw):
+        raw = raw if isinstance(raw, dict) else {}
+        self.status_code = int(raw.get("status") or 0)
+        self._text = str(raw.get("text") or "")
+
+    def json(self):
+        import json
+
+        try:
+            return json.loads(self._text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(str(exc)) from exc
+
+
+def _set_au_location_in_browser(driver, postcode: str) -> bool:
+    """Same address-change call as the HTTP path, sent from the open amazon.com.au page."""
+    def post(endpoint, data, headers=None, timeout=None):
+        driver.set_script_timeout(max(5, FETCH_TIMEOUT))
+        return _BrowserPostResponse(driver.execute_async_script(_BROWSER_POST_JS, endpoint, data))
+
+    try:
+        ok = set_amazon_au_location(
+            post,
+            "https://www.amazon.com.au/gp/delivery/ajax/address-change.html",
+            "https://www.amazon.com.au/",
+            postcode,
+            page_type="Gateway",
+        )
+    except Exception as exc:
+        logger.debug("Amazon AU browser location call failed: %s", exc)
+        return False
+    if ok:
+        try:
+            driver.refresh()
+        except Exception:
+            pass
+    return ok
+
+
 def _ensure_au_location(driver, session: dict = None) -> bool:
     if session and session.get("amazon_au_location_set"):
         return True
@@ -494,6 +607,11 @@ def _ensure_au_location(driver, session: dict = None) -> bool:
         driver.get("https://www.amazon.com.au")
         random_delay(2, 4)
         AmazonScraper.solve_captcha(driver)
+
+        if _set_au_location_in_browser(driver, amazon_au_postcode()):
+            if session is not None:
+                session["amazon_au_location_set"] = True
+            return True
 
         wait = WebDriverWait(driver, 8)
         loc_selectors = [

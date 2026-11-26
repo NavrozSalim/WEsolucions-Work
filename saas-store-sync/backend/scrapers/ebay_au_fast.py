@@ -454,6 +454,9 @@ def scrape_ebay_au_fast(vendor_url: str, region: str, session: dict | None = Non
 
         driver = _get_driver(session)
         _inject_cookies(driver, session)
+        from .ebay_au_location import ensure_driver_postcode
+
+        ensure_driver_postcode(driver, url)
 
         item_timeout = _item_pageload_timeout()
         prev_timeout = None

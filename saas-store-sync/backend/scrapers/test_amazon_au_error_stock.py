@@ -138,10 +138,10 @@ class AmazonAUPriceMarkupTests(SimpleTestCase):
 
 
 class AmazonAUPostcodeTests(SimpleTestCase):
-    def test_default_postcode_is_2762(self):
+    def test_default_postcode_is_2155(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("AMAZON_AU_POSTCODE", None)
-            self.assertEqual(amazon_au_postcode(), "2762")
+            self.assertEqual(amazon_au_postcode(), "2155")
 
     def test_env_override(self):
         with patch.dict(os.environ, {"AMAZON_AU_POSTCODE": "2000"}):
@@ -149,7 +149,7 @@ class AmazonAUPostcodeTests(SimpleTestCase):
 
     def test_invalid_falls_back(self):
         with patch.dict(os.environ, {"AMAZON_AU_POSTCODE": "abc"}):
-            self.assertEqual(amazon_au_postcode(), "2762")
+            self.assertEqual(amazon_au_postcode(), "2155")
 
 
 class AmazonAUProxyUrlTests(SimpleTestCase):

@@ -95,6 +95,22 @@ class DiscoveryError(Exception):
     pass
 
 
+def _job_zip_code(job) -> str:
+    """The job's zip, or the AU scrapers' deliver-to postcode when the job has none."""
+    code = (job.zip_code or '').strip()
+    if code:
+        return code
+    if job.marketplace == 'amazon_au':
+        from scrapers.amazon_au_scraper import amazon_au_postcode
+
+        return amazon_au_postcode()
+    if job.marketplace == 'ebay_au':
+        from scrapers.ebay_au_location import ebay_au_postcode
+
+        return ebay_au_postcode()
+    return ''
+
+
 def _with_ebay_zip(url: str, zip_code: str) -> str:
     if not zip_code or 'ebay.' not in (url or '').lower():
         return url
@@ -187,7 +203,14 @@ def _amazon_session(marketplace: str, zip_code: str):
     home = host + '/'
     try:
         session.get(home, timeout=FETCH_TIMEOUT)
-        if zip_code:
+        if zip_code and 'amazon.com.au' in host:
+            from scrapers.amazon_au_scraper import set_amazon_au_location
+
+            set_amazon_au_location(
+                session.post, host + '/gp/delivery/ajax/address-change.html', home, zip_code,
+                page_type='Search',
+            )
+        elif zip_code:
             session.post(
                 host + '/gp/delivery/ajax/address-change.html',
                 data={
@@ -1123,27 +1146,34 @@ def _amazon_requests_session(marketplace: str, state: dict, zip_code: str):
 
                 code = amazon_au_postcode()
             except Exception:
-                code = '2762'
+                code = '2155'
         else:
             code = '10001'
     try:
         session.get(host + '/', timeout=FETCH_TIMEOUT)
-        session.post(
-            host + '/gp/delivery/ajax/address-change.html',
-            data={
-                'locationType': 'LOCATION_INPUT',
-                'zipCode': code,
-                'storeContext': 'generic',
-                'deviceType': 'web',
-                'pageType': 'Detail',
-                'actionSource': 'glow',
-            },
-            headers={
-                'x-requested-with': 'XMLHttpRequest',
-                'referer': host + '/',
-            },
-            timeout=FETCH_TIMEOUT,
-        )
+        if is_au:
+            from scrapers.amazon_au_scraper import set_amazon_au_location
+
+            set_amazon_au_location(
+                session.post, host + '/gp/delivery/ajax/address-change.html', host + '/', code,
+            )
+        else:
+            session.post(
+                host + '/gp/delivery/ajax/address-change.html',
+                data={
+                    'locationType': 'LOCATION_INPUT',
+                    'zipCode': code,
+                    'storeContext': 'generic',
+                    'deviceType': 'web',
+                    'pageType': 'Detail',
+                    'actionSource': 'glow',
+                },
+                headers={
+                    'x-requested-with': 'XMLHttpRequest',
+                    'referer': host + '/',
+                },
+                timeout=FETCH_TIMEOUT,
+            )
     except Exception:
         logger.warning('Could not set Amazon delivery zip %s', code)
     state['_discovery_zip_set'] = True
@@ -1554,7 +1584,7 @@ def _execute_job(job_id, lock_owner=None) -> None:
         # use the discovery curl session warmed here.
         if not job.use_sample and job.mode == DiscoveryJob.Mode.CATEGORY:
             if is_amazon(job.marketplace):
-                session = _amazon_session(job.marketplace, (job.zip_code or '').strip())
+                session = _amazon_session(job.marketplace, _job_zip_code(job))
             elif is_ebay(job.marketplace):
                 session = _ebay_session(job.marketplace)
 
@@ -1574,7 +1604,7 @@ def _execute_job(job_id, lock_owner=None) -> None:
                         errors,
                         on_batch=table.add,
                         session=session,
-                        zip_code=(job.zip_code or '').strip(),
+                        zip_code=_job_zip_code(job),
                         stop=stop,
                     )
         else:
@@ -1623,7 +1653,7 @@ def _execute_job(job_id, lock_owner=None) -> None:
                     session,
                     table,
                     stop,
-                    zip_code=(job.zip_code or '').strip(),
+                    zip_code=_job_zip_code(job),
                 )
             if ebay_pending:
                 _fetch_ebay_products(

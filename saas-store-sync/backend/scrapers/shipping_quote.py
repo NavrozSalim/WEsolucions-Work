@@ -133,6 +133,8 @@ def _fetch_json_via_http(session: dict, path: str):
 def quote_ebay_au(url: str, postcode: str, qty: int, session: dict | None) -> dict:
     """eBay AU postage for ``qty`` of the item to ``postcode`` (the default postage option)."""
     from .ebay_au_fast import _DRIVER_KEY
+    from .ebay_au_location import remember_postcode
+    from .ebay_common import EBAY_MARKET_AU, _ebay_sk
 
     session = session if session is not None else {}
     item_id = ebay_item_id(url)
@@ -147,11 +149,15 @@ def quote_ebay_au(url: str, postcode: str, qty: int, session: dict | None) -> di
             data = _fetch_json_via_driver(driver, path)
         except Exception as exc:
             logger.info('eBay AU postage quote via browser failed: %s', exc)
+        # eBay now remembers the order's postcode in this browser: the next
+        # catalog page sets the scrapers' own postcode again.
+        remember_postcode(driver, postcode)
     if data is None:
         try:
             data = _fetch_json_via_http(session, path)
         except Exception as exc:
             logger.info('eBay AU postage quote via HTTP failed: %s', exc)
+        remember_postcode(session.get(_ebay_sk(EBAY_MARKET_AU, 'http_client')), postcode)
     if data is None:
         return {'status': UNAVAILABLE, 'amount': None, 'text': 'Could not load eBay postage for this postcode'}
     result = parse_ebay_rates(data)

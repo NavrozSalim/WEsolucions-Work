@@ -157,3 +157,22 @@ class AmazonFetchWorkersSettingTests(SimpleTestCase):
             engine._fetch_amazon_products(rows, 'amazon_au', [], None, table, lambda: False)
         self.assertEqual(peak[0], 6)
         self.assertEqual(table.add.call_count, 24)
+
+
+class AuDefaultDeliverToTests(SimpleTestCase):
+    def _job(self, marketplace, zip_code=''):
+        return SimpleNamespace(marketplace=marketplace, zip_code=zip_code)
+
+    def test_au_jobs_without_a_zip_use_2155(self):
+        with patch.dict(os.environ, {'AMAZON_AU_POSTCODE': '', 'EBAY_AU_POSTCODE': ''}):
+            self.assertEqual(engine._job_zip_code(self._job('amazon_au')), '2155')
+            self.assertEqual(engine._job_zip_code(self._job('ebay_au')), '2155')
+
+    def test_typed_zip_and_us_jobs_are_unchanged(self):
+        self.assertEqual(engine._job_zip_code(self._job('ebay_au', ' 3000 ')), '3000')
+        self.assertEqual(engine._job_zip_code(self._job('amazon_us')), '')
+        self.assertEqual(engine._job_zip_code(self._job('ebay_us')), '')
+
+    def test_ebay_au_search_pages_carry_the_postcode(self):
+        url = engine._with_ebay_zip('https://www.ebay.com.au/b/Dog-Beds/20744', '2155')
+        self.assertIn('_stpos=2155', url)
