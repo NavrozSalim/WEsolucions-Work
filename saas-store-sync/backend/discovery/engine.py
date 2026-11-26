@@ -69,7 +69,21 @@ _AMAZON_MIN_BAND_CENTS = 100
 FETCH_TIMEOUT = 25
 # Amazon product pages share one delivery zip. A few at a time is faster
 # while pages come back clean. A run of blocks drops back to one page at a time.
+# Each page thread takes its own proxy from the catalog pool, so a server with
+# many Amazon proxies can open more at once (DISCOVERY_AMAZON_FETCH_WORKERS).
 AMAZON_FETCH_WORKERS = 3
+AMAZON_FETCH_WORKERS_MAX = 16
+
+
+def amazon_fetch_workers() -> int:
+    """Amazon product pages opened at once (``DISCOVERY_AMAZON_FETCH_WORKERS``, default 3, at most 16)."""
+    import os
+
+    try:
+        value = int(os.environ.get('DISCOVERY_AMAZON_FETCH_WORKERS') or AMAZON_FETCH_WORKERS)
+    except ValueError:
+        return AMAZON_FETCH_WORKERS
+    return max(1, min(AMAZON_FETCH_WORKERS_MAX, value))
 
 _UA = (
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -1344,8 +1358,10 @@ def _fetch_amazon_products(rows, marketplace, errors, session, table, stop, zip_
             fill_image_columns(parsed)
         return row, parsed, local_errors
 
+    workers = amazon_fetch_workers()
+    logger.info('discovery %s: %s product pages at a time', marketplace, workers)
     try:
-        with ThreadPoolExecutor(max_workers=AMAZON_FETCH_WORKERS) as pool:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             inflight = set()
 
             def submit_one() -> bool:
@@ -1357,7 +1373,7 @@ def _fetch_amazon_products(rows, marketplace, errors, session, table, stop, zip_
                 return True
 
             def fill() -> None:
-                target = 1 if degraded else AMAZON_FETCH_WORKERS
+                target = 1 if degraded else workers
                 while len(inflight) < target:
                     if not submit_one():
                         break

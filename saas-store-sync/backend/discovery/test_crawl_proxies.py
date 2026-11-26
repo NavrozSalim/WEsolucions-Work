@@ -120,3 +120,40 @@ class CrawlFetchRotationTests(SimpleTestCase):
         with patch.object(engine, '_fetch_once', return_value=BLOCKED_PAGE) as fetch:
             self.assertEqual(engine._fetch('https://www.amazon.com.au/s?k=x', session), BLOCKED_PAGE)
         fetch.assert_called_once()
+
+
+class AmazonFetchWorkersSettingTests(SimpleTestCase):
+    def test_default_is_three(self):
+        with patch.dict(os.environ, {'DISCOVERY_AMAZON_FETCH_WORKERS': ''}):
+            self.assertEqual(engine.amazon_fetch_workers(), 3)
+
+    def test_setting_is_used_and_capped(self):
+        for raw, expected in (('8', 8), ('0', 1), ('40', 16), ('lots', 3)):
+            with patch.dict(os.environ, {'DISCOVERY_AMAZON_FETCH_WORKERS': raw}):
+                self.assertEqual(engine.amazon_fetch_workers(), expected, raw)
+
+    def test_product_pages_run_that_many_at_once(self):
+        import threading
+        import time
+
+        running = []
+        peak = [0]
+        lock = threading.Lock()
+
+        def slow_product(row, marketplace, local_errors, zip_code, browser_state):
+            with lock:
+                running.append(1)
+                peak[0] = max(peak[0], len(running))
+            time.sleep(0.05)
+            with lock:
+                running.pop()
+            return {'asin': row['url'][-10:], 'title': 'ok'}
+
+        rows = [{'url': f'https://www.amazon.com.au/dp/B0000000{i:02d}'} for i in range(24)]
+        table = MagicMock()
+        with patch.dict(os.environ, {'DISCOVERY_AMAZON_FETCH_WORKERS': '6'}), \
+                patch.object(engine, '_catalog_amazon_product', side_effect=slow_product), \
+                patch.object(engine, 'fill_image_columns'):
+            engine._fetch_amazon_products(rows, 'amazon_au', [], None, table, lambda: False)
+        self.assertEqual(peak[0], 6)
+        self.assertEqual(table.add.call_count, 24)

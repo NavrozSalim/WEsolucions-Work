@@ -74,6 +74,9 @@ x-us-env: &us-env
   - EBAY_US_CHROME_MIX_EXPLORE=${EBAY_US_CHROME_MIX_EXPLORE:-0.1}
   # This server's tries are counted apart from the US Scraper's: different proxies.
   - EBAY_US_CHROME_MIX_GROUP=${EBAY_US_CHROME_MIX_GROUP:-discovery}
+  # Discovery: Amazon product pages opened at once (1-16). Each takes its own
+  # proxy; with a proxy list 6-8 is safe. A run of blocks drops to one at a time.
+  - DISCOVERY_AMAZON_FETCH_WORKERS=${DISCOVERY_AMAZON_FETCH_WORKERS:-3}
 
 services:
   celery_worker_us:
